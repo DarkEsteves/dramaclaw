@@ -13,7 +13,7 @@ import { createRemixArtifact, submitRemixProcessAction } from '@/api/remix';
 import { ReferenceBlueprintPanel } from './blueprintPanel';
 
 const source = { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/reference.mp4', transcriptRef: { artifactId: 'transcript-1', revision: 2 } };
-const rows = [{ startTime: 0, endTime: 1, visualDescription: '杯子特写', narrative: '引出产品' }];
+const rows = [{ startTime: '0', endTime: '1', visualDescription: '杯子特写', narrative: '引出产品' }];
 
 describe('ReferenceBlueprintPanel', () => {
   beforeEach(() => vi.clearAllMocks());

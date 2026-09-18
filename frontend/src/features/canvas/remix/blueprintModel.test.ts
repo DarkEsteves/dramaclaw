@@ -14,7 +14,7 @@ describe('reference blueprint model', () => {
   it('keeps observations, model interpretations, and user rules separate', () => {
     const payload = buildReferenceBlueprint({
       source: { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/video.mp4', transcriptRef: { artifactId: 'transcript-1', revision: 2 } },
-      rows: [{ startTime: 0, endTime: 1, visualDescription: '杯子特写', narrative: '引出产品' }],
+      rows: [{ startTime: '0', endTime: '1', visualDescription: '杯子特写', narrative: '引出产品' }],
       narrativeRole: '先提出困扰，再展示产品', preserveRule: '保留节奏', replaceRule: '替换品牌画面',
     });
     expect(payload.narrative_role).toBe('先提出困扰，再展示产品');

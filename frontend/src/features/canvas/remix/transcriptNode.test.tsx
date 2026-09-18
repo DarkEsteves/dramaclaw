@@ -33,6 +33,8 @@ import { TranscriptNode } from '../nodes/TranscriptNode';
 import { submitRemixProcessAction } from '@/api/remix';
 import { reviseTranscriptArtifact } from './transcriptArtifactApi';
 
+const flowProps = { type: 'transcriptNode', zIndex: 0, draggable: true, dragging: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
+
 describe('TranscriptNode', () => {
   beforeEach(() => {
     state.nodes.splice(2);
@@ -43,18 +45,18 @@ describe('TranscriptNode', () => {
   });
 
   it('transcribes the connected audio and persists a word timeline reference', async () => {
-    const { rerender } = render(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const { rerender } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.click(screen.getByRole('button', { name: '开始转写' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
-    rerender(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     expect(screen.getByDisplayValue('你')).toBeTruthy();
     expect(screen.getByText('低置信度')).toBeTruthy();
   });
 
   it('saves corrected words as a new artifact revision', async () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000, confidence: 0.4 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
-    render(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
     await waitFor(() => expect(reviseTranscriptArtifact).toHaveBeenCalledWith('demo', { artifactId: 'words-1', revision: 1 }, expect.objectContaining({ transcript: '您好' })));
@@ -64,7 +66,7 @@ describe('TranscriptNode', () => {
   it('offers forced alignment when an upstream script artifact is connected', async () => {
     state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 2 } } });
     state.edges.push({ source: 'script', target: 'transcript' });
-    render(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.click(screen.getByRole('button', { name: '按脚本对齐' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'align_script', mediaPath: 'narration.wav', scriptRef: { artifactId: 'script-1', revision: 2 } })));
   });
@@ -73,7 +75,7 @@ describe('TranscriptNode', () => {
     state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
     state.edges.push({ source: 'script', target: 'transcript' });
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], artifactRef: { artifactId: 'words-1', revision: 1 }, status: 'completed', alignedScriptRef: { artifactId: 'script-1', revision: 2 } };
-    render(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
     expect(state.nodes[1].data.status).toBe('needs_review');
   });
