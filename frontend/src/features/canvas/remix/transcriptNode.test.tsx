@@ -22,7 +22,7 @@ vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 
 vi.mock('@/api/remix', () => ({
   submitRemixProcessAction: vi.fn(async () => ({ operation_id: 'operation-1' })),
   fetchRemixOperation: vi.fn(async () => ({ operation_id: 'operation-1', status: 'needs_confirmation', output_refs: [{ artifact_id: 'words-1', revision: 1 }] })),
-  fetchRemixArtifact: vi.fn(async () => ({ id: 'words-1', revision: 1, schema: 'word_timeline.v1', payload: {
+  fetchRemixArtifact: vi.fn(async () => ({ id: 'words-1', revision: 1, schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 3 }], payload: {
     schema: 'word_timeline.v1', media_hash: 'hash', language: 'zh', status: 'completed', transcript: '你好',
     words: [{ text: '你', start_char: 0, end_char: 1, start_us: 0, end_us: 500_000, confidence: 0.4 }, { text: '好', start_char: 1, end_char: 2, start_us: 500_000, end_us: 1_000_000, confidence: 0.9 }],
   } })),
@@ -59,7 +59,7 @@ describe('TranscriptNode', () => {
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
-    await waitFor(() => expect(reviseTranscriptArtifact).toHaveBeenCalledWith('demo', { artifactId: 'words-1', revision: 1 }, expect.objectContaining({ transcript: '您好' })));
+    await waitFor(() => expect(reviseTranscriptArtifact).toHaveBeenCalledWith('demo', { artifactId: 'words-1', revision: 1 }, expect.objectContaining({ transcript: '您好' }), [{ artifactId: 'script-1', revision: 3 }]));
     expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 2 });
   });
 

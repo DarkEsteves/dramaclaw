@@ -118,7 +118,10 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       if (artifact.schema !== 'word_timeline.v1') throw new Error('转写产物格式错误');
       const payload = artifact.payload as TranscriptTimeline;
       const revised = correctedTimeline(payload, payload.words.map((word, index) => edited[index] ?? word.text));
-      const saved = await reviseTranscriptArtifact(project, artifactRef, revised);
+      const rawRefs = (artifact as typeof artifact & { upstream_refs?: Array<{ artifact_id: string; revision: number }> }).upstream_refs;
+      if (!Array.isArray(rawRefs) && (data.alignedScriptRef || payload.script_ref)) throw new Error('无法确认对齐脚本版本，请重新对齐');
+      const upstreamRefs = (rawRefs ?? []).map((upstream) => ({ artifactId: upstream.artifact_id, revision: upstream.revision }));
+      const saved = await reviseTranscriptArtifact(project, artifactRef, revised, upstreamRefs);
       updateNodeData(id, { artifactRef: { artifactId: saved.id, revision: saved.revision }, words: timelineWords(revised), status: 'completed' });
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
