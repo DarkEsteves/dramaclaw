@@ -76,7 +76,7 @@ describe('remix canvas nodes', () => {
       />,
     );
 
-    expect(screen.getByText('artifact-1 · r2')).toBeTruthy();
+    expect(screen.getByText('已完成 · 版本 2')).toBeTruthy();
     expect(screen.getByDisplayValue('Hello')).toBeTruthy();
     expect(screen.getByText('00:00.100 – 00:00.450')).toBeTruthy();
     expect(screen.getByText('低置信度')).toBeTruthy();

@@ -42,6 +42,7 @@ import { setNodeMediaActive } from '@/features/canvas/application/canvasLod';
 import { useNodeGenerationTaskState } from '@/features/canvas/application/useNodeGenerationTaskState';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { RemixMediaInput } from '@/features/canvas/remix/RemixMediaInput';
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { useCanvasStore, useIsBoxSelecting } from '@/stores/canvasStore';
 import { AudioOperationsPanel } from '@/features/canvas/nodes/AudioOperationsPanel';
 import { deriveAudioText, useAudioGeneration } from '@/features/canvas/nodes/useAudioGeneration';
@@ -107,6 +108,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const { isGenerating, task } = useNodeGenerationTaskState(data);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  const [remixMediaOpen, setRemixMediaOpen] = useState(false);
   const [voicePickerInitialTab, setVoicePickerInitialTab] = useState<'library' | 'mine'>('library');
   // 重试用与面板提交同一套生成逻辑（hook）。
   const { generate } = useAudioGeneration(id, data);
@@ -387,6 +389,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
         className={NODE_HEADER_FLOATING_POSITION_CLASS}
         icon={<Music2 className="h-4 w-4" />}
         titleText={resolvedTitle}
+        rightSlot={selected && readUrl().project ? <button type="button" aria-expanded={remixMediaOpen} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={(event) => { event.stopPropagation(); setRemixMediaOpen((open) => !open); }}>改编素材</button> : undefined}
         editable
         onTitleChange={(nextTitle) => updateNodeData(id, { displayName: nextTitle })}
       />
@@ -471,7 +474,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           )}
       </div>
 
-      {selected && readUrl().project && <div className="absolute left-[calc(100%+12px)] top-0 z-20 w-72">
+      {selected && remixMediaOpen && readUrl().project && <div className="absolute left-[calc(100%+12px)] top-0 z-20 w-72">
         <RemixMediaInput
           project={readUrl().project!}
           kind="audio"

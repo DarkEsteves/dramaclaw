@@ -8,6 +8,7 @@ import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArti
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 
@@ -151,25 +152,25 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     <NodeResizeHandle minWidth={320} minHeight={220} maxWidth={760} maxHeight={900} />
     <div className={`flex max-h-[600px] flex-col overflow-hidden rounded-[var(--node-radius)] border ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="border-b border-white/[0.08] p-3 text-xs text-text-muted">
-        <div className="mb-2 truncate">{source ? `${source.kind === 'audio' ? '音频' : '视频'}：${source.path}` : '请连接上传的音频或带声音视频'}</div>
+        <div className="mb-2 truncate" title={source?.path}>{source ? `${source.kind === 'audio' ? '音频' : '视频'}：${source.path.split('/').pop()}` : '请连接上传的音频或带声音视频'}</div>
         {source?.url && (source.kind === 'audio' ? <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} controls className="w-full" /> : <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} controls className="max-h-40 w-full" />)}
         <div className="mt-2 flex items-center gap-2">
-          <select aria-label="转写语言" value={language} onChange={(event) => setLanguage(event.target.value)} className="rounded border border-border-dark bg-surface-field px-1 py-1"><option value="zh">中文</option><option value="en">English</option></select>
-          <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('transcribe')} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">{operationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
-          {scriptRef && <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('align')} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">按脚本对齐</button>}
-          <span>{artifactRef ? `${artifactRef.artifactId} · r${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
+          <select aria-label="转写语言" value={language} onChange={(event) => setLanguage(event.target.value)} className="nodrag h-7 rounded-[12px] border border-white/10 bg-surface-field px-2 text-text-dark"><option value="zh">中文</option><option value="en">English</option></select>
+          <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('transcribe')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{operationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
+          {scriptRef && <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>按脚本对齐</button>}
+          <span>{artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
         </div>
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
         {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐'}</p>}
         {data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
           <button type="button" className="w-[145px] shrink-0 text-left font-mono text-[11px] text-text-muted" onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = word.startUs / 1_000_000; }}>{stamp(word.startUs)} – {stamp(word.endUs)}</button>
-          <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => { setConfirmedTiming(false); setEdited((current) => current.map((text, position) => position === index ? event.target.value : text)); }} className="min-w-0 flex-1 rounded border border-border-dark bg-surface-field px-1 py-1" />
+          <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => { setConfirmedTiming(false); setEdited((current) => current.map((text, position) => position === index ? event.target.value : text)); }} className="nodrag min-w-0 flex-1 rounded-[12px] border border-white/10 bg-surface-field px-2 py-1 outline-none focus:border-white/25" />
           {typeof word.confidence === 'number' && word.confidence < 0.6 && <span className="shrink-0 text-amber-300">低置信度</span>}
         </div>)}
         {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无对齐字词</p>}
       </div>
-      {artifactRef && <div className="border-t border-white/[0.08] p-2 text-xs"><label className="mb-2 flex items-center gap-1"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><div className="flex gap-2"><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">保存校字</button><button type="button" onClick={() => void exportResult('json')}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')}>导出 SRT</button></div></div>}
+      {artifactRef && <div className="border-t border-white/[0.08] p-3 text-xs"><label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><div className="flex flex-wrap gap-2"><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button><button type="button" onClick={() => void exportResult('json')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 SRT</button></div></div>}
       {error && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
     </div>
   </div>;

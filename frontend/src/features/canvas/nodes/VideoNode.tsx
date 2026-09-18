@@ -197,6 +197,7 @@ import { RegenerateButton } from "@/features/canvas/ui/RegenerateButton";
 import { DepthCaptureBody } from "@/features/canvas/nodes/DepthCaptureBody";
 import {
   NODE_CREDIT_PILL_FLAT_CLASS,
+  NODE_CONTEXT_CONTROL_TRIGGER_CLASS,
   NODE_GENERATE_BUTTON_BASE_CLASS,
   NODE_GENERATE_BUTTON_DISABLED_CLASS,
   NODE_GENERATE_BUTTON_ENABLED_CLASS,
@@ -1382,6 +1383,7 @@ export const VideoNode = memo(
     const albumRootRef = useRef<HTMLDivElement | null>(null);
     const albumPointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const [albumExpanded, setAlbumExpanded] = useState(false);
+    const [remixMediaOpen, setRemixMediaOpen] = useState(false);
     // 本次会话内"应到条数"——未完成的在画册里占位。存模块级登记表而非组件
     // state：onlyRenderVisibleElements 下平移出视口会卸载组件，state 会丢。
     const albumPendingTotal = useAlbumPendingTotal(id);
@@ -3594,6 +3596,7 @@ export const VideoNode = memo(
               className={NODE_HEADER_FLOATING_POSITION_CLASS}
               icon={<VideoIcon className="h-4 w-4" />}
               titleText={resolvedTitle}
+              rightSlot={selected && readUrl().project ? <button type="button" aria-expanded={remixMediaOpen} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={(event) => { event.stopPropagation(); setRemixMediaOpen((open) => !open); }}>改编素材</button> : undefined}
               editable
               onTitleChange={(nextTitle) =>
                 updateNodeData(id, { displayName: nextTitle })
@@ -4383,7 +4386,7 @@ export const VideoNode = memo(
           className="hidden"
           onChange={handleFileChange}
         />
-        {selected && readUrl().project && !albumExpanded && (
+        {selected && remixMediaOpen && readUrl().project && !albumExpanded && (
           <div className="absolute left-[calc(100%+12px)] top-0 z-20 w-72">
             <RemixMediaInput
               project={readUrl().project!}

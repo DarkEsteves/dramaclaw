@@ -7,6 +7,7 @@ import type { SemanticTimelineNodeData } from '@/features/canvas/domain/canvasNo
 import { buildTimelineEditMap, buildTimelineOverrides, operationMatchesTimelineInputs, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 
@@ -166,7 +167,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     <div className={`max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted">
         <span>{data.artifactRef ? `时间轴 r${data.artifactRef.revision}` : '待编译'}</span>
-        <button type="button" disabled={busy || !project} onClick={(event) => { event.stopPropagation(); void compile(); }} className="nodrag rounded border border-white/15 px-2 py-1 text-text-dark disabled:opacity-50">{busy ? '编译中…' : currentOperationRef.current ? '继续检查' : '重新编译'}</button>
+        <button type="button" disabled={busy || !project} onClick={(event) => { event.stopPropagation(); void compile(); }} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{busy ? '编译中…' : currentOperationRef.current ? '继续检查' : '重新编译'}</button>
       </div>
       {!asRef(scriptRef) || !asRef(wordRef) ? <p className="mb-2 text-[12px] text-amber-300">连接脚本和已对齐语音的转写节点后可编译。</p> : null}
       {(error || data.compileError) && <p role="alert" className="mb-2 text-[12px] text-red-300">{error || data.compileError}</p>}
@@ -176,7 +177,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           <div>{event.label}</div>
           {event.invalidReason ? <div className="text-amber-300">未解决：{event.invalidReason}</div> : <div className="text-text-muted">{event.startFrame !== undefined ? `帧 ${event.startFrame}–${event.endFrame}` : '等待编译'}</div>}
           <div className="mt-1 grid grid-cols-3 gap-1">
-            {([['offsetMs', '偏移毫秒'], ['startFrame', '固定起始帧'], ['endFrame', '固定结束帧']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${event.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 w-full rounded border border-white/10 bg-black/20 px-1 py-1 text-[11px] text-text-dark" /></label>)}
+            {([['offsetMs', '偏移毫秒'], ['startFrame', '固定起始帧'], ['endFrame', '固定结束帧']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${event.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 h-8 w-full rounded-[12px] border border-white/10 bg-surface-field px-2 text-[11px] text-text-dark outline-none focus:border-white/25" /></label>)}
           </div>
         </div>;
       })}

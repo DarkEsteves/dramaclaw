@@ -52,6 +52,7 @@ import {
 } from "@/features/canvas/application/nodeActionResult";
 import { generationTaskDescriptor } from "@/features/canvas/application/resumeGeneration";
 import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeControlStyles";
 import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
 import { confirmRemixOperation, fetchRemixOperation, listRemixOperations, renderRemixManifest, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
@@ -339,11 +340,12 @@ export const VideoComposeNode = memo(
         <Handle type="source" position={Position.Right} id="render" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
-          <div className="mb-2 text-[12px] text-text-muted">{t('videoCompose.node.remixManifest', { id: data.remixManifestRef.artifactId, revision: data.remixManifestRef.revision })}</div>
+          <div className="mb-2 text-[12px] text-text-muted">合成清单 · 版本 {data.remixManifestRef.revision}</div>
           <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} />
-          <label className="mt-2 block text-[11px] text-text-muted">{t('videoCompose.node.remixKey')}<input value={remixKey} onChange={(event) => setRemixKey(event.target.value)} className="mt-1 w-full rounded border border-white/[0.1] bg-black/20 px-2 py-1 text-text-dark" /></label>
-          <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="mt-2 rounded bg-primary px-3 py-1.5 text-[12px] text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
-          <button type="button" disabled={isRemixPreparing || !project} onClick={() => void handlePrepareRemix()} className="ml-2 mt-2 rounded border border-border-dark px-3 py-1.5 text-[12px] text-text-dark disabled:opacity-50">重新汇总上游节点</button>
+          <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
+            <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+            <button type="button" disabled={isRemixPreparing || !project} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>更新清单</button>
+          </div>
           {(!exportable || nodeRevision == null) ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: blockReason })}</div> : null}
           {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
           {data.remixOperationId && !data.resultVideoUrl ? <div className="mt-2 text-[12px] text-text-muted">合成任务处理中，完成后会回填到本节点。</div> : null}

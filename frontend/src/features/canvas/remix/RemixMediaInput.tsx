@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { uploadRemixMedia } from '@/api/remix';
 import type { UploadedRemixMedia } from './workbenchModel';
+import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 
 type VideoRole = 'reference' | 'visual' | 'speech_clock';
 type AudioRole = 'narration' | 'bgm' | 'sfx';
@@ -43,22 +45,22 @@ export function RemixMediaInput({ project, kind, media, role, onChange, onCreate
       setBusy(false);
     }
   };
-  return <div className="nodrag rounded-[var(--node-radius)] border border-border-dark bg-surface-panel p-3 text-xs text-text-dark" onClick={(event) => event.stopPropagation()}>
-    <div className="mb-2 font-medium">参考视频改编素材</div>
-    <label className="block">{kind === 'video' ? '改编视频素材' : '改编音频素材'}
-      <input aria-label={kind === 'video' ? '改编视频素材' : '改编音频素材'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="mt-1 block w-full" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+  return <div className={`nodrag rounded-[12px] p-3 text-xs text-text-dark ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
+    <div className="mb-3 text-[12px] font-medium">改编素材</div>
+    <label className="block text-text-muted">{kind === 'video' ? '视频文件' : '音频文件'}
+      <input aria-label={kind === 'video' ? '改编视频素材' : '改编音频素材'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="nodrag mt-1 block w-full rounded-[12px] border border-white/10 bg-surface-field px-2 py-1.5 text-[11px] text-text-dark file:mr-2 file:rounded-md file:border-0 file:bg-white/10 file:px-2 file:py-1 file:text-text-dark disabled:opacity-50" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
     </label>
-    <label className="mt-2 block">用途
-      <select aria-label="素材用途" value={role} disabled={busy} className="mt-1 w-full rounded-md border border-border-dark bg-surface-field p-1" onChange={(event) => {
+    <label className="mt-3 block text-text-muted">用途
+      <select aria-label="素材用途" value={role} disabled={busy} className="nodrag mt-1 h-9 w-full rounded-[12px] border border-white/10 bg-surface-field px-3 text-xs text-text-dark" onChange={(event) => {
         if (media) onChange({ media, role: event.target.value as VideoRole | AudioRole });
       }}>
         {roles.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
       </select>
     </label>
     {media && <div className="mt-2 truncate text-text-muted" title={media.media_path}>{media.media_path.split('/').pop()} · {(media.duration_us / 1_000_000).toFixed(1)} 秒{media.has_audio ? ' · 有声' : ''}</div>}
-    {media && <div className="mt-2 flex gap-2">
-      {onCreateTranscript && <button type="button" className="rounded border border-border-dark px-2 py-1" onClick={onCreateTranscript}>创建转写节点</button>}
-      {onCreateStory && <button type="button" className="rounded border border-border-dark px-2 py-1" onClick={onCreateStory}>创建参考故事节点</button>}
+    {media && <div className="mt-3 flex flex-wrap gap-2 border-t border-white/10 pt-3">
+      {onCreateTranscript && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateTranscript}>创建转写节点</button>}
+      {onCreateStory && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateStory}>创建视频故事节点</button>}
     </div>}
     {busy && <div role="status">正在上传…</div>}
     {error && <div role="alert" className="text-destructive">{error}</div>}
