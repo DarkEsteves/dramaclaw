@@ -152,6 +152,10 @@ export interface CanvasEventMap {
   'freezone/start-creation': {
     actionId: CanvasCreationActionId;
   };
+  'remix-node/action': {
+    nodeId: string;
+    action: 'open_media' | 'transcribe' | 'align' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose';
+  };
   'tool-dialog/open': {
     nodeId: string;
     toolType: NodeToolType;

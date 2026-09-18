@@ -42,7 +42,7 @@ import { setNodeMediaActive } from '@/features/canvas/application/canvasLod';
 import { useNodeGenerationTaskState } from '@/features/canvas/application/useNodeGenerationTaskState';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { RemixMediaInput } from '@/features/canvas/remix/RemixMediaInput';
-import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { useCanvasStore, useIsBoxSelecting } from '@/stores/canvasStore';
 import { AudioOperationsPanel } from '@/features/canvas/nodes/AudioOperationsPanel';
 import { deriveAudioText, useAudioGeneration } from '@/features/canvas/nodes/useAudioGeneration';
@@ -109,6 +109,10 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
   const { isGenerating, task } = useNodeGenerationTaskState(data);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [remixMediaOpen, setRemixMediaOpen] = useState(false);
+  useEffect(() => { if (!selected) setRemixMediaOpen(false); }, [selected]);
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId === id && action === 'open_media') setRemixMediaOpen(true);
+  }), [id]);
   const [voicePickerInitialTab, setVoicePickerInitialTab] = useState<'library' | 'mine'>('library');
   // 重试用与面板提交同一套生成逻辑（hook）。
   const { generate } = useAudioGeneration(id, data);
@@ -389,7 +393,6 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
         className={NODE_HEADER_FLOATING_POSITION_CLASS}
         icon={<Music2 className="h-4 w-4" />}
         titleText={resolvedTitle}
-        rightSlot={selected && readUrl().project ? <button type="button" aria-expanded={remixMediaOpen} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={(event) => { event.stopPropagation(); setRemixMediaOpen((open) => !open); }}>改编素材</button> : undefined}
         editable
         onTitleChange={(nextTitle) => updateNodeData(id, { displayName: nextTitle })}
       />
@@ -479,6 +482,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           project={readUrl().project!}
           kind="audio"
           media={data.remixMedia}
+          sourceUrl={data.audioUrl}
           role={data.remixRole ?? 'narration'}
           onChange={({ media, role }) => updateNodeData(id, { remixMedia: media, remixRole: role as AudioNodeData['remixRole'] })}
           onCreateTranscript={() => {

@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { uploadRemixMedia } from '@/api/remix';
+import { useEffect, useRef, useState } from 'react';
+import { attachRemixMedia, uploadRemixMedia } from '@/api/remix';
 import type { UploadedRemixMedia } from './workbenchModel';
+import { projectMediaPathFromUrl } from './remixMediaPath';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 
@@ -11,6 +12,7 @@ interface Props {
   project: string;
   kind: 'video' | 'audio';
   media?: UploadedRemixMedia;
+  sourceUrl?: string | null;
   role: VideoRole | AudioRole;
   onChange: (value: { media: UploadedRemixMedia; role: VideoRole | AudioRole }) => void;
   onCreateTranscript?: () => void;
@@ -28,10 +30,31 @@ const audioRoles: Array<{ value: AudioRole; label: string }> = [
   { value: 'sfx', label: '音效' },
 ];
 
-export function RemixMediaInput({ project, kind, media, role, onChange, onCreateTranscript, onCreateStory }: Props) {
+export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChange, onCreateTranscript, onCreateStory }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const attachingPath = useRef<string | null>(null);
+  const onChangeRef = useRef(onChange);
+  const roleRef = useRef(role);
+  onChangeRef.current = onChange;
+  roleRef.current = role;
   const roles = kind === 'video' ? videoRoles : audioRoles;
+  useEffect(() => {
+    if (media || !sourceUrl || !project) return;
+    const path = projectMediaPathFromUrl(project, sourceUrl);
+    if (!path || attachingPath.current === path) return;
+    attachingPath.current = path;
+    setBusy(true);
+    attachRemixMedia(project, path).then((attached) => {
+      if (attached.media_kind === kind) {
+        setBusy(false);
+        onChangeRef.current({ media: attached, role: roleRef.current });
+      }
+      else setError('当前节点素材类型不匹配');
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : '无法引用当前节点素材');
+    }).finally(() => { setBusy(false); });
+  }, [project, kind, media, sourceUrl]);
   const upload = async (file: File) => {
     setBusy(true);
     setError(null);
@@ -46,9 +69,9 @@ export function RemixMediaInput({ project, kind, media, role, onChange, onCreate
     }
   };
   return <div className={`nodrag rounded-[12px] p-3 text-xs text-text-dark ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
-    <div className="mb-3 text-[12px] font-medium">改编素材</div>
-    <label className="block text-text-muted">{kind === 'video' ? '视频文件' : '音频文件'}
-      <input aria-label={kind === 'video' ? '改编视频素材' : '改编音频素材'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="nodrag mt-1 block w-full rounded-[12px] border border-white/10 bg-surface-field px-2 py-1.5 text-[11px] text-text-dark file:mr-2 file:rounded-md file:border-0 file:bg-white/10 file:px-2 file:py-1 file:text-text-dark disabled:opacity-50" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+    <div className="mb-3 text-[12px] font-medium">{kind === 'video' ? '视频用途' : '音频用途'}</div>
+    <label className="block text-text-muted">{kind === 'video' ? '更换视频文件' : '更换音频文件'}
+      <input aria-label={kind === 'video' ? '更换视频文件' : '更换音频文件'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="nodrag mt-1 block w-full rounded-[12px] border border-white/10 bg-surface-field px-2 py-1.5 text-[11px] text-text-dark file:mr-2 file:rounded-md file:border-0 file:bg-white/10 file:px-2 file:py-1 file:text-text-dark disabled:opacity-50" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
     </label>
     <label className="mt-3 block text-text-muted">用途
       <select aria-label="素材用途" value={role} disabled={busy} className="nodrag mt-1 h-9 w-full rounded-[12px] border border-white/10 bg-surface-field px-3 text-xs text-text-dark" onChange={(event) => {
@@ -62,7 +85,7 @@ export function RemixMediaInput({ project, kind, media, role, onChange, onCreate
       {onCreateTranscript && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateTranscript}>创建转写节点</button>}
       {onCreateStory && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateStory}>创建视频故事节点</button>}
     </div>}
-    {busy && <div role="status">正在上传…</div>}
+    {busy && <div role="status">正在读取素材…</div>}
     {error && <div role="alert" className="text-destructive">{error}</div>}
   </div>;
 }

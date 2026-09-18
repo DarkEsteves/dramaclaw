@@ -10,6 +10,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from novelvideo.api.auth import get_api_user
@@ -29,6 +30,10 @@ _EXTENSIONS = {
     ".mp3": "audio", ".m4a": "audio", ".wav": "audio", ".aac": "audio",
     ".ogg": "audio", ".flac": "audio",
 }
+
+
+class AttachMediaBody(BaseModel):
+    media_path: str = Field(min_length=1)
 
 
 def _probe_media(path: Path, expected_kind: str) -> tuple[int, bool]:
@@ -73,6 +78,51 @@ def _save_media(stream, project_dir: Path, suffix: str, media_kind: str) -> dict
         }
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _inspect_existing_media(project_dir: Path, media_path: str) -> dict:
+    relative = Path(media_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Media must be a project-relative file")
+    path = (project_dir / relative).resolve()
+    if not path.is_relative_to(project_dir) or not path.is_file():
+        raise ValueError("Media must be an existing project file")
+    media_kind = _EXTENSIONS.get(path.suffix.lower())
+    if media_kind is None:
+        raise ValueError("Unsupported remix media extension")
+    size = path.stat().st_size
+    if size == 0 or size > MAX_REMIX_MEDIA_BYTES:
+        raise ValueError("Media size is outside the supported range")
+    duration_us, has_audio = _probe_media(path, media_kind)
+    with path.open("rb") as media_file:
+        media_hash = hashlib.file_digest(media_file, "sha256").hexdigest()
+    return {
+        "media_path": path.relative_to(project_dir).as_posix(),
+        "media_hash": media_hash,
+        "media_kind": media_kind,
+        "duration_us": duration_us,
+        "has_audio": has_audio,
+        "size": size,
+    }
+
+
+@router.post("/media/attach")
+async def attach_existing_remix_media(
+    project: str,
+    body: AttachMediaBody,
+    user: dict = Depends(get_api_user),
+):
+    ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+    require_project_home_node(ctx, operation="attach remix media")
+    project_dir = Path(ctx.output_dir).resolve()
+    try:
+        result = await run_in_threadpool(_inspect_existing_media, project_dir, body.media_path)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(503, "Remix media inspection is temporarily unavailable") from exc
+    result["url"] = make_static_url_for_context(ctx, result["media_path"], local_path=project_dir / result["media_path"])
+    return {"ok": True, "data": result}
 
 
 @router.post("/media")

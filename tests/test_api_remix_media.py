@@ -90,3 +90,30 @@ def test_upload_enforces_role_home_and_media_probe(client):
     assert api.post(endpoint.replace("/demo/", "/peer/"), files={"file": ("x.mp4", content)}).status_code == 403
     assert api.post(endpoint, files={"file": ("x.mp4", b"garbage")}).status_code == 422
     assert api.post(endpoint, files={"file": ("x.txt", content)}).status_code == 422
+
+
+def test_attach_existing_project_media_without_reupload(client):
+    api, _, root = client
+    source = root / "freezone" / "_uploads" / "reference.mp4"
+    source.parent.mkdir(parents=True)
+    content = _video_bytes(root)
+    source.write_bytes(content)
+
+    response = api.post(
+        "/api/v1/projects/demo/freezone/remix/media/attach",
+        json={"media_path": "freezone/_uploads/reference.mp4"},
+    )
+    assert response.status_code == 200
+    media = response.json()["data"]
+    assert media["media_path"] == "freezone/_uploads/reference.mp4"
+    assert media["media_hash"] == hashlib.sha256(content).hexdigest()
+    assert media["media_kind"] == "video"
+    assert source.read_bytes() == content
+
+
+def test_attach_rejects_non_project_media(client, tmp_path):
+    api, _, _ = client
+    (tmp_path.parent / "outside.mp4").write_bytes(_video_bytes(tmp_path))
+    endpoint = "/api/v1/projects/demo/freezone/remix/media/attach"
+    assert api.post(endpoint, json={"media_path": "../outside.mp4"}).status_code == 422
+    assert api.post(endpoint, json={"media_path": "/etc/passwd"}).status_code == 422

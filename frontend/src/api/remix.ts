@@ -25,6 +25,9 @@ export function uploadRemixMedia(project: string, file: File) {
   body.append('file', file);
   return apiCall<RemixUploadedMedia>(`projects/${project}/freezone/remix/media`, { method: 'POST', body, timeout: false });
 }
+export function attachRemixMedia(project: string, mediaPath: string) {
+  return apiCall<RemixUploadedMedia>(`projects/${project}/freezone/remix/media/attach`, { method: 'POST', json: { media_path: mediaPath } });
+}
 export function fetchRemixOperation(project: string, operationId: string) {
   return apiCall<RemixOperation>(`projects/${project}/freezone/remix/operations/${operationId}`);
 }

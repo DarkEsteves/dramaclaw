@@ -83,6 +83,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import type { RemixArtifactRef } from '@/api/remix';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
@@ -398,9 +399,11 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const upstreamNodes = useUpstreamNodes(id);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isRemixScriptOpen, setRemixScriptOpen] = useState(false);
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId === id && action === 'edit_script') setRemixScriptOpen(true);
+  }), [id]);
   const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
-  const hasRemixScript = Boolean(blueprintRef || savedRemixRef || data.remixScriptDraft);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
   const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
@@ -675,10 +678,9 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             durationMs={data.generationDurationMs}
           />
         )}
-        {hasRemixScript && <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
-          <span>{remixRef(data.remixScriptRef) ? `改编脚本 r${remixRef(data.remixScriptRef)?.revision}` : '改编脚本待保存'}</span>
-          <button type="button" className="nodrag rounded border border-white/15 px-2 py-1 text-text-dark" onClick={(event) => { event.stopPropagation(); setRemixScriptOpen(true); }}>编辑改编脚本</button>
-        </div>}
+        <div className="border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
+          <span>{remixRef(data.remixScriptRef) ? `参考改编脚本 · 版本 ${remixRef(data.remixScriptRef)?.revision}` : blueprintRef ? '参考改编脚本 · 待保存' : '参考改编脚本 · 可连接视频故事'}</span>
+        </div>
         {hasResult ? (
           <>
             <ScriptResultHeader

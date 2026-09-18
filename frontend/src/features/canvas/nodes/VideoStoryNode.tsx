@@ -29,6 +29,7 @@ import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/feature
 import { useCanvasStore } from '@/stores/canvasStore';
 import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
 import { ReferenceBlueprintPanel } from '@/features/canvas/remix/blueprintPanel';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
 
 type VideoStoryNodeProps = NodeProps & {
@@ -224,6 +225,9 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeData(id, { sourceVideoUrl: blueprintSource.videoUrl, referenceBlueprintRef: null });
     reanalyzeVideoStory(id, { durationSec: blueprintSource.durationUs / 1_000_000 });
   }, [blueprintSource, id, updateNodeData]);
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId === id && action === 'analyze') reanalyzeBlueprint();
+  }), [id, reanalyzeBlueprint]);
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoStory, data, t),

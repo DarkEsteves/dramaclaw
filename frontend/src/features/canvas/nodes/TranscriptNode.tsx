@@ -11,6 +11,7 @@ import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/feature
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 type Props = NodeProps & { id: string; data: TranscriptNodeData; selected?: boolean };
 
@@ -72,6 +73,11 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
   };
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId !== id) return;
+    if (action === 'transcribe') void start('transcribe');
+    if (action === 'align') void start('align');
+  }), [id, start]);
 
   useEffect(() => {
     if (!project || !operationId) return;

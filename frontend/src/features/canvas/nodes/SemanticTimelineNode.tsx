@@ -10,6 +10,7 @@ import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/feature
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 type TimelineData = SemanticTimelineNodeData & {
   eventOverrides?: Record<string, TimelineEventOverride>;
@@ -159,6 +160,9 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       if (!watchingRef.current && mountedRef.current) setBusy(false);
     }
   };
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId === id && action === 'compile') void compile();
+  }), [id, compile]);
 
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
     <Handle type="target" position={Position.Left} id="timing" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />

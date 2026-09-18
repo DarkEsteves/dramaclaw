@@ -1679,6 +1679,22 @@ export const NodeActionToolbar = memo(
                 Recipe 已降级编译
               </span>
             )}
+            {(isVideoNode(node) || isAudioNode(node) || node.type === CANVAS_NODE_TYPES.transcript || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
+              <>
+                {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
+                  : isAudioNode(node) ? [{ action: 'open_media', label: '音频用途', Icon: Wand2 }]
+                  : node.type === CANVAS_NODE_TYPES.transcript ? [{ action: 'transcribe', label: '转写', Icon: PenLine }, { action: 'align', label: '按脚本对齐', Icon: Workflow }]
+                  : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '分析原片', Icon: Film }]
+                  : node.type === CANVAS_NODE_TYPES.script ? [{ action: 'edit_script', label: '编辑改编脚本', Icon: PenLine }]
+                  : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '编译时间轴', Icon: Workflow }]
+                  : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]
+                ).map(({ action, label, Icon }) => <UiChipButton
+                  key={`remix-${action}`}
+                  className={TOOLBAR_TEXT_BUTTON_CLASS}
+                  onClick={(event) => { event.stopPropagation(); canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'transcribe' | 'align' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose' }); }}
+                ><Icon className="h-3.5 w-3.5" />{label}</UiChipButton>)}
+              </>
+            )}
             {isPresetLocked && workbenchTarget && (
               <UiChipButton
                 key="mainline-open-workbench"

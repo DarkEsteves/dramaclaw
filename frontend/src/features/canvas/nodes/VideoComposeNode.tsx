@@ -52,6 +52,7 @@ import {
 } from "@/features/canvas/application/nodeActionResult";
 import { generationTaskDescriptor } from "@/features/canvas/application/resumeGeneration";
 import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
+import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeControlStyles";
 import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
 import { confirmRemixOperation, fetchRemixOperation, listRemixOperations, renderRemixManifest, type RemixTaskRef } from "@/api/remix";
@@ -180,6 +181,9 @@ export const VideoComposeNode = memo(
         setRemixPreparing(false);
       }
     }, [project, isRemixPreparing, id, updateNodeData, data.remixNodeRevision]);
+    useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+      if (nodeId === id && action === 'prepare_compose') void handlePrepareRemix();
+    }), [id, handlePrepareRemix]);
 
     useEffect(() => {
       updateNodeInternals(id);
@@ -410,7 +414,7 @@ export const VideoComposeNode = memo(
             >
               旧版单节点改编
             </button>}
-            {hasSemanticTimeline && <button type="button" disabled={isRemixPreparing} onClick={(event) => { event.stopPropagation(); void handlePrepareRemix(); }} className="rounded-md border border-primary px-3 py-1 text-[12px] text-primary disabled:opacity-50">{isRemixPreparing ? '正在汇总产物…' : '从上游节点生成合成清单'}</button>}
+            {!hasSemanticTimeline && <span className="text-center text-[11px] text-text-muted">参考改编：先连接语义时间轴节点</span>}
             {remixError && <span role="alert" className="text-[11px] text-red-300">{remixError}</span>}
           </div>
         </div>
