@@ -190,6 +190,9 @@ export interface DepthCaptureState {
 }
 
 export interface VideoNodeData extends NodeDisplayData {
+  /** Project-owned source media for the reference remix workflow. */
+  remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
+  remixRole?: 'reference' | 'visual' | 'speech_clock';
   videoUrl: string | null;
   previewImageUrl?: string | null;
   /**
@@ -365,6 +368,8 @@ export interface VideoComposeNodeData extends NodeDisplayData {
   remixWorkbenchDraft?: import('../remix/workbenchModel').RemixWorkbenchDraft;
   /** Remix manifests use the versioned layered renderer, not the legacy clip editor. */
   remixManifestRef?: { artifactId: string; revision: number } | null;
+  remixInputFingerprint?: string;
+  remixOperationId?: string | null;
   remixNodeRevision?: number;
   remixEvents?: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>;
   remixSelections?: Array<{ id: string; label: string; start: number; end: number; invalidReason?: string }>;
@@ -674,6 +679,9 @@ export interface AudioVoiceRef {
 }
 
 export interface AudioNodeData extends NodeDisplayData {
+  /** Project-owned audio actually used by transcription and rendering. */
+  remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
+  remixRole?: 'narration' | 'bgm' | 'sfx';
   audioUrl: string | null;
   sourceFileName?: string | null;
   durationMs?: number | null;

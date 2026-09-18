@@ -1,13 +1,14 @@
 import { apiCall } from './client';
 
 export interface RemixArtifactRef { artifactId: string; revision: number }
-export interface RemixArtifact { id: string; schema: string; revision: number; payload: Record<string, unknown> }
+export interface RemixArtifact { id: string; schema: string; revision: number; payload: Record<string, unknown>; upstream_refs?: Array<{ artifact_id: string; revision: number }> }
 export interface RemixRenderRequest { manifestRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number; canvasId?: string; nodeId?: string }
 export interface RemixTaskRef { task_key: string; task_type: string; task_id: string | null; operation_id: string }
 export interface RemixRenderTaskRef extends RemixTaskRef { job_id: string }
 export interface RemixOperation { operation_id: string; status: string; task_id: string | null; task_type?: string | null; task_scope?: string | null; canvas_id?: string; node_id?: string; node_revision?: number; input_refs?: Array<{ artifact_id: string; revision: number }>; output_refs: Array<{ project_path?: string; artifact_id?: string; revision?: number }>; output_urls?: Array<{ media_url: string; download_url: string }> }
 export interface RemixUploadedMedia { media_path: string; media_hash: string; url: string; size: number; media_kind: 'video' | 'audio'; duration_us: number; has_audio?: boolean }
 export type RemixProcessRequest =
+  | { action: 'analyze_reference_video'; mediaPath: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'transcribe_media'; mediaPath: string; language: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'align_script'; mediaPath: string; scriptRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
   | { action: 'compile_semantic_timeline'; scriptRef: RemixArtifactRef; wordTimelineRef: RemixArtifactRef; editMap: Record<string, unknown>[]; overrides: Record<string, unknown>[]; fps: number; idempotencyKey: string; nodeRevision: number };
@@ -38,7 +39,9 @@ export function confirmRemixOperation(project: string, operationId: string, canv
 }
 
 export function submitRemixProcessAction(project: string, request: RemixProcessRequest) {
-  const payload = request.action === 'transcribe_media'
+  const payload = request.action === 'analyze_reference_video'
+    ? { media_path: request.mediaPath }
+    : request.action === 'transcribe_media'
     ? { media_path: request.mediaPath, language: request.language }
     : request.action === 'align_script'
       ? { media_path: request.mediaPath, script_ref: exactRef(request.scriptRef) }

@@ -20,4 +20,9 @@ describe('remix script editor', () => {
   it('blocks saving invalid or out-of-range selections', () => {
     expect(() => buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], end: 99 }] }, 1)).toThrow('语义区间');
   });
+
+  it('serializes an SFX directive for a timed selection', () => {
+    const payload = buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], sfxNodeId: 'audio-1' }] }, 1);
+    expect(payload.events).toEqual([expect.objectContaining({ sfx_node_id: 'audio-1' })]);
+  });
 });

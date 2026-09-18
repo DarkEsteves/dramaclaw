@@ -51,7 +51,7 @@ class ConfirmOperationBody(BaseModel):
 
 
 class ProcessActionBody(BaseModel):
-    action: Literal["transcribe_media", "align_script", "compile_semantic_timeline"]
+    action: Literal["transcribe_media", "align_script", "compile_semantic_timeline", "analyze_reference_video"]
     payload: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
     node_revision: int = Field(ge=1, strict=True)
@@ -61,6 +61,7 @@ _PROCESS_TASK_TYPES = {
     "transcribe_media": "remix_transcribe_media",
     "align_script": "remix_align_script",
     "compile_semantic_timeline": "remix_compile_semantic_timeline",
+    "analyze_reference_video": "remix_analyze_reference_video",
 }
 
 
@@ -128,6 +129,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "transcribe_media": ({"media_path", "language"}, set()),
         "align_script": ({"media_path", "script_ref"}, set()),
         "compile_semantic_timeline": ({"script_ref", "word_timeline_ref", "edit_map", "overrides", "fps"}, set()),
+        "analyze_reference_video": ({"media_path"}, set()),
     }
     required, optional = expected[action]
     if set(payload) != required | optional:

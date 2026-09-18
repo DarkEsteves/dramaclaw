@@ -9,6 +9,26 @@ import pytest
 VOICE_HASH = hashlib.sha256(b"voice").hexdigest()
 
 
+def test_reference_evidence_runner_publishes_full_video_evidence(tmp_path, monkeypatch):
+    from novelvideo.task_backend.runners import remix as runner
+
+    media = tmp_path / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"video")
+    evidence = {
+        "media_hash": hashlib.sha256(b"video").hexdigest(),
+        "time_base": "1/1000", "duration_us": 1_000_000,
+        "cuts": [], "representative_frames": [{"pts": 0, "time_us": 0}],
+    }
+    monkeypatch.setattr(runner, "build_reference_evidence", lambda path: evidence)
+    result = runner.run_remix_analyze_reference_video(
+        {"payload": {"media_path": "media/reference.mp4", "media_sha256": hashlib.sha256(b"video").hexdigest()}},
+        SimpleNamespace(output_dir=str(tmp_path), project_id="demo"),
+    )
+    assert result["artifact_ref"]["revision"] == 1
+    assert result["artifact_ref"]["artifact_id"]
+
+
 def test_transcribe_runner_resolves_project_relative_media_and_publishes_timeline(tmp_path, monkeypatch):
     from novelvideo.task_backend.runners import remix as runner
 

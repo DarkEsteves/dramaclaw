@@ -41,6 +41,7 @@ import {
 import { setNodeMediaActive } from '@/features/canvas/application/canvasLod';
 import { useNodeGenerationTaskState } from '@/features/canvas/application/useNodeGenerationTaskState';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
+import { RemixMediaInput } from '@/features/canvas/remix/RemixMediaInput';
 import { useCanvasStore, useIsBoxSelecting } from '@/stores/canvasStore';
 import { AudioOperationsPanel } from '@/features/canvas/nodes/AudioOperationsPanel';
 import { deriveAudioText, useAudioGeneration } from '@/features/canvas/nodes/useAudioGeneration';
@@ -469,6 +470,22 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
             />
           )}
       </div>
+
+      {selected && readUrl().project && <div className="absolute left-[calc(100%+12px)] top-0 z-20 w-72">
+        <RemixMediaInput
+          project={readUrl().project!}
+          kind="audio"
+          media={data.remixMedia}
+          role={data.remixRole ?? 'narration'}
+          onChange={({ media, role }) => updateNodeData(id, { remixMedia: media, remixRole: role as AudioNodeData['remixRole'] })}
+          onCreateTranscript={() => {
+            const store = useCanvasStore.getState();
+            const child = store.addNode(CANVAS_NODE_TYPES.transcript, store.findNodePosition(id, 480, 220));
+            store.addEdge(id, child);
+            store.setSelectedNode(child);
+          }}
+        />
+      </div>}
 
       {/* 节点一旦有音频内容（手动上传 or TTS 合成），就不再展示底部操作区 ——
           这条规则覆盖手动上传 / TTS 合成完成两种情况。

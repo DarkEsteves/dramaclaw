@@ -6690,6 +6690,8 @@
       "video": "Video",
       "audio": "Âm thanh",
       "videoStory": "Câu chuyện video",
+      "transcript": "Phiên âm/Căn chỉnh",
+      "semanticTimeline": "Dòng thời gian ngữ nghĩa",
       "script": "Kịch bản",
       "pano360Viewer": "Góc nhìn 360°",
       "threeDWorld": "Thế giới 3D",

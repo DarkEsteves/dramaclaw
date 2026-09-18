@@ -451,9 +451,7 @@ const videoStoryNodeDefinition: CanvasNodeDefinition<VideoStoryNodeData> = {
   type: CANVAS_NODE_TYPES.videoStory,
   menuLabelKey: 'node.menu.videoStory',
   menuIcon: 'video',
-  // Only ever spawned programmatically (after video-analyze success), never
-  // through the double-click or "+" menus.
-  visibleInMenu: false,
+  visibleInMenu: true,
   capabilities: {
     toolbar: false,
     promptInput: false,
@@ -462,8 +460,8 @@ const videoStoryNodeDefinition: CanvasNodeDefinition<VideoStoryNodeData> = {
     sourceHandle: true,
     targetHandle: true,
     connectMenu: {
-      fromSource: false,
-      fromTarget: false,
+      fromSource: true,
+      fromTarget: true,
     },
   },
   createDefaultData: () => ({
@@ -481,12 +479,12 @@ const transcriptNodeDefinition: CanvasNodeDefinition<TranscriptNodeData> = {
   type: CANVAS_NODE_TYPES.transcript,
   menuLabelKey: 'node.menu.transcript',
   menuIcon: 'text',
-  visibleInMenu: false,
+  visibleInMenu: true,
   capabilities: { toolbar: false, promptInput: false },
   connectivity: {
     sourceHandle: true,
     targetHandle: true,
-    connectMenu: { fromSource: false, fromTarget: false },
+    connectMenu: { fromSource: true, fromTarget: true },
   },
   createDefaultData: () => ({
     displayName: 'Transcript',
@@ -499,9 +497,9 @@ const transcriptNodeDefinition: CanvasNodeDefinition<TranscriptNodeData> = {
 
 const semanticTimelineNodeDefinition: CanvasNodeDefinition<SemanticTimelineNodeData> = {
   type: CANVAS_NODE_TYPES.semanticTimeline,
-  menuLabelKey: 'node.menu.semanticTimeline', menuIcon: 'text', visibleInMenu: false,
+  menuLabelKey: 'node.menu.semanticTimeline', menuIcon: 'text', visibleInMenu: true,
   capabilities: { toolbar: false, promptInput: false },
-  connectivity: { sourceHandle: true, targetHandle: true, connectMenu: { fromSource: false, fromTarget: false } },
+  connectivity: { sourceHandle: true, targetHandle: true, connectMenu: { fromSource: true, fromTarget: true } },
   createDefaultData: () => ({ displayName: 'Semantic timeline', artifactRef: null, events: [] }),
 };
 
@@ -830,7 +828,7 @@ const UPSTREAM_SOURCE_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasN
 // 明写「不收音频」—— 但那两处只管菜单能创建什么，拖线落到一个**既有**节点上时
 // 谁都没拦。放进这里才真正收口。
 const DOWNSTREAM_TARGET_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasNodeType[]>> = {
-  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose],
+  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline],
   // 风格节点只是图片节点 styleTemplateId 的投影，连到别处不产生任何效果。
   [CANVAS_NODE_TYPES.style]: [CANVAS_NODE_TYPES.imageGen],
 };
@@ -935,9 +933,15 @@ export const DOWNSTREAM_SPAWN_WHITELIST: Partial<
     CANVAS_NODE_TYPES.videoCompose,
     CANVAS_NODE_TYPES.videoBreakdown,
     CANVAS_NODE_TYPES.script,
+    CANVAS_NODE_TYPES.transcript,
+    CANVAS_NODE_TYPES.videoStory,
   ],
   // 音频：下游只有视频（声轨素材）与视频合成（音频轨）读得懂。
-  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose],
+  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline],
+  [CANVAS_NODE_TYPES.transcript]: [CANVAS_NODE_TYPES.videoStory, CANVAS_NODE_TYPES.semanticTimeline, CANVAS_NODE_TYPES.script],
+  [CANVAS_NODE_TYPES.videoStory]: [CANVAS_NODE_TYPES.script, CANVAS_NODE_TYPES.semanticTimeline],
+  [CANVAS_NODE_TYPES.script]: [CANVAS_NODE_TYPES.semanticTimeline],
+  [CANVAS_NODE_TYPES.semanticTimeline]: [CANVAS_NODE_TYPES.videoCompose],
   // 360° 全景查看器：截图都是图片，下游只接图片类节点。
   [CANVAS_NODE_TYPES.pano360Viewer]: [
     CANVAS_NODE_TYPES.imageGen,

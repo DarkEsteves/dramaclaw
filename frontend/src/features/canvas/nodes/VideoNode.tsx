@@ -266,6 +266,7 @@ import {
 } from "@/features/canvas/ui/NodeGenerationHistory";
 import type { FreezoneGenerationHistoryRecord } from "@/api/ops";
 import { readUrl } from "@/lib/url-params";
+import { RemixMediaInput } from "@/features/canvas/remix/RemixMediaInput";
 import type { ModelOption } from "@/features/canvas/ui/ProviderModelPicker";
 import { CreditCostPill } from "@/components/credits/credit-visual";
 import { NodeHistoryRail } from "@/features/canvas/ui/NodeHistoryRail";
@@ -4382,6 +4383,29 @@ export const VideoNode = memo(
           className="hidden"
           onChange={handleFileChange}
         />
+        {selected && readUrl().project && !albumExpanded && (
+          <div className="absolute left-[calc(100%+12px)] top-0 z-20 w-72">
+            <RemixMediaInput
+              project={readUrl().project!}
+              kind="video"
+              media={data.remixMedia}
+              role={data.remixRole ?? 'reference'}
+              onChange={({ media, role }) => updateNodeData(id, { remixMedia: media, remixRole: role as VideoNodeData['remixRole'] })}
+              onCreateTranscript={() => {
+                const store = useCanvasStore.getState();
+                const child = store.addNode(CANVAS_NODE_TYPES.transcript, store.findNodePosition(id, 480, 200));
+                store.addEdge(id, child);
+                store.setSelectedNode(child);
+              }}
+              onCreateStory={() => {
+                const store = useCanvasStore.getState();
+                const child = store.addNode(CANVAS_NODE_TYPES.videoStory, store.findNodePosition(id, 760, 360));
+                store.addEdge(id, child);
+                store.setSelectedNode(child);
+              }}
+            />
+          </div>
+        )}
       </div>
     );
   },

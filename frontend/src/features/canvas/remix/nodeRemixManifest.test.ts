@@ -1,0 +1,42 @@
+import { describe, expect, it } from 'vitest';
+import { buildNodeRemixManifest } from './nodeRemixManifest';
+
+const video = { media_path: 'input/reference.mp4', media_hash: 'a'.repeat(64), url: '/reference.mp4', size: 10, media_kind: 'video' as const, duration_us: 4_000_000, has_audio: true };
+const audio = { media_path: 'input/voice.wav', media_hash: 'b'.repeat(64), url: '/voice.wav', size: 10, media_kind: 'audio' as const, duration_us: 4_000_000 };
+
+describe('buildNodeRemixManifest', () => {
+  it('binds compiled timing to project media and script captions', () => {
+    const output = buildNodeRemixManifest({
+      reference: video,
+      narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'reveal', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '喝一口咖啡', events: [{ event_id: 'reveal', caption: '喝一口咖啡' }] },
+    });
+    expect(output.subtitle_events).toEqual([{ text: '喝一口咖啡', start_frame: 12, end_frame: 45 }]);
+    expect(output.layers).toEqual([{ media_id: 'reference', start_frame: 0, end_frame: 120, z_order: 0, fit: 'cover' }]);
+    expect(output.media_bindings).toHaveLength(2);
+  });
+
+  it('blocks unresolved required semantic events', () => {
+    expect(() => buildNodeRemixManifest({ reference: video, narration: audio, timing: { fps: 30, events: [], unresolved_required_events: [{ event_id: 'hook' }], override_conflicts: [] }, script: { dialogue: '', events: [] } })).toThrow(/未解析/);
+  });
+
+  it('uses the new narration duration and loops a shorter reference video', () => {
+    const shortReference = { ...video, duration_us: 1_000_000 };
+    const output = buildNodeRemixManifest({ reference: shortReference, narration: audio, timing: { fps: 30, events: [{ event_id: 'late', start_frame: 60, end_frame: 90 }], unresolved_required_events: [], override_conflicts: [] }, script: { dialogue: '新台词', events: [{ event_id: 'late', caption: '新台词' }] } });
+    expect(output.output_spec.duration_frames).toBe(120);
+    expect(output.media_bindings[0]).toMatchObject({ media_id: 'reference', loop: true });
+    expect(output.layers[0]).toMatchObject({ end_frame: 120 });
+  });
+
+  it('mixes a connected BGM track and a cue-bound SFX track', () => {
+    const bgm = { ...audio, media_path: 'input/bgm.wav', media_hash: 'c'.repeat(64), duration_us: 1_000_000 };
+    const sfx = { ...audio, media_path: 'input/sfx.wav', media_hash: 'd'.repeat(64), duration_us: 500_000 };
+    const output = buildNodeRemixManifest({ reference: video, narration: audio, timing: { fps: 30, events: [{ event_id: 'reveal', start_frame: 30, end_frame: 90 }], unresolved_required_events: [], override_conflicts: [] }, script: { dialogue: '登场', events: [{ event_id: 'reveal', caption: '登场', sfx_node_id: 'sfx-node' }] }, audioTracks: [{ id: 'bgm-node', role: 'bgm', media: bgm }, { id: 'sfx-node', role: 'sfx', media: sfx }] });
+    expect(output.audio_events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'bgm', start_frame: 0, end_frame: 120 }),
+      expect.objectContaining({ role: 'sfx', start_frame: 30, end_frame: 45 }),
+    ]));
+    expect(output.media_bindings).toContainEqual(expect.objectContaining({ media_id: 'bgm-bgm-node', loop: true }));
+  });
+});

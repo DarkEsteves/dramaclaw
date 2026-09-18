@@ -6813,6 +6813,8 @@
       "video": "视频",
       "audio": "音频",
       "videoStory": "视频故事",
+      "transcript": "转写/对齐",
+      "semanticTimeline": "语义时间轴",
       "script": "脚本",
       "pano360Viewer": "360° 全景",
       "threeDWorld": "导演世界",

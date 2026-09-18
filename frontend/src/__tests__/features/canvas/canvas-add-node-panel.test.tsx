@@ -26,6 +26,8 @@ const translations: Record<string, string> = {
   "node.menu.video": "视频",
   "node.menu.audio": "音频",
   "node.menu.videoStory": "视频故事",
+  "node.menu.transcript": "转写/对齐",
+  "node.menu.semanticTimeline": "语义时间轴",
   "node.menu.videoCompose": "视频合成",
   "node.menu.script": "脚本",
   "node.menu.interactiveStory": "互动影游",
@@ -59,6 +61,16 @@ describe("CanvasAddNodePanel", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("offers the reference remix nodes as separate canvas nodes", () => {
+    render(
+      <CanvasAddNodePanel skillItems={[]} onSelectNode={vi.fn()} onSelectSkill={vi.fn()} onClose={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: "转写/对齐" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "视频故事" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "语义时间轴" })).toBeInTheDocument();
   });
 
   it("shows standalone shot context in the quick add panel", async () => {

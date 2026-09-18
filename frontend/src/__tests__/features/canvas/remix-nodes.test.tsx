@@ -22,11 +22,21 @@ vi.mock('@/features/canvas/ui/nodeFrameStyles', () => ({
 }));
 
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
-import { canvasNodeDefinitions } from '@/features/canvas/domain/nodeRegistry';
+import { canvasNodeDefinitions, getDownstreamSpawnTypes, isManualConnectionAllowed } from '@/features/canvas/domain/nodeRegistry';
 import { TranscriptNode } from '@/features/canvas/nodes/TranscriptNode';
 import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
 
 describe('remix canvas nodes', () => {
+  it('offers the planned remix nodes as connectable workflow steps', () => {
+    expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.transcript].visibleInMenu).toBe(true);
+    expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.semanticTimeline].visibleInMenu).toBe(true);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.video)).toContain(CANVAS_NODE_TYPES.transcript);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toContain(CANVAS_NODE_TYPES.transcript);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.transcript)).toContain(CANVAS_NODE_TYPES.videoStory);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.script)).toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.semanticTimeline)).toContain(CANVAS_NODE_TYPES.videoCompose);
+    expect(isManualConnectionAllowed(CANVAS_NODE_TYPES.audio, CANVAS_NODE_TYPES.transcript)).toBe(true);
+  });
   it('registers transcript and output-capable reference blueprint ports', () => {
     const transcript = canvasNodeDefinitions[CANVAS_NODE_TYPES.transcript];
     const blueprint = canvasNodeDefinitions[CANVAS_NODE_TYPES.videoStory];
@@ -39,7 +49,7 @@ describe('remix canvas nodes', () => {
     expect(timeline.connectivity).toMatchObject({ sourceHandle: true, targetHandle: true });
   });
 
-  it('renders persisted artifact, word timing, and review status read-only', () => {
+  it('renders persisted artifact and editable word timing', () => {
     render(
       <TranscriptNode
         id="transcript-1"
@@ -67,11 +77,9 @@ describe('remix canvas nodes', () => {
     );
 
     expect(screen.getByText('artifact-1 · r2')).toBeTruthy();
-    expect(screen.getByText('Hello')).toBeTruthy();
+    expect(screen.getByDisplayValue('Hello')).toBeTruthy();
     expect(screen.getByText('00:00.100 – 00:00.450')).toBeTruthy();
-    expect(screen.getByText('Needs review')).toBeTruthy();
-    expect(screen.getByText('Low confidence')).toBeTruthy();
-    expect(screen.getByText('Unresolved: product reveal')).toBeTruthy();
+    expect(screen.getByText('低置信度')).toBeTruthy();
   });
 
   it('renders a persisted reference blueprint artifact on the story node', () => {

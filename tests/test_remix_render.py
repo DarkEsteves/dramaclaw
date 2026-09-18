@@ -142,6 +142,31 @@ def test_render_rejects_video_shorter_than_its_event(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_render_can_loop_reference_video_under_longer_narration(tmp_path: Path) -> None:
+    reference = tmp_path / "reference.mp4"
+    voice = tmp_path / "voice.wav"
+    bgm = tmp_path / "bgm.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320:r=30:d=1", "-an", str(reference))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=220:duration=0.5", str(bgm))
+    manifest = {
+        "output_spec": {"width": 180, "height": 320, "fps": 30, "duration_frames": 60},
+        "media_bindings": [
+            {"media_id": "reference", "kind": "video", "loop": True, "media_hash": "sha256:" + hashlib.sha256(reference.read_bytes()).hexdigest()},
+            {"media_id": "voice", "kind": "audio", "media_hash": "sha256:" + hashlib.sha256(voice.read_bytes()).hexdigest()},
+            {"media_id": "bgm", "kind": "audio", "loop": True, "media_hash": "sha256:" + hashlib.sha256(bgm.read_bytes()).hexdigest()},
+        ],
+        "layers": [{"media_id": "reference", "start_frame": 0, "end_frame": 60, "z_order": 0}],
+        "subtitle_events": [],
+        "audio_events": [{"media_id": "voice", "role": "narration", "start_frame": 0, "end_frame": 60}, {"media_id": "bgm", "role": "bgm", "start_frame": 0, "end_frame": 60, "volume": 0.3}],
+        "manual_overrides": [], "source_versions": [],
+    }
+    output = render_manifest(manifest, media_paths={"reference": reference, "voice": voice, "bgm": bgm}, output_path=tmp_path / "out.mp4")
+    r, g, b = _pixel(output, 1.5)
+    assert b > r + 50 and b > g + 50
+
+
 def test_build_manifest_binds_timing_events_to_media_and_caption() -> None:
     timing = {
         "fps": 30,

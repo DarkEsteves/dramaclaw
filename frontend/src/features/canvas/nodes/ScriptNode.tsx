@@ -404,6 +404,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
   const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.script, data, t),
@@ -773,6 +774,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             existingRef={savedRemixRef}
             blueprintRef={blueprintRef}
             visualNodes={remixVisualNodes}
+            sfxNodes={remixSfxNodes}
             onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef })}
             onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}

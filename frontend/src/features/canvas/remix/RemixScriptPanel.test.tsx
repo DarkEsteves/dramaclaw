@@ -8,7 +8,7 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 describe('RemixScriptPanel', () => {
   it('marks a selected phrase and saves a versioned script artifact', async () => {
     const onSave = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面' }]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面' }]} sfxNodes={[]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
     const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
     expect(await screen.findByText('用早晨疲惫引出咖啡')).toBeTruthy();
     dialogue.focus();

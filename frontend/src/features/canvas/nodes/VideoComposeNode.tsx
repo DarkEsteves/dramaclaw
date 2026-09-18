@@ -53,8 +53,12 @@ import {
 import { generationTaskDescriptor } from "@/features/canvas/application/resumeGeneration";
 import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
 import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
-import { renderRemixManifest, type RemixTaskRef } from "@/api/remix";
+import { confirmRemixOperation, fetchRemixOperation, listRemixOperations, renderRemixManifest, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
+import { prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
+import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
+import { getFreezoneCanvas } from "@/api/canvas";
+import { captureCanvasBaseline, mergeConfirmedCanvasWithLocalChanges } from "@/features/canvas/remix/workbenchCanvasMerge";
 
 type VideoComposeNodeProps = NodeProps & {
   id: string;
@@ -81,6 +85,8 @@ export const VideoComposeNode = memo(
     const [remixTask, setRemixTask] = useState<RemixTaskRef | null>(null);
     const [remixError, setRemixError] = useState<string | null>(null);
     const [isRemixSubmitting, setRemixSubmitting] = useState(false);
+    const [isRemixPreparing, setRemixPreparing] = useState(false);
+    const [recoveredRemixOperationId, setRecoveredRemixOperationId] = useState<string | null>(null);
 
     const seedNodeIds = useMemo(
       () => orderedComposeSeedNodeIds(upstreamNodes, data.compositionInputOrder),
@@ -96,6 +102,7 @@ export const VideoComposeNode = memo(
     const canOpen = videoCount >= MIN_UPSTREAM_VIDEOS;
     const canAutoCompose =
       videoCount >= MIN_AUTO_COMPOSE_VIDEOS && seedNodeIds.length >= MIN_AUTO_COMPOSE_MEDIA;
+    const hasSemanticTimeline = upstreamNodes.some((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline);
 
     const resolvedTitle = useMemo(
       () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoCompose, data, t),
@@ -105,6 +112,73 @@ export const VideoComposeNode = memo(
 
     const project = readUrl().project;
     const canvasId = readUrl().canvas ?? "default";
+
+    useEffect(() => {
+      if (!project || !data.remixManifestRef || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.remixOperationId) return;
+      let cancelled = false;
+      void listRemixOperations(project).then(({ items }) => {
+        if (cancelled) return;
+        const match = items.find((item) => item.canvas_id === canvasId && item.node_id === id && item.task_type === 'remix_render'
+          && item.node_revision === data.remixNodeRevision
+          && item.input_refs?.length === 1
+          && item.input_refs[0].artifact_id === data.remixManifestRef?.artifactId
+          && item.input_refs[0].revision === data.remixManifestRef?.revision);
+        if (match) setRecoveredRemixOperationId(match.operation_id);
+      }).catch(() => {});
+      return () => { cancelled = true; };
+    }, [project, canvasId, id, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision, data.remixNodeRevision, data.remixWorkbenchDraft, data.remixOperationId]);
+
+    useEffect(() => {
+      const operationId = data.remixOperationId ?? recoveredRemixOperationId;
+      if (!project || !operationId || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.resultVideoUrl) return;
+      let cancelled = false;
+      let running = false;
+      const poll = async () => {
+        if (running || cancelled) return;
+        running = true;
+        try {
+          const operation = await fetchRemixOperation(project, operationId);
+          if (cancelled) return;
+          if (operation.status === 'failed' || operation.status === 'cancelled') { setRemixError(`合成${operation.status === 'failed' ? '失败' : '已取消'}`); return; }
+          if (operation.status !== 'needs_confirmation') return;
+          const state = useCanvasStore.getState();
+          const current = state.nodes.find((node) => node.id === id)?.data as VideoComposeNodeData | undefined;
+          if (!current?.remixManifestRef || operation.input_refs?.length !== 1
+            || operation.input_refs[0].artifact_id !== current.remixManifestRef.artifactId
+            || operation.input_refs[0].revision !== current.remixManifestRef.revision
+            || operation.node_revision !== current.remixNodeRevision) { setRemixError('合成已完成，但上游版本已变化；结果保留在任务记录中'); return; }
+          if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('画布尚未保存，请稍后重试结果确认');
+          const baseline = captureCanvasBaseline(state.nodes, state.edges);
+          const confirmed = await confirmRemixOperation(project, operationId, canvasId, id);
+          if (confirmed.status !== 'completed') { setRemixError('结果已过期，保留在任务记录中'); return; }
+          const remote = await getFreezoneCanvas(project, canvasId);
+          if (!applyRemoteFreezoneCanvas(project, canvasId, remote, (remoteNodes, remoteEdges, localNodes, localEdges) =>
+            mergeConfirmedCanvasWithLocalChanges(remoteNodes, remoteEdges, localNodes, localEdges, baseline, id))) throw new Error('结果已确认，但画布同步失败；请刷新查看');
+          setRemixError(null);
+        } catch (caught) { if (!cancelled) setRemixError(caught instanceof Error ? caught.message : String(caught)); }
+        finally { running = false; }
+      };
+      void poll();
+      const timer = window.setInterval(() => void poll(), 3_000);
+      return () => { cancelled = true; window.clearInterval(timer); };
+    }, [project, canvasId, id, data.remixOperationId, recoveredRemixOperationId, data.remixWorkbenchDraft, data.resultVideoUrl]);
+
+    const handlePrepareRemix = useCallback(async () => {
+      if (!project || isRemixPreparing) return;
+      setRemixPreparing(true);
+      setRemixError(null);
+      try {
+        const state = useCanvasStore.getState();
+        const prepared = await prepareNodeRemix(project, state.nodes, state.edges, id);
+        updateNodeData(id, { remixManifestRef: prepared.manifestRef, remixEvents: prepared.events, remixSelections: prepared.selections, unresolvedRequiredEvents: prepared.unresolvedRequiredEvents, remixInputFingerprint: remixGraphFingerprint(state.nodes, state.edges, id), remixNodeRevision: (data.remixNodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null });
+        setRecoveredRemixOperationId(null);
+        setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
+      } catch (caught) {
+        setRemixError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setRemixPreparing(false);
+      }
+    }, [project, isRemixPreparing, id, updateNodeData, data.remixNodeRevision]);
 
     useEffect(() => {
       updateNodeInternals(id);
@@ -236,7 +310,7 @@ export const VideoComposeNode = memo(
       [handleAutoCompose, handleOpen, id],
     );
 
-    if (data.remixManifestRef && !data.remixWorkbenchDraft) {
+    if (data.remixManifestRef && (data.remixInputFingerprint || !data.remixWorkbenchDraft)) {
       const exportable = canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts: [] });
       const nodeRevision = data.remixNodeRevision;
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
@@ -244,8 +318,19 @@ export const VideoComposeNode = memo(
         : (data.unresolvedRequiredEvents ?? []).join(', ');
       const submit = async () => {
         if (!project || !exportable || nodeRevision == null) return;
+        const current = useCanvasStore.getState();
+        if (data.remixInputFingerprint && remixGraphFingerprint(current.nodes, current.edges, id) !== data.remixInputFingerprint) {
+          setRemixError('上游素材或产物已变化，请重新生成合成清单');
+          return;
+        }
         setRemixSubmitting(true); setRemixError(null);
-        try { setRemixTask(await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision })); }
+        try {
+          if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('画布尚未保存，请稍后重试');
+          const task = await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision, canvasId, nodeId: id });
+          setRemixTask(task);
+          updateNodeData(id, { remixOperationId: task.operation_id });
+          if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('任务已提交，但画布尚未保存；请刷新后从任务记录恢复');
+        }
         catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
         finally { setRemixSubmitting(false); }
       };
@@ -258,8 +343,11 @@ export const VideoComposeNode = memo(
           <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} />
           <label className="mt-2 block text-[11px] text-text-muted">{t('videoCompose.node.remixKey')}<input value={remixKey} onChange={(event) => setRemixKey(event.target.value)} className="mt-1 w-full rounded border border-white/[0.1] bg-black/20 px-2 py-1 text-text-dark" /></label>
           <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="mt-2 rounded bg-primary px-3 py-1.5 text-[12px] text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+          <button type="button" disabled={isRemixPreparing || !project} onClick={() => void handlePrepareRemix()} className="ml-2 mt-2 rounded border border-border-dark px-3 py-1.5 text-[12px] text-text-dark disabled:opacity-50">重新汇总上游节点</button>
           {(!exportable || nodeRevision == null) ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: blockReason })}</div> : null}
           {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
+          {data.remixOperationId && !data.resultVideoUrl ? <div className="mt-2 text-[12px] text-text-muted">合成任务处理中，完成后会回填到本节点。</div> : null}
+          {data.resultVideoUrl ? <a className="mt-2 block text-[12px] text-primary underline" href={data.resultVideoUrl} target="_blank" rel="noreferrer">播放成片</a> : null}
           {remixError ? <div className="mt-2 text-[12px] text-red-300">{remixError}</div> : null}
         </div>
       </div>;
@@ -313,13 +401,15 @@ export const VideoComposeNode = memo(
             <span className="text-[12px] text-text-muted/90">
               {t("videoCompose.node.hint", { min: MIN_UPSTREAM_VIDEOS })}
             </span>
-            <button
+            {data.remixWorkbenchDraft && <button
               type="button"
               onClick={(event) => { event.stopPropagation(); setRemixWorkbenchOpen(true); }}
               className="rounded-md px-3 py-1.5 text-[12px] text-primary hover:bg-white/[0.06]"
             >
-              参考视频改编
-            </button>
+              旧版单节点改编
+            </button>}
+            {hasSemanticTimeline && <button type="button" disabled={isRemixPreparing} onClick={(event) => { event.stopPropagation(); void handlePrepareRemix(); }} className="rounded-md border border-primary px-3 py-1 text-[12px] text-primary disabled:opacity-50">{isRemixPreparing ? '正在汇总产物…' : '从上游节点生成合成清单'}</button>}
+            {remixError && <span role="alert" className="text-[11px] text-red-300">{remixError}</span>}
           </div>
         </div>
 

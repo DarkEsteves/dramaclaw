@@ -178,6 +178,23 @@ def test_processing_action_queues_once_with_project_local_media(client, tmp_path
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"voice").hexdigest()
 
 
+def test_reference_analysis_action_queues_project_media_without_speech_engine(client, tmp_path, monkeypatch):
+    api, queued = client
+    from novelvideo.api.routes import remix as routes
+
+    media = tmp_path / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"video")
+    monkeypatch.setattr(routes, "_speech_engine_ready", lambda: False)
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"},
+        "idempotency_key": "reference-once", "node_revision": 1,
+    })
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "remix_analyze_reference_video"
+    assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"video").hexdigest()
+
+
 def test_processing_action_rejects_unsafe_media_and_unknown_action(client):
     api, queued = client
     base = "/api/v1/projects/demo/freezone/remix/actions"

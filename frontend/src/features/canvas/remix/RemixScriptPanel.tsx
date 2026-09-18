@@ -9,12 +9,13 @@ interface Props {
   existingRef: RemixArtifactRef | null;
   blueprintRef: RemixArtifactRef | null;
   visualNodes: Array<{ id: string; label: string }>;
+  sfxNodes: Array<{ id: string; label: string }>;
   onDraftChange: (draft: RemixScriptDraft) => void;
   onSave: (ref: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,13 +59,14 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className="nodrag mt-1 min-h-28 w-full rounded border border-white/15 bg-black/25 p-2 text-sm outline-none" /></label>
       <button type="button" onClick={markSelected} className="rounded border border-white/15 px-2 py-1">标记选中文本</button>
       <p className="text-text-muted">在台词中选中文字后标记；填写替换画面节点可作为 B-roll 指令。</p>
-      {draft.selections.map((selection, index) => <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_auto] items-end gap-2 rounded border border-white/10 p-2">
+      {draft.selections.map((selection, index) => <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded border border-white/10 p-2">
         <label>事件名称<input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className="nodrag mt-1 w-full rounded border border-white/10 bg-black/20 p-1" /></label>
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className="nodrag mt-1 w-full rounded border border-white/10 bg-black/20 p-1" /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className="nodrag mt-1 w-full rounded border border-white/10 bg-black/20 p-1" /></label>
         <label>B-roll 画面<select aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, visualNodeId: event.target.value || undefined } : item) })} className="nodrag mt-1 w-full rounded border border-white/10 bg-[#242426] p-1"><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: event.target.value || undefined } : item) })} className="nodrag mt-1 w-full rounded border border-white/10 bg-[#242426] p-1"><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
         <button type="button" onClick={() => changeDraft({ ...draft, selections: draft.selections.filter((_, position) => position !== index) })} className="rounded border border-white/15 px-2 py-1">删除</button>
-        {selection.invalidReason && <p className="col-span-5 text-amber-300">台词已改变，请重新标记这个区间。</p>}
+        {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
       </div>)}
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div>

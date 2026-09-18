@@ -1,0 +1,66 @@
+import { useState } from 'react';
+import { uploadRemixMedia } from '@/api/remix';
+import type { UploadedRemixMedia } from './workbenchModel';
+
+type VideoRole = 'reference' | 'visual' | 'speech_clock';
+type AudioRole = 'narration' | 'bgm' | 'sfx';
+
+interface Props {
+  project: string;
+  kind: 'video' | 'audio';
+  media?: UploadedRemixMedia;
+  role: VideoRole | AudioRole;
+  onChange: (value: { media: UploadedRemixMedia; role: VideoRole | AudioRole }) => void;
+  onCreateTranscript?: () => void;
+  onCreateStory?: () => void;
+}
+
+const videoRoles: Array<{ value: VideoRole; label: string }> = [
+  { value: 'reference', label: '待分析原片' },
+  { value: 'visual', label: '替换画面' },
+  { value: 'speech_clock', label: '视频原声' },
+];
+const audioRoles: Array<{ value: AudioRole; label: string }> = [
+  { value: 'narration', label: '旁白' },
+  { value: 'bgm', label: '背景音乐' },
+  { value: 'sfx', label: '音效' },
+];
+
+export function RemixMediaInput({ project, kind, media, role, onChange, onCreateTranscript, onCreateStory }: Props) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const roles = kind === 'video' ? videoRoles : audioRoles;
+  const upload = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const uploaded = await uploadRemixMedia(project, file);
+      if (uploaded.media_kind !== kind) throw new Error(kind === 'video' ? '请选择视频文件' : '请选择音频文件');
+      onChange({ media: uploaded, role });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="nodrag rounded-[var(--node-radius)] border border-border-dark bg-surface-panel p-3 text-xs text-text-dark" onClick={(event) => event.stopPropagation()}>
+    <div className="mb-2 font-medium">参考视频改编素材</div>
+    <label className="block">{kind === 'video' ? '改编视频素材' : '改编音频素材'}
+      <input aria-label={kind === 'video' ? '改编视频素材' : '改编音频素材'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="mt-1 block w-full" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+    </label>
+    <label className="mt-2 block">用途
+      <select aria-label="素材用途" value={role} disabled={busy} className="mt-1 w-full rounded-md border border-border-dark bg-surface-field p-1" onChange={(event) => {
+        if (media) onChange({ media, role: event.target.value as VideoRole | AudioRole });
+      }}>
+        {roles.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+      </select>
+    </label>
+    {media && <div className="mt-2 truncate text-text-muted" title={media.media_path}>{media.media_path.split('/').pop()} · {(media.duration_us / 1_000_000).toFixed(1)} 秒{media.has_audio ? ' · 有声' : ''}</div>}
+    {media && <div className="mt-2 flex gap-2">
+      {onCreateTranscript && <button type="button" className="rounded border border-border-dark px-2 py-1" onClick={onCreateTranscript}>创建转写节点</button>}
+      {onCreateStory && <button type="button" className="rounded border border-border-dark px-2 py-1" onClick={onCreateStory}>创建参考故事节点</button>}
+    </div>}
+    {busy && <div role="status">正在上传…</div>}
+    {error && <div role="alert" className="text-destructive">{error}</div>}
+  </div>;
+}

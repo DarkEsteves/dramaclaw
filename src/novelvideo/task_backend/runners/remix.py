@@ -8,6 +8,7 @@ from typing import Any
 
 from novelvideo.freezone.remix.render import render_manifest, validate_manifest
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
+from novelvideo.freezone.remix.evidence import build_reference_evidence
 from novelvideo.freezone.remix.timing import compile_timing
 from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
@@ -64,6 +65,20 @@ def run_remix_transcribe_media(envelope: dict[str, Any], ctx: ProjectContext) ->
     )
     _publish_operation_result(payload, ctx, {"artifact_id": artifact["id"], "revision": artifact["revision"]})
     return {"status": "completed", "artifact_ref": {"artifact_id": artifact["id"], "revision": artifact["revision"]}}
+
+
+def run_remix_analyze_reference_video(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
+    """Publish timestamped evidence for the entire uploaded reference video."""
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    project_dir = Path(ctx.output_dir).resolve()
+    media_path = _verified_project_media_path(project_dir, payload)
+    evidence = build_reference_evidence(media_path)
+    artifact = RemixArtifactStore(project_dir, ctx.project_id).create(
+        schema="reference_evidence.v1", payload=evidence, upstream_refs=[]
+    )
+    ref = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+    _publish_operation_result(payload, ctx, ref)
+    return {"status": "completed", "artifact_ref": ref}
 
 
 def run_remix_align_script(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
@@ -168,5 +183,6 @@ def run_remix_render(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str,
 
 register_project_task_runner("remix_render", run_remix_render, requires_home_node=True, lane="ffmpeg")
 register_project_task_runner("remix_transcribe_media", run_remix_transcribe_media, requires_home_node=True)
+register_project_task_runner("remix_analyze_reference_video", run_remix_analyze_reference_video, requires_home_node=True)
 register_project_task_runner("remix_align_script", run_remix_align_script, requires_home_node=True)
 register_project_task_runner("remix_compile_semantic_timeline", run_remix_compile_semantic_timeline, requires_home_node=True)

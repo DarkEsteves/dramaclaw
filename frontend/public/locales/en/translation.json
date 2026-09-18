@@ -6813,6 +6813,8 @@
       "video": "Video",
       "audio": "Audio",
       "videoStory": "Video Story",
+      "transcript": "Transcript/Alignment",
+      "semanticTimeline": "Semantic Timeline",
       "script": "Script",
       "pano360Viewer": "360° View",
       "threeDWorld": "3D World",

@@ -6,6 +6,7 @@ export interface RemixSelectionDraft {
   start: number;
   end: number;
   visualNodeId?: string;
+  sfxNodeId?: string;
   invalidReason?: string;
 }
 
@@ -30,7 +31,7 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
   return {
     dialogue: draft.dialogue, segments: [],
     selections: draft.selections.map((item) => ({ selection_id: item.id, start_char: item.start, end_char: item.end, script_revision: revision })),
-    events: draft.selections.map((item) => ({ event_id: item.id, selection_id: item.id, required: true, caption: Array.from(draft.dialogue).slice(item.start, item.end).join(''), ...(item.visualNodeId ? { visual_node_id: item.visualNodeId } : {}) })),
+    events: draft.selections.map((item) => ({ event_id: item.id, selection_id: item.id, required: true, caption: Array.from(draft.dialogue).slice(item.start, item.end).join(''), ...(item.visualNodeId ? { visual_node_id: item.visualNodeId } : {}), ...(item.sfxNodeId ? { sfx_node_id: item.sfxNodeId } : {}) })),
     blueprint_mappings: [],
     media_requirements: draft.selections.filter((item) => item.visualNodeId).map((item) => ({ event_id: item.id, visual_node_id: item.visualNodeId })),
   };

@@ -130,6 +130,8 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("media bindings require unique nonempty IDs")
         if kind not in {"image", "video", "audio"}:
             raise ValueError(f"unsupported media kind for {media_id}")
+        if "loop" in row and (kind not in {"video", "audio"} or type(row["loop"]) is not bool):
+            raise ValueError(f"loop is only supported for video or audio media: {media_id}")
         if not isinstance(row.get("media_hash"), str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", row["media_hash"]):
             raise ValueError(f"media_hash is required for {media_id}")
         bindings[media_id] = kind
@@ -288,6 +290,8 @@ def render_manifest(
         media_indices[media_id] = index
         if binding["kind"] == "image":
             command.extend(["-loop", "1", "-framerate", str(fps)])
+        elif binding.get("loop"):
+            command.extend(["-stream_loop", "-1"])
         command.extend(["-i", str(path)])
 
     for row in [*manifest["layers"], *manifest["audio_events"]]:
@@ -296,7 +300,8 @@ def render_manifest(
         if kind == "image":
             continue
         required = (row["end_frame"] - row["start_frame"]) / fps
-        if _duration_seconds(Path(media_paths[media_id])) + 0.5 / fps < required:
+        binding = next(item for item in bindings if item["media_id"] == media_id)
+        if not binding.get("loop") and _duration_seconds(Path(media_paths[media_id])) + 0.5 / fps < required:
             raise ValueError(f"bound media {media_id} is shorter than its event")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
