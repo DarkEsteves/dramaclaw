@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import subprocess
+import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
@@ -84,7 +86,9 @@ def speech_engine_ready() -> bool:
     if os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE") != "whisperx":
         return False
     cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
-    return bool(cache and Path(cache).is_dir() and importlib.util.find_spec("whisperx"))
+    python = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON")
+    available = Path(python).is_file() and os.access(python, os.X_OK) if python else importlib.util.find_spec("whisperx")
+    return bool(cache and Path(cache).is_dir() and available)
 
 
 def configured_speech_aligner() -> SpeechAligner:
@@ -94,6 +98,11 @@ def configured_speech_aligner() -> SpeechAligner:
     cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
     if not cache or not Path(cache).is_dir():
         raise RuntimeError("WhisperX model cache must be an existing local directory")
+    python = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON")
+    if python:
+        if not Path(python).is_file() or not os.access(python, os.X_OK):
+            raise RuntimeError("WhisperX Python executable is unavailable")
+        return _ExternalWhisperXAligner(Path(python), Path(cache))
     from novelvideo.freezone.remix.whisperx_adapter import WhisperXSpeechAligner
 
     return WhisperXSpeechAligner(
@@ -103,6 +112,47 @@ def configured_speech_aligner() -> SpeechAligner:
         compute_type=os.getenv("DRAMACLAW_REMIX_COMPUTE_TYPE", "int8"),
         batch_size=int(os.getenv("DRAMACLAW_REMIX_BATCH_SIZE", "4")),
     )
+
+
+class _ExternalWhisperXAligner:
+    """Run WhisperX in its own Python environment to preserve project dependencies."""
+
+    def __init__(self, python: Path, model_cache: Path) -> None:
+        self.python = python
+        self.model_cache = model_cache
+
+    def transcribe(self, media_path: Path, language: str) -> dict[str, Any]:
+        return self._run("transcribe", media_path, language)
+
+    def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
+        return self._run("align", media_path, language, script)
+
+    def _run(self, action: str, media_path: Path, language: str, script: str | None = None) -> dict[str, Any]:
+        request = {
+            "action": action,
+            "media_path": str(media_path),
+            "language": language,
+            "script": script,
+            "model_cache": str(self.model_cache),
+            "model_name": os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small"),
+            "device": os.getenv("DRAMACLAW_REMIX_DEVICE", "cpu"),
+            "compute_type": os.getenv("DRAMACLAW_REMIX_COMPUTE_TYPE", "int8"),
+            "batch_size": int(os.getenv("DRAMACLAW_REMIX_BATCH_SIZE", "4")),
+        }
+        worker = Path(__file__).with_name("whisperx_worker.py")
+        completed = subprocess.run(
+            [str(self.python), str(worker)], input=json.dumps(request),
+            text=True, capture_output=True, timeout=1800, check=False,
+        )
+        if completed.returncode:
+            raise RuntimeError(f"WhisperX worker failed: {completed.stderr[-2000:]}")
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("WhisperX worker returned invalid JSON") from error
+        if not isinstance(result, dict):
+            raise RuntimeError("WhisperX worker returned invalid result")
+        return result
 
 
 def _validate_media_and_language(media_path: Path, language: object) -> None:
@@ -155,7 +205,9 @@ def _normalize_result(
             "confidence_available": False,
             "mismatch": {"reason": str(error)},
         }
-    transcript = "".join(word["text"] for word in words)
+    transcript = script_text if script_text is not None else raw.get("transcript")
+    if not isinstance(transcript, str):
+        transcript = "".join(word["text"] for word in words)
     return {
         **common,
         "status": "completed",

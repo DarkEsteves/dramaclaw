@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +104,7 @@ def test_configured_adapter_transcribes_to_timed_characters(tmp_path: Path, monk
     result = alignment.transcribe_media(media, "en")
 
     assert result["status"] == "completed"
+    assert result["transcript"] == "go go"
     assert [(word["text"], word["start_us"], word["end_us"]) for word in result["words"]] == [
         ("g", 0, 100_000), ("o", 100_000, 200_000),
         ("g", 500_000, 600_000), ("o", 600_000, 700_000),
@@ -146,4 +149,47 @@ def test_engine_requires_existing_local_cache(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(tmp_path / "missing"))
     assert not alignment.speech_engine_ready()
     with pytest.raises(RuntimeError, match="model cache"):
+        alignment.configured_speech_aligner()
+
+
+def test_external_whisperx_python_runs_isolated_worker(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "models"
+    cache.mkdir()
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    python = tmp_path / "whisperx-python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, json.dumps({
+            "status": "completed", "words": [
+                {"text": "你", "start_char": 0, "end_char": 1, "start": 0.1, "end": 0.3},
+            ],
+        }), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert alignment.speech_engine_ready()
+    result = alignment.transcribe_media(media, "zh")
+    assert result["status"] == "completed"
+    assert result["words"][0]["text"] == "你"
+    command, options = calls[0]
+    assert command[0] == str(python)
+    assert command[1].endswith("whisperx_worker.py")
+    assert json.loads(options["input"])["language"] == "zh"
+
+
+def test_external_whisperx_python_must_exist(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "models"
+    cache.mkdir()
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(tmp_path / "missing-python"))
+    assert not alignment.speech_engine_ready()
+    with pytest.raises(RuntimeError, match="Python"):
         alignment.configured_speech_aligner()

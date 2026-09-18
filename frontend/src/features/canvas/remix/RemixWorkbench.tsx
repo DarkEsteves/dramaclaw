@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, listRemixOperations, renderRemixManifest, uploadRemixMedia, type RemixOperation } from '@/api/remix';
+import { confirmRemixOperation, createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia, type RemixOperation } from '@/api/remix';
 import { buildWorkbenchManifest, type RemixCaptionCue, type RemixWorkbenchDraft, type UploadedRemixMedia } from './workbenchModel';
 import { applyRemoteFreezoneCanvas, flushFreezoneCanvasRuntime } from '@/features/freezone/canvasSyncRuntime';
 import { getFreezoneCanvas } from '@/api/canvas';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { captureCanvasBaseline, mergeConfirmedCanvasWithLocalChanges } from './workbenchCanvasMerge';
+import { cuesFromWordTimeline, type WordTimelinePayload } from './transcriptionCues';
 
 interface Props {
   project: string;
@@ -41,6 +42,8 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
   const [busy, setBusy] = useState(false);
   const [savingOperationHandle, setSavingOperationHandle] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [language, setLanguage] = useState('zh');
+  const transcription = draft.transcription;
 
   const save = (next: RemixWorkbenchDraft) => { draftRef.current = next; setDraft(next); onPersist(next); };
   const changed = (next: RemixWorkbenchDraft) => {
@@ -51,7 +54,7 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
   };
   const updateCue = (id: string, patch: Partial<RemixCaptionCue>) => changed({ ...draft, cues: draft.cues.map((cue) => cue.id === id ? { ...cue, ...patch } : cue) });
   const upload = async (file: File, kind: 'video' | 'audio') => {
-    if (reconcilingRef.current || submittingRef.current) return;
+    if (reconcilingRef.current || submittingRef.current || draftRef.current.transcription) return;
     pendingUploadsRef.current += 1;
     setBusy(true); setError(null);
     try {
@@ -62,7 +65,7 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
     finally { pendingUploadsRef.current -= 1; setBusy(false); }
   };
   const uploadVisual = async (file: File, cueId: string) => {
-    if (reconcilingRef.current || submittingRef.current) return;
+    if (reconcilingRef.current || submittingRef.current || draftRef.current.transcription) return;
     pendingUploadsRef.current += 1;
     setBusy(true); setError(null);
     try {
@@ -73,8 +76,66 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
     finally { pendingUploadsRef.current -= 1; setBusy(false); }
   };
 
+  const transcribe = async () => {
+    if (busy || reconcilingRef.current || submittingRef.current || draftRef.current.transcription || pendingUploadsRef.current > 0) return;
+    const current = draftRef.current;
+    const narration = current.audio ?? (current.video?.has_audio ? current.video : undefined);
+    if (!narration) { setError('请先上传带声音的视频或旁白音频'); return; }
+    if (current.cues.length > 0 && !window.confirm('自动识别会替换现有台词、关键时刻和替换画面，确定继续吗？')) return;
+    setBusy(true); setError(null);
+    try {
+      const nodeRevision = (current.nodeRevision ?? 0) + 1;
+      const task = await submitRemixProcessAction(project, { action: 'transcribe_media', mediaPath: narration.media_path, language, idempotencyKey: crypto.randomUUID(), nodeRevision });
+      save({ ...draftRef.current, transcription: { operationId: task.operation_id, mediaPath: narration.media_path, nodeRevision } });
+      if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('识别任务已提交，但画布尚未保存；请等待同步后重试');
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => {
+    if (!transcription) return;
+    let cancelled = false;
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      let terminal = false;
+      try {
+        const operation = await fetchRemixOperation(project, transcription.operationId);
+        if (cancelled || draftRef.current.transcription?.operationId !== transcription.operationId) return;
+        if (operation.status === 'failed' || operation.status === 'cancelled') {
+          terminal = true;
+          throw new Error(`自动识别${operation.status === 'failed' ? '失败' : '已取消'}`);
+        }
+        const ref = operation.output_refs.find((item) => item.artifact_id && item.revision);
+        if (operation.status === 'needs_confirmation' && ref?.artifact_id && ref.revision) {
+          const artifact = await fetchRemixArtifact(project, { artifactId: ref.artifact_id, revision: ref.revision });
+          if (cancelled || draftRef.current.transcription?.operationId !== transcription.operationId) return;
+          if (artifact.schema !== 'word_timeline.v1') { terminal = true; throw new Error('语音识别结果格式错误'); }
+          const current = draftRef.current;
+          const media = current.audio ?? (current.video?.has_audio ? current.video : undefined);
+          if (!media || media.media_path !== transcription.mediaPath) { terminal = true; throw new Error('音频已变更，请重新识别'); }
+          const cues = cuesFromWordTimeline(artifact.payload as unknown as WordTimelinePayload, Math.min(media.duration_us, current.video?.duration_us ?? media.duration_us));
+          if (!cues.length) { terminal = true; throw new Error('没有识别到人声，请手动添加台词'); }
+          changed({ ...current, cues, transcription: undefined });
+        } else if (operation.status === 'pending' && operation.task_type && operation.task_scope) {
+          const task = await fetchRemixTaskStatus(project, operation.task_type, operation.task_scope);
+          if (task?.status === 'failed' || task?.status === 'cancelled') { terminal = true; throw new Error(task.error ?? '自动识别失败'); }
+        }
+      } catch (caught) {
+        if (!cancelled && draftRef.current.transcription?.operationId === transcription.operationId) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+          if (terminal) save({ ...draftRef.current, transcription: undefined });
+        }
+      } finally { checking = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 3_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [project, transcription?.operationId, transcription?.mediaPath]);
+
   const submit = async () => {
-    if (submittingRef.current || reconcilingRef.current || pendingUploadsRef.current > 0) return;
+    if (submittingRef.current || reconcilingRef.current || pendingUploadsRef.current > 0 || draftRef.current.transcription) return;
     submittingRef.current = true;
     setBusy(true); setError(null);
     try {
@@ -174,24 +235,24 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
         </header>
         <section className="grid gap-4 md:grid-cols-2">
           <label className="space-y-2 rounded-xl border border-border-dark bg-surface-panel p-4 text-sm">1. 参考视频
-            <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" disabled={busy || reconciling} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'video'); }} className="block w-full text-xs" />
+            <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" disabled={busy || reconciling || Boolean(transcription)} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'video'); }} className="block w-full text-xs" />
             <span className="block text-xs text-text-muted">{draft.video ? `${draft.video.media_path.split('/').pop()} · ${(draft.video.duration_us / 1_000_000).toFixed(1)} 秒` : '尚未上传'}</span>
           </label>
           <label className="space-y-2 rounded-xl border border-border-dark bg-surface-panel p-4 text-sm">2. 旁白音频（可选）
-            <input type="file" accept="audio/*" disabled={busy || reconciling} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'audio'); }} className="block w-full text-xs" />
+            <input type="file" accept="audio/*" disabled={busy || reconciling || Boolean(transcription)} onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'audio'); }} className="block w-full text-xs" />
             <span className="block text-xs text-text-muted">{draft.audio ? draft.audio.media_path.split('/').pop() : draft.video?.has_audio ? '使用参考视频原声' : '无原声时必须上传'}</span>
           </label>
         </section>
         {draft.video && <video controls src={draft.video.url} className="max-h-64 w-full rounded-lg bg-black object-contain" />}
         <section className="rounded-xl border border-border-dark bg-surface-panel p-4">
-          <div className="mb-3 flex items-center justify-between"><div><h3 className="font-medium">3. 台词和关键时刻</h3><p className="text-xs text-text-muted">手动输入字幕开始和结束时间（秒）；关键时刻用于记录画面意义。</p></div><button type="button" disabled={busy || reconciling} className="rounded-md border border-border-dark px-3 py-1.5 text-xs disabled:opacity-50" onClick={() => changed({ ...draft, cues: [...draft.cues, { id: crypto.randomUUID(), label: '', text: '', startSeconds: 0, endSeconds: 1 }] })}>添加台词</button></div>
+          <div className="mb-3 flex items-center justify-between"><div><h3 className="font-medium">3. 台词和关键时刻</h3><p className="text-xs text-text-muted">可自动识别前 60 秒字幕，再调整文字与时间；关键时刻用于记录画面意义。</p></div><div className="flex items-center gap-2"><select aria-label="识别语言" value={language} onChange={(event) => setLanguage(event.target.value)} disabled={busy || Boolean(transcription)} className={fieldClass}><option value="zh">中文</option><option value="en">English</option></select><button type="button" disabled={busy || reconciling || Boolean(transcription) || !(draft.audio || draft.video?.has_audio)} className="rounded-md border border-border-dark px-3 py-1.5 text-xs disabled:opacity-50" onClick={() => void transcribe()}>{transcription ? '正在识别…' : '自动识别字幕'}</button><button type="button" disabled={busy || reconciling || Boolean(transcription)} className="rounded-md border border-border-dark px-3 py-1.5 text-xs disabled:opacity-50" onClick={() => changed({ ...draft, cues: [...draft.cues, { id: crypto.randomUUID(), label: '', text: '', startSeconds: 0, endSeconds: 1 }] })}>添加台词</button></div></div>
           <div className="space-y-3">{draft.cues.map((cue) => <div key={cue.id} className="grid gap-2 rounded-lg border border-border-dark p-3 md:grid-cols-[1fr_1fr_90px_90px_auto]">
-            <label className="text-xs text-text-muted">关键时刻<input aria-label="关键时刻" disabled={busy || reconciling} value={cue.label} onChange={(event) => updateCue(cue.id, { label: event.target.value })} placeholder="如：产品登场" className={`mt-1 block w-full ${fieldClass}`} /></label>
-            <label className="text-xs text-text-muted">字幕内容<input aria-label="字幕内容" disabled={busy || reconciling} value={cue.text} onChange={(event) => updateCue(cue.id, { text: event.target.value })} className={`mt-1 block w-full ${fieldClass}`} /></label>
-            <label className="text-xs text-text-muted">开始秒<input aria-label="开始秒" disabled={busy || reconciling} type="number" min="0" step="0.1" value={cue.startSeconds} onChange={(event) => updateCue(cue.id, { startSeconds: Number(event.target.value) })} className={`mt-1 block w-full ${fieldClass}`} /></label>
-            <label className="text-xs text-text-muted">结束秒<input aria-label="结束秒" disabled={busy || reconciling} type="number" min="0" step="0.1" value={cue.endSeconds} onChange={(event) => updateCue(cue.id, { endSeconds: Number(event.target.value) })} className={`mt-1 block w-full ${fieldClass}`} /></label>
-            <button type="button" disabled={busy || reconciling} className="self-end text-xs text-text-muted disabled:opacity-50" onClick={() => changed({ ...draft, cues: draft.cues.filter((item) => item.id !== cue.id) })}>删除</button>
-            <label className="text-xs text-text-muted md:col-span-full">替换画面（可选；留空则使用参考视频）<input aria-label="替换画面" type="file" accept="video/*" disabled={busy || reconciling} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadVisual(file, cue.id); }} className="mt-1 block w-full text-xs" />{cue.visual && <span className="block text-primary">已选择 {cue.visual.media_path.split('/').pop()}</span>}</label>
+            <label className="text-xs text-text-muted">关键时刻<input aria-label="关键时刻" disabled={busy || reconciling || Boolean(transcription)} value={cue.label} onChange={(event) => updateCue(cue.id, { label: event.target.value })} placeholder="如：产品登场" className={`mt-1 block w-full ${fieldClass}`} /></label>
+            <label className="text-xs text-text-muted">字幕内容<input aria-label="字幕内容" disabled={busy || reconciling || Boolean(transcription)} value={cue.text} onChange={(event) => updateCue(cue.id, { text: event.target.value })} className={`mt-1 block w-full ${fieldClass}`} /></label>
+            <label className="text-xs text-text-muted">开始秒<input aria-label="开始秒" disabled={busy || reconciling || Boolean(transcription)} type="number" min="0" step="0.1" value={cue.startSeconds} onChange={(event) => updateCue(cue.id, { startSeconds: Number(event.target.value) })} className={`mt-1 block w-full ${fieldClass}`} /></label>
+            <label className="text-xs text-text-muted">结束秒<input aria-label="结束秒" disabled={busy || reconciling || Boolean(transcription)} type="number" min="0" step="0.1" value={cue.endSeconds} onChange={(event) => updateCue(cue.id, { endSeconds: Number(event.target.value) })} className={`mt-1 block w-full ${fieldClass}`} /></label>
+            <button type="button" disabled={busy || reconciling || Boolean(transcription)} className="self-end text-xs text-text-muted disabled:opacity-50" onClick={() => changed({ ...draft, cues: draft.cues.filter((item) => item.id !== cue.id) })}>删除</button>
+            <label className="text-xs text-text-muted md:col-span-full">替换画面（可选；留空则使用参考视频）<input aria-label="替换画面" type="file" accept="video/*" disabled={busy || reconciling || Boolean(transcription)} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadVisual(file, cue.id); }} className="mt-1 block w-full text-xs" />{cue.visual && <span className="block text-primary">已选择 {cue.visual.media_path.split('/').pop()}</span>}</label>
           </div>)}</div>
         </section>
         {history.length > 0 && <section className="rounded-xl border border-border-dark bg-surface-panel p-4">
@@ -206,7 +267,7 @@ export function RemixWorkbench({ project, canvasId, nodeId, initialDraft, onPers
           })}</div>
         </section>}
         <footer className="flex items-center gap-4 border-t border-border-dark pt-4">
-          <button type="button" disabled={busy || reconciling || !draft.video} onClick={() => void submit()} className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">{busy || reconciling ? '处理中…' : '生成视频'}</button>
+          <button type="button" disabled={busy || reconciling || Boolean(transcription) || !draft.video} onClick={() => void submit()} className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">{busy || reconciling ? '处理中…' : '生成视频'}</button>
           {visibleStatus && <span className="text-sm text-text-muted">任务状态：{visibleStatus}</span>}
           {visiblePath && <><a href={mediaUrl(project, visiblePath)} target="_blank" rel="noreferrer" className="text-sm text-primary underline">播放成片</a><a href={`/api/v1/projects/${encodeURIComponent(project)}/files/${visiblePath.split('/').map(encodeURIComponent).join('/')}`} className="text-sm text-primary underline">下载成片</a></>}
           {error && <span role="alert" className="text-sm text-destructive">{error}</span>}

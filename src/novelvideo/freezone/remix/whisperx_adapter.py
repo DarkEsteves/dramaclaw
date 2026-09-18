@@ -92,7 +92,7 @@ class WhisperXSpeechAligner:
                 "status": "script_mismatch", "words": [],
                 "mismatch": {"reason": "WhisperX found speech but produced no timed characters"},
             }
-        return {"status": "completed", "words": words}
+        return {"status": "completed", "transcript": text, "words": words}
 
 
 def _script_check(text: str) -> str:

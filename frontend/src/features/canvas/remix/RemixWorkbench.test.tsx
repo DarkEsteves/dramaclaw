@@ -9,12 +9,14 @@ vi.mock('@/api/remix', () => ({
   confirmRemixOperation: vi.fn(async () => ({ operation_id: 'operation-1', status: 'completed', output_refs: [{ project_path: 'freezone/remix_renders/output.mp4' }] })),
   fetchRemixTaskStatus: vi.fn(async () => ({ status: 'running' })),
   listRemixOperations: vi.fn(async () => ({ items: [] })),
+  submitRemixProcessAction: vi.fn(async () => ({ operation_id: 'transcribe-1', task_type: 'remix_transcribe_media', task_id: 'task-transcribe', task_key: 'key', job_id: 'job-transcribe' })),
+  fetchRemixArtifact: vi.fn(async () => ({ id: 'timeline-1', schema: 'word_timeline.v1', revision: 1, payload: { status: 'completed', transcript: '你好', words: [{ text: '你', start_us: 0, end_us: 500_000 }, { text: '好', start_us: 500_000, end_us: 1_000_000 }] } })),
 }));
 vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true), applyRemoteFreezoneCanvas: vi.fn(() => true) }));
 vi.mock('@/api/canvas', () => ({ getFreezoneCanvas: vi.fn(async () => ({ revision: 4, nodes: [], edges: [] })) }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: { getState: () => ({ nodes: [], edges: [] }) } }));
 
-import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, uploadRemixMedia } from '@/api/remix';
+import { confirmRemixOperation, createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from '@/api/remix';
 import { applyRemoteFreezoneCanvas, flushFreezoneCanvasRuntime } from '@/features/freezone/canvasSyncRuntime';
 import { getFreezoneCanvas } from '@/api/canvas';
 import type { RemixOperation, RemixUploadedMedia } from '@/api/remix';
@@ -23,9 +25,73 @@ import { RemixWorkbench } from './RemixWorkbench';
 describe('RemixWorkbench', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.mocked(fetchRemixOperation).mockReset().mockResolvedValue({ operation_id: 'operation-1', status: 'pending', task_id: 'task-1', output_refs: [] });
     vi.mocked(listRemixOperations).mockReset().mockResolvedValue({ items: [] });
     vi.mocked(uploadRemixMedia).mockReset();
+    vi.mocked(submitRemixProcessAction).mockReset().mockResolvedValue({ operation_id: 'transcribe-1', task_type: 'remix_transcribe_media', task_id: 'task-transcribe', task_key: 'key' });
+    vi.mocked(fetchRemixArtifact).mockReset().mockResolvedValue({ id: 'timeline-1', schema: 'word_timeline.v1', revision: 1, payload: { status: 'completed', transcript: '你好', words: [{ text: '你', start_us: 0, end_us: 500_000 }, { text: '好', start_us: 500_000, end_us: 1_000_000 }] } });
+  });
+  it('transcribes the selected audio and fills editable cues', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValue({ operation_id: 'transcribe-1', status: 'needs_confirmation', task_id: 'task-transcribe', output_refs: [{ artifact_id: 'timeline-1', revision: 1 }] });
+    const onPersist = vi.fn();
+    render(<RemixWorkbench project="demo" canvasId="default" nodeId="compose-1" onClose={() => {}} onPersist={onPersist} initialDraft={{
+      video: { media_path: 'media/video.mp4', media_hash: 'a'.repeat(64), url: '/video.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000, has_audio: true },
+      cues: [],
+    }} />);
+    fireEvent.click(screen.getByRole('button', { name: '自动识别字幕' }));
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'media/video.mp4', language: 'zh' })));
+    await waitFor(() => expect(flushFreezoneCanvasRuntime).toHaveBeenCalledWith('demo', 'default'));
+    await waitFor(() => expect(onPersist).toHaveBeenCalledWith(expect.objectContaining({ cues: [expect.objectContaining({ text: '你好', startSeconds: 0, endSeconds: 1 })] })));
+    expect((screen.getByLabelText('字幕内容') as HTMLInputElement).value).toBe('你好');
+  });
+
+  it('asks before replacing manually edited cues or visual replacements', async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    render(<RemixWorkbench project="demo" canvasId="default" nodeId="compose-1" onClose={() => {}} onPersist={() => {}} initialDraft={{
+      video: { media_path: 'media/video.mp4', media_hash: 'a'.repeat(64), url: '/video.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000, has_audio: true },
+      cues: [{ id: 'existing', label: '产品登场', text: '手工台词', startSeconds: 0, endSeconds: 1, visual: { media_path: 'media/visual.mp4', media_hash: 'b'.repeat(64), url: '/visual.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000 } }],
+    }} />);
+    fireEvent.click(screen.getByRole('button', { name: '自动识别字幕' }));
+    expect(window.confirm).toHaveBeenCalled();
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('字幕内容') as HTMLInputElement).value).toBe('手工台词');
+  });
+
+  it('keeps manual cues when transcription reports no speech', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValue({ operation_id: 'transcribe-1', status: 'needs_confirmation', task_id: 'task-transcribe', output_refs: [{ artifact_id: 'timeline-1', revision: 1 }] });
+    vi.mocked(fetchRemixArtifact).mockResolvedValue({ id: 'timeline-1', schema: 'word_timeline.v1', revision: 1, payload: { status: 'no_speech', words: [] } });
+    const onPersist = vi.fn();
+    render(<RemixWorkbench project="demo" canvasId="default" nodeId="compose-1" onClose={() => {}} onPersist={onPersist} initialDraft={{
+      video: { media_path: 'media/video.mp4', media_hash: 'a'.repeat(64), url: '/video.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000, has_audio: true },
+      cues: [{ id: 'existing', label: '保留', text: '已有台词', startSeconds: 0, endSeconds: 1 }],
+    }} />);
+    fireEvent.click(screen.getByRole('button', { name: '自动识别字幕' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('没有识别到人声'));
+    expect((screen.getByLabelText('字幕内容') as HTMLInputElement).value).toBe('已有台词');
+  });
+
+  it('resumes an in-flight transcription after reopening the canvas', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValue({ operation_id: 'transcribe-1', status: 'needs_confirmation', task_id: 'task-transcribe', output_refs: [{ artifact_id: 'timeline-1', revision: 1 }] });
+    const onPersist = vi.fn();
+    render(<RemixWorkbench project="demo" canvasId="default" nodeId="compose-1" onClose={() => {}} onPersist={onPersist} initialDraft={{
+      video: { media_path: 'media/video.mp4', media_hash: 'a'.repeat(64), url: '/video.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000, has_audio: true },
+      cues: [], transcription: { operationId: 'transcribe-1', mediaPath: 'media/video.mp4', nodeRevision: 1 },
+    }} />);
+    await waitFor(() => expect(onPersist).toHaveBeenCalledWith(expect.objectContaining({ cues: [expect.objectContaining({ text: '你好' })], transcription: undefined })));
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('keeps the transcription handle after a temporary polling error', async () => {
+    vi.mocked(fetchRemixOperation).mockRejectedValueOnce(new Error('连接中断'));
+    const onPersist = vi.fn();
+    render(<RemixWorkbench project="demo" canvasId="default" nodeId="compose-1" onClose={() => {}} onPersist={onPersist} initialDraft={{
+      video: { media_path: 'media/video.mp4', media_hash: 'a'.repeat(64), url: '/video.mp4', size: 100, media_kind: 'video', duration_us: 2_000_000, has_audio: true },
+      cues: [], transcription: { operationId: 'transcribe-1', mediaPath: 'media/video.mp4', nodeRevision: 1 },
+    }} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('连接中断'));
+    expect(onPersist).not.toHaveBeenCalled();
+    expect((screen.getByRole('button', { name: '正在识别…' }) as HTMLButtonElement).disabled).toBe(true);
   });
   it('recovers an orphaned matching operation and exposes older render history', async () => {
     vi.mocked(listRemixOperations).mockResolvedValueOnce({ items: [

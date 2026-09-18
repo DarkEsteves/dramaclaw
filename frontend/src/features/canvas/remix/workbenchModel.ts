@@ -26,6 +26,7 @@ export interface RemixWorkbenchDraft {
   operationId?: string;
   resultPath?: string;
   status?: string;
+  transcription?: { operationId: string; mediaPath: string; nodeRevision: number };
 }
 
 export function buildWorkbenchManifest(video: UploadedRemixMedia, audio: UploadedRemixMedia, cues: RemixCaptionCue[]): Record<string, unknown> {
