@@ -81,6 +81,9 @@ import {
 } from '@/features/canvas/ui/NodeGenerationHistory';
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
+import type { RemixArtifactRef } from '@/api/remix';
+import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
+import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
   backendErrorToastMessage,
@@ -123,6 +126,13 @@ const OPS_PANEL_EXPANDED_HEIGHT = 560;
 // 用于把生成的 text / video / upload 节点放到脚本节点左侧时计算坐标。
 // 注：addNode 实际尺寸由 canvasNodeFactory 决定，这里只是布局用近似值。
 const SPAWN_TEXT_WIDTH = 440;
+
+function remixRef(value: unknown): RemixArtifactRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const ref = value as Record<string, unknown>;
+  return typeof ref.artifactId === 'string' && Number.isInteger(ref.revision) && Number(ref.revision) > 0
+    ? { artifactId: ref.artifactId, revision: Number(ref.revision) } : null;
+}
 const SPAWN_TEXT_HEIGHT = 320;
 const SPAWN_VIDEO_WIDTH = 580;
 const SPAWN_VIDEO_HEIGHT = 380;
@@ -387,6 +397,13 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   // node drags don't re-render this node. See useUpstreamGraph.
   const upstreamNodes = useUpstreamNodes(id);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isRemixScriptOpen, setRemixScriptOpen] = useState(false);
+  const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
+  const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
+  const hasRemixScript = Boolean(blueprintRef || savedRemixRef || data.remixScriptDraft);
+  const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
+  const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
+  const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.script, data, t),
@@ -657,6 +674,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             durationMs={data.generationDurationMs}
           />
         )}
+        {hasRemixScript && <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
+          <span>{remixRef(data.remixScriptRef) ? `改编脚本 r${remixRef(data.remixScriptRef)?.revision}` : '改编脚本待保存'}</span>
+          <button type="button" className="nodrag rounded border border-white/15 px-2 py-1 text-text-dark" onClick={(event) => { event.stopPropagation(); setRemixScriptOpen(true); }}>编辑改编脚本</button>
+        </div>}
         {hasResult ? (
           <>
             <ScriptResultHeader
@@ -742,6 +763,21 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
           historyLoading={historyLoading}
           refreshHistory={refreshHistory}
         />
+      )}
+
+      {isRemixScriptOpen && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/75" onClick={() => setRemixScriptOpen(false)}>
+          <RemixScriptPanel
+            project={readUrl().project ?? ''}
+            initialDraft={initialRemixDraft}
+            existingRef={savedRemixRef}
+            blueprintRef={blueprintRef}
+            visualNodes={remixVisualNodes}
+            onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef })}
+            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref }); setRemixScriptOpen(false); }}
+            onClose={() => setRemixScriptOpen(false)}
+          />
+        </div>, document.body,
       )}
 
       {hasResult && isFullscreen && typeof document !== 'undefined' &&

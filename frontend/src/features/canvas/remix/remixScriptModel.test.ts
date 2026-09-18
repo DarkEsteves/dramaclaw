@@ -1,0 +1,23 @@
+import { describe, expect, it } from 'vitest';
+import { buildRemixScriptPayload, editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
+
+const draft: RemixScriptDraft = { dialogue: '喝下咖啡', selections: [{ id: 'product', label: '产品登场', start: 2, end: 4, visualNodeId: 'video-1' }] };
+
+describe('remix script editor', () => {
+  it('serializes code-point selections and B-roll rules for exact artifact revision', () => {
+    expect(buildRemixScriptPayload(draft, 2)).toEqual({
+      dialogue: '喝下咖啡', segments: [],
+      selections: [{ selection_id: 'product', start_char: 2, end_char: 4, script_revision: 2 }],
+      events: [{ event_id: 'product', selection_id: 'product', required: true, caption: '咖啡', visual_node_id: 'video-1' }],
+      blueprint_mappings: [], media_requirements: [{ event_id: 'product', visual_node_id: 'video-1' }],
+    });
+  });
+
+  it('invalidates touched selections when dialogue changes', () => {
+    expect(editRemixDialogue(draft, '喝下可啡').selections[0].invalidReason).toBeTruthy();
+  });
+
+  it('blocks saving invalid or out-of-range selections', () => {
+    expect(() => buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], end: 99 }] }, 1)).toThrow('语义区间');
+  });
+});
