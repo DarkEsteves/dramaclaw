@@ -1,10 +1,10 @@
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { ScrollText } from 'lucide-react';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import { useUpstreamNodes } from '@/features/canvas/application/useUpstreamGraph';
 import type { SemanticTimelineNodeData } from '@/features/canvas/domain/canvasNodes';
-import { buildTimelineEditMap, buildTimelineOverrides, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
+import { buildTimelineEditMap, buildTimelineOverrides, operationMatchesTimelineInputs, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { readUrl } from '@/lib/url-params';
@@ -37,20 +37,96 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const [error, setError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, TimelineEventOverride>>(data.eventOverrides ?? {});
   const project = readUrl().project;
+  const currentOperationRef = useRef(data.compileOperationId ?? null);
+  const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? 0 });
+  const watchingRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  currentOperationRef.current = data.compileOperationId ?? currentOperationRef.current;
+  currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? currentInputsRef.current.revision };
+
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const changeOverride = (eventId: string, key: keyof TimelineEventOverride, raw: string) => {
     const nextValue = raw === '' ? undefined : Number(raw);
     const current = overrides;
     const next = { ...current, [eventId]: { ...current[eventId], [key]: nextValue } };
     setOverrides(next);
+    currentOperationRef.current = null;
+    currentInputsRef.current.revision += 1;
     updateNodeData(id, {
       eventOverrides: next,
       artifactRef: null,
+      compileOperationId: null,
+      nodeRevision: currentInputsRef.current.revision,
     });
   };
 
+  const watchOperation = async (operationId: string) => {
+    if (!project || watchingRef.current === operationId) return;
+    watchingRef.current = operationId;
+    setBusy(true);
+    setError(null);
+    try {
+      for (let attempt = 0; attempt < 120; attempt++) {
+        if (!mountedRef.current || currentOperationRef.current !== operationId) return;
+        const operation = await fetchRemixOperation(project, operationId);
+        if (!mountedRef.current || currentOperationRef.current !== operationId) return;
+        const inputs = currentInputsRef.current;
+        if (!operationMatchesTimelineInputs(operation, inputs.script, inputs.words, inputs.revision)) {
+          currentOperationRef.current = null;
+          updateNodeData(id, { artifactRef: null, compileOperationId: null, compileError: '上游脚本或语音版本已变化，请重新编译。' });
+          setError('上游脚本或语音版本已变化，请重新编译。');
+          return;
+        }
+        if (operation.status === 'needs_confirmation' || operation.status === 'completed') {
+          const ref = operation.output_refs.find((item) => typeof item.artifact_id === 'string' && Number.isInteger(item.revision));
+          if (!ref?.artifact_id || !ref.revision) throw new Error('编译完成，但没有返回时间轴产物。');
+          const artifactRef = { artifactId: ref.artifact_id, revision: ref.revision };
+          const timing = await fetchRemixArtifact(project, artifactRef);
+          if (timing.schema !== 'performance_timing.v1') throw new Error('时间轴产物格式不正确。');
+          const current = currentInputsRef.current;
+          if (!mountedRef.current || currentOperationRef.current !== operationId || !operationMatchesTimelineInputs(operation, current.script, current.words, current.revision)) return;
+          currentOperationRef.current = null;
+          updateNodeData(id, { artifactRef, events: readTimingEvents(timing.payload), compileOperationId: null, compileError: null });
+          return;
+        }
+        if (operation.status === 'failed' || operation.status === 'cancelled') {
+          currentOperationRef.current = null;
+          updateNodeData(id, { compileOperationId: null });
+          throw new Error('时间轴编译失败。');
+        }
+        if (operation.task_type && operation.task_scope) {
+          const taskState = await fetchRemixTaskStatus(project, operation.task_type, operation.task_scope);
+          if (taskState?.status === 'failed') {
+            currentOperationRef.current = null;
+            updateNodeData(id, { compileOperationId: null });
+            throw new Error(taskState.error || '时间轴编译失败。');
+          }
+        }
+        await sleep(1000);
+      }
+      throw new Error('编译仍在运行，请稍后继续检查。');
+    } catch (cause) {
+      if (!mountedRef.current) return;
+      const message = cause instanceof Error ? cause.message : '时间轴编译状态暂时不可用。';
+      setError(message);
+      updateNodeData(id, { compileError: message });
+    } finally {
+      watchingRef.current = null;
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (data.compileOperationId) {
+      currentOperationRef.current = data.compileOperationId;
+      void watchOperation(data.compileOperationId);
+    }
+  }, [data.compileOperationId, project]);
+
   const compile = async () => {
     if (!project || busy) return;
+    if (currentOperationRef.current) { void watchOperation(currentOperationRef.current); return; }
     const exactScriptRef = asRef(scriptRef);
     const exactWordRef = asRef(wordRef);
     if (!exactScriptRef || !exactWordRef) {
@@ -64,38 +140,22 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       if (aligned.schema !== 'word_timeline.v1' || aligned.payload.status !== 'completed') throw new Error('转写节点需要完成脚本与语音对齐。');
       const editMap = buildTimelineEditMap(Array.isArray(aligned.payload.words) ? aligned.payload.words : []);
       if (!editMap.length) throw new Error('对齐结果没有有效语音时间。');
-      const nodeRevision = (data.nodeRevision ?? 0) + 1;
+      const nodeRevision = currentInputsRef.current.revision + 1;
       const task = await submitRemixProcessAction(project, {
         action: 'compile_semantic_timeline', scriptRef: exactScriptRef, wordTimelineRef: exactWordRef,
         editMap, overrides: buildTimelineOverrides(overrides), fps: data.fps ?? 30,
         idempotencyKey: crypto.randomUUID(), nodeRevision,
       });
+      currentInputsRef.current.revision = nodeRevision;
+      currentOperationRef.current = task.operation_id;
       updateNodeData(id, { nodeRevision, compileOperationId: task.operation_id, artifactRef: null });
-      for (let attempt = 0; attempt < 120; attempt++) {
-        const operation = await fetchRemixOperation(project, task.operation_id);
-        if (operation.status === 'needs_confirmation' || operation.status === 'completed') {
-          const ref = operation.output_refs.find((item) => typeof item.artifact_id === 'string' && Number.isInteger(item.revision));
-          if (!ref?.artifact_id || !ref.revision) throw new Error('编译完成，但没有返回时间轴产物。');
-          const artifactRef = { artifactId: ref.artifact_id, revision: ref.revision };
-          const timing = await fetchRemixArtifact(project, artifactRef);
-          if (timing.schema !== 'performance_timing.v1') throw new Error('时间轴产物格式不正确。');
-          updateNodeData(id, { artifactRef, events: readTimingEvents(timing.payload), compileOperationId: null, compileError: null });
-          return;
-        }
-        if (operation.status === 'failed' || operation.status === 'cancelled') throw new Error('时间轴编译失败。');
-        if (operation.task_type && operation.task_scope) {
-          const taskState = await fetchRemixTaskStatus(project, operation.task_type, operation.task_scope);
-          if (taskState?.status === 'failed') throw new Error(taskState.error || '时间轴编译失败。');
-        }
-        await sleep(1000);
-      }
-      throw new Error('编译仍在运行，请稍后重试。');
+      await watchOperation(task.operation_id);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : '时间轴编译失败。';
       setError(message);
       updateNodeData(id, { compileError: message });
     } finally {
-      setBusy(false);
+      if (!watchingRef.current && mountedRef.current) setBusy(false);
     }
   };
 
@@ -106,7 +166,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     <div className={`max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted">
         <span>{data.artifactRef ? `时间轴 r${data.artifactRef.revision}` : '待编译'}</span>
-        <button type="button" disabled={busy || !project} onClick={(event) => { event.stopPropagation(); void compile(); }} className="nodrag rounded border border-white/15 px-2 py-1 text-text-dark disabled:opacity-50">{busy ? '编译中…' : '重新编译'}</button>
+        <button type="button" disabled={busy || !project} onClick={(event) => { event.stopPropagation(); void compile(); }} className="nodrag rounded border border-white/15 px-2 py-1 text-text-dark disabled:opacity-50">{busy ? '编译中…' : currentOperationRef.current ? '继续检查' : '重新编译'}</button>
       </div>
       {!asRef(scriptRef) || !asRef(wordRef) ? <p className="mb-2 text-[12px] text-amber-300">连接脚本和已对齐语音的转写节点后可编译。</p> : null}
       {(error || data.compileError) && <p role="alert" className="mb-2 text-[12px] text-red-300">{error || data.compileError}</p>}

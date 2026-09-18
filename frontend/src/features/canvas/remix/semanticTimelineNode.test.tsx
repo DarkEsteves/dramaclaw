@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const updateNodeData = vi.fn();
 const upstreamNodes = [
@@ -16,14 +16,15 @@ vi.mock('@/api/remix', () => ({
     ? { schema: 'word_timeline.v1', payload: { status: 'completed', words: [{ start_us: 0, end_us: 1_000_000 }] } }
     : { schema: 'performance_timing.v1', payload: { events: [{ event_id: 'product', start_frame: 3, end_frame: 15 }], unresolved_required_events: [], override_conflicts: [] } }),
   submitRemixProcessAction: vi.fn(async () => ({ operation_id: 'op-1' })),
-  fetchRemixOperation: vi.fn(async () => ({ operation_id: 'op-1', status: 'needs_confirmation', output_refs: [{ artifact_id: 'timing-art', revision: 1 }] })),
+  fetchRemixOperation: vi.fn(async () => ({ operation_id: 'op-1', status: 'needs_confirmation', node_revision: 2, input_refs: [{ artifact_id: 'script-art', revision: 1 }, { artifact_id: 'words-art', revision: 1 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] })),
   confirmRemixOperation: vi.fn(async () => ({ operation_id: 'op-1', status: 'completed', output_refs: [{ artifact_id: 'timing-art', revision: 1 }] })),
 }));
 
-import { submitRemixProcessAction } from '@/api/remix';
+import { fetchRemixOperation, submitRemixProcessAction } from '@/api/remix';
 import { SemanticTimelineNode } from '../nodes/SemanticTimelineNode';
 
 describe('SemanticTimelineNode', () => {
+  beforeEach(() => vi.clearAllMocks());
   it('compiles connected script and speech alignment with editable event offset', async () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     fireEvent.change(screen.getByLabelText('产品登场 偏移毫秒'), { target: { value: '250' } });
@@ -36,5 +37,31 @@ describe('SemanticTimelineNode', () => {
       overrides: [{ event_id: 'product', relative_offset_us: 250_000 }],
     })));
     await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } })));
+  });
+
+  it('resumes a persisted compile operation after mounting without submitting another task', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'op-1', task_id: null, status: 'needs_confirmation', node_revision: 1, input_refs: [{ artifact_id: 'script-art', revision: 1 }, { artifact_id: 'words-art', revision: 1 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] });
+    render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 }, compileOperationId: null })));
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('does not publish an operation compiled for an older script revision', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'op-1', task_id: null, status: 'needs_confirmation', node_revision: 1, input_refs: [{ artifact_id: 'script-art', revision: 0 }, { artifact_id: 'words-art', revision: 1 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] });
+    render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: null, compileOperationId: null })));
+    expect(updateNodeData).not.toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } }));
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the saved operation after a temporary request failure instead of submitting a duplicate', async () => {
+    vi.mocked(fetchRemixOperation)
+      .mockRejectedValueOnce(new Error('网络暂时不可用'))
+      .mockResolvedValueOnce({ operation_id: 'op-1', task_id: null, status: 'needs_confirmation', node_revision: 1, input_refs: [{ artifact_id: 'script-art', revision: 1 }, { artifact_id: 'words-art', revision: 1 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] });
+    render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('网络暂时不可用'));
+    fireEvent.click(screen.getByRole('button', { name: '继续检查' }));
+    await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } })));
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
   });
 });
