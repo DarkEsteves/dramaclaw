@@ -58,9 +58,30 @@ describe('TranscriptNode', () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000, confidence: 0.4 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '仅校正同一发音和词边界，保留原时间' }));
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
     await waitFor(() => expect(reviseTranscriptArtifact).toHaveBeenCalledWith('demo', { artifactId: 'words-1', revision: 1 }, expect.objectContaining({ transcript: '您好' }), [{ artifactId: 'script-1', revision: 3 }]));
     expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 2 });
+  });
+
+  it('invalidates timing for an unconfirmed same-length replacement', async () => {
+    state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
+    expect(state.nodes[1].data.pendingCorrectionText).toBe('您');
+    expect(reviseTranscriptArtifact).not.toHaveBeenCalled();
+  });
+
+  it('invalidates timing for a changed phrase even with confirmation', async () => {
+    state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您好' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '仅校正同一发音和词边界，保留原时间' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
+    expect(reviseTranscriptArtifact).not.toHaveBeenCalled();
   });
 
   it('offers forced alignment when an upstream script artifact is connected', async () => {

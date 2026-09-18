@@ -35,12 +35,22 @@ describe('transcript node model', () => {
   });
 
   it('rebuilds character spans and transcript when a word is corrected', () => {
-    expect(correctedTimeline(timeline, ['您', '好']).words).toEqual([
+    expect(correctedTimeline(timeline, ['您', '好'], true).words).toEqual([
       expect.objectContaining({ text: '您', start_char: 0, end_char: 1, start_us: 0, end_us: 500_000 }),
       expect.objectContaining({ text: '好', start_char: 1, end_char: 2, start_us: 500_000, end_us: 1_000_000 }),
     ]);
-    expect(correctedTimeline(timeline, ['您', '好']).transcript).toBe('您好');
-    expect(() => correctedTimeline(timeline, ['', '好'])).toThrow('字词不能为空');
+    expect(correctedTimeline(timeline, ['您', '好'], true).transcript).toBe('您好');
+    expect(correctedTimeline(timeline, ['您', '好'], true).words[0]).toMatchObject({ timing_status: 'manually_verified', original_text: '你' });
+    expect(() => correctedTimeline(timeline, ['', '好'], true)).toThrow('字词不能为空');
+  });
+
+  it('requires explicit same-speech confirmation even when a replacement has the same length', () => {
+    expect(() => correctedTimeline(timeline, ['您', '好'], false)).toThrow('需要重新对齐');
+  });
+
+  it('rejects changed word length or boundaries despite confirmation', () => {
+    expect(() => correctedTimeline(timeline, ['您好', '好'], true)).toThrow('需要重新对齐');
+    expect(() => correctedTimeline(timeline, ['你 好', '好'], true)).toThrow('需要重新对齐');
   });
 
   it('exports playable SRT timing', () => {

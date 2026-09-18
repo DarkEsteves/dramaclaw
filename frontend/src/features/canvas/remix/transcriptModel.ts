@@ -45,6 +45,10 @@ export interface TranscriptTimeline extends Record<string, unknown> {
   transcript?: string | null;
 }
 
+export class RealignmentRequiredError extends Error {
+  constructor() { super('修改可能改变发音或词边界，需要重新对齐'); this.name = 'RealignmentRequiredError'; }
+}
+
 export function timelineWords(payload: TranscriptTimeline): TranscriptWord[] {
   if (payload.status !== 'completed' || !Array.isArray(payload.words)) return [];
   return payload.words.filter((word) => typeof word.text === 'string' && Number.isFinite(word.start_us) && Number.isFinite(word.end_us))
@@ -52,17 +56,21 @@ export function timelineWords(payload: TranscriptTimeline): TranscriptWord[] {
 }
 
 /** Keep word timing but regenerate character offsets for a corrected transcript. */
-export function correctedTimeline(payload: TranscriptTimeline, correctedWords: string[]): TranscriptTimeline {
+export function correctedTimeline(payload: TranscriptTimeline, correctedWords: string[], confirmedSameSpeechAndBoundaries: boolean): TranscriptTimeline {
   if (payload.status !== 'completed' || correctedWords.length !== payload.words.length) throw new Error('转写内容已变化，请重新加载');
   let offset = 0;
   const words = payload.words.map((word, index) => {
     const text = correctedWords[index]?.trim();
     if (!text) throw new Error('字词不能为空');
+    const changed = text !== word.text;
+    if (changed && (!confirmedSameSpeechAndBoundaries || Array.from(text).length !== Array.from(word.text).length || /\s/u.test(text))) {
+      throw new RealignmentRequiredError();
+    }
     const start = offset;
     offset += text.length;
-    return { ...word, text, start_char: start, end_char: offset };
+    return { ...word, text, start_char: start, end_char: offset, ...(changed ? { timing_status: 'manually_verified', original_text: word.text } : {}) };
   });
-  return { ...payload, transcript: words.map((word) => word.text).join(''), words };
+  return { ...payload, transcript: words.map((word) => word.text).join(''), words, manual_timing_review: words.some((word) => word.timing_status === 'manually_verified') };
 }
 
 function srtTime(us: number): string {

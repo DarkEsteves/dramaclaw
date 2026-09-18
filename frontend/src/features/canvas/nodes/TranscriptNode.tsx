@@ -3,7 +3,7 @@ import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflo
 import { FileText } from 'lucide-react';
 import { fetchRemixArtifact, fetchRemixOperation, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { TranscriptNodeData } from '@/features/canvas/domain/canvasNodes';
-import { correctedTimeline, sourceMediaForTranscript, sourceScriptForTranscript, timelineWords, transcriptSrt, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
+import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, timelineWords, transcriptSrt, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArtifactApi';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
@@ -38,6 +38,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const [operationId, setOperationId] = useState<string | null>(typeof data.operationId === 'string' ? data.operationId : null);
   const [language, setLanguage] = useState('zh');
   const [edited, setEdited] = useState<string[]>(() => data.words.map((word) => word.text));
+  const [confirmedTiming, setConfirmedTiming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mediaRef = useRef<HTMLMediaElement>(null);
@@ -117,13 +118,19 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       const artifact = await fetchRemixArtifact(project, artifactRef);
       if (artifact.schema !== 'word_timeline.v1') throw new Error('转写产物格式错误');
       const payload = artifact.payload as TranscriptTimeline;
-      const revised = correctedTimeline(payload, payload.words.map((word, index) => edited[index] ?? word.text));
+      const revised = correctedTimeline(payload, payload.words.map((word, index) => edited[index] ?? word.text), confirmedTiming);
       const rawRefs = (artifact as typeof artifact & { upstream_refs?: Array<{ artifact_id: string; revision: number }> }).upstream_refs;
       if (!Array.isArray(rawRefs) && (data.alignedScriptRef || payload.script_ref)) throw new Error('无法确认对齐脚本版本，请重新对齐');
       const upstreamRefs = (rawRefs ?? []).map((upstream) => ({ artifactId: upstream.artifact_id, revision: upstream.revision }));
       const saved = await reviseTranscriptArtifact(project, artifactRef, revised, upstreamRefs);
-      updateNodeData(id, { artifactRef: { artifactId: saved.id, revision: saved.revision }, words: timelineWords(revised), status: 'completed' });
-    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+      updateNodeData(id, { artifactRef: { artifactId: saved.id, revision: saved.revision }, words: timelineWords(revised), status: 'completed', pendingCorrectionText: null });
+      setConfirmedTiming(false);
+    } catch (caught) {
+      if (caught instanceof RealignmentRequiredError) {
+        updateNodeData(id, { artifactRef: null, status: 'needs_review', alignmentStale: true, pendingCorrectionText: edited.join(''), unresolved: ['台词已修改，请同步脚本并重新对齐'] });
+      }
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
     finally { setBusy(false); }
   };
 
@@ -154,15 +161,15 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         </div>
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
-        {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">脚本已修改，请重新对齐</p>}
+        {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐'}</p>}
         {data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
           <button type="button" className="w-[145px] shrink-0 text-left font-mono text-[11px] text-text-muted" onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = word.startUs / 1_000_000; }}>{stamp(word.startUs)} – {stamp(word.endUs)}</button>
-          <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => setEdited((current) => current.map((text, position) => position === index ? event.target.value : text))} className="min-w-0 flex-1 rounded border border-border-dark bg-surface-field px-1 py-1" />
+          <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => { setConfirmedTiming(false); setEdited((current) => current.map((text, position) => position === index ? event.target.value : text)); }} className="min-w-0 flex-1 rounded border border-border-dark bg-surface-field px-1 py-1" />
           {typeof word.confidence === 'number' && word.confidence < 0.6 && <span className="shrink-0 text-amber-300">低置信度</span>}
         </div>)}
         {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无对齐字词</p>}
       </div>
-      {artifactRef && <div className="flex gap-2 border-t border-white/[0.08] p-2 text-xs"><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">保存校字</button><button type="button" onClick={() => void exportResult('json')}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')}>导出 SRT</button></div>}
+      {artifactRef && <div className="border-t border-white/[0.08] p-2 text-xs"><label className="mb-2 flex items-center gap-1"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><div className="flex gap-2"><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">保存校字</button><button type="button" onClick={() => void exportResult('json')}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')}>导出 SRT</button></div></div>}
       {error && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
     </div>
   </div>;
