@@ -197,6 +197,7 @@ from novelvideo.freezone.agent_product_operations import (
     bind_agent_product_model_execution,
     bind_agent_product_task,
     create_agent_product_operation,
+    deliver_structured_recipe_result,
     finish_agent_product_operation,
     is_direct_voice_recipe_action,
     list_agent_product_operations_for_session,
@@ -261,6 +262,7 @@ from novelvideo.freezone.recipe_runtime import (
     compile_recipe_prompt_batch,
     compile_recipe_prompt_result,
     generate_recipe_text,
+    get_recipe_for_runtime,
 )
 from novelvideo.ports import get_usage_meter
 from novelvideo.ports.local.usage import NoOpUsageMeter
@@ -5475,9 +5477,7 @@ async def _record_recipe_compile_product_evidence(
     if operation.get("status") == "delivered":
         await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
         return
-    # A concurrent request (e.g. a timed-out earlier compile) may have failed
-    # this attempt while we compiled. Returning the prompt would send the
-    # runner on to a media submission that can only 409.
+    # A concurrent request may have failed this attempt while we compiled.
     _raise_if_recipe_attempt_ended(operation)
     try:
         if (
@@ -5496,25 +5496,48 @@ async def _record_recipe_compile_product_evidence(
                 compiled_prompt="" if deliver_text else compiled.prompt,
             )
             if deliver_text:
-                # Synchronous text generation has no separate media task. Persist
-                # the actual server-produced text in the operation's immutable
-                # result receipt, rather than waiting for a nonexistent task key.
-                # finish_agent_product_operation atomically stores this receipt and
-                # transitions to delivered; reconcile even if the worker timed out.
                 if body.node_kind != "text" or not compiled.prompt.strip():
                     raise ValueError("text delivery requires a non-empty text result")
-                operation = await asyncio.to_thread(
-                    finish_agent_product_operation,
-                    project_dir=state_dir,
-                    operation_id=operation_id,
-                    outcome="delivered",
-                    expected_task_id=str(operation.get("task_id") or ""),
-                    result_ref={
-                        "kind": "recipe_text_result",
-                        "id": operation_id,
-                        "content": compiled.prompt,
-                    },
-                )
+                try:
+                    recipe = get_recipe_for_runtime(
+                        username=str(user.get("username") or ""),
+                        recipe_id=body.recipe_id,
+                        recipe_version=body.recipe_version,
+                    )
+                except RecipeRuntimeError:
+                    # Legacy operations can outlive their catalog entry.
+                    if (
+                        body.recipe_version
+                        or (operation.get("metadata") or {}).get("recipe_schema_version")
+                        == "dramaclaw.recipe.v2"
+                    ):
+                        raise
+                    recipe = {"schema_version": "dramaclaw.recipe.v1"}
+                if recipe.get("schema_version") == "dramaclaw.recipe.v2":
+                    operation = await asyncio.to_thread(
+                        deliver_structured_recipe_result,
+                        operation_project_dir=state_dir,
+                        artifact_project_dir=Path(ctx.output_dir),
+                        operation_id=operation_id,
+                        expected_task_id=str(operation.get("task_id") or ""),
+                        recipe=recipe,
+                        content=compiled.prompt,
+                        created_by=str(user.get("username") or ""),
+                        upstream_refs=[],
+                    )
+                else:
+                    operation = await asyncio.to_thread(
+                        finish_agent_product_operation,
+                        project_dir=state_dir,
+                        operation_id=operation_id,
+                        outcome="delivered",
+                        expected_task_id=str(operation.get("task_id") or ""),
+                        result_ref={
+                            "kind": "recipe_text_result",
+                            "id": operation_id,
+                            "content": compiled.prompt,
+                        },
+                    )
                 await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
             return
         if compiled.prompt.strip() and compiled.mode in {
@@ -5523,8 +5546,7 @@ async def _record_recipe_compile_product_evidence(
             "persistent_cache",
             "deterministic",
         }:
-            # Recipe use is billable regardless of compilation mode. Persist the
-            # usable prompt as server-owned delivery evidence, not fake model evidence.
+            # Cache and fallback compilations use server-owned delivery evidence.
             operation = await asyncio.to_thread(
                 finish_agent_product_operation,
                 project_dir=state_dir,

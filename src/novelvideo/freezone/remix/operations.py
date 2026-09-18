@@ -1,0 +1,151 @@
+"""Durable, project-scoped idempotency records for remix producer calls."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from contextlib import contextmanager
+from pathlib import Path
+import tempfile
+import uuid
+from typing import Any
+
+
+class RemixOperationStore:
+    def __init__(self, project_dir: Path, project_id: str) -> None:
+        self.project_dir = Path(project_dir).resolve()
+        if not isinstance(project_id, str) or not project_id:
+            raise ValueError("project_id is required")
+        self.project_id = project_id
+        self.root = self.project_dir / "freezone" / "_remix_operations"
+
+    @contextmanager
+    def _locked(self):
+        from novelvideo.ports import get_canvas_write_mutex
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with get_canvas_write_mutex().write_mutex(self.project_dir, "remix_operations") as guard:
+            yield guard
+
+    @staticmethod
+    def _json(value: dict[str, Any]) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+    def _atomic(self, path: Path, value: dict[str, Any], guard: Any) -> None:
+        fd, name = tempfile.mkstemp(prefix=".remix-operation-", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(self._json(value))
+                stream.flush()
+                os.fsync(stream.fileno())
+            guard.reassert()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _refs(self, refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not isinstance(refs, list):
+            raise ValueError("input_refs must be a list")
+        result = []
+        for ref in refs:
+            if not isinstance(ref, dict) or ref.get("project_id", self.project_id) != self.project_id:
+                raise ValueError("Cross-project references are not allowed")
+            artifact_id, revision = ref.get("artifact_id"), ref.get("revision")
+            if not isinstance(artifact_id, str) or not artifact_id or type(revision) is not int or revision < 1:
+                raise ValueError("invalid artifact reference")
+            result.append({"artifact_id": artifact_id, "revision": revision, "project_id": self.project_id})
+        return result
+
+    def _path(self, operation_id: str) -> Path:
+        return self.root / f"{operation_id}.json"
+
+    def _read(self, operation_id: str) -> dict[str, Any]:
+        try:
+            record = json.loads(self._path(operation_id).read_text())
+        except FileNotFoundError:
+            raise
+        if not isinstance(record, dict) or record.get("project_id") != self.project_id:
+            raise FileNotFoundError("operation not found")
+        return record
+
+    def _outputs_exist(self, output_refs: list[dict[str, Any]]) -> bool:
+        for ref in output_refs:
+            if isinstance(ref, dict) and "artifact_id" in ref:
+                from .store import RemixArtifactStore
+
+                try:
+                    RemixArtifactStore(self.project_dir, self.project_id).read(
+                        ref["artifact_id"], ref["revision"]
+                    )
+                except (FileNotFoundError, KeyError, ValueError):
+                    return False
+                continue
+            relative = ref.get("project_path") if isinstance(ref, dict) else None
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+                return False
+            path = (self.project_dir / relative).resolve()
+            if not path.is_relative_to(self.project_dir) or not path.is_file():
+                return False
+        return True
+
+    def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False) -> dict[str, Any]:
+        if not isinstance(idempotency_key, str) or not idempotency_key or not isinstance(producer_version, str) or not producer_version or type(node_revision) is not int or node_revision < 1 or not isinstance(normalized_parameters, dict):
+            raise ValueError("invalid operation request")
+        refs = self._refs(input_refs)
+        key = hashlib.sha256(f"{self.project_id}\0{idempotency_key}".encode()).hexdigest()
+        with self._locked() as guard:
+            index_path = self.root / "index.json"
+            index = json.loads(index_path.read_text()) if index_path.exists() else {}
+            old_id = index.get(key)
+            if old_id and not regenerate:
+                old = self._read(old_id)
+                if (old["input_refs"] != refs or old["producer_version"] != producer_version
+                    or old["normalized_parameters"] != normalized_parameters
+                    or old["node_revision"] != node_revision):
+                    raise ValueError("Idempotency key reused for a different request")
+                if old["status"] not in {"completed", "needs_confirmation"} or self._outputs_exist(old.get("output_refs", [])):
+                    return {**old, "created": False}
+            operation_id = uuid.uuid4().hex
+            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": []}
+            self._atomic(self._path(operation_id), record, guard)
+            index[key] = operation_id
+            self._atomic(index_path, index, guard)
+            return {**record, "created": True}
+
+    def _update(self, operation_id: str, guard: Any, **changes: Any) -> dict[str, Any]:
+        record = self._read(operation_id)
+        record.update(changes)
+        self._atomic(self._path(operation_id), record, guard)
+        return record
+
+    def provider_outcome_unknown(self, operation_id: str, *, provider_task_id: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            return self._update(operation_id, guard, status="pending_reconciliation", provider_task_id=provider_task_id)
+
+    def bind_task(self, operation_id: str, *, task_id: str, provider_task_id: str = "") -> dict[str, Any]:
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id is required")
+        with self._locked() as guard:
+            return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id)
+
+    def publish_result_unverified(self, operation_id: str, *, output_refs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Save durable runner output without claiming the canvas node is still current."""
+        if not isinstance(output_refs, list) or not output_refs:
+            raise ValueError("operation output references are unavailable")
+        with self._locked() as guard:
+            if not self._outputs_exist(output_refs):
+                raise ValueError("operation output references are unavailable")
+            record = self._read(operation_id)
+            if record["status"] == "needs_confirmation" and record["output_refs"] == output_refs:
+                return record
+            if record["status"] != "pending":
+                raise ValueError("operation cannot publish result in its current state")
+            return self._update(operation_id, guard, status="needs_confirmation", output_refs=output_refs)
+
+    def complete(self, operation_id: str, *, output_refs: list[dict[str, Any]], current_input_refs: list[dict[str, Any]], current_node_revision: int) -> dict[str, Any]:
+        refs = self._refs(current_input_refs)
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
+            return self._update(operation_id, guard, status=status, output_refs=output_refs)

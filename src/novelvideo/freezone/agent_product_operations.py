@@ -594,6 +594,29 @@ def finish_agent_product_operation(
     return _payload(row)
 
 
+def deliver_structured_recipe_result(
+    *, operation_project_dir: Path, artifact_project_dir: Path, operation_id: str, expected_task_id: str,
+    recipe: dict[str, Any], content: str, created_by: str,
+    upstream_refs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Publish a validated v2 Recipe artifact before marking product delivery."""
+    operation = read_agent_product_operation(project_dir=operation_project_dir, operation_id=operation_id)
+    if operation is None or operation.get("product_kind") != "recipe_result":
+        raise ValueError("structured delivery requires a recipe result operation")
+    from novelvideo.freezone.recipe_runtime import publish_structured_recipe_output
+
+    artifact = publish_structured_recipe_output(
+        recipe=recipe, content=content, project_dir=artifact_project_dir,
+        project_id=str(operation["project_id"]), created_by=created_by,
+        upstream_refs=upstream_refs,
+    )
+    return finish_agent_product_operation(
+        project_dir=operation_project_dir, operation_id=operation_id,
+        outcome="delivered", expected_task_id=expected_task_id,
+        result_ref={"kind": "remix_artifact", "id": artifact["id"], "revision": artifact["revision"], "schema": artifact["schema"]},
+    )
+
+
 def save_agent_generation_session(
     *,
     project_dir: Path,

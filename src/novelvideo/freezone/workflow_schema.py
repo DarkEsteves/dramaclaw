@@ -21,6 +21,7 @@ from novelvideo.freezone.workflow_contract_generated import (
     WORKFLOW_LINK_TYPES,
     WORKFLOW_NODE_TYPES,
     WORKFLOW_PLAN_SCHEMA_VERSION,
+    PROCESSING_ACTION_TYPES,
 )
 
 NODE_TYPE_VALUES = WORKFLOW_NODE_TYPES
@@ -508,7 +509,18 @@ def _recipe_node_schema() -> dict[str, Any]:
         {
             "node_type": {
                 "type": "string",
-                "enum": [value for value in NODE_TYPE_VALUES if value not in {"videoComposeNode", "htmlArtifactNode"}],
+                "enum": [
+                    value
+                    for value in NODE_TYPE_VALUES
+                    if value
+                    not in {
+                        "videoComposeNode",
+                        "htmlArtifactNode",
+                        "videoStoryNode",
+                        "transcriptNode",
+                        "semanticTimelineNode",
+                    }
+                ],
             },
             "data": _node_data_schema(recipe_required=True),
         }
@@ -584,6 +596,35 @@ def _compose_node_schema() -> dict[str, Any]:
         "type": "object",
         "properties": properties,
         "required": ["id", "node_type"],
+        "additionalProperties": False,
+    }
+
+
+def _process_node_schema() -> dict[str, Any]:
+    """Accept typed processing nodes without making them catalog Recipe steps."""
+    properties = _node_common_properties()
+    properties.update(
+        {
+            "node_type": {
+                "type": "string",
+                "enum": ["videoStoryNode", "transcriptNode", "semanticTimelineNode"],
+            },
+            "data": {
+                "type": "object",
+                "properties": {
+                    "processingAction": {"type": "string", "enum": PROCESSING_ACTION_TYPES},
+                    "displayName": {"type": "string"},
+                    "title": {"type": "string"},
+                },
+                "required": ["processingAction"],
+                "additionalProperties": True,
+            },
+        }
+    )
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["id", "node_type", "data"],
         "additionalProperties": False,
     }
 
@@ -682,6 +723,7 @@ def workflow_plan_json_schema() -> dict[str, Any]:
                         _recipe_node_schema(),
                         _resource_text_node_schema(),
                         _compose_node_schema(),
+                        _process_node_schema(),
                         _html_node_schema(),
                     ]
                 },

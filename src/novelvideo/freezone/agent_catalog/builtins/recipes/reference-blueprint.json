@@ -1,0 +1,15 @@
+{
+  "schema_version": "dramaclaw.recipe.v2",
+  "id": "reference-blueprint",
+  "enabled": true,
+  "version": "1.0.0",
+  "name": "参考片蓝图",
+  "description": "将带时间证据整理为可编辑的结构蓝图。",
+  "output_kind": "text",
+  "action_keys": ["reference-blueprint"],
+  "system_prompt": "只输出满足契约的 JSON 蓝图。",
+  "planning_prompt": "分析参考视频证据并输出叙事蓝图。",
+  "result_summary": "结构化参考片蓝图",
+  "input_contract": {"required": ["evidence_ref"]},
+  "output_schema": {"type": "object", "required": ["narrative_role", "events", "preserve_replace_rules", "observations", "inferences", "user_choices"], "properties": {"narrative_role": {"type": "string"}, "events": {"type": "array"}, "preserve_replace_rules": {"type": "array"}, "observations": {"type": "array"}, "inferences": {"type": "array"}, "user_choices": {"type": "array"}}}
+}

@@ -215,7 +215,7 @@ class AgentCatalogSkillConfig(_CatalogBaseModel):
 
 
 class AgentCatalogRecipeConfig(_CatalogBaseModel):
-    schema_version: str = "dramaclaw.recipe.v1"
+    schema_version: Literal["dramaclaw.recipe.v1", "dramaclaw.recipe.v2"] = "dramaclaw.recipe.v1"
     id: str
     enabled: bool = True
     version: str | int = "1.0.0"
@@ -233,6 +233,8 @@ class AgentCatalogRecipeConfig(_CatalogBaseModel):
     requires_generated_audio: bool = False
     force_enhancement: bool = False
     skip_detail_check: bool = False
+    input_contract: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
 
     @field_validator("id")
     @classmethod
@@ -265,6 +267,11 @@ class AgentCatalogRecipeConfig(_CatalogBaseModel):
     def validate_pipeline_contract(self) -> "AgentCatalogRecipeConfig":
         if self.requires_generated_audio and self.output_kind != "video":
             raise ValueError("requires_generated_audio requires output_kind=video")
+        if self.schema_version == "dramaclaw.recipe.v2":
+            if not self.input_contract or not self.output_schema:
+                raise ValueError("v2 recipe requires input_contract and output_schema")
+        elif self.input_contract is not None or self.output_schema is not None:
+            raise ValueError("v1 recipe cannot declare structured contracts")
         if self.output_format == "html" and self.output_kind != "text":
             raise ValueError("HTML output_format requires output_kind=text")
         if self.id in self.conflicts_with:

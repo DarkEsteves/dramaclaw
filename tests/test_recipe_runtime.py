@@ -28,9 +28,10 @@ def test_builtin_text_recipes_produce_final_deliverables():
         validated = validate_agent_recipe_config(payload)
         text_recipe_ids.append(str(validated["id"]))
 
-    assert len(text_recipe_ids) == 24
+    assert len(text_recipe_ids) == 27
     assert "general-text" in text_recipe_ids
     assert "ecommerce-text-plan" in text_recipe_ids
+    assert {"reference-blueprint", "reference-remix-script", "reference-broll-plan"} <= set(text_recipe_ids)
 
 
 @pytest.mark.parametrize(

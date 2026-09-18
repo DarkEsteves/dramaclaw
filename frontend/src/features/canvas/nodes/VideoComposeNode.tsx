@@ -51,6 +51,9 @@ import {
   subscribeNodeAction,
 } from "@/features/canvas/application/nodeActionResult";
 import { generationTaskDescriptor } from "@/features/canvas/application/resumeGeneration";
+import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
+import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
+import { renderRemixManifest, type RemixTaskRef } from "@/api/remix";
 
 type VideoComposeNodeProps = NodeProps & {
   id: string;
@@ -72,6 +75,10 @@ export const VideoComposeNode = memo(
     const updateNodeData = useCanvasStore((state) => state.updateNodeData);
     const upstreamNodes = useUpstreamNodes(id);
     const [isEditorOpen, setEditorOpen] = useState(false);
+    const [remixKey, setRemixKey] = useState<string>(() => globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
+    const [remixTask, setRemixTask] = useState<RemixTaskRef | null>(null);
+    const [remixError, setRemixError] = useState<string | null>(null);
+    const [isRemixSubmitting, setRemixSubmitting] = useState(false);
 
     const seedNodeIds = useMemo(
       () => orderedComposeSeedNodeIds(upstreamNodes, data.compositionInputOrder),
@@ -100,6 +107,7 @@ export const VideoComposeNode = memo(
     useEffect(() => {
       updateNodeInternals(id);
     }, [id, updateNodeInternals]);
+
 
     const handleOpen = useCallback(() => {
       if (!project) return false;
@@ -225,6 +233,35 @@ export const VideoComposeNode = memo(
       }),
       [handleAutoCompose, handleOpen, id],
     );
+
+    if (data.remixManifestRef) {
+      const exportable = canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts: [] });
+      const nodeRevision = data.remixNodeRevision;
+      const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
+        ? t('videoCompose.node.remixRevisionMissing')
+        : (data.unresolvedRequiredEvents ?? []).join(', ');
+      const submit = async () => {
+        if (!project || !exportable || nodeRevision == null) return;
+        setRemixSubmitting(true); setRemixError(null);
+        try { setRemixTask(await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision })); }
+        catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
+        finally { setRemixSubmitting(false); }
+      };
+      return <div className="group relative w-[380px]" onClick={() => setSelectedNode(id)}>
+        <Handle type="target" position={Position.Left} id="manifest" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+        <Handle type="source" position={Position.Right} id="render" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
+        <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
+        <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
+          <div className="mb-2 text-[12px] text-text-muted">{t('videoCompose.node.remixManifest', { id: data.remixManifestRef.artifactId, revision: data.remixManifestRef.revision })}</div>
+          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} />
+          <label className="mt-2 block text-[11px] text-text-muted">{t('videoCompose.node.remixKey')}<input value={remixKey} onChange={(event) => setRemixKey(event.target.value)} className="mt-1 w-full rounded border border-white/[0.1] bg-black/20 px-2 py-1 text-text-dark" /></label>
+          <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="mt-2 rounded bg-primary px-3 py-1.5 text-[12px] text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+          {(!exportable || nodeRevision == null) ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: blockReason })}</div> : null}
+          {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
+          {remixError ? <div className="mt-2 text-[12px] text-red-300">{remixError}</div> : null}
+        </div>
+      </div>;
+    }
 
     return (
       <div

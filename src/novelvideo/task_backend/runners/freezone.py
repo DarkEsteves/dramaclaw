@@ -2156,3 +2156,6 @@ for _agent_product_task_type in AGENT_PRODUCT_TASK_TYPES:
     )
 
 register_project_task_runner("freezone_image_vectorize", run_freezone_image_vectorize, lane="ffmpeg")
+
+# Remix rendering is project-home bound because it reads immutable project artifacts.
+from novelvideo.task_backend.runners import remix as _remix_runner  # noqa: E402, F401

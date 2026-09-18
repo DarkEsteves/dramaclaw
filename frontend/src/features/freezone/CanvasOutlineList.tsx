@@ -98,6 +98,8 @@ const NODE_TYPE_ICON: Record<CanvasNodeType, LucideIcon> = {
   [CANVAS_NODE_TYPES.storyboardGen]: LayoutGrid,
   [CANVAS_NODE_TYPES.video]: Play,
   [CANVAS_NODE_TYPES.audio]: AudioLines,
+  [CANVAS_NODE_TYPES.transcript]: FileText,
+  [CANVAS_NODE_TYPES.semanticTimeline]: ScrollText,
   [CANVAS_NODE_TYPES.videoStory]: Film,
   [CANVAS_NODE_TYPES.videoCompose]: Film,
   [CANVAS_NODE_TYPES.videoBreakdown]: ScanSearch,

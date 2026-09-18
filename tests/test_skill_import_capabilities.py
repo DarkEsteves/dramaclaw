@@ -34,6 +34,9 @@ def test_snapshot_is_stable_and_does_not_claim_live_models():
     assert len(first['capability_hash']) == 64
     assert first['models']['availability'] == 'unknown'
     assert first['plan_schema']['properties']['nodes']
+    assert first['node_types']['videoStoryNode']['object_type'] == 'VideoNode'
+    assert first['node_types']['transcriptNode']['object_type'] == 'TextNode'
+    assert first['node_types']['semanticTimelineNode']['object_type'] == 'VideoNode'
     first['node_types'].clear()
     assert snapshot_capabilities()['node_types']
 

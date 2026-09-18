@@ -10,7 +10,10 @@
     "videoNode",
     "audioNode",
     "htmlArtifactNode",
-    "videoComposeNode"
+    "videoComposeNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode"
   ],
   "agent_creatable_node_types": [
     "uploadNode",
@@ -25,7 +28,10 @@
     "threeDWorldNode",
     "previzNode",
     "skillNode",
-    "htmlArtifactNode"
+    "htmlArtifactNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode"
   ],
   "link_types": [
     "context_for",
@@ -45,6 +51,16 @@
     "generate_3gs_world",
     "auto_compose_video"
   ],
+  "processing_action_types": [
+    "transcribe_media",
+    "align_script",
+    "compile_semantic_timeline"
+  ],
+  "processing_action_input_roles": {
+    "transcribe_media": ["reference_media"],
+    "align_script": ["narration", "script"],
+    "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"]
+  },
   "model_aliases_by_node_type": {
     "imageGenNode": {
       "nano-banana-2": "newapi_nanobanana2",

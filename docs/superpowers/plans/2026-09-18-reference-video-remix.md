@@ -1,6 +1,6 @@
 # 参考视频改编：虾画 / 虾导原生实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本文是实施前计划；执行状态全部从未完成开始。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 实施状态与验收缺口见 `docs/experiments/reference-video-remix-implementation-status.md`；本文的复选框仍以完整验收为准。
 
 **Goal:** 用户上传参考视频，虾导拆解其表达结构，按新主题改写，调用现有生成能力，并依据实际旁白安排字幕、B-roll 和音效，在虾画中编辑并导出竖屏 MP4。
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 日期：2026-09-18。基线：本次 `git fetch origin staging` 得到的 `dcfbc726774b5b0a711b21b70b37225a49d1b87b`。
-- 计划分支：`codex/reference-video-remix-plan`；本次只交付计划，功能尚未实现。
+- 实施分支：`codex/reference-video-remix-plan`；当前已有分阶段基础实现，完整验收仍待 P0 真实样片。
 - 需求来源：2026-09-15《参考视频改编：原生虾画实施计划》。本文件整合该文档及本次代码复核，仓库内阅读无需依赖 Downloads 文件。
 - MVP：15–60 秒、单说话人、9:16、中文或英文、旁白驱动；输出 1080×1920/30fps。
 - 支持图片/视频 B-roll、逐词或逐字高亮字幕、基础淡入淡出和缩放、旁白/BGM/SFX 分轨；音效允许上传。

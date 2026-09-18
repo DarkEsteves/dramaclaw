@@ -8999,6 +8999,7 @@
       "open": "Open video compose",
       "reopen": "Reopen",
       "resultName": "Composed video"
+      ,"remixManifest": "Manifest {{id}} · r{{revision}}", "remixKey": "Idempotency key", "remixSubmit": "Render export", "remixSubmitting": "Submitting…", "remixTask": "Task {{task}}", "remixBlocked": "Export blocked: {{reason}}", "remixRevisionMissing": "Export blocked: canvas node revision is missing"
     },
     "undo": "Undo",
     "redo": "Redo",

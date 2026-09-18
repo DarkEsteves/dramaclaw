@@ -270,6 +270,12 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
         id="target"
         className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]"
       />
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="blueprint"
+        className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]"
+      />
 
       <NodeHeader
         className={NODE_HEADER_FLOATING_POSITION_CLASS}
@@ -314,6 +320,11 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             {t(`${V}.fullscreen`)}
           </button>
         </div>
+        {data.referenceBlueprintRef && (
+          <div className="border-b border-[rgba(255,255,255,0.06)] px-3 py-1.5 text-[11px] text-text-muted">
+            Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}
+          </div>
+        )}
         <div className="flex-1 overflow-hidden p-2">
           {isAnalyzing ? (
             <div className="h-full w-full" />

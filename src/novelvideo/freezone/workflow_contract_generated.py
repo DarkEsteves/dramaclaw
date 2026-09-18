@@ -1,6 +1,6 @@
 """Generated from schemas/workflow/v1/stable-contract.json; do not edit."""
 
-SOURCE_SHA256 = "a29aa8bc8b49f30d6b85fce38ccd9cb29ac223d7c1f10c2ebc17fc32e421dde0"
+SOURCE_SHA256 = "f000f4c282b6f23faad87228eb63138ee448487efe9af24db0efaaf5c0303728"
 WORKFLOW_CONTRACT_SCHEMA_VERSION = "freezone_workflow_contract.v1"
 WORKFLOW_PLAN_SCHEMA_VERSION = "freezone_workflow_plan.v1"
 WORKFLOW_INTENT_SCHEMA_VERSION = "freezone_workflow_intent.v1"
@@ -13,6 +13,9 @@ WORKFLOW_NODE_TYPES = [
     "audioNode",
     "htmlArtifactNode",
     "videoComposeNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode",
 ]
 AGENT_CREATABLE_NODE_TYPES = [
     "uploadNode",
@@ -28,6 +31,9 @@ AGENT_CREATABLE_NODE_TYPES = [
     "previzNode",
     "skillNode",
     "htmlArtifactNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode",
 ]
 WORKFLOW_LINK_TYPES = [
     "context_for",
@@ -47,6 +53,12 @@ GENERATION_ACTION_TYPES = [
     "generate_3gs_world",
     "auto_compose_video",
 ]
+PROCESSING_ACTION_TYPES = ["transcribe_media", "align_script", "compile_semantic_timeline"]
+PROCESSING_ACTION_INPUT_ROLES = {
+    "transcribe_media": ["reference_media"],
+    "align_script": ["narration", "script"],
+    "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
+}
 MODEL_ALIASES_BY_NODE_TYPE = {
     "imageGenNode": {
         "nano-banana-2": "newapi_nanobanana2",

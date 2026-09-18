@@ -8,12 +8,35 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
 from novelvideo.freezone.agent_workflows.graph import build_workflow_graph_commands
-from novelvideo.freezone.workflow_plan import validate_workflow_plan
 from novelvideo.freezone.workflow_preflight import evaluate_workflow_preflight
 from novelvideo.freezone.workflow_schema import (
     workflow_intent_json_schema,
     workflow_plan_json_schema,
 )
+from novelvideo.freezone.workflow_plan import compile_process_descriptors, validate_workflow_plan
+
+
+def test_compile_process_descriptors_binds_typed_edge_roles_without_media_resolution() -> None:
+    plan = {
+        "nodes": [
+            {"id": "voice", "node_type": "audioNode", "data": {"semanticOutputRole": "narration"}},
+            {"id": "script", "node_type": "scriptNode", "data": {"semanticOutputRole": "script"}},
+            {"id": "align", "node_type": "transcriptNode", "data": {"processingAction": "align_script"}},
+        ],
+        "edges": [
+            {"source": "voice", "target": "align", "link_type": "dependency_for"},
+            {"source": "script", "target": "align", "link_type": "dependency_for"},
+        ],
+    }
+
+    assert compile_process_descriptors(plan, node_revision=9) == [
+        {
+            "action": "align_script",
+            "node_id": "align",
+            "node_revision": 9,
+            "typed_inputs": {"narration": {"node_id": "voice"}, "script": {"node_id": "script"}},
+        }
+    ]
 
 _MINIMAL_ECOMMERCE_SKILL = {
     "id": "ecommerce-product",

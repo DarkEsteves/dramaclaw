@@ -8999,6 +8999,7 @@
       "open": "打开视频合成",
       "reopen": "重新打开",
       "resultName": "合成视频"
+      ,"remixManifest": "清单 {{id}} · r{{revision}}", "remixKey": "幂等键", "remixSubmit": "渲染导出", "remixSubmitting": "提交中…", "remixTask": "任务 {{task}}", "remixBlocked": "导出已阻塞：{{reason}}", "remixRevisionMissing": "导出已阻塞：缺少画布节点修订号"
     },
     "undo": "撤销",
     "redo": "重做",

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "annotation_method": "Annotators mark audible word or character onset and offset against decoded audio; store half-open microsecond intervals and resolve disagreements before calculating P95.",
+  "cases": [
+    {
+      "case_id": "zh-clear",
+      "language": "zh",
+      "category": "clear_speech",
+      "required_assets": ["zh-clear/reference.mp4", "zh-clear/script.txt", "zh-clear/narration-fast.wav", "zh-clear/narration-slow.wav", "zh-clear/fast-annotations.json", "zh-clear/slow-annotations.json", "zh-clear/background.png", "zh-clear/broll.mp4"],
+      "required_event": "商品登场",
+      "required_event_selection": {"id": "product-reveal", "start_char": 4, "end_char": 8},
+      "script_path": "zh-clear/script.txt",
+      "voices": [{"id": "fast", "audio": "zh-clear/narration-fast.wav", "annotations": "zh-clear/fast-annotations.json"}, {"id": "slow", "audio": "zh-clear/narration-slow.wav", "annotations": "zh-clear/slow-annotations.json"}],
+      "render": {"background": "zh-clear/background.png", "broll": "zh-clear/broll.mp4", "caption": "商品登场", "duration_frames": 900, "width": 1080, "height": 1920, "fps": 30},
+      "manual_boundary_count": 0
+    },
+    {
+      "case_id": "en-clear",
+      "language": "en",
+      "category": "clear_speech",
+      "required_assets": ["en-clear/reference.mp4", "en-clear/script.txt", "en-clear/narration-fast.wav", "en-clear/narration-slow.wav", "en-clear/fast-annotations.json", "en-clear/slow-annotations.json", "en-clear/background.png", "en-clear/broll.mp4"],
+      "required_event": "product reveal",
+      "required_event_selection": {"id": "product-reveal", "start_char": 6, "end_char": 20},
+      "script_path": "en-clear/script.txt",
+      "voices": [{"id": "fast", "audio": "en-clear/narration-fast.wav", "annotations": "en-clear/fast-annotations.json"}, {"id": "slow", "audio": "en-clear/narration-slow.wav", "annotations": "en-clear/slow-annotations.json"}],
+      "render": {"background": "en-clear/background.png", "broll": "en-clear/broll.mp4", "caption": "product reveal", "duration_frames": 900, "width": 1080, "height": 1920, "fps": 30},
+      "manual_boundary_count": 0
+    },
+    {
+      "case_id": "repeated-numbers-emoji",
+      "language": "zh",
+      "category": "repeated_words_numbers_emoji",
+      "required_assets": ["repeated-numbers-emoji/narration.wav", "repeated-numbers-emoji/alignment.json"],
+      "manual_boundary_count": 0
+    },
+    {
+      "case_id": "no-speech",
+      "language": "en",
+      "category": "no_speech",
+      "required_assets": ["no-speech/reference.mp4"],
+      "manual_boundary_count": 0
+    },
+    {
+      "case_id": "script-mismatch",
+      "language": "en",
+      "category": "script_mismatch",
+      "required_assets": ["script-mismatch/omission-narration.wav", "script-mismatch/insertion-narration.wav", "script-mismatch/alignment.json"],
+      "manual_boundary_count": 0
+    },
+    {
+      "case_id": "vfr-crop-speed",
+      "language": "en",
+      "category": "vfr_crop_speed",
+      "required_assets": ["vfr-crop-speed/source-vfr.mp4", "vfr-crop-speed/narration.wav", "vfr-crop-speed/alignment.json"],
+      "manual_boundary_count": 0
+    }
+  ]
+}

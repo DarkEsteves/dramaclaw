@@ -37,6 +37,8 @@ def _validate_source(payload: dict) -> None:
         "agent_creatable_node_types",
         "link_types",
         "generation_action_types",
+        "processing_action_types",
+        "processing_action_input_roles",
         "model_aliases_by_node_type",
         "recipe_envelope",
     }
@@ -48,6 +50,7 @@ def _validate_source(payload: dict) -> None:
         "agent_creatable_node_types",
         "link_types",
         "generation_action_types",
+        "processing_action_types",
     ):
         values = payload[key]
         if (
@@ -64,6 +67,16 @@ def _validate_source(payload: dict) -> None:
     aliases = payload["model_aliases_by_node_type"]
     if not isinstance(aliases, dict) or not set(aliases).issubset(creatable):
         raise ValueError("model alias node types must be agent-creatable")
+    processing_roles = payload["processing_action_input_roles"]
+    if not isinstance(processing_roles, dict) or set(processing_roles) != set(
+        payload["processing_action_types"]
+    ):
+        raise ValueError("processing action input roles must cover every processing action")
+    for action, roles in processing_roles.items():
+        if not isinstance(roles, list) or not roles or not all(
+            isinstance(role, str) and role for role in roles
+        ):
+            raise ValueError(f"processing action {action} must define non-empty input roles")
     recipe = payload["recipe_envelope"]
     if not isinstance(recipe, dict) or not recipe.get("required"):
         raise ValueError("recipe_envelope.required must be defined")
@@ -94,6 +107,8 @@ def _python(payload: dict, digest: str) -> str:
             f'AGENT_CREATABLE_NODE_TYPES = {literal(payload["agent_creatable_node_types"])}',
             f'WORKFLOW_LINK_TYPES = {literal(payload["link_types"])}',
             f'GENERATION_ACTION_TYPES = {literal(payload["generation_action_types"])}',
+            f'PROCESSING_ACTION_TYPES = {literal(payload["processing_action_types"])}',
+            f'PROCESSING_ACTION_INPUT_ROLES = {literal(payload["processing_action_input_roles"])}',
             f'MODEL_ALIASES_BY_NODE_TYPE = {literal(payload["model_aliases_by_node_type"])}',
             f'RECIPE_ENVELOPE_CONTRACT = {literal(payload["recipe_envelope"])}',
             "",
@@ -115,6 +130,10 @@ def _typescript(payload: dict, digest: str) -> str:
             "export const WORKFLOW_LINK_TYPES = WORKFLOW_STABLE_CONTRACT.link_types;",
             "export const WORKFLOW_GENERATION_ACTION_TYPES =",
             "  WORKFLOW_STABLE_CONTRACT.generation_action_types;",
+            "export const WORKFLOW_PROCESSING_ACTION_TYPES =",
+            "  WORKFLOW_STABLE_CONTRACT.processing_action_types;",
+            "export const WORKFLOW_PROCESSING_ACTION_INPUT_ROLES =",
+            "  WORKFLOW_STABLE_CONTRACT.processing_action_input_roles;",
             "",
         ]
     )
@@ -132,6 +151,16 @@ def _mcp(payload: dict, digest: str) -> str:
             "node_type": {"enum": payload["workflow_node_types"]},
             "link_type": {"enum": payload["link_types"]},
             "action": {"enum": payload["generation_action_types"]},
+            "processing_action": {"enum": payload["processing_action_types"]},
+            "processing_input_role": {
+                "enum": sorted(
+                    {
+                        role
+                        for roles in payload["processing_action_input_roles"].values()
+                        for role in roles
+                    }
+                )
+            },
         },
     }
     return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

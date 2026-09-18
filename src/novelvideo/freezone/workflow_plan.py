@@ -10,7 +10,8 @@ from novelvideo.freezone.workflow_schema import (
     NODE_TYPE_VALUES,
     WORKFLOW_PLAN_SCHEMA_VERSION,
 )
-from novelvideo.freezone.workflow_semantics import text_edge_error
+from novelvideo.freezone.workflow_contract_generated import PROCESSING_ACTION_INPUT_ROLES
+from novelvideo.freezone.workflow_semantics import DEFAULT_OUTPUT_ROLES, text_edge_error
 
 MAX_WORKFLOW_NODES = 200
 MAX_WORKFLOW_EDGES = 400
@@ -86,6 +87,68 @@ _PROMPT_STRATEGY_VALUES = {
 
 _USER_INPUT_STAGES = {"input", "resource", "asset"}
 _USER_INPUT_STEP_IDS = {"workflow_input", "user_input", "user_requirement"}
+
+
+def compile_process_descriptors(plan: dict[str, Any], *, node_revision: int) -> list[dict[str, Any]]:
+    """Bind declared process actions to unique, typed upstream node references.
+
+    This is deliberately a pure compilation step. It never resolves a media path
+    or artifact, so a later authorized API/task boundary can do that work without
+    accepting untrusted file locations from the workflow plan.
+    """
+    if not isinstance(node_revision, int) or node_revision < 0:
+        raise ValueError("node_revision must be a non-negative integer")
+    nodes = plan.get("nodes")
+    edges = plan.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise ValueError("process descriptor plan requires nodes and edges arrays")
+    node_by_id = {
+        node.get("id"): node
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    incoming: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        if isinstance(edge, dict) and isinstance(edge.get("target"), str):
+            incoming.setdefault(edge["target"], []).append(edge)
+
+    descriptors: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        action = data.get("processingAction")
+        if action not in PROCESSING_ACTION_INPUT_ROLES:
+            continue
+        node_id = node.get("id")
+        if not isinstance(node_id, str):
+            raise ValueError("process node requires an id")
+        bindings: dict[str, dict[str, str]] = {}
+        for edge in incoming.get(node_id, []):
+            source_id = edge.get("source")
+            source = node_by_id.get(source_id)
+            if not isinstance(source_id, str) or not isinstance(source, dict):
+                raise ValueError(f"process node {node_id} references an unknown source")
+            source_data = source.get("data") if isinstance(source.get("data"), dict) else {}
+            role = source_data.get("semanticOutputRole") or source_data.get("ioRole")
+            if not isinstance(role, str):
+                role = DEFAULT_OUTPUT_ROLES.get(str(source.get("node_type") or ""))
+            if role in PROCESSING_ACTION_INPUT_ROLES[action]:
+                if role in bindings:
+                    raise ValueError(f"process node {node_id} has multiple {role} inputs")
+                bindings[role] = {"node_id": source_id}
+        missing = [role for role in PROCESSING_ACTION_INPUT_ROLES[action] if role not in bindings]
+        if missing:
+            raise ValueError(f"process node {node_id} is missing typed inputs: {', '.join(missing)}")
+        descriptors.append(
+            {
+                "action": action,
+                "node_id": node_id,
+                "node_revision": node_revision,
+                "typed_inputs": bindings,
+            }
+        )
+    return descriptors
 
 
 def _node_type_value(node: dict[str, Any]) -> str:

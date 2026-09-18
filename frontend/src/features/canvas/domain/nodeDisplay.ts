@@ -34,6 +34,8 @@ export const DEFAULT_NODE_DISPLAY_NAME: Record<CanvasNodeType, string> = {
   [CANVAS_NODE_TYPES.storyboardGen]: '多版本宫格',
   [CANVAS_NODE_TYPES.video]: '视频',
   [CANVAS_NODE_TYPES.audio]: '音频',
+  [CANVAS_NODE_TYPES.transcript]: '转写',
+  [CANVAS_NODE_TYPES.semanticTimeline]: '语义时间线',
   [CANVAS_NODE_TYPES.videoStory]: '视频故事',
   [CANVAS_NODE_TYPES.videoCompose]: '视频合成',
   [CANVAS_NODE_TYPES.videoBreakdown]: '逐帧拉片',

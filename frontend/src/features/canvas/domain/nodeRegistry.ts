@@ -22,6 +22,8 @@ import {
   type StoryboardGenNodeData,
   type StyleNodeData,
   type TextAnnotationNodeData,
+  type TranscriptNodeData,
+  type SemanticTimelineNodeData,
   type ThreeDWorldNodeData,
   type UploadImageNodeData,
   type VideoComposeNodeData,
@@ -457,7 +459,7 @@ const videoStoryNodeDefinition: CanvasNodeDefinition<VideoStoryNodeData> = {
     promptInput: false,
   },
   connectivity: {
-    sourceHandle: false,
+    sourceHandle: true,
     targetHandle: true,
     connectMenu: {
       fromSource: false,
@@ -471,7 +473,36 @@ const videoStoryNodeDefinition: CanvasNodeDefinition<VideoStoryNodeData> = {
     rawResult: null,
     isAnalyzing: false,
     analysisError: null,
+    referenceBlueprintRef: null,
   }),
+};
+
+const transcriptNodeDefinition: CanvasNodeDefinition<TranscriptNodeData> = {
+  type: CANVAS_NODE_TYPES.transcript,
+  menuLabelKey: 'node.menu.transcript',
+  menuIcon: 'text',
+  visibleInMenu: false,
+  capabilities: { toolbar: false, promptInput: false },
+  connectivity: {
+    sourceHandle: true,
+    targetHandle: true,
+    connectMenu: { fromSource: false, fromTarget: false },
+  },
+  createDefaultData: () => ({
+    displayName: 'Transcript',
+    artifactRef: null,
+    words: [],
+    status: 'needs_review',
+    unresolved: [],
+  }),
+};
+
+const semanticTimelineNodeDefinition: CanvasNodeDefinition<SemanticTimelineNodeData> = {
+  type: CANVAS_NODE_TYPES.semanticTimeline,
+  menuLabelKey: 'node.menu.semanticTimeline', menuIcon: 'text', visibleInMenu: false,
+  capabilities: { toolbar: false, promptInput: false },
+  connectivity: { sourceHandle: true, targetHandle: true, connectMenu: { fromSource: false, fromTarget: false } },
+  createDefaultData: () => ({ displayName: 'Semantic timeline', artifactRef: null, events: [] }),
 };
 
 const videoComposeNodeDefinition: CanvasNodeDefinition<VideoComposeNodeData> = {
@@ -736,6 +767,8 @@ export const canvasNodeDefinitions: Record<CanvasNodeType, CanvasNodeDefinition>
   [CANVAS_NODE_TYPES.storyboardGen]: storyboardGenNodeDefinition,
   [CANVAS_NODE_TYPES.video]: videoNodeDefinition,
   [CANVAS_NODE_TYPES.audio]: audioNodeDefinition,
+  [CANVAS_NODE_TYPES.transcript]: transcriptNodeDefinition,
+  [CANVAS_NODE_TYPES.semanticTimeline]: semanticTimelineNodeDefinition,
   [CANVAS_NODE_TYPES.videoStory]: videoStoryNodeDefinition,
   [CANVAS_NODE_TYPES.videoCompose]: videoComposeNodeDefinition,
   [CANVAS_NODE_TYPES.videoBreakdown]: videoBreakdownNodeDefinition,

@@ -26,6 +26,8 @@ export const CANVAS_NODE_TYPES = {
   storyboardGen: 'storyboardGenNode',
   video: 'videoNode',
   audio: 'audioNode',
+  transcript: 'transcriptNode',
+  semanticTimeline: 'semanticTimelineNode',
   videoStory: 'videoStoryNode',
   videoCompose: 'videoComposeNode',
   videoBreakdown: 'videoBreakdownNode',
@@ -359,6 +361,12 @@ export interface VideoNodeData extends NodeDisplayData {
  * `submitFreezoneVideoCompose`，导出地址回写到 `resultVideoUrl`。
  */
 export interface VideoComposeNodeData extends NodeDisplayData {
+  /** Remix manifests use the versioned layered renderer, not the legacy clip editor. */
+  remixManifestRef?: { artifactId: string; revision: number } | null;
+  remixNodeRevision?: number;
+  remixEvents?: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>;
+  remixSelections?: Array<{ id: string; label: string; start: number; end: number; invalidReason?: string }>;
+  unresolvedRequiredEvents?: string[];
   /** 最近一次合成导出的视频 url。 */
   resultVideoUrl?: string | null;
   /** 结果视频的封面（暂未生成时为空）。 */
@@ -769,6 +777,30 @@ export interface VideoStoryNodeData extends NodeDisplayData {
   /** 解析开始时间戳,用于 loading 遮罩的进度百分比模拟。 */
   analysisStartedAt?: number | null;
   analysisError?: string | null;
+  /** Immutable reference-blueprint artifact consumed by downstream remix nodes. */
+  referenceBlueprintRef?: { artifactId: string; revision: number } | null;
+  [key: string]: unknown;
+}
+
+export interface TranscriptWord {
+  text: string;
+  startUs: number;
+  endUs: number;
+  confidence?: number | null;
+}
+
+export interface TranscriptNodeData extends NodeDisplayData {
+  /** Immutable transcript artifact, retained when the canvas is saved and reloaded. */
+  artifactRef?: { artifactId: string; revision: number } | null;
+  words: TranscriptWord[];
+  status: 'completed' | 'needs_review' | 'failed';
+  unresolved?: string[];
+  [key: string]: unknown;
+}
+
+export interface SemanticTimelineNodeData extends NodeDisplayData {
+  artifactRef?: { artifactId: string; revision: number } | null;
+  events: Array<{ selectionId: string; label: string; startFrame?: number; endFrame?: number; invalidReason?: string | null }>;
   [key: string]: unknown;
 }
 
@@ -993,6 +1025,8 @@ export type CanvasNodeData =
   | StoryboardGenNodeData
   | VideoNodeData
   | AudioNodeData
+  | TranscriptNodeData
+  | SemanticTimelineNodeData
   | VideoStoryNodeData
   | VideoComposeNodeData
   | VideoBreakdownNodeData

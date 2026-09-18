@@ -41,6 +41,9 @@ LINK_OBJECT_TYPE_BY_NODE_TYPE = {
     "videoNode": "VideoNode",
     "audioNode": "AudioNode",
     "videoComposeNode": "VideoNode",
+    "videoStoryNode": "VideoNode",
+    "transcriptNode": "TextNode",
+    "semanticTimelineNode": "VideoNode",
     "htmlArtifactNode": "HtmlNode",
 }
 

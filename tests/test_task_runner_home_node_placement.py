@@ -96,7 +96,7 @@ def test_only_audited_self_contained_builtin_runners_are_placement_free():
 
     assert flipped == PLACEMENT_FREE_TASKS
     assert set(PROJECTION_REQUIREMENTS) <= PLACEMENT_FREE_TASKS
-    assert set(laned) == {"freezone_image_vectorize", "freezone_image_animate_gif"}
+    assert set(laned) == {"freezone_image_vectorize", "freezone_image_animate_gif", "remix_render"}
     assert all(project_task_lane(task) == "ffmpeg" for task in laned)
 
 

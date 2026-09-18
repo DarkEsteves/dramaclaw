@@ -16,12 +16,15 @@ from novelvideo.freezone.workflow_contract_generated import (
     AGENT_CREATABLE_NODE_TYPES,
     GENERATION_ACTION_TYPES,
     MODEL_ALIASES_BY_NODE_TYPE,
+    PROCESSING_ACTION_INPUT_ROLES,
+    PROCESSING_ACTION_TYPES,
     RECIPE_ENVELOPE_CONTRACT,
     WORKFLOW_LINK_TYPES,
     WORKFLOW_NODE_TYPES,
 )
 from novelvideo.freezone.workflow_runs import GENERATION_ACTIONS
 from novelvideo.freezone.workflow_schema import LINK_TYPE_VALUES, NODE_TYPE_VALUES
+from novelvideo.freezone.workflow_semantics import ACCEPTED_INPUT_ROLES, DEFAULT_OUTPUT_ROLES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +33,32 @@ def test_stable_contract_drives_backend_workflow_enums() -> None:
     assert NODE_TYPE_VALUES == WORKFLOW_NODE_TYPES
     assert LINK_TYPE_VALUES == WORKFLOW_LINK_TYPES
     assert GENERATION_ACTIONS == set(GENERATION_ACTION_TYPES)
+
+
+def test_stable_contract_registers_remix_nodes_and_typed_processing_actions() -> None:
+    assert {"videoStoryNode", "transcriptNode", "semanticTimelineNode"}.issubset(
+        WORKFLOW_NODE_TYPES
+    )
+    assert PROCESSING_ACTION_TYPES == [
+        "transcribe_media",
+        "align_script",
+        "compile_semantic_timeline",
+    ]
+    assert PROCESSING_ACTION_INPUT_ROLES == {
+        "transcribe_media": ["reference_media"],
+        "align_script": ["narration", "script"],
+        "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
+    }
+    assert DEFAULT_OUTPUT_ROLES["videoStoryNode"] == "blueprint"
+    assert DEFAULT_OUTPUT_ROLES["transcriptNode"] == "aligned_words"
+    assert DEFAULT_OUTPUT_ROLES["semanticTimelineNode"] == "composition"
+    assert ACCEPTED_INPUT_ROLES["transcriptNode"] == {"reference_media", "narration"}
+    assert ACCEPTED_INPUT_ROLES["semanticTimelineNode"] == {
+        "narration",
+        "script",
+        "aligned_words",
+        "blueprint",
+    }
 
 
 def test_stable_contract_recipe_fields_match_backend_validator() -> None:

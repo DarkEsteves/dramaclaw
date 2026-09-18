@@ -9,6 +9,13 @@ IO_ROLES = {
     "image_output",
     "audio_output",
     "video_output",
+    "reference_media",
+    "narration",
+    "script",
+    "aligned_words",
+    "blueprint",
+    "visual_asset",
+    "composition",
 }
 DEFAULT_OUTPUT_ROLES = {
     "scriptNode": "planning_text",
@@ -17,6 +24,9 @@ DEFAULT_OUTPUT_ROLES = {
     "videoNode": "video_output",
     "audioNode": "audio_output",
     "videoComposeNode": "video_output",
+    "videoStoryNode": "blueprint",
+    "transcriptNode": "aligned_words",
+    "semanticTimelineNode": "composition",
 }
 ACCEPTED_INPUT_ROLES = {
     "textAnnotationNode": {"planning_text", "context_text"},
@@ -32,6 +42,9 @@ ACCEPTED_INPUT_ROLES = {
         "audio_output",
     },
     "videoComposeNode": {"video_output", "audio_output"},
+    "videoStoryNode": {"reference_media"},
+    "transcriptNode": {"reference_media", "narration"},
+    "semanticTimelineNode": {"narration", "script", "aligned_words", "blueprint"},
 }
 
 

@@ -71,6 +71,43 @@ class RecipeRuntimeError(ValueError):
     """Raised when a workflow node cannot safely compile its Recipe."""
 
 
+def validate_structured_recipe_output(recipe: dict[str, Any], content: str) -> dict[str, Any]:
+    """Decode and validate a v2 final deliverable before any artifact publish."""
+    if recipe.get("schema_version") != "dramaclaw.recipe.v2":
+        raise RecipeRuntimeError("recipe does not declare a structured output contract")
+    try:
+        value = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RecipeRuntimeError("structured recipe output must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise RecipeRuntimeError("structured recipe output must be an object")
+    try:
+        from jsonschema import Draft202012Validator
+
+        Draft202012Validator(recipe["output_schema"]).validate(value)
+    except Exception as exc:
+        raise RecipeRuntimeError("structured recipe output does not match output_schema") from exc
+    return value
+
+
+def publish_structured_recipe_output(
+    *, recipe: dict[str, Any], content: str, project_dir, project_id: str,
+    created_by: str, upstream_refs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate a v2 final value before publishing its typed remix artifact."""
+    payload = validate_structured_recipe_output(recipe, content)
+    artifact_schema = {"reference-blueprint": "reference_blueprint.v1", "reference-remix-script": "remix_script.v1", "reference-broll-plan": "remix_script.v1"}.get(
+        str(recipe.get("id") or "")
+    )
+    if artifact_schema is None:
+        raise RecipeRuntimeError("recipe has no structured artifact delivery mapping")
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    return RemixArtifactStore(
+        project_dir, project_id, created_by=created_by
+    ).create(schema=artifact_schema, payload=payload, upstream_refs=upstream_refs)
+
+
 @dataclass(frozen=True)
 class RecipeCompileResult:
     prompt: str

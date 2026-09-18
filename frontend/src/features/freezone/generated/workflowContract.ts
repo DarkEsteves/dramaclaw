@@ -1,5 +1,5 @@
 // Generated from schemas/workflow/v1/stable-contract.json; do not edit.
-export const WORKFLOW_CONTRACT_SOURCE_SHA256 = "a29aa8bc8b49f30d6b85fce38ccd9cb29ac223d7c1f10c2ebc17fc32e421dde0";
+export const WORKFLOW_CONTRACT_SOURCE_SHA256 = "f000f4c282b6f23faad87228eb63138ee448487efe9af24db0efaaf5c0303728";
 export const WORKFLOW_STABLE_CONTRACT = {
   "schema_version": "freezone_workflow_contract.v1",
   "workflow_plan_schema_version": "freezone_workflow_plan.v1",
@@ -12,7 +12,10 @@ export const WORKFLOW_STABLE_CONTRACT = {
     "videoNode",
     "audioNode",
     "htmlArtifactNode",
-    "videoComposeNode"
+    "videoComposeNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode"
   ],
   "agent_creatable_node_types": [
     "uploadNode",
@@ -27,7 +30,10 @@ export const WORKFLOW_STABLE_CONTRACT = {
     "threeDWorldNode",
     "previzNode",
     "skillNode",
-    "htmlArtifactNode"
+    "htmlArtifactNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode"
   ],
   "link_types": [
     "context_for",
@@ -47,6 +53,26 @@ export const WORKFLOW_STABLE_CONTRACT = {
     "generate_3gs_world",
     "auto_compose_video"
   ],
+  "processing_action_types": [
+    "transcribe_media",
+    "align_script",
+    "compile_semantic_timeline"
+  ],
+  "processing_action_input_roles": {
+    "transcribe_media": [
+      "reference_media"
+    ],
+    "align_script": [
+      "narration",
+      "script"
+    ],
+    "compile_semantic_timeline": [
+      "narration",
+      "script",
+      "aligned_words",
+      "blueprint"
+    ]
+  },
   "model_aliases_by_node_type": {
     "imageGenNode": {
       "nano-banana-2": "newapi_nanobanana2",
@@ -101,3 +127,7 @@ export const WORKFLOW_NODE_TYPES = WORKFLOW_STABLE_CONTRACT.workflow_node_types;
 export const WORKFLOW_LINK_TYPES = WORKFLOW_STABLE_CONTRACT.link_types;
 export const WORKFLOW_GENERATION_ACTION_TYPES =
   WORKFLOW_STABLE_CONTRACT.generation_action_types;
+export const WORKFLOW_PROCESSING_ACTION_TYPES =
+  WORKFLOW_STABLE_CONTRACT.processing_action_types;
+export const WORKFLOW_PROCESSING_ACTION_INPUT_ROLES =
+  WORKFLOW_STABLE_CONTRACT.processing_action_input_roles;
