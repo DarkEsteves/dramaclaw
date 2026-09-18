@@ -484,13 +484,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           media={data.remixMedia}
           sourceUrl={data.audioUrl}
           role={data.remixRole ?? 'narration'}
-          onChange={({ media, role }) => updateNodeData(id, { remixMedia: media, remixRole: role as AudioNodeData['remixRole'] })}
-          onCreateTranscript={() => {
-            const store = useCanvasStore.getState();
-            const child = store.addNode(CANVAS_NODE_TYPES.transcript, store.findNodePosition(id, 480, 220));
-            store.addEdge(id, child);
-            store.setSelectedNode(child);
-          }}
+          onChange={({ media, role }) => updateNodeData(id, { audioUrl: media.url, remixMedia: media, remixRole: role as AudioNodeData['remixRole'] })}
         />
       </div>}
 

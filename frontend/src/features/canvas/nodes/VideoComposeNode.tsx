@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Handle,
   Position,
@@ -88,6 +88,7 @@ export const VideoComposeNode = memo(
     const [remixError, setRemixError] = useState<string | null>(null);
     const [isRemixSubmitting, setRemixSubmitting] = useState(false);
     const [isRemixPreparing, setRemixPreparing] = useState(false);
+    const prepareClaimRef = useRef(false);
     const [recoveredRemixOperationId, setRecoveredRemixOperationId] = useState<string | null>(null);
 
     const seedNodeIds = useMemo(
@@ -166,7 +167,8 @@ export const VideoComposeNode = memo(
     }, [project, canvasId, id, data.remixOperationId, recoveredRemixOperationId, data.remixWorkbenchDraft, data.resultVideoUrl]);
 
     const handlePrepareRemix = useCallback(async () => {
-      if (!project || isRemixPreparing) return;
+      if (!project || prepareClaimRef.current) return;
+      prepareClaimRef.current = true;
       setRemixPreparing(true);
       setRemixError(null);
       try {
@@ -178,12 +180,19 @@ export const VideoComposeNode = memo(
       } catch (caught) {
         setRemixError(caught instanceof Error ? caught.message : String(caught));
       } finally {
+        prepareClaimRef.current = false;
         setRemixPreparing(false);
       }
-    }, [project, isRemixPreparing, id, updateNodeData, data.remixNodeRevision]);
+    }, [project, id, updateNodeData, data.remixNodeRevision]);
     useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
       if (nodeId === id && action === 'prepare_compose') void handlePrepareRemix();
     }), [id, handlePrepareRemix]);
+
+    useEffect(() => {
+      if (!data.autoPrepareRequested || !hasSemanticTimeline) return;
+      updateNodeData(id, { autoPrepareRequested: false });
+      void handlePrepareRemix();
+    }, [data.autoPrepareRequested, hasSemanticTimeline, id, handlePrepareRemix, updateNodeData]);
 
     useEffect(() => {
       updateNodeInternals(id);

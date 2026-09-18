@@ -22,6 +22,7 @@ vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 
 vi.mock('@/api/remix', () => ({
   submitRemixProcessAction: vi.fn(async () => ({ operation_id: 'operation-1' })),
   fetchRemixOperation: vi.fn(async () => ({ operation_id: 'operation-1', status: 'needs_confirmation', output_refs: [{ artifact_id: 'words-1', revision: 1 }] })),
+  fetchRemixTaskStatus: vi.fn(async () => null),
   fetchRemixArtifact: vi.fn(async () => ({ id: 'words-1', revision: 1, schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 3 }], payload: {
     schema: 'word_timeline.v1', media_hash: 'hash', language: 'zh', status: 'completed', transcript: '你好',
     words: [{ text: '你', start_char: 0, end_char: 1, start_us: 0, end_us: 500_000, confidence: 0.4 }, { text: '好', start_char: 1, end_char: 2, start_us: 500_000, end_us: 1_000_000, confidence: 0.9 }],
@@ -30,7 +31,7 @@ vi.mock('@/api/remix', () => ({
 vi.mock('./transcriptArtifactApi', () => ({ reviseTranscriptArtifact: vi.fn(async () => ({ id: 'words-1', revision: 2 })) }));
 
 import { TranscriptNode } from '../nodes/TranscriptNode';
-import { submitRemixProcessAction } from '@/api/remix';
+import { fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction } from '@/api/remix';
 import { reviseTranscriptArtifact } from './transcriptArtifactApi';
 
 const flowProps = { type: 'transcriptNode', zIndex: 0, draggable: true, dragging: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
@@ -42,6 +43,22 @@ describe('TranscriptNode', () => {
     state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null };
     state.updateNodeData.mockClear();
     vi.clearAllMocks();
+  });
+
+  it('starts transcription automatically when created by its source node', async () => {
+    state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, autoStartMode: 'transcribe' };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
+    expect(state.nodes[1].data.autoStartMode).toBeNull();
+  });
+
+  it('releases a failed worker task so transcription can be retried', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'operation-1', status: 'pending', output_refs: [], task_type: 'remix_transcribe_media', task_scope: 'scope-1' } as never);
+    vi.mocked(fetchRemixTaskStatus).mockResolvedValueOnce({ status: 'failed', error: 'WhisperX worker failed' });
+    state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1' };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(state.nodes[1].data).toMatchObject({ operationId: null, status: 'failed' }));
+    expect(screen.getByText('WhisperX worker failed')).toBeTruthy();
   });
 
   it('transcribes the connected audio and persists a word timeline reference', async () => {

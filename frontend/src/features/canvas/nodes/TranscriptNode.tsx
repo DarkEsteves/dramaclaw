@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
 import { FileText } from 'lucide-react';
-import { fetchRemixArtifact, fetchRemixOperation, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
+import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { TranscriptNodeData } from '@/features/canvas/domain/canvasNodes';
 import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, timelineWords, transcriptSrt, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArtifactApi';
@@ -44,6 +44,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mediaRef = useRef<HTMLMediaElement>(null);
+  const autoStartConsumed = useRef(false);
   useEffect(() => updateNodeInternals(id), [id, updateNodeInternals]);
   useEffect(() => setEdited(data.words.map((word) => word.text)), [data.words]);
 
@@ -73,6 +74,13 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
   };
+  useEffect(() => {
+    if (data.autoStartMode !== 'transcribe') { autoStartConsumed.current = false; return; }
+    if (!source || autoStartConsumed.current) return;
+    autoStartConsumed.current = true;
+    updateNodeData(id, { autoStartMode: null });
+    void start('transcribe');
+  }, [data.autoStartMode, id, source, start, updateNodeData]);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId !== id) return;
     if (action === 'transcribe') void start('transcribe');
@@ -90,6 +98,10 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         const operation = await fetchRemixOperation(project, operationId);
         if (cancelled) return;
         if (operation.status === 'failed' || operation.status === 'cancelled') throw new Error('语音识别失败，请重试');
+        if (operation.status !== 'needs_confirmation' && operation.status !== 'completed' && operation.task_type && operation.task_scope) {
+          const taskState = await fetchRemixTaskStatus(project, operation.task_type, operation.task_scope);
+          if (taskState?.status === 'failed') throw new Error(taskState.error || '语音识别失败，请重试');
+        }
         if (operation.status !== 'needs_confirmation' && operation.status !== 'completed') return;
         const output = operation.output_refs.find((item) => item.artifact_id && item.revision);
         if (!output?.artifact_id || !output.revision) throw new Error('语音识别未返回转写产物');

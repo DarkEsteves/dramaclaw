@@ -3,7 +3,6 @@ import { attachRemixMedia, uploadRemixMedia } from '@/api/remix';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { projectMediaPathFromUrl } from './remixMediaPath';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
-import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 
 type VideoRole = 'reference' | 'visual' | 'speech_clock';
 type AudioRole = 'narration' | 'bgm' | 'sfx';
@@ -15,8 +14,6 @@ interface Props {
   sourceUrl?: string | null;
   role: VideoRole | AudioRole;
   onChange: (value: { media: UploadedRemixMedia; role: VideoRole | AudioRole }) => void;
-  onCreateTranscript?: () => void;
-  onCreateStory?: () => void;
 }
 
 const videoRoles: Array<{ value: VideoRole; label: string }> = [
@@ -30,7 +27,7 @@ const audioRoles: Array<{ value: AudioRole; label: string }> = [
   { value: 'sfx', label: '音效' },
 ];
 
-export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChange, onCreateTranscript, onCreateStory }: Props) {
+export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachingPath = useRef<string | null>(null);
@@ -81,10 +78,6 @@ export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChang
       </select>
     </label>
     {media && <div className="mt-2 truncate text-text-muted" title={media.media_path}>{media.media_path.split('/').pop()} · {(media.duration_us / 1_000_000).toFixed(1)} 秒{media.has_audio ? ' · 有声' : ''}</div>}
-    {media && <div className="mt-3 flex flex-wrap gap-2 border-t border-white/10 pt-3">
-      {onCreateTranscript && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateTranscript}>创建转写节点</button>}
-      {onCreateStory && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onCreateStory}>创建视频故事节点</button>}
-    </div>}
     {busy && <div role="status">正在读取素材…</div>}
     {error && <div role="alert" className="text-destructive">{error}</div>}
   </div>;

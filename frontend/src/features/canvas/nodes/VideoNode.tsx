@@ -4396,19 +4396,7 @@ export const VideoNode = memo(
               media={data.remixMedia}
               sourceUrl={data.videoUrl}
               role={data.remixRole ?? 'reference'}
-              onChange={({ media, role }) => updateNodeData(id, { remixMedia: media, remixRole: role as VideoNodeData['remixRole'] })}
-              onCreateTranscript={() => {
-                const store = useCanvasStore.getState();
-                const child = store.addNode(CANVAS_NODE_TYPES.transcript, store.findNodePosition(id, 480, 200));
-                store.addEdge(id, child);
-                store.setSelectedNode(child);
-              }}
-              onCreateStory={() => {
-                const store = useCanvasStore.getState();
-                const child = store.addNode(CANVAS_NODE_TYPES.videoStory, store.findNodePosition(id, 760, 360));
-                store.addEdge(id, child);
-                store.setSelectedNode(child);
-              }}
+              onChange={({ media, role }) => updateNodeData(id, { videoUrl: media.url, remixMedia: media, remixRole: role as VideoNodeData['remixRole'] })}
             />
           </div>
         )}

@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,5 +64,14 @@ describe('SemanticTimelineNode', () => {
     fireEvent.click(screen.getByRole('button', { name: '继续检查' }));
     await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } })));
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('claims automatic compilation only once under StrictMode', async () => {
+    let release!: (value: Awaited<ReturnType<typeof submitRemixProcessAction>>) => void;
+    vi.mocked(submitRemixProcessAction).mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    render(<StrictMode><SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], autoCompileRequested: true }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} /></StrictMode>);
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalled());
+    expect(submitRemixProcessAction).toHaveBeenCalledTimes(1);
+    release({ operation_id: 'op-1', task_key: 'key', task_type: 'remix_compile_semantic_timeline', task_id: 'task-1' });
   });
 });

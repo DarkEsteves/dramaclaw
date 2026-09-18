@@ -11,6 +11,8 @@ import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeCon
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
+import { createComposeFromTimeline } from '@/features/canvas/remix/spawnRemixDownstream';
+import { toast } from 'sonner';
 
 type TimelineData = SemanticTimelineNodeData & {
   eventOverrides?: Record<string, TimelineEventOverride>;
@@ -18,6 +20,7 @@ type TimelineData = SemanticTimelineNodeData & {
   compileError?: string | null;
   compileOperationId?: string | null;
   nodeRevision?: number;
+  autoCompileRequested?: boolean;
 };
 
 function asRef(value: unknown): RemixArtifactRef | null {
@@ -42,6 +45,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const currentOperationRef = useRef(data.compileOperationId ?? null);
   const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? 0 });
   const watchingRef = useRef<string | null>(null);
+  const compileClaimRef = useRef(false);
   const mountedRef = useRef(true);
   currentOperationRef.current = data.compileOperationId ?? currentOperationRef.current;
   currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? currentInputsRef.current.revision };
@@ -127,7 +131,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   }, [data.compileOperationId, project]);
 
   const compile = async () => {
-    if (!project || busy) return;
+    if (!project || compileClaimRef.current) return;
     if (currentOperationRef.current) { void watchOperation(currentOperationRef.current); return; }
     const exactScriptRef = asRef(scriptRef);
     const exactWordRef = asRef(wordRef);
@@ -135,6 +139,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       setError('请先连接脚本节点和已对齐语音的转写节点。');
       return;
     }
+    compileClaimRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -157,12 +162,23 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       setError(message);
       updateNodeData(id, { compileError: message });
     } finally {
+      compileClaimRef.current = false;
       if (!watchingRef.current && mountedRef.current) setBusy(false);
     }
   };
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'compile') void compile();
+    if (nodeId === id && action === 'create_compose') {
+      try { createComposeFromTimeline(id); }
+      catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建视频合成节点'); }
+    }
   }), [id, compile]);
+
+  useEffect(() => {
+    if (!data.autoCompileRequested || !asRef(scriptRef) || !asRef(wordRef)) return;
+    updateNodeData(id, { autoCompileRequested: false });
+    void compile();
+  }, [data.autoCompileRequested, scriptRef, wordRef, id]);
 
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
     <Handle type="target" position={Position.Left} id="timing" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />

@@ -84,6 +84,7 @@ import { readUrl } from '@/lib/url-params';
 import type { RemixArtifactRef } from '@/api/remix';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
+import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
@@ -401,6 +402,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const [isRemixScriptOpen, setRemixScriptOpen] = useState(false);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'edit_script') setRemixScriptOpen(true);
+    if (nodeId === id && action === 'create_timeline') {
+      try { createTimelineFromScript(id); }
+      catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建语义时间轴'); }
+    }
   }), [id]);
   const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
