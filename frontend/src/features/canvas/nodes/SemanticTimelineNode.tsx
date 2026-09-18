@@ -1,7 +1,7 @@
 import { memo, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { ScrollText } from 'lucide-react';
-import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
+import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import { useUpstreamNodes } from '@/features/canvas/application/useUpstreamGraph';
 import type { SemanticTimelineNodeData } from '@/features/canvas/domain/canvasNodes';
 import { buildTimelineEditMap, buildTimelineOverrides, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
@@ -79,7 +79,6 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           const artifactRef = { artifactId: ref.artifact_id, revision: ref.revision };
           const timing = await fetchRemixArtifact(project, artifactRef);
           if (timing.schema !== 'performance_timing.v1') throw new Error('时间轴产物格式不正确。');
-          if (operation.status === 'needs_confirmation') await confirmRemixOperation(project, task.operation_id, readUrl().canvas ?? 'default', id);
           updateNodeData(id, { artifactRef, events: readTimingEvents(timing.payload), compileOperationId: null, compileError: null });
           return;
         }
