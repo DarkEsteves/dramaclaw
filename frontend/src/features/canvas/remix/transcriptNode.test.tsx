@@ -68,4 +68,13 @@ describe('TranscriptNode', () => {
     fireEvent.click(screen.getByRole('button', { name: '按脚本对齐' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'align_script', mediaPath: 'narration.wav', scriptRef: { artifactId: 'script-1', revision: 2 } })));
   });
+
+  it('invalidates old alignment when the connected script revision changes', async () => {
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], artifactRef: { artifactId: 'words-1', revision: 1 }, status: 'completed', alignedScriptRef: { artifactId: 'script-1', revision: 2 } };
+    render(<TranscriptNode id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
+    expect(state.nodes[1].data.status).toBe('needs_review');
+  });
 });

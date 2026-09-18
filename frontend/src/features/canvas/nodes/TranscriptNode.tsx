@@ -47,6 +47,12 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const project = readUrl().project;
   const artifactRef = data.artifactRef as RemixArtifactRef | null | undefined;
   const canSave = Boolean(artifactRef && edited.some((text, index) => text !== data.words[index]?.text));
+  useEffect(() => {
+    const aligned = data.alignedScriptRef as RemixArtifactRef | null | undefined;
+    if (artifactRef && aligned && (!scriptRef || aligned.artifactId !== scriptRef.artifactId || aligned.revision !== scriptRef.revision)) {
+      updateNodeData(id, { artifactRef: null, status: 'needs_review', alignmentStale: true, unresolved: ['脚本已修改，请重新对齐'] });
+    }
+  }, [artifactRef, data.alignedScriptRef, id, scriptRef, updateNodeData]);
 
   const start = async (mode: 'transcribe' | 'align') => {
     if (busy || operationId) return;
@@ -59,7 +65,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       const task = await submitRemixProcessAction(project, mode === 'align'
         ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
         : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
-      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [] });
+      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, words: [], pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
       setOperationId(task.operation_id);
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
@@ -89,7 +95,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         const current = sourceMediaForTranscript(id, store.nodes, store.edges);
         const saved = store.nodes.find((node) => node.id === id)?.data as TranscriptNodeData | undefined;
         if (!current || current.path !== saved?.sourceMediaPath) throw new Error('上游音频已变化，请重新转写');
-        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, status: 'completed', unresolved: [], operationId: null });
+        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
         setOperationId(null);
       } catch (caught) {
         if (!cancelled) {
@@ -145,6 +151,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         </div>
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
+        {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">脚本已修改，请重新对齐</p>}
         {data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
           <button type="button" className="w-[145px] shrink-0 text-left font-mono text-[11px] text-text-muted" onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = word.startUs / 1_000_000; }}>{stamp(word.startUs)} – {stamp(word.endUs)}</button>
           <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => setEdited((current) => current.map((text, position) => position === index ? event.target.value : text))} className="min-w-0 flex-1 rounded border border-border-dark bg-surface-field px-1 py-1" />

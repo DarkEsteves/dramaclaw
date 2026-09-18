@@ -27,6 +27,9 @@ import { NodeGenerationOverlay } from '@/features/canvas/ui/NodeGenerationOverla
 import { EditableTableCell } from '@/features/canvas/ui/EditableTableCell';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
+import { ReferenceBlueprintPanel } from '@/features/canvas/remix/blueprintPanel';
+import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
 
 type VideoStoryNodeProps = NodeProps & {
   id: string;
@@ -211,7 +214,16 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const updateNodeInternals = useUpdateNodeInternals();
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
+  const canvasNodes = useCanvasStore((state) => state.nodes);
+  const canvasEdges = useCanvasStore((state) => state.edges);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const blueprintSource = useMemo(() => connectedBlueprintSources(id, canvasNodes, canvasEdges), [id, canvasNodes, canvasEdges]);
+  const patchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
+  const reanalyzeBlueprint = useCallback(() => {
+    if (!blueprintSource?.videoUrl) return;
+    updateNodeData(id, { sourceVideoUrl: blueprintSource.videoUrl, referenceBlueprintRef: null });
+    reanalyzeVideoStory(id, { durationSec: blueprintSource.durationUs / 1_000_000 });
+  }, [blueprintSource, id, updateNodeData]);
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoStory, data, t),
@@ -253,7 +265,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
       const nextRows = rows.map((row, index) =>
         index === rowIndex ? { ...row, [colKey]: nextValue } : row,
       );
-      updateNodeData(id, { rows: nextRows });
+      updateNodeData(id, { rows: nextRows, referenceBlueprintRef: null });
     },
     [id, rows, updateNodeData],
   );
@@ -325,6 +337,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}
           </div>
         )}
+        <ReferenceBlueprintPanel nodeId={id} source={blueprintSource} rows={rows} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} />
         <div className="flex-1 overflow-hidden p-2">
           {isAnalyzing ? (
             <div className="h-full w-full" />

@@ -11,7 +11,7 @@ type SourceNode = { id: string; data: Record<string, unknown> };
 type SourceEdge = { source: string; target: string };
 
 /** Only project-local remix media can be sent to the transcription worker. */
-export function sourceMediaForTranscript(nodeId: string, nodes: SourceNode[], edges: SourceEdge[]): TranscriptSource | null {
+export function sourceMediaForTranscript(nodeId: string, nodes: SourceNode[] = [], edges: SourceEdge[] = []): TranscriptSource | null {
   const sources = new Set(edges.filter((edge) => edge.target === nodeId).map((edge) => edge.source));
   const connected = nodes.filter((node) => sources.has(node.id)).map((node) => node.data.remixMedia).filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object'));
   const media = connected.find((item) => item.media_kind === 'audio' && typeof item.media_path === 'string')
@@ -20,7 +20,7 @@ export function sourceMediaForTranscript(nodeId: string, nodes: SourceNode[], ed
   return { path: media.media_path as string, url: typeof media.url === 'string' ? media.url : undefined, kind: media.media_kind as 'audio' | 'video' };
 }
 
-export function sourceScriptForTranscript(nodeId: string, nodes: SourceNode[], edges: SourceEdge[]): RemixArtifactRef | null {
+export function sourceScriptForTranscript(nodeId: string, nodes: SourceNode[] = [], edges: SourceEdge[] = []): RemixArtifactRef | null {
   const sources = new Set(edges.filter((edge) => edge.target === nodeId).map((edge) => edge.source));
   for (const node of nodes) {
     if (!sources.has(node.id)) continue;
