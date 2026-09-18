@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Annotated, Literal
 import hashlib
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +14,7 @@ from novelvideo.api.auth import get_api_user
 from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
+from novelvideo.freezone.remix.alignment import speech_engine_ready
 from novelvideo.project_context import require_project_home_node, resolve_project_context
 from novelvideo.ports import get_task_backend
 from novelvideo.task_identity import project_task_state_key
@@ -39,6 +41,13 @@ class RenderArtifactBody(BaseModel):
     revision: int = Field(ge=1, strict=True)
     idempotency_key: str = Field(min_length=1, max_length=256)
     node_revision: int = Field(ge=1, strict=True)
+    canvas_id: str = ""
+    node_id: str = ""
+
+
+class ConfirmOperationBody(BaseModel):
+    canvas_id: str = Field(min_length=1, max_length=64)
+    node_id: str = Field(min_length=1, max_length=128)
 
 
 class ProcessActionBody(BaseModel):
@@ -56,8 +65,7 @@ _PROCESS_TASK_TYPES = {
 
 
 def _speech_engine_ready() -> bool:
-    # No production ASR adapter is selected until the real-media P0 gate passes.
-    return False
+    return speech_engine_ready()
 
 
 async def _store(project: str, user: dict, role: str) -> RemixArtifactStore:
@@ -85,6 +93,34 @@ async def _call(fn, *args, **kwargs):
 
 def _data(value: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": value}
+
+
+def _operation_view(record: dict[str, Any]) -> dict[str, Any]:
+    parameters = record.get("normalized_parameters") or {}
+    if record.get("producer_version") == "remix-render.v1":
+        task_type = "remix_render"
+        scope = parameters.get("job_id")
+    elif record.get("producer_version") == "remix-process.v1":
+        task_type = _PROCESS_TASK_TYPES.get(parameters.get("action"))
+        scope = record["operation_id"]
+    else:
+        task_type = None
+        scope = None
+    project_id = record["project_id"]
+    output_urls = []
+    for ref in record.get("output_refs") or []:
+        path = ref.get("project_path") if isinstance(ref, dict) else None
+        if isinstance(path, str) and path:
+            base = f"/api/v1/projects/{quote(project_id, safe='')}"
+            encoded = quote(path, safe="/")
+            output_urls.append({"media_url": f"{base}/media/{encoded}", "download_url": f"{base}/files/{encoded}"})
+    return {
+        **record,
+        "task_type": task_type,
+        "task_scope": scope,
+        "task_key": project_task_state_key(task_type, project_id, 0, scope=scope) if task_type and scope else None,
+        "output_urls": output_urls,
+    }
 
 
 def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -159,7 +195,7 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
     task_type = _PROCESS_TASK_TYPES[body.action]
     task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=operation["operation_id"])
     if operation["task_id"] or operation["status"] == "needs_confirmation":
-        return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_status": operation["status"], "output_refs": operation["output_refs"]})
+        return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
     queued = await get_task_backend().enqueue_project_task(
         ctx,
         product_surface="freezone",
@@ -170,7 +206,7 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
         payload={**body.payload, **({"media_sha256": parameters["media_sha256"]} if "media_sha256" in parameters else {}), "operation_id": operation["operation_id"], "node_revision": body.node_revision},
     )
     await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
-    return _data({"action": body.action, "task_type": task_type, "task_id": queued.task_state.task_id, "task_key": task_key, "operation_status": "pending"})
+    return _data({"action": body.action, "task_type": task_type, "task_id": queued.task_state.task_id, "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": "pending"})
 
 
 @router.post("/artifacts")
@@ -237,6 +273,8 @@ async def render_artifact(
             producer_version="remix-render.v1",
             normalized_parameters={"job_id": job_id},
             node_revision=body.node_revision,
+            canvas_id=body.canvas_id,
+            node_id=body.node_id,
         )
     except ValueError as exc:
         if "Idempotency key" in str(exc):
@@ -251,6 +289,7 @@ async def render_artifact(
             "manifest_ref": {"artifact_id": artifact_id, "revision": body.revision},
             "node_revision": body.node_revision,
             "operation_status": operation["status"],
+            "operation_id": operation["operation_id"],
             "output_refs": operation["output_refs"],
         })
     queued = await get_task_backend().enqueue_project_task(
@@ -279,4 +318,50 @@ async def render_artifact(
         "queue": queued.queue,
         "manifest_ref": {"artifact_id": artifact_id, "revision": body.revision},
         "node_revision": body.node_revision,
+        "operation_id": operation["operation_id"],
     })
+
+
+@router.get("/operations")
+async def list_operations(
+    project: str,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    user: dict = Depends(get_api_user),
+):
+    store = await _store(project, user, "viewer")
+    operations = RemixOperationStore(store.project_dir, store.project_id)
+    records = await _call(operations.list, limit=limit)
+    return _data({"items": [_operation_view(record) for record in records]})
+
+
+@router.get("/operations/{operation_id}")
+async def read_operation(project: str, operation_id: str, user: dict = Depends(get_api_user)):
+    store = await _store(project, user, "viewer")
+    return _data(_operation_view(await _call(RemixOperationStore(store.project_dir, store.project_id).get, operation_id)))
+
+
+@router.post("/operations/{operation_id}/confirm")
+async def confirm_operation(
+    project: str,
+    operation_id: str,
+    body: ConfirmOperationBody,
+    user: dict = Depends(get_api_user),
+):
+    store = await _store(project, user, "editor")
+    ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+    from novelvideo.freezone.remix.results import RemixNodeConflict, confirm_render
+
+    try:
+        result = await run_in_threadpool(
+            confirm_render, store.project_dir, Path(ctx.state_dir), store.project_id, operation_id,
+            canvas_id=body.canvas_id, node_id=body.node_id,
+        )
+    except RemixNodeConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Operation or canvas not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (CanvasLockBusy, OSError) as exc:
+        raise HTTPException(503, "Remix result temporarily unavailable; retry") from exc
+    return _data(_operation_view(result))

@@ -54,6 +54,7 @@ import { generationTaskDescriptor } from "@/features/canvas/application/resumeGe
 import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
 import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
 import { renderRemixManifest, type RemixTaskRef } from "@/api/remix";
+import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
 
 type VideoComposeNodeProps = NodeProps & {
   id: string;
@@ -75,6 +76,7 @@ export const VideoComposeNode = memo(
     const updateNodeData = useCanvasStore((state) => state.updateNodeData);
     const upstreamNodes = useUpstreamNodes(id);
     const [isEditorOpen, setEditorOpen] = useState(false);
+    const [isRemixWorkbenchOpen, setRemixWorkbenchOpen] = useState(false);
     const [remixKey, setRemixKey] = useState<string>(() => globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
     const [remixTask, setRemixTask] = useState<RemixTaskRef | null>(null);
     const [remixError, setRemixError] = useState<string | null>(null);
@@ -234,7 +236,7 @@ export const VideoComposeNode = memo(
       [handleAutoCompose, handleOpen, id],
     );
 
-    if (data.remixManifestRef) {
+    if (data.remixManifestRef && !data.remixWorkbenchDraft) {
       const exportable = canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts: [] });
       const nodeRevision = data.remixNodeRevision;
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
@@ -311,6 +313,13 @@ export const VideoComposeNode = memo(
             <span className="text-[12px] text-text-muted/90">
               {t("videoCompose.node.hint", { min: MIN_UPSTREAM_VIDEOS })}
             </span>
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); setRemixWorkbenchOpen(true); }}
+              className="rounded-md px-3 py-1.5 text-[12px] text-primary hover:bg-white/[0.06]"
+            >
+              参考视频改编
+            </button>
           </div>
         </div>
 
@@ -347,6 +356,21 @@ export const VideoComposeNode = memo(
               });
               setEditorOpen(false);
             }}
+          />
+        )}
+        {isRemixWorkbenchOpen && project && (
+          <RemixWorkbench
+            project={project}
+            canvasId={canvasId}
+            nodeId={id}
+            initialDraft={data.remixWorkbenchDraft ?? { cues: [] }}
+            onPersist={(draft) => updateNodeData(id, {
+              remixWorkbenchDraft: draft,
+              remixManifestRef: draft.manifestRef ?? null,
+              remixNodeRevision: draft.nodeRevision,
+              resultVideoUrl: draft.resultPath ? `/api/v1/projects/${encodeURIComponent(project)}/media/${draft.resultPath.split('/').map(encodeURIComponent).join('/')}` : null,
+            })}
+            onClose={() => setRemixWorkbenchOpen(false)}
           />
         )}
       </div>

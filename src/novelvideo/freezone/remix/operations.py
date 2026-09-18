@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import uuid
+import re
 from typing import Any
 
 
@@ -58,7 +59,24 @@ class RemixOperationStore:
         return result
 
     def _path(self, operation_id: str) -> Path:
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[a-f0-9]{32}", operation_id):
+            raise ValueError("invalid operation ID")
         return self.root / f"{operation_id}.json"
+
+    def get(self, operation_id: str) -> dict[str, Any]:
+        return self._read(operation_id)
+
+    def list(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if not self.root.is_dir():
+            return []
+        paths = sorted(
+            (path for path in self.root.glob("*.json") if re.fullmatch(r"[a-f0-9]{32}\.json", path.name)),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        return [self._read(path.stem) for path in paths[:limit]]
 
     def _read(self, operation_id: str) -> dict[str, Any]:
         try:
@@ -89,9 +107,11 @@ class RemixOperationStore:
                 return False
         return True
 
-    def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False) -> dict[str, Any]:
+    def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False, canvas_id: str = "", node_id: str = "") -> dict[str, Any]:
         if not isinstance(idempotency_key, str) or not idempotency_key or not isinstance(producer_version, str) or not producer_version or type(node_revision) is not int or node_revision < 1 or not isinstance(normalized_parameters, dict):
             raise ValueError("invalid operation request")
+        if bool(canvas_id) != bool(node_id) or (canvas_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", canvas_id)) or (node_id and (not isinstance(node_id, str) or len(node_id) > 128)):
+            raise ValueError("invalid canvas or node identity")
         refs = self._refs(input_refs)
         key = hashlib.sha256(f"{self.project_id}\0{idempotency_key}".encode()).hexdigest()
         with self._locked() as guard:
@@ -102,12 +122,13 @@ class RemixOperationStore:
                 old = self._read(old_id)
                 if (old["input_refs"] != refs or old["producer_version"] != producer_version
                     or old["normalized_parameters"] != normalized_parameters
-                    or old["node_revision"] != node_revision):
+                    or old["node_revision"] != node_revision
+                    or old.get("canvas_id", "") != canvas_id or old.get("node_id", "") != node_id):
                     raise ValueError("Idempotency key reused for a different request")
                 if old["status"] not in {"completed", "needs_confirmation"} or self._outputs_exist(old.get("output_refs", [])):
                     return {**old, "created": False}
             operation_id = uuid.uuid4().hex
-            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": []}
+            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": []}
             self._atomic(self._path(operation_id), record, guard)
             index[key] = operation_id
             self._atomic(index_path, index, guard)
@@ -149,3 +170,16 @@ class RemixOperationStore:
             record = self._read(operation_id)
             status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
             return self._update(operation_id, guard, status=status, output_refs=output_refs)
+
+    def confirm(self, operation_id: str, *, current_input_refs: list[dict[str, Any]], current_node_revision: int, canvas_id: str, node_id: str) -> dict[str, Any]:
+        refs = self._refs(current_input_refs)
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record.get("canvas_id") and (record["canvas_id"] != canvas_id or record["node_id"] != node_id):
+                raise ValueError("operation belongs to a different canvas node")
+            if record["status"] in {"completed", "stale"}:
+                return record
+            if record["status"] != "needs_confirmation" or not self._outputs_exist(record["output_refs"]):
+                raise ValueError("operation result is not available for confirmation")
+            status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
+            return self._update(operation_id, guard, status=status)

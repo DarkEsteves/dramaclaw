@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
@@ -73,8 +75,34 @@ def align_script(
 
 def _require_aligner(aligner: SpeechAligner | None) -> SpeechAligner:
     if aligner is None:
-        raise RuntimeError("no speech aligner is configured; inject a ready local adapter")
+        return configured_speech_aligner()
     return aligner
+
+
+def speech_engine_ready() -> bool:
+    """Report whether an explicitly enabled local engine can accept jobs."""
+    if os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE") != "whisperx":
+        return False
+    cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
+    return bool(cache and Path(cache).is_dir() and importlib.util.find_spec("whisperx"))
+
+
+def configured_speech_aligner() -> SpeechAligner:
+    """Build the opt-in adapter without downloading models during API startup."""
+    if os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE") != "whisperx":
+        raise RuntimeError("no speech aligner is configured")
+    cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
+    if not cache or not Path(cache).is_dir():
+        raise RuntimeError("WhisperX model cache must be an existing local directory")
+    from novelvideo.freezone.remix.whisperx_adapter import WhisperXSpeechAligner
+
+    return WhisperXSpeechAligner(
+        model_cache=Path(cache),
+        model_name=os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small"),
+        device=os.getenv("DRAMACLAW_REMIX_DEVICE", "cpu"),
+        compute_type=os.getenv("DRAMACLAW_REMIX_COMPUTE_TYPE", "int8"),
+        batch_size=int(os.getenv("DRAMACLAW_REMIX_BATCH_SIZE", "4")),
+    )
 
 
 def _validate_media_and_language(media_path: Path, language: object) -> None:

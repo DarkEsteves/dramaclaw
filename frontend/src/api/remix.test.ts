@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('./client', () => ({ apiCall: vi.fn(async (_path: string, _options?: unknown) => ({})) }));
 
 import { apiCall } from './client';
-import { createRemixArtifact, renderRemixManifest, submitRemixProcessAction } from './remix';
+import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
 
 describe('remix API contract', () => {
   it('sends exact artifact refs and render revision to the backend routes', async () => {
@@ -29,5 +29,19 @@ describe('remix API contract', () => {
         idempotency_key: 'align-once', node_revision: 5,
       },
     });
+  });
+
+  it('uploads a media file and retrieves a render operation', async () => {
+    const file = new File(['video'], 'clip.mp4', { type: 'video/mp4' });
+    await uploadRemixMedia('demo', file);
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/media', expect.objectContaining({ method: 'POST', body: expect.any(FormData) }));
+    await fetchRemixOperation('demo', 'operation-1');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations/operation-1');
+    await fetchRemixTaskStatus('demo', 'remix_render', 'job-1');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/tasks/remix_render/0?scope=job-1');
+    await confirmRemixOperation('demo', 'operation-1', 'default', 'compose-1');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations/operation-1/confirm', { method: 'POST', json: { canvas_id: 'default', node_id: 'compose-1' } });
+    await listRemixOperations('demo');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations?limit=50');
   });
 });

@@ -361,6 +361,8 @@ export interface VideoNodeData extends NodeDisplayData {
  * `submitFreezoneVideoCompose`，导出地址回写到 `resultVideoUrl`。
  */
 export interface VideoComposeNodeData extends NodeDisplayData {
+  /** Saved manual reference-video remix draft and render handle. */
+  remixWorkbenchDraft?: import('../remix/workbenchModel').RemixWorkbenchDraft;
   /** Remix manifests use the versioned layered renderer, not the legacy clip editor. */
   remixManifestRef?: { artifactId: string; revision: number } | null;
   remixNodeRevision?: number;
