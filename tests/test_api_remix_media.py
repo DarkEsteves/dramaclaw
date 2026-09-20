@@ -58,6 +58,11 @@ def test_upload_returns_usable_immutable_project_media(client):
     data = first.json()["data"]
     assert data["media_kind"] == "video"
     assert data["has_audio"] is True
+    assert data["width_px"] == 32
+    assert data["height_px"] == 32
+    assert data["fps_num"] == 10
+    assert data["fps_den"] == 1
+    assert data["audio_stream_count"] == 1
     assert data["media_hash"] == hashlib.sha256(content).hexdigest()
     assert data["duration_us"] > 0
     assert data["url"] == f"/media/{data['media_path']}"
@@ -75,6 +80,7 @@ def test_video_upload_reports_when_separate_narration_is_needed(client):
     response = api.post("/api/v1/projects/demo/freezone/remix/media", files={"file": ("silent.mp4", source.read_bytes())})
     assert response.status_code == 200
     assert response.json()["data"]["has_audio"] is False
+    assert response.json()["data"]["audio_stream_count"] == 0
 
 
 def test_upload_enforces_role_home_and_media_probe(client):

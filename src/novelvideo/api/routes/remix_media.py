@@ -36,7 +36,7 @@ class AttachMediaBody(BaseModel):
     media_path: str = Field(min_length=1)
 
 
-def _probe_media(path: Path, expected_kind: str) -> tuple[int, bool]:
+def _probe_media(path: Path, expected_kind: str) -> dict:
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
@@ -49,8 +49,19 @@ def _probe_media(path: Path, expected_kind: str) -> tuple[int, bool]:
         duration = float(metadata.get("format", {}).get("duration", 0))
         if not 0 < duration < 24 * 60 * 60:
             raise ValueError("Uploaded media duration is invalid")
-        has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
-        return round(duration * 1_000_000), has_audio
+        audio_count = sum(stream.get("codec_type") == "audio" for stream in streams)
+        video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+        result = {"duration_us": round(duration * 1_000_000), "has_audio": audio_count > 0,
+                  "audio_stream_count": audio_count}
+        if video:
+            fps = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1"
+            try:
+                fps_num, fps_den = (int(value) for value in fps.split("/", 1))
+            except (AttributeError, ValueError):
+                fps_num, fps_den = 0, 1
+            result.update({"width_px": video.get("width"), "height_px": video.get("height"),
+                           "fps_num": fps_num, "fps_den": fps_den})
+        return result
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("Uploaded file is not valid supported media") from exc
 
@@ -63,7 +74,7 @@ def _save_media(stream, project_dir: Path, suffix: str, media_kind: str) -> dict
         size = stream_to_file_with_limit(stream, staged, max_bytes=MAX_REMIX_MEDIA_BYTES)
         if size == 0:
             raise ValueError("Uploaded file is empty")
-        duration_us, has_audio = _probe_media(staged, media_kind)
+        media_info = _probe_media(staged, media_kind)
         with staged.open("rb") as media_file:
             media_hash = hashlib.file_digest(media_file, "sha256").hexdigest()
         target = target_dir / f"{uuid.uuid4().hex}{suffix}"
@@ -72,8 +83,7 @@ def _save_media(stream, project_dir: Path, suffix: str, media_kind: str) -> dict
             "media_path": target.relative_to(project_dir).as_posix(),
             "media_hash": media_hash,
             "media_kind": media_kind,
-            "duration_us": duration_us,
-            "has_audio": has_audio,
+            **media_info,
             "size": size,
         }
     finally:
@@ -93,15 +103,14 @@ def _inspect_existing_media(project_dir: Path, media_path: str) -> dict:
     size = path.stat().st_size
     if size == 0 or size > MAX_REMIX_MEDIA_BYTES:
         raise ValueError("Media size is outside the supported range")
-    duration_us, has_audio = _probe_media(path, media_kind)
+    media_info = _probe_media(path, media_kind)
     with path.open("rb") as media_file:
         media_hash = hashlib.file_digest(media_file, "sha256").hexdigest()
     return {
         "media_path": path.relative_to(project_dir).as_posix(),
         "media_hash": media_hash,
         "media_kind": media_kind,
-        "duration_us": duration_us,
-        "has_audio": has_audio,
+        **media_info,
         "size": size,
     }
 
