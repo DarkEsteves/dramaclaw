@@ -61,6 +61,22 @@ describe('transcript node model', () => {
     expect(() => correctedTimeline(timeline, ['您', '好'], false)).toThrow('需要重新对齐');
   });
 
+  it('allows a confirmed single English word spelling correction while rebuilding offsets', () => {
+    const wordTimeline = {
+      ...timeline,
+      transcript: 'Christine, five grams',
+      words: [
+        { text: 'Christine,', start_char: 0, end_char: 10, start_us: 0, end_us: 400_000 },
+        { text: 'five', start_char: 11, end_char: 15, start_us: 500_000, end_us: 700_000 },
+        { text: 'grams', start_char: 16, end_char: 21, start_us: 800_000, end_us: 1_000_000 },
+      ],
+    };
+    const revised = correctedTimeline(wordTimeline, ['Creatine,', 'five', 'grams'], true);
+    expect(revised.transcript).toBe('Creatine, five grams');
+    expect(revised.words[1]).toMatchObject({ start_char: 10, end_char: 14, start_us: 500_000 });
+    expect(revised.words[0]).toMatchObject({ timing_status: 'manually_verified', original_text: 'Christine,' });
+  });
+
   it('rejects changed word length or boundaries despite confirmation', () => {
     expect(() => correctedTimeline(timeline, ['您好', '好'], true)).toThrow('需要重新对齐');
     expect(() => correctedTimeline(timeline, ['你 好', '好'], true)).toThrow('需要重新对齐');

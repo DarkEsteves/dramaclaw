@@ -65,7 +65,11 @@ export function correctedTimeline(payload: TranscriptTimeline, correctedWords: s
     const text = correctedWords[index]?.trim();
     if (!text) throw new Error('字词不能为空');
     const changed = text !== word.text;
-    if (changed && (!confirmedSameSpeechAndBoundaries || Array.from(text).length !== Array.from(word.text).length || /\s/u.test(text))) {
+    const sameLength = Array.from(text).length === Array.from(word.text).length;
+    const singleLatinWordCorrection = /^[A-Za-z]+[.,!?]?$/u.test(text)
+      && /^[A-Za-z]+[.,!?]?$/u.test(word.text)
+      && (text.match(/[.,!?]$/u)?.[0] ?? '') === (word.text.match(/[.,!?]$/u)?.[0] ?? '');
+    if (changed && (!confirmedSameSpeechAndBoundaries || (!sameLength && !singleLatinWordCorrection) || /\s/u.test(text))) {
       throw new RealignmentRequiredError();
     }
     const sourceStart = Number.isInteger(word.start_char) ? Number(word.start_char) : sourceOffset;
