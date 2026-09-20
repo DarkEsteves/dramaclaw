@@ -41,8 +41,8 @@ type VideoStoryNodeProps = NodeProps & {
   selected?: boolean;
 };
 
-const DEFAULT_WIDTH = 960;
-const DEFAULT_HEIGHT = 560;
+const DEFAULT_WIDTH = 800;
+const DEFAULT_HEIGHT = 480;
 const MIN_WIDTH = 480;
 const MIN_HEIGHT = 240;
 const MAX_WIDTH = 1600;

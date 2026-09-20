@@ -22,7 +22,7 @@ describe('story script entry', () => {
   it('opens a readable story card by default and keeps an explicitly resized card', () => {
     const props = { id: 'story-1', type: 'videoStoryNode', zIndex: 0, draggable: true, dragging: false, selected: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0, data: { displayName: '原片拆解', rows: [] } };
     const { container, rerender } = render(<VideoStoryNode {...props} />);
-    expect(container.firstElementChild).toHaveStyle({ width: '960px', height: '560px' });
+    expect(container.firstElementChild).toHaveStyle({ width: '800px', height: '480px' });
     rerender(<VideoStoryNode {...props} width={810} height={450} />);
     expect(container.firstElementChild).toHaveStyle({ width: '810px', height: '450px' });
   });

@@ -73,7 +73,7 @@ export const SHELL_FALLBACK_SIZES: Partial<Record<string, { width: number; heigh
   textAnnotationNode: { width: 440, height: 320 },
   scriptNode: { width: 480, height: 320 },
   audioNode: { width: 480, height: 210 },
-  videoStoryNode: { width: 960, height: 560 },
+  videoStoryNode: { width: 800, height: 480 },
   transcriptNode: { width: 420, height: 300 },
   semanticTimelineNode: { width: 420, height: 300 },
   videoComposeNode: { width: 240, height: 136 },
