@@ -8,6 +8,11 @@ describe('ReferenceEventList', () => {
     expect(container.firstElementChild).toHaveClass('nowheel');
   });
 
+  it('scrolls the explanatory text with events so it cannot cover event rows', () => {
+    render(<ReferenceEventList events={[]} />);
+    expect(screen.getByText(/按原片时间排列/)).not.toHaveClass('sticky');
+  });
+
   it('shows timed visual and spoken evidence with separate narrative inference', () => {
     render(<ReferenceEventList videoUrl="/clip.mp4" events={[{
       start_us: 8_200_000, end_us: 11_500_000,
