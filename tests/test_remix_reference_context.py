@@ -5,6 +5,7 @@ import hashlib
 from novelvideo.freezone.remix.reference_context import build_reference_events
 from novelvideo.freezone.remix.reference_context import load_reference_events
 from novelvideo.freezone.remix.reference_context import bind_reference_story
+from novelvideo.freezone.remix.reference_context import select_reference_frame_times
 from novelvideo.freezone.remix.store import RemixArtifactStore
 
 
@@ -96,7 +97,7 @@ def test_story_notes_keep_evidence_times_and_observation_separate_from_inference
 
     assert notes[0] == {
         **events[0], "visual_observation": "人物起床", "narrative_inference": "提出问题",
-        "frame_url": "/one.png", "note_status": "needs_review",
+        "frame_url": "/one.png", "analysis_frame_time_us": 500_000, "note_status": "needs_review",
     }
     assert notes[1]["start_us"] == 1_000_000
     assert notes[1]["spoken_text"] == "咖啡"
@@ -119,3 +120,29 @@ def test_model_notes_with_wrong_timing_are_not_attached_to_another_event() -> No
     ]
     notes = bind_reference_story(events, shots, [], [])
     assert all(note["visual_observation"] == "" for note in notes)
+
+
+def test_every_event_gets_one_frame_from_its_own_time_window() -> None:
+    events = [
+        {"start_us": 0, "end_us": 4_000_000, "frame_times_us": [0, 1_600_000, 3_200_000]},
+        {"start_us": 4_000_000, "end_us": 5_000_000, "frame_times_us": []},
+        {"start_us": 5_000_000, "end_us": 6_000_000, "frame_times_us": [5_100_000]},
+    ]
+    assert select_reference_frame_times(events) == [1_600_000, 4_500_000, 5_100_000]
+
+
+def test_missing_frame_cannot_be_presented_as_observed_visual_fact() -> None:
+    events = [{"start_us": 0, "end_us": 1_000_000, "frame_times_us": []}]
+    shots = [{"start_time": 0, "end_time": 1, "visual_description": "男主持说话", "narrative": "提出问题"}]
+    notes = bind_reference_story(events, shots, [], [])
+    assert notes[0]["frame_url"] is None
+    assert notes[0]["visual_observation"] == ""
+    assert notes[0]["note_status"] == "missing_frame"
+
+
+def test_fallback_frame_time_is_kept_as_analysis_evidence() -> None:
+    events = [{"start_us": 4_000_000, "end_us": 5_000_000, "frame_times_us": []}]
+    shots = [{"start_time": 4, "end_time": 5, "visual_description": "女子做饭"}]
+    notes = bind_reference_story(events, shots, [4_500_000], ["/fallback.png"])
+    assert notes[0]["analysis_frame_time_us"] == 4_500_000
+    assert notes[0]["frame_times_us"] == []

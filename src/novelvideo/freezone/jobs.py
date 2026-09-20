@@ -1934,6 +1934,45 @@ def build_video_story_analysis_prompt(
     reference_events: list[dict[str, Any]] | None = None,
     frame_times_us: list[int] | None = None,
 ) -> str:
+    if reference_events is not None:
+        import json
+
+        numbered = [
+            {
+                "event": index,
+                "frame": index,
+                "start_us": event["start_us"],
+                "end_us": event["end_us"],
+                "start_time": event["start_us"] / 1_000_000,
+                "end_time": event["end_us"] / 1_000_000,
+                "frame_time_us": frame_times_us[index - 1] if frame_times_us and index <= len(frame_times_us) else None,
+                "spoken_text": str(event.get("spoken_text", ""))[:500],
+            }
+            for index, event in enumerate(reference_events, 1)
+        ]
+        mapping = "\n".join(
+            f"事件 {index} 只对应第 {index} 张画面。"
+            for index in range(1, len(numbered) + 1)
+        )
+        frame_clock = "\n".join(
+            f"第 {index} 张输入画面时间：{time_us} 微秒。"
+            for index, time_us in enumerate(frame_times_us or [], 1)
+        )
+        return f"""请按原片时间轴分析视频。输入画面和事件严格一一对应，共 {len(numbered)} 个事件。
+{mapping}
+{frame_clock}
+事件数据：{json.dumps(numbered, ensure_ascii=False)}
+
+必须按事件顺序输出恰好 {len(numbered)} 个 shots，每个事件一个。不得改写事件的起止时间。
+每个事件的 visual_description 只能依据对应的那一张画面；不能参考其他事件的画面。
+台词不能用来猜测画面。静态画面看不出的动作、身份、产品名称、情绪和声音不要编成画面事实。
+画面看不清时 visual_description 用空字符串。画面描述用中文，尽量在 45 字内。
+narrative 只简述画面和同期台词在故事中的可能作用；推断应与画面事实分开，尽量在 35 字内。
+spoken_text 是转写结果，可能有错词；不要擅自更改，也不要据此补出看不见的物体。
+keyframes 对每个事件只能填写对应的输入帧序号。严格输出 JSON 对象，不要 markdown。
+
+JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","duration":{duration_sec if duration_sec is not None else 'null'},"shots":[{{"shot":1,"start_time":0.0,"end_time":1.0,"duration":1.0,"visual_description":"中文画面观察","narrative":"中文叙事作用","shot_size":"中景","camera_angle":"平视","camera_movement":"固定","focus_depth":"中等景深","lighting":"中文光线","background_music":"","voice_sound":"","image_prompt":"","motion_prompt":"","keyframes":[1]}}]}}
+"""
     duration_hint = (
         f"视频总时长约 {duration_sec:.2f} 秒。"
         f"请把 start_time/end_time 分配在 0 到 {duration_sec:.2f} 秒之间。"
@@ -1988,28 +2027,7 @@ JSON schema:
   ]
 }}
 """
-    if reference_events is None:
-        return prompt
-    import json
-
-    compact = [
-        {"start_us": event["start_us"], "end_us": event["end_us"],
-         "spoken_text": str(event.get("spoken_text", ""))[:500],
-         "frame_pts": event.get("frame_pts", [])[:12]}
-        for event in reference_events[:60]
-    ]
-    frame_clock = "".join(
-        f"第 {index} 张输入画面时间：{time_us} 微秒。\n"
-        for index, time_us in enumerate(frame_times_us or [], 1)
-    )
-    return prompt + frame_clock + (
-        "\n下面是同一原片时间轴上的画面事件与同期台词（时间单位为微秒）：\n"
-        + json.dumps(compact, ensure_ascii=False)
-        + "\n请结合输入画面与同期台词，为每个事件写画面观察、叙事推断和台词的作用。"
-        "此处请为上列每个事件按顺序输出一个 shots 条目，不采用前述 3-12 段的归并规则。"
-        "不得改写事件的起止时间；无法从画面证实的内容不要当作画面观察。"
-        "没有同期台词时不要编造台词。\n"
-    )
+    return prompt
 
 
 _MAX_JSON_REPAIRS = 32

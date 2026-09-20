@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from novelvideo.i18n_message import MessageLike, lmsg
-from novelvideo.freezone.remix.reference_context import bind_reference_story, load_reference_events
+from novelvideo.freezone.remix.reference_context import bind_reference_story, load_reference_events, select_reference_frame_times
 from novelvideo.egress_context import (
     TRUSTED_EGRESS_CONTEXT_KEY,
     TrustedEgressContext,
@@ -890,11 +890,7 @@ async def _run_freezone_video_story_async(
     _update(ctx, "freezone_video_story", job_id, 0.1, "ffmpeg 抽取关键帧...")
     frame_times_us = None
     if reference_events is not None:
-        times = sorted({time for event in reference_events for time in event.get("frame_times_us", []) if type(time) is int})
-        if not times:
-            times = [(event["start_us"] + event["end_us"]) // 2 for event in reference_events]
-        budget = min(len(times), int(payload.get("max_frames") or 20))
-        frame_times_us = [times[index * (len(times) - 1) // max(1, budget - 1)] for index in range(budget)] if budget else []
+        frame_times_us = select_reference_frame_times(reference_events)
         frame_paths = await _call_freezone_leaf(
             envelope, run_freezone_extract_reference_frames, "run_freezone_extract_frames",
             project_dir=project_dir, job_id=job_id,

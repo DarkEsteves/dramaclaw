@@ -20,4 +20,13 @@ describe('ReferenceEventList', () => {
     expect(screen.getByLabelText('原片事件预览')).toBeTruthy();
     expect(screen.getByText(/画面时间/)).toBeTruthy();
   });
+
+  it('marks an event without visual evidence and explains where speech corrections happen', () => {
+    render(<ReferenceEventList events={[{
+      start_us: 4_000_000, end_us: 5_000_000, frame_times_us: [],
+      spoken_text: 'Christine', note_status: 'missing_frame',
+    }]} />);
+    expect(screen.getByText('画面未核实')).toBeTruthy();
+    expect(screen.getByText(/转写节点校对/)).toBeTruthy();
+  });
 });

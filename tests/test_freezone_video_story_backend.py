@@ -81,7 +81,10 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
     prompt = build_video_story_analysis_prompt(
         frame_count=2,
         duration_sec=4.0,
-        reference_events=[{"start_us": 0, "end_us": 2_000_000, "spoken_text": "hello", "frame_pts": [1], "word_spans": []}],
+        reference_events=[
+            {"start_us": 0, "end_us": 2_000_000, "spoken_text": "hello", "frame_pts": [1], "word_spans": []},
+            {"start_us": 2_000_000, "end_us": 4_000_000, "spoken_text": "world", "frame_pts": [2], "word_spans": []},
+        ],
         frame_times_us=[500_000, 2_500_000],
     )
 
@@ -91,6 +94,10 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
     assert "同期台词" in prompt
     assert "不得改写事件的起止时间" in prompt
     assert "第 1 张输入画面时间：500000 微秒" in prompt
+    assert "事件 1 只对应第 1 张画面" in prompt
+    assert "事件 2 只对应第 2 张画面" in prompt
+    assert "台词不能用来猜测画面" in prompt
+    assert "3-12 个叙事镜头" not in prompt
 
 
 def test_freezone_analyze_request_defaults_to_shots_mode() -> None:

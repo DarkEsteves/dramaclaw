@@ -108,6 +108,20 @@ def _spoken_text(words: list[dict[str, Any]], source_text: object) -> str:
     return result
 
 
+def select_reference_frame_times(events: list[dict[str, Any]]) -> list[int]:
+    """Select one source-clock frame inside each event, including sparse events."""
+    selected: list[int] = []
+    for event in events:
+        start, end = event["start_us"], event["end_us"]
+        midpoint = (start + end) // 2
+        candidates = [
+            time for time in event.get("frame_times_us", [])
+            if type(time) is int and start <= time < end
+        ]
+        selected.append(min(candidates, key=lambda time: (abs(time - midpoint), time)) if candidates else midpoint)
+    return selected
+
+
 def bind_reference_story(
     events: list[dict[str, Any]], shots: list[dict[str, Any]],
     frame_times_us: list[int], frame_urls: list[str],
@@ -126,16 +140,18 @@ def bind_reference_story(
         shot = candidate if aligned else {}
         midpoint = (event["start_us"] + event["end_us"]) // 2
         candidates = [
-            (abs(time - midpoint), url)
+            (abs(time - midpoint), time, url)
             for time, url in zip(frame_times_us, frame_urls)
             if event["start_us"] <= time < event["end_us"]
         ]
-        frame_url = min(candidates)[1] if candidates else None
+        selected_frame = min(candidates) if candidates else None
+        frame_url = selected_frame[2] if selected_frame else None
         notes.append({
             **event,
             "frame_url": frame_url,
-            "visual_observation": shot.get("visual_description", ""),
-            "narrative_inference": shot.get("narrative", ""),
-            "note_status": "needs_review",
+            "analysis_frame_time_us": selected_frame[1] if selected_frame else None,
+            "visual_observation": shot.get("visual_description", "") if frame_url else "",
+            "narrative_inference": shot.get("narrative", "") if frame_url else "",
+            "note_status": "needs_review" if frame_url else "missing_frame",
         })
     return notes
