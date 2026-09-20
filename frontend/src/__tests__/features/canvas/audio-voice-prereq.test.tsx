@@ -52,20 +52,34 @@ describe("AudioOperationsPanel voice prerequisite", () => {
     useCanvasStore.getState().setCanvasData([], []);
   });
 
-  it("shows per-speaker voice controls only for remix dialogue nodes", () => {
+  it("shows per-speaker voice controls for linked script dialogue", () => {
     renderPanel({
       audioKind: 'speech',
+      remixScriptRef: { artifactId: 'script-1', revision: 1 },
       text: '男：你好？\n女：你好。',
       remixDialogueTurns: [{ speaker: '男', text: '你好？' }, { speaker: '女', text: '你好。' }],
       remixSpeakerVoices: {},
     });
-    expect(screen.getByText('男：你好？')).toBeTruthy();
-    expect(screen.getByText('女：你好。')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '输入要合成的文本' })).toHaveProperty('readOnly', true);
     expect(screen.getByRole('button', { name: '为男选择声线' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '为女选择声线' })).toBeTruthy();
-    expect(screen.queryByRole('textbox', { name: '输入要合成的文本' })).toBeNull();
     expect(screen.queryByText('尚未选中可用的自定义声线')).toBeNull();
     expect(screen.getByTitle('请先为男、女选择声线')).toHaveProperty('disabled', true);
+  });
+
+  it("lets a manual audio node choose multi-role voices from labelled text", () => {
+    renderPanel({ audioKind: 'speech', dialogueVoiceMode: 'dialogue', text: 's:wew\nw:fwefw' });
+    expect(screen.getByRole('button', { name: '为s选择声线' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '为w选择声线' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '输入要合成的文本' })).toBeTruthy();
+    expect(screen.getByTitle('请先为s、w选择声线')).toHaveProperty('disabled', true);
+  });
+
+  it("keeps manual single-voice mode until the user switches it", () => {
+    renderPanel({ audioKind: 'speech', text: 's:wew\nw:fwefw' });
+    expect(screen.queryByRole('button', { name: '为s选择声线' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '多角色配音' }));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'audio-1')?.data.dialogueVoiceMode).toBe('dialogue');
   });
 
   it("reloads references after an empty request has settled", async () => {

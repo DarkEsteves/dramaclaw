@@ -37,7 +37,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { missingDialogueSpeakers } from '@/features/canvas/remix/dialogueVoicePolicy';
-import { isLegacyRoleLabelledRemixAudio } from '@/features/canvas/remix/dialogueTurns';
+import { isLegacyRoleLabelledRemixAudio, resolveAudioDialogue, singleVoiceAudioText } from '@/features/canvas/remix/dialogueTurns';
 
 const MAX_MUSIC_PROMPT_CHARS = 4_100;
 
@@ -114,7 +114,8 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
   // 有效 prompt：上游引用的文本不回显进输入框，仅在提交时与本地输入「拼接」成最终
   // prompt（上游在前、本地在后，与 joinUpstreamText 一致用空行分隔，过滤空段）。
   const ownText = deriveAudioText(data);
-  const dialogueTurns = data.remixDialogueTurns ?? [];
+  const dialogue = resolveAudioDialogue(data);
+  const dialogueTurns = dialogue.turns;
   const hasInvalidSpeechInstruction =
     !isMusic && isSpeechGenerationInstruction(ownText);
   useEffect(() => {
@@ -129,9 +130,9 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
       });
     }
   }, [data.audioUrl, hasInvalidSpeechInstruction, nodeId, updateNodeData]);
-  const effectivePrompt = dialogueTurns.length > 0
+  const effectivePrompt = dialogue.enabled
     ? dialogueTurns.map((turn) => turn.text).join('\n')
-    : [upstreamTextJoined.trim(), ownText.trim()]
+    : [upstreamTextJoined.trim(), singleVoiceAudioText(data, ownText).trim()]
     .filter((segment) => segment.length > 0)
     .join('\n\n');
   const emotionPrompt = data.emotionPrompt ?? '';
@@ -156,10 +157,12 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
     const runtimeSpeechMode = legacySpeechVoice && runtimeData.speechMode === 'preset'
       ? 'preset' : 'clone';
     const runtimeOwnText = deriveAudioText(runtimeData);
-    const runtimeDialogueTurns = runtimeData.remixDialogueTurns ?? [];
+    const runtimeDialogue = resolveAudioDialogue(runtimeData);
+    const runtimeDialogueTurns = runtimeDialogue.turns;
+    const runtimeNarrationText = singleVoiceAudioText(runtimeData, runtimeOwnText);
     const runtimeEffectivePrompt = runtimeDialogueTurns.length > 0
       ? runtimeDialogueTurns.map((turn) => turn.text).join('\n')
-      : [upstreamTextJoined.trim(), runtimeOwnText.trim()]
+      : [upstreamTextJoined.trim(), runtimeNarrationText.trim()]
         .filter((segment) => segment.length > 0)
         .join('\n\n');
     const runtimeMusicLengthMs = runtimeIsMusic
@@ -175,6 +178,10 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
     if (isLegacyRoleLabelledRemixAudio(runtimeData)) {
       updateNodeData(nodeId, { generationError: '这份脚本包含角色标签，请回到脚本点击“制作配音”更新节点后再生成。' });
       return { skipped: true, reason: 'legacy_dialogue_node' };
+    }
+    if (runtimeDialogue.error) {
+      updateNodeData(nodeId, { generationError: runtimeDialogue.error });
+      return { skipped: true, reason: 'invalid_dialogue' };
     }
     if (!runtimeIsMusic && runtimeDialogueTurns.length === 0 && requiresCustomVoiceSelection(runtimeData)) {
       updateNodeData(nodeId, {
@@ -213,8 +220,8 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
         // Other catalog-backed audio Recipes still compile before submission.
         const speechFallbackPrompt = runtimeIsMusic
           ? fallbackPrompt
-          : extractExplicitSpeakableAudioText(runtimeOwnText.trim())
-            || extractSpeakableAudioText(runtimeOwnText.trim())
+          : extractExplicitSpeakableAudioText(runtimeNarrationText.trim())
+            || extractSpeakableAudioText(runtimeNarrationText.trim())
             || extractExplicitSpeakableAudioText(selectedUpstreamText)
             || extractSpeakableAudioText(selectedUpstreamText);
         const catalog = runtimeData.workflowCatalog;
@@ -232,7 +239,7 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
           nodeId,
           nodeData: runtimeData,
           nodeKind: 'audio',
-          nodePrompt: runtimeOwnText,
+          nodePrompt: runtimeIsMusic ? runtimeOwnText : runtimeNarrationText,
           // Music prompts describe the soundtrack itself. Do not feed the full
           // upstream script/beat text into the music compiler: the Eleven music
           // endpoint caps input at 4100 characters and the node prompt already

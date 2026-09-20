@@ -56,6 +56,7 @@ import { BillingRuleNotConfiguredError } from '@/lib/api-errors';
 import { VoiceSelectionModal } from './VoiceSelectionModal';
 import { requiresCustomVoiceSelection } from './audioVoicePolicy';
 import { missingDialogueSpeakers } from '@/features/canvas/remix/dialogueVoicePolicy';
+import { resolveAudioDialogue } from '@/features/canvas/remix/dialogueTurns';
 
 const PANEL_GAP_PX = 12;
 const PANEL_OVERHANG_PX = 60;
@@ -113,9 +114,10 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
   const [showMusicSettings, setShowMusicSettings] = useState(false);
   // 'music'：文字生成音乐(走 /freezone/audio/eleven-music)；缺省/'speech'：克隆音频(TTS)。
   const isMusic = data.audioKind === 'music';
-  const dialogueTurns = data.remixDialogueTurns ?? [];
-  const isDialogue = dialogueTurns.length > 0;
-  const dialogueSpeakers = [...new Set(dialogueTurns.map((turn) => turn.speaker))];
+  const dialogue = resolveAudioDialogue(data);
+  const dialogueTurns = dialogue.turns;
+  const isDialogue = dialogue.enabled;
+  const dialogueSpeakers = dialogue.speakers;
   const missingSpeakers = missingDialogueSpeakers(dialogueTurns, data.remixSpeakerVoices);
   const voiceMissing = !isDialogue && requiresCustomVoiceSelection(data);
   // 生成逻辑(含失败重试)抽到 useAudioGeneration，与节点本体的重试共用同一实现。
@@ -236,7 +238,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
   // 文本框为空但引用了非空文本时也允许提交（effectivePrompt 会回退到上游引用）。
   const submitDisabled =
     isGenerating || billingRuleMissing || modelTaskAccess.blocked ||
-    effectivePrompt.length === 0 || missingSpeakers.length > 0;
+    effectivePrompt.length === 0 || Boolean(dialogue.error) || missingSpeakers.length > 0;
 
   return (
     <OperationPanelShell
@@ -269,25 +271,18 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
         </div>
       )}
 
-      {isDialogue ? (
-        <div className="px-3 pt-3">
-          <div className={AUDIO_INPUT_LABEL_CLASS}>角色配音 · 按脚本顺序逐句合成</div>
-          <div className="nodrag nowheel ui-scrollbar mt-2 max-h-48 space-y-1.5 overflow-y-auto rounded-[10px] border border-white/[0.08] px-2 py-2 text-[12px] text-text-dark">
-            {dialogueTurns.map((turn, index) => <div key={`${index}-${turn.speaker}`}>{turn.speaker}：{turn.text}</div>)}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {dialogueSpeakers.map((speaker) => <button
-              key={speaker}
-              type="button"
-              aria-label={`为${speaker}选择声线`}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => { event.stopPropagation(); setDialogueVoicePickerSpeaker(speaker); }}
-              className="nodrag rounded-full border border-white/[0.1] px-2.5 py-1 text-[11px] text-text-dark hover:bg-white/[0.06]"
-            >{speaker} · {data.remixSpeakerVoices?.[speaker]?.label ?? '选择声线'}</button>)}
-          </div>
-          {missingSpeakers.length > 0 && <div className="mt-2 text-[11px] text-amber-300">请先为{missingSpeakers.join('、')}选择声线</div>}
-        </div>
-      ) : <div className="px-3 pt-3">
+      <div className="px-3 pt-3">
+        {!isMusic && <div className="mb-3 flex gap-1 rounded-[10px] border border-white/[0.08] p-1">
+          {(['single', 'dialogue'] as const).map((mode) => <button
+            key={mode}
+            type="button"
+            aria-label={mode === 'single' ? '单人配音' : '多角色配音'}
+            aria-pressed={(mode === 'dialogue') === isDialogue}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => { event.stopPropagation(); updateNodeData(nodeId, { dialogueVoiceMode: mode, generationError: null }); }}
+            className={`nodrag flex-1 rounded-[7px] px-2 py-1 text-[11px] ${((mode === 'dialogue') === isDialogue) ? 'bg-white/[0.1] text-text-dark' : 'text-text-muted hover:text-text-dark'}`}
+          >{mode === 'single' ? '单人配音' : '多角色配音'}</button>)}
+        </div>}
         <label className="flex flex-col gap-2">
           <span className={AUDIO_INPUT_LABEL_CLASS}>
             {isMusic
@@ -296,6 +291,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
           </span>
           <textarea
             value={textDraft}
+            readOnly={Boolean(data.remixScriptRef)}
             onChange={(event) => {
               const next = event.target.value;
               setTextDraft(next);
@@ -316,6 +312,8 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
             placeholder={
               isMusic
                 ? t('node.audioPanel.promptPlaceholder.music')
+                : isDialogue
+                ? '每行输入“角色：台词”，例如 s:你好'
                 : t('node.audioPanel.promptPlaceholder.speech')
             }
             disabled={isGenerating}
@@ -324,7 +322,22 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
             }`}
           />
         </label>
-      </div>}
+        {Boolean(data.remixScriptRef) && <div className="mt-1.5 text-[11px] text-text-muted">台词来自脚本节点，请在脚本节点修改。</div>}
+        {isDialogue && <>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {dialogueSpeakers.map((speaker) => <button
+              key={speaker}
+              type="button"
+              aria-label={`为${speaker}选择声线`}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); setDialogueVoicePickerSpeaker(speaker); }}
+              className="nodrag rounded-full border border-white/[0.1] px-2.5 py-1 text-[11px] text-text-dark hover:bg-white/[0.06]"
+            >{speaker} · {data.remixSpeakerVoices?.[speaker]?.label ?? '选择声线'}</button>)}
+          </div>
+          {dialogue.error && <div className="mt-2 text-[11px] text-amber-300">{dialogue.error}</div>}
+          {missingSpeakers.length > 0 && <div className="mt-2 text-[11px] text-amber-300">请先为{missingSpeakers.join('、')}选择声线</div>}
+        </>}
+      </div>
 
       {!isMusic && (
       <div className="px-3 pb-3 pt-4">
@@ -436,6 +449,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
           disabled={submitDisabled}
           title={
             modelTaskAccess.message
+            ?? dialogue.error
             ?? (missingSpeakers.length > 0 ? `请先为${missingSpeakers.join('、')}选择声线` : null)
             ?? (voiceMissing
               ? t('node.audioPanel.generateWithoutVoice')
