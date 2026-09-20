@@ -20,6 +20,53 @@ describe('source-first remix graph plans', () => {
     expect(() => planTimelineFromScript(nodes, [edge('script', 'words')], 'script')).toThrow('按当前脚本对齐');
   });
 
+  it('rejects completed words from an older narration file', () => {
+    const nodes = [
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('s'), audioUrl: '/new.wav', remixMedia: { media_path: 'new.wav', media_hash: 'new' } }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaPath: 'old.wav', sourceMediaHash: 'old' }),
+    ];
+    expect(() => planTimelineFromScript(nodes, [edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words')], 'script')).toThrow('当前配音');
+  });
+
+  it('rejects old alignment when audioUrl changes before media is reattached', () => {
+    const nodes = [
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('s'), audioUrl: '/new.wav', remixMedia: { url: '/old.wav', media_path: 'old.wav', media_hash: 'old' } }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaPath: 'old.wav', sourceMediaHash: 'old' }),
+    ];
+    expect(() => planTimelineFromScript(nodes, [edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words')], 'script')).toThrow('当前配音');
+  });
+
+  it('does not reuse completed words while a new narration is awaiting media attachment', () => {
+    const nodes = [
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('s'), audioUrl: '/new.wav' }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaPath: 'old.wav', sourceMediaHash: 'old' }),
+    ];
+    expect(() => planTimelineFromScript(nodes, [edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words')], 'script')).toThrow('当前配音');
+  });
+
+  it('does not fall back to old words when a connected narration has no audio', () => {
+    const nodes = [
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('s'), audioUrl: null }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' }),
+    ];
+    expect(() => planTimelineFromScript(nodes, [edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words')], 'script')).toThrow('当前配音');
+  });
+
+  it('uses the current narration alignment when an older transcript remains connected', () => {
+    const nodes = [
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('s'), audioUrl: '/new.wav', remixMedia: { media_path: 'new.wav', media_hash: 'new' } }),
+      node('old', 'transcriptNode', { artifactRef: ref('old'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaPath: 'old.wav', sourceMediaHash: 'old' }),
+      node('current', 'transcriptNode', { artifactRef: ref('current'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaPath: 'new.wav', sourceMediaHash: 'new' }),
+    ];
+    const edges = [edge('script', 'audio'), edge('script', 'old'), edge('audio', 'old'), edge('script', 'current'), edge('audio', 'current')];
+    expect(planTimelineFromScript(nodes, edges, 'script')).toEqual({ sourceIds: ['script', 'current'] });
+  });
+
   it('requires the complete reference and narration chain before creating compose', () => {
     const nodes = [
       node('video', 'videoNode', { remixRole: 'reference', remixMedia: { media_hash: 'v', has_audio: true } }),

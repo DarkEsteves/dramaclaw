@@ -35,11 +35,35 @@ export function planTimelineFromScript(nodes: CanvasNode[], edges: CanvasEdge[],
   const script = nodes.find((node) => node.id === scriptId && node.type === CANVAS_NODE_TYPES.script);
   const scriptRef = ref(script?.data.remixScriptRef);
   if (!scriptRef) throw new Error('请先保存改编脚本。');
-  const aligned = nodes.filter((node) => node.type === CANVAS_NODE_TYPES.transcript
+  const narration = nodes.find((node) => node.type === CANVAS_NODE_TYPES.audio
+    && node.data.remixRole === 'narration'
+    && sameRef(ref(node.data.remixScriptRef), scriptRef)
+    && edges.some((edge) => edge.source === scriptId && edge.target === node.id));
+  const media = narration?.data.remixMedia as { url?: string; media_path?: string; media_hash?: string } | undefined;
+  if (narration && !narration.data.audioUrl) {
+    throw new Error('当前配音没有音频，请先生成或上传配音。');
+  }
+  if (narration?.data.audioUrl && !media) {
+    throw new Error('当前配音尚未附着媒体，请重新按脚本对齐。');
+  }
+  if (narration?.data.audioUrl && media?.url && narration.data.audioUrl !== media.url) {
+    throw new Error('当前配音音频已变化，请重新按脚本对齐。');
+  }
+  const scriptAlignments = nodes.filter((node) => node.type === CANVAS_NODE_TYPES.transcript
     && edges.some((edge) => edge.source === scriptId && edge.target === node.id)
     && ref(node.data.artifactRef) && sameRef(ref(node.data.alignedScriptRef), scriptRef)
     && node.data.status === 'completed' && !node.data.alignmentStale);
-  if (aligned.length !== 1) throw new Error(aligned.length ? '只能连接一个按当前脚本对齐的转写节点。' : '请先将转写节点连接到脚本，并按当前脚本对齐。');
+  const aligned = narration?.data.audioUrl && media ? scriptAlignments.filter((node) =>
+    edges.some((edge) => edge.source === narration.id && edge.target === node.id)
+    && node.data.sourceMediaPath === media.media_path
+    && node.data.sourceMediaHash === media.media_hash,
+  ) : scriptAlignments;
+  if (aligned.length !== 1) {
+    if (scriptAlignments.length && !aligned.length && narration?.data.audioUrl && media) {
+      throw new Error('当前配音音频已变化，请重新按脚本对齐。');
+    }
+    throw new Error(aligned.length ? '只能连接一个按当前脚本对齐的转写节点。' : '请先将转写节点连接到脚本，并按当前脚本对齐。');
+  }
   return { sourceIds: [scriptId, aligned[0].id] };
 }
 

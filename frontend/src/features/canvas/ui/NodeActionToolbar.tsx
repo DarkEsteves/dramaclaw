@@ -1633,6 +1633,8 @@ export const NodeActionToolbar = memo(
     const isPresetLocked = _toolbarFlags.isPresetManaged;
     const recipeCompileFellBack =
       node.data.workflowRecipeCompileMode === "timeout_fallback";
+    const remixScriptState = node.type === CANVAS_NODE_TYPES.script
+      ? scriptCanvasState(nodes, edges, node.id) : null;
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;
 
@@ -1704,8 +1706,12 @@ export const NodeActionToolbar = memo(
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
                   : node.type === CANVAS_NODE_TYPES.script ? [
                     { action: 'edit_script', label: '编辑改编脚本', Icon: PenLine },
-                    ...(scriptCanvasState(nodes, edges, node.id).nextAction === 'create_timeline'
+                    ...(remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
+                      : remixScriptState?.nextAction === 'view_alignment'
+                      ? [{ action: 'view_alignment', label: '查看对齐进度', Icon: Workflow }]
+                      : remixScriptState?.nextAction === 'align_narration'
+                      ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
                       : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
                   ]
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '重新编译', Icon: Workflow }, { action: 'create_compose', label: '生成合成清单', Icon: Film }]
@@ -1715,8 +1721,14 @@ export const NodeActionToolbar = memo(
                   className={TOOLBAR_TEXT_BUTTON_CLASS}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (action === 'align_script') {
-                      void createAlignedTranscriptFromAudio(node.id).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐'));
+                    if (action === 'view_alignment') {
+                      if (remixScriptState?.transcriptId) {
+                        setSelectedNode(remixScriptState.transcriptId);
+                        requestFocusNode(remixScriptState.transcriptId);
+                      }
+                    } else if (action === 'align_script' || action === 'align_narration') {
+                      const audioId = action === 'align_narration' ? remixScriptState?.narrationId : node.id;
+                      if (audioId) void createAlignedTranscriptFromAudio(audioId).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐'));
                     } else if (action === 'create_narration' || action === 'create_timeline') {
                       try { action === 'create_narration' ? createNarrationFromScript(node.id) : createTimelineFromScript(node.id); }
                       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建后续节点'); }

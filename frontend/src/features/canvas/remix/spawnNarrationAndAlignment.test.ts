@@ -102,6 +102,21 @@ describe('remix narration and alignment continuation', () => {
     expect(requestFocusNode).toHaveBeenCalledWith('words');
   });
 
+  it('reattaches the selected audio when saved media still points at an older URL', async () => {
+    const audioUrl = '/static/projects/demo/freezone/_uploads/narration.wav?v=2';
+    const media = { media_path: 'freezone/_uploads/narration.wav', media_hash: 'new', media_kind: 'audio', has_audio: true, url: '/static/projects/demo/freezone/_uploads/narration.wav' };
+    attachRemixMedia.mockResolvedValue(media);
+    const updateNodeData = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [node('script', 'scriptNode', { remixScriptRef: scriptRef }), node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: scriptRef, audioUrl, remixMedia: { ...media, url: '/old.wav', media_hash: 'old' } })],
+      edges: [edge('script', 'audio')], addNode: vi.fn(() => 'words'), addEdge: vi.fn(() => 'edge'), updateNodeData,
+      setSelectedNode: vi.fn(), requestFocusNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 700, y: 0 })),
+    });
+    await createAlignedTranscriptFromAudio('audio');
+    expect(attachRemixMedia).toHaveBeenCalledWith('demo', media.media_path);
+    expect(updateNodeData).toHaveBeenCalledWith('audio', { audioUrl: media.url, remixMedia: media });
+  });
+
   it('refuses to align an audio node from an older script revision', async () => {
     const addNode = vi.fn();
     graphStore.getState.mockReturnValue({

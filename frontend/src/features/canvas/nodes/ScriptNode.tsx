@@ -709,7 +709,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
               <p className="flex-1">点击“编辑改编脚本”填写台词。</p>
             )}
             <div className="border-t border-white/[0.08] pt-2">
-              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本'}`}
+              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'view_alignment' ? '对齐中：查看进度' : remixNextAction === 'align_narration' ? '下一步：按脚本对齐' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本'}`}
             </div>
           </div>
         ) : hasResult ? (

@@ -20,4 +20,21 @@ describe('script canvas state', () => {
     expect(scriptCanvasState([script, words], [edge('s', 'w')], 's').nextAction).toBe('create_timeline');
     expect(scriptCanvasState([script, { ...words, data: { ...words.data, alignedScriptRef: { ...saved, revision: 1 } } }], [edge('s', 'w')], 's').nextAction).toBe('create_narration');
   });
+
+  it('offers alignment when the current script has a connected, ready narration', () => {
+    const script = node('s', 'scriptNode', { remixScriptRef: saved, remixScriptDraft: { dialogue: '新台词', selections: [] } });
+    const narration = node('a', 'audioNode', { remixRole: 'narration', remixScriptRef: saved, audioUrl: '/voice.wav' });
+    expect(scriptCanvasState([script, narration], [edge('s', 'a')], 's')).toMatchObject({ nextAction: 'align_narration', narrationId: 'a' });
+    expect(scriptCanvasState([script, { ...narration, data: { ...narration.data, audioUrl: null } }], [edge('s', 'a')], 's').nextAction).toBe('create_narration');
+    expect(scriptCanvasState([script, { ...narration, data: { ...narration.data, remixScriptRef: { ...saved, revision: 1 } } }], [edge('s', 'a')], 's').nextAction).toBe('create_narration');
+  });
+
+  it('points to the existing transcript while the exact narration is aligning', () => {
+    const script = node('s', 'scriptNode', { remixScriptRef: saved });
+    const narration = node('a', 'audioNode', { remixRole: 'narration', remixScriptRef: saved, audioUrl: '/voice.wav', remixMedia: { url: '/voice.wav', media_path: 'voice.wav', media_hash: 'voice' } });
+    const words = node('w', 'transcriptNode', { operationId: 'running', pendingScriptRef: saved, sourceMediaPath: 'voice.wav', sourceMediaHash: 'voice', status: 'needs_review' });
+    expect(scriptCanvasState([script, narration, words], [edge('s', 'a'), edge('s', 'w'), edge('a', 'w')], 's')).toMatchObject({ nextAction: 'view_alignment', transcriptId: 'w' });
+    const replaced = { ...narration, data: { ...narration.data, audioUrl: '/new.wav' } };
+    expect(scriptCanvasState([script, replaced, words], [edge('s', 'a'), edge('s', 'w'), edge('a', 'w')], 's').nextAction).toBe('align_narration');
+  });
 });

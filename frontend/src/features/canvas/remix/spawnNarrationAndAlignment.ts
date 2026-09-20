@@ -80,12 +80,15 @@ async function createAlignedTranscript(audioId: string): Promise<string> {
   const path = projectMediaPathFromUrl(project, url);
   let media = audio.data.remixMedia as UploadedRemixMedia | undefined;
   if (!path && (!media || media.url !== url)) throw new Error('当前配音尚未保存到项目，请上传项目内音频。');
-  if (!media || (path && media.media_path !== path)) {
+  if (!media || (path && media.media_path !== path) || (media.url && media.url !== url)) {
     if (!path) throw new Error('当前配音尚未保存到项目，请上传项目内音频。');
     media = await attachRemixMedia(project, path);
     const latestAudio = useCanvasStore.getState().nodes.find((node) => node.id === audioId);
     if (!latestAudio || latestAudio.data.audioUrl !== url) throw new Error('配音已变化，请重新点击按脚本对齐。');
-    useCanvasStore.getState().updateNodeData(audioId, { remixMedia: media });
+    useCanvasStore.getState().updateNodeData(audioId, {
+      remixMedia: media,
+      ...(media.url !== url ? { audioUrl: media.url } : {}),
+    });
   }
   if (media.media_kind !== 'audio' || media.has_audio === false) throw new Error('当前文件不是可用配音音频。');
   const store = useCanvasStore.getState();
