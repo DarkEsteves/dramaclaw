@@ -289,7 +289,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
       <Handle
         type="source"
         position={Position.Right}
-        id="blueprint"
+        id="source"
         className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]"
       />
 

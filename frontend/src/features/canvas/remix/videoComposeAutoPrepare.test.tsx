@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 const updateNodeData = vi.fn();
 const prepareNodeRemix = vi.hoisted(() => vi.fn());
-vi.mock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
+vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: Object.assign((selector: (state: unknown) => unknown) => selector({ updateNodeData, setSelectedNode: vi.fn() }), { getState: () => ({ nodes: [], edges: [] }) }) }));
 vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNodes: () => [{ id: 'timing', type: 'semanticTimelineNode', data: {} }] }));
@@ -22,6 +22,8 @@ describe('VideoComposeNode automatic preparation', () => {
     let release!: (value: { manifestRef: { artifactId: string; revision: number }; events: []; selections: []; unresolvedRequiredEvents: [] }) => void;
     prepareNodeRemix.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
     render(<StrictMode><VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', autoPrepareRequested: true }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} /></StrictMode>);
+    expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
+    expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
     await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
     expect(prepareNodeRemix).toHaveBeenCalledTimes(1);
     release({ manifestRef: { artifactId: 'manifest', revision: 1 }, events: [], selections: [], unresolvedRequiredEvents: [] });

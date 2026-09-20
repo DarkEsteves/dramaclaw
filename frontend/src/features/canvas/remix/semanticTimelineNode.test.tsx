@@ -7,7 +7,7 @@ const upstreamNodes = [
   { id: 'script-1', type: 'scriptNode', data: { remixScriptRef: { artifactId: 'script-art', revision: 1 } } },
   { id: 'transcript-1', type: 'transcriptNode', data: { artifactRef: { artifactId: 'words-art', revision: 1 } } },
 ];
-vi.mock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' } }));
+vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' } }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNodes: () => upstreamNodes }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unknown) => unknown) => selector({ updateNodeData, setSelectedNode: vi.fn() }) }));
@@ -28,6 +28,8 @@ describe('SemanticTimelineNode', () => {
   beforeEach(() => vi.clearAllMocks());
   it('compiles connected script and speech alignment with editable event offset', async () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
+    expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('产品登场 偏移毫秒'), { target: { value: '250' } });
     fireEvent.click(screen.getByRole('button', { name: '重新编译' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({

@@ -164,8 +164,8 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   };
 
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
-    <Handle type="target" position={Position.Left} id="media" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
-    <Handle type="source" position={Position.Right} id="transcript" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
+    <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+    <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
     <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<FileText className="h-4 w-4" />} titleText={data.displayName || '转写与对齐'} editable={false} />
     <NodeResizeHandle minWidth={320} minHeight={220} maxWidth={760} maxHeight={900} />
     <div className={`flex max-h-[600px] flex-col overflow-hidden rounded-[var(--node-radius)] border ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>

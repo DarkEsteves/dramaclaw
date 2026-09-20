@@ -181,8 +181,8 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   }, [data.autoCompileRequested, scriptRef, wordRef, id]);
 
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
-    <Handle type="target" position={Position.Left} id="timing" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
-    <Handle type="source" position={Position.Right} id="composition" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
+    <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+    <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
     <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<ScrollText className="h-4 w-4" />} titleText={data.displayName || '语义时间轴'} editable={false} />
     <div className={`max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted">

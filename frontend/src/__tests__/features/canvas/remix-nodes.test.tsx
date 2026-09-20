@@ -80,6 +80,8 @@ describe('remix canvas nodes', () => {
     expect(screen.getByDisplayValue('Hello')).toBeTruthy();
     expect(screen.getByText('00:00.100 – 00:00.450')).toBeTruthy();
     expect(screen.getByText('低置信度')).toBeTruthy();
+    expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
+    expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
   });
 
   it('renders a persisted reference blueprint artifact on the story node', () => {
@@ -105,5 +107,7 @@ describe('remix canvas nodes', () => {
     );
 
     expect(screen.getByText('Blueprint blueprint-1 · r3')).toBeTruthy();
+    expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
+    expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
   });
 });
