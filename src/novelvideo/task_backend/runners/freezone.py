@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from novelvideo.i18n_message import MessageLike, lmsg
-from novelvideo.freezone.remix.reference_context import load_reference_events
+from novelvideo.freezone.remix.reference_context import bind_reference_story, load_reference_events
 from novelvideo.egress_context import (
     TRUSTED_EGRESS_CONTEXT_KEY,
     TrustedEgressContext,
@@ -867,6 +867,7 @@ async def _run_freezone_video_story_async(
         ensure_freezone_dirs,
         run_freezone_analyze_shots,
         run_freezone_extract_frames,
+        run_freezone_extract_reference_frames,
     )
 
     payload = envelope.get("payload") or {}
@@ -887,16 +888,29 @@ async def _run_freezone_video_story_async(
         )
     ensure_freezone_dirs(project_dir)
     _update(ctx, "freezone_video_story", job_id, 0.1, "ffmpeg 抽取关键帧...")
-    frame_paths = await _call_freezone_leaf(
-        envelope,
-        run_freezone_extract_frames,
-        "run_freezone_extract_frames",
-        project_dir=project_dir,
-        job_id=job_id,
-        video_path=Path(str(payload["video_path"])),
-        max_frames=int(payload.get("max_frames") or 20),
-        scene_threshold=float(payload.get("scene_threshold") or 0.3),
-    )
+    frame_times_us = None
+    if reference_events is not None:
+        times = sorted({time for event in reference_events for time in event.get("frame_times_us", []) if type(time) is int})
+        if not times:
+            times = [(event["start_us"] + event["end_us"]) // 2 for event in reference_events]
+        budget = min(len(times), int(payload.get("max_frames") or 20))
+        frame_times_us = [times[index * (len(times) - 1) // max(1, budget - 1)] for index in range(budget)] if budget else []
+        frame_paths = await _call_freezone_leaf(
+            envelope, run_freezone_extract_reference_frames, "run_freezone_extract_frames",
+            project_dir=project_dir, job_id=job_id,
+            video_path=Path(str(payload["video_path"])), frame_times_us=frame_times_us,
+        )
+    else:
+        frame_paths = await _call_freezone_leaf(
+            envelope,
+            run_freezone_extract_frames,
+            "run_freezone_extract_frames",
+            project_dir=project_dir,
+            job_id=job_id,
+            video_path=Path(str(payload["video_path"])),
+            max_frames=int(payload.get("max_frames") or 20),
+            scene_threshold=float(payload.get("scene_threshold") or 0.3),
+        )
     frame_urls = [
         make_static_url_for_context(ctx, path.relative_to(project_dir).as_posix())
         for path in frame_paths
@@ -908,7 +922,7 @@ async def _run_freezone_video_story_async(
         0.55,
         f"Vision 解析 {len(frame_paths)} 帧为视频故事...",
     )
-    vision_options = {"reference_events": reference_events} if reference_events is not None else {}
+    vision_options = {"reference_events": reference_events, "frame_times_us": frame_times_us} if reference_events is not None else {}
     result = await _call_freezone_leaf(
         envelope,
         run_freezone_analyze_shots,
@@ -923,6 +937,12 @@ async def _run_freezone_video_story_async(
         **vision_options,
     )
     output_path = Path(str(result["output_path"]))
+    notes = bind_reference_story(
+        reference_events,
+        result.get("analyses") or [],
+        frame_times_us or [],
+        frame_urls,
+    ) if reference_events is not None else None
     return {
         "job_id": job_id,
         "output_url": make_static_url_for_context(
@@ -933,9 +953,10 @@ async def _run_freezone_video_story_async(
         "analysis_mode": "video_story",
         "frame_count": len(frame_paths),
         "frame_urls": frame_urls,
+        **({"frame_times_us": frame_times_us} if frame_times_us is not None else {}),
         "analyses": result.get("analyses"),
         "video_story": result.get("video_story"),
-        **({"reference_events": reference_events} if reference_events is not None else {}),
+        **({"reference_events": notes} if notes is not None else {}),
     }
 
 

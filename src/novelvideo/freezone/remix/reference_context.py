@@ -45,6 +45,10 @@ def build_reference_events(
         if type(time_us) is int and 0 < time_us < duration:
             boundaries.add(time_us)
     times = sorted(boundaries)
+    # The vision prompt accepts at most 60 source-clock windows. Keep the
+    # original first/last boundary and evenly merge excess scene cuts.
+    if len(times) > 61:
+        times = [times[index * (len(times) - 1) // 60] for index in range(61)]
     frames = evidence.get("representative_frames", [])
     words = transcript.get("words", []) if transcript and transcript.get("status") == "completed" else []
     source_text = transcript.get("transcript") if transcript else None
@@ -63,6 +67,13 @@ def build_reference_events(
             "end_us": end,
             "frame_pts": [
                 frame["pts"] for frame in frames
+                if isinstance(frame, dict)
+                and type(frame.get("time_us")) is int
+                and start <= frame["time_us"] < end
+                and type(frame.get("pts")) is int
+            ],
+            "frame_times_us": [
+                frame["time_us"] for frame in frames
                 if isinstance(frame, dict)
                 and type(frame.get("time_us")) is int
                 and start <= frame["time_us"] < end
@@ -95,3 +106,36 @@ def _spoken_text(words: list[dict[str, Any]], source_text: object) -> str:
             result += " "
         result += text
     return result
+
+
+def bind_reference_story(
+    events: list[dict[str, Any]], shots: list[dict[str, Any]],
+    frame_times_us: list[int], frame_urls: list[str],
+) -> list[dict[str, Any]]:
+    """Keep factual media time boundaries while attaching reviewable model notes."""
+    notes: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        candidate = shots[index] if len(shots) == len(events) and isinstance(shots[index], dict) else {}
+        try:
+            aligned = (
+                abs(float(candidate["start_time"]) - event["start_us"] / 1_000_000) <= 0.5
+                and abs(float(candidate["end_time"]) - event["end_us"] / 1_000_000) <= 0.5
+            )
+        except (KeyError, TypeError, ValueError):
+            aligned = False
+        shot = candidate if aligned else {}
+        midpoint = (event["start_us"] + event["end_us"]) // 2
+        candidates = [
+            (abs(time - midpoint), url)
+            for time, url in zip(frame_times_us, frame_urls)
+            if event["start_us"] <= time < event["end_us"]
+        ]
+        frame_url = min(candidates)[1] if candidates else None
+        notes.append({
+            **event,
+            "frame_url": frame_url,
+            "visual_observation": shot.get("visual_description", ""),
+            "narrative_inference": shot.get("narrative", ""),
+            "note_status": "needs_review",
+        })
+    return notes

@@ -5,10 +5,18 @@ describe('reference blueprint model', () => {
   it('finds connected reference video and transcript artifact', () => {
     const nodes = [
       { id: 'video', data: { videoUrl: '/video.mp4', remixMedia: { media_path: 'reference.mp4', media_hash: 'hash', duration_us: 2_000_000, media_kind: 'video', url: '/video.mp4' } } },
-      { id: 'words', data: { artifactRef: { artifactId: 'transcript-1', revision: 2 } } },
+      { id: 'words', data: { sourceMediaHash: 'hash', artifactRef: { artifactId: 'transcript-1', revision: 2 } } },
     ];
     const edges = [{ source: 'video', target: 'story' }, { source: 'words', target: 'story' }];
     expect(connectedBlueprintSources('story', nodes, edges)).toEqual({ mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/video.mp4', transcriptRef: { artifactId: 'transcript-1', revision: 2 } });
+  });
+
+  it('ignores a connected transcript from a replaced video', () => {
+    const nodes = [
+      { id: 'video', data: { videoUrl: '/new.mp4', remixMedia: { media_path: 'new.mp4', media_hash: 'new', duration_us: 1_000_000, media_kind: 'video' } } },
+      { id: 'words', data: { sourceMediaHash: 'old', artifactRef: { artifactId: 'old-words', revision: 1 } } },
+    ];
+    expect(connectedBlueprintSources('story', nodes, [{ source: 'video', target: 'story' }, { source: 'words', target: 'story' }])?.transcriptRef).toBeNull();
   });
 
   it('keeps observations, model interpretations, and user rules separate', () => {

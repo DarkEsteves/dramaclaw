@@ -77,7 +77,10 @@ export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChang
         {roles.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
       </select>
     </label>
-    {media && <div className="mt-2 truncate text-text-muted" title={media.media_path}>{media.media_path.split('/').pop()} · {(media.duration_us / 1_000_000).toFixed(1)} 秒{media.has_audio ? ' · 有声' : ''}</div>}
+    {media && <div className="mt-2 text-text-muted" title={media.media_path}>
+      <div className="truncate">{media.media_path.split('/').pop()}</div>
+      <div>{(media.duration_us / 1_000_000).toFixed(1)} 秒{media.width_px && media.height_px ? ` · ${media.width_px}×${media.height_px}` : ''}{media.fps_num && media.fps_den ? ` · ${(media.fps_num / media.fps_den).toFixed(2)} fps` : ''} · {media.audio_stream_count ?? (media.has_audio ? 1 : 0)} 条音轨</div>
+    </div>}
     {busy && <div role="status">正在读取素材…</div>}
     {error && <div role="alert" className="text-destructive">{error}</div>}
   </div>;

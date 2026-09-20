@@ -7,7 +7,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 
 const inFlight = new Map<string, Promise<string>>();
 
-async function createTranscript(sourceNodeId: string): Promise<string> {
+async function createTranscript(sourceNodeId: string, autoStart: boolean): Promise<string> {
   const project = readUrl().project;
   if (!project) throw new Error('请先打开项目画布');
   const store = useCanvasStore.getState();
@@ -33,7 +33,7 @@ async function createTranscript(sourceNodeId: string): Promise<string> {
   const existing = current.edges.find((edge) => edge.source === sourceNodeId && current.nodes.some((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.transcript && node.data.sourceMediaPath === media.media_path && node.data.sourceMediaHash === media.media_hash));
   if (existing) {
     const child = current.nodes.find((node) => node.id === existing.target);
-    if (child && Array.isArray(child.data.words) && child.data.words.length === 0 && !child.data.operationId) {
+    if (autoStart && child && Array.isArray(child.data.words) && child.data.words.length === 0 && !child.data.operationId) {
       current.updateNodeData(child.id, { autoStartMode: 'transcribe' });
     }
     return existing.target;
@@ -43,15 +43,17 @@ async function createTranscript(sourceNodeId: string): Promise<string> {
     current.deleteNode(child);
     throw new Error('连接转写节点失败');
   }
-  current.updateNodeData(child, { sourceMediaPath: media.media_path, sourceMediaHash: media.media_hash, autoStartMode: 'transcribe' });
+  current.updateNodeData(child, { sourceMediaPath: media.media_path, sourceMediaHash: media.media_hash, autoStartMode: autoStart ? 'transcribe' : null });
   return child;
 }
 
 /** Create a result node from an audio/video source and start transcription once it mounts. */
-export function startSourceTranscript(sourceNodeId: string): Promise<string> {
-  const pending = inFlight.get(sourceNodeId);
+export function startSourceTranscript(sourceNodeId: string, options: { autoStart?: boolean } = {}): Promise<string> {
+  const autoStart = options.autoStart !== false;
+  const key = `${sourceNodeId}:${autoStart}`;
+  const pending = inFlight.get(key);
   if (pending) return pending;
-  const started = createTranscript(sourceNodeId).finally(() => inFlight.delete(sourceNodeId));
-  inFlight.set(sourceNodeId, started);
+  const started = createTranscript(sourceNodeId, autoStart).finally(() => inFlight.delete(key));
+  inFlight.set(key, started);
   return started;
 }

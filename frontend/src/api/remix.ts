@@ -6,7 +6,7 @@ export interface RemixRenderRequest { manifestRef: RemixArtifactRef; idempotency
 export interface RemixTaskRef { task_key: string; task_type: string; task_id: string | null; operation_id: string }
 export interface RemixRenderTaskRef extends RemixTaskRef { job_id: string }
 export interface RemixOperation { operation_id: string; status: string; task_id: string | null; task_type?: string | null; task_scope?: string | null; canvas_id?: string; node_id?: string; node_revision?: number; input_refs?: Array<{ artifact_id: string; revision: number }>; output_refs: Array<{ project_path?: string; artifact_id?: string; revision?: number }>; output_urls?: Array<{ media_url: string; download_url: string }> }
-export interface RemixUploadedMedia { media_path: string; media_hash: string; url: string; size: number; media_kind: 'video' | 'audio'; duration_us: number; has_audio?: boolean }
+export interface RemixUploadedMedia { media_path: string; media_hash: string; url: string; size: number; media_kind: 'video' | 'audio'; duration_us: number; has_audio?: boolean; audio_stream_count?: number; width_px?: number; height_px?: number; fps_num?: number; fps_den?: number }
 export type RemixProcessRequest =
   | { action: 'analyze_reference_video'; mediaPath: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'transcribe_media'; mediaPath: string; language: string; idempotencyKey: string; nodeRevision: number }

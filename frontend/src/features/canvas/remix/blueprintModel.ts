@@ -28,7 +28,9 @@ export function connectedBlueprintSources(nodeId: string, nodes: ConnectedNode[]
   });
   if (!video) return null;
   const media = video.data.remixMedia as Record<string, unknown>;
-  const transcriptRef = connected.map((node) => artifactRef(node.data.artifactRef)).find(Boolean) ?? null;
+  const transcriptRef = connected
+    .filter((node) => node.data.sourceMediaHash === media.media_hash)
+    .map((node) => artifactRef(node.data.artifactRef)).find(Boolean) ?? null;
   return {
     mediaPath: media.media_path as string,
     mediaHash: typeof media.media_hash === 'string' ? media.media_hash : '',

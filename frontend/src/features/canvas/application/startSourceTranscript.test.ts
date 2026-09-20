@@ -34,6 +34,11 @@ describe('startSourceTranscript', () => {
     expect(state.nodes[1].data.autoStartMode).toBe('transcribe');
   });
 
+  it('can create the transcript without starting a second job when analysis coordinates it', async () => {
+    await startSourceTranscript('audio-1', { autoStart: false });
+    expect(state.nodes[1].data.autoStartMode).toBeNull();
+  });
+
   it('reuses an existing transcript instead of creating duplicates', async () => {
     state.nodes[0].data.remixMedia = { media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true };
     state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [], sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });

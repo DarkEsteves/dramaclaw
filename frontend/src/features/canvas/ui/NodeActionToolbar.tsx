@@ -137,7 +137,7 @@ import { useFreezoneVideoModels } from "@/features/canvas/hooks/useFreezoneVideo
 import { findSeedance25VideoModel } from "@/features/canvas/nodes/shared/videoModelCapabilities";
 import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
-import { analyzeVideoStory } from "@/features/canvas/application/videoAnalyzeStory";
+import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
@@ -1092,12 +1092,7 @@ export const NodeActionToolbar = memo(
 
     const handleAnalyzeVideo = useCallback(() => {
       const url = requireVideoUrl();
-      const videoData = node.data as Record<string, unknown>;
-      const durationSec =
-        typeof videoData.durationMs === "number" && videoData.durationMs > 0
-          ? videoData.durationMs / 1000
-          : undefined;
-      const result = analyzeVideoStory(node.id, { videoUrl: url, durationSec });
+      const result = analyzeReferenceVideo(node.id, { videoUrl: url });
       if (!result) {
         throw new Error("无法启动视频解析");
       }
@@ -2203,13 +2198,7 @@ export const NodeActionToolbar = memo(
                   if (!hasVideo || !videoUrl || isAnalyzing) {
                     return;
                   }
-                  // 编排在 application/videoAnalyzeStory（故事板详情「解析」共用）：
-                  // 同步建 loading 故事节点 → 提交 → 归一化回填 / 写错。
-                  const durationSec =
-                    typeof videoData.durationMs === "number" && videoData.durationMs > 0
-                      ? videoData.durationMs / 1000
-                      : undefined;
-                  analyzeVideoStory(node.id, { videoUrl, durationSec });
+                  analyzeReferenceVideo(node.id, { videoUrl });
                 };
 
                 const handleVideoDownload = async () => {

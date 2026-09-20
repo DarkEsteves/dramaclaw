@@ -74,7 +74,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   }, [artifactRef, data.alignedScriptRef, id, scriptRef, updateNodeData]);
 
   const start = async (mode: 'transcribe' | 'align') => {
-    if (busy || operationId) return;
+    if (busy || operationId || data.managedOperationId) return;
     if (!project || !source) { setError('请先连接已上传的音频或带声音视频'); return; }
     if (mode === 'align' && !scriptRef) { setError('请先连接已保存脚本的节点'); return; }
     if (data.words.length > 0 && !window.confirm('重新识别会替换当前校字结果，确定继续吗？')) return;
@@ -191,8 +191,8 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         {source?.url && (source.kind === 'audio' ? <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} controls className="w-full" /> : <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} controls className="max-h-40 w-full" />)}
         <div className="mt-2 flex items-center gap-2">
           <select aria-label="转写语言" value={language} onChange={(event) => setLanguage(event.target.value)} className="nodrag h-7 rounded-[12px] border border-white/10 bg-surface-field px-2 text-text-dark"><option value="zh">中文</option><option value="en">English</option></select>
-          <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('transcribe')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{operationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
-          {scriptRef && <button type="button" disabled={busy || Boolean(operationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>按脚本对齐</button>}
+          <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('transcribe')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{operationId || data.managedOperationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
+          {scriptRef && <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>按脚本对齐</button>}
           <span>{artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
         </div>
       </div>

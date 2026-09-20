@@ -116,6 +116,31 @@ def test_configured_adapter_transcribes_to_timed_words(tmp_path: Path, monkeypat
     ]
 
 
+def test_configured_adapter_detects_language_for_one_click_analysis(tmp_path: Path, monkeypatch):
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+
+    class DetectingWhisperX(FakeWhisperX):
+        def load_model(self, name, device, **kwargs):
+            self.calls.append(("load_model", kwargs))
+            return SimpleNamespace(transcribe=lambda audio, **options: {
+                "language": "en", "segments": [{"text": "go go", "start": 0.0, "end": 1.0}],
+            })
+
+    fake = DetectingWhisperX()
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.transcribe_media(media, "auto")
+
+    assert result["language"] == "en"
+    assert next(options for name, options in fake.calls if name == "load_align_model")["language_code"] == "en"
+    assert "language" not in next(options for name, options in fake.calls if name == "load_model")
+
+
 def test_configured_adapter_reports_script_mismatch_before_forced_alignment(tmp_path: Path, monkeypatch):
     media = tmp_path / "voice.wav"
     media.write_bytes(b"audio")

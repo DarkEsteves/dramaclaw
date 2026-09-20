@@ -173,10 +173,13 @@ def _normalize_result(
     if not isinstance(raw, dict):
         raise ValueError("speech aligner returned an invalid result")
     status = raw.get("status")
+    detected_language = raw.get("language") if language == "auto" else language
+    if not isinstance(detected_language, str) or not detected_language:
+        detected_language = language
     common = {
         "schema": "word_timeline.v1",
         "media_hash": _sha256(media_path),
-        "language": language,
+        "language": detected_language,
     }
     if script_revision is not None:
         common["script_revision"] = script_revision

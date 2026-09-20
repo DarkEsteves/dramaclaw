@@ -341,6 +341,30 @@ describe('reanalyzeVideoStory（视频故事重新解析）', () => {
     expect((nodeById('story-1')?.data.rows as unknown[]).length).toBeGreaterThan(0);
   });
 
+  it('将原片证据和转写版本传给联合分析并保留事件结果', async () => {
+    seedStoryNode();
+    submitFreezoneAnalyzeVideoStory.mockResolvedValue({ task_key: 'tk' });
+    awaitTaskCompletion.mockResolvedValue({ result: { video_story: { shots: [] }, reference_events: [{ start_us: 0, end_us: 1_000_000, spoken_text: '你好' }] } });
+    const evidenceRef = { artifactId: 'evidence', revision: 2 };
+    const transcriptRef = { artifactId: 'words', revision: 3 };
+
+    await reanalyzeVideoStory('story-1', { evidenceRef, transcriptRef })?.completion;
+
+    expect(submitFreezoneAnalyzeVideoStory).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ evidenceRef, transcriptRef }));
+    expect(nodeById('story-1')?.data.referenceEvents).toEqual([{ start_us: 0, end_us: 1_000_000, spoken_text: '你好' }]);
+  });
+
+  it('联合分析缺少事件结果时显示失败，而不清空旧内容冒充成功', async () => {
+    seedStoryNode();
+    submitFreezoneAnalyzeVideoStory.mockResolvedValue({ task_key: 'tk' });
+    awaitTaskCompletion.mockResolvedValue({ result: { video_story: { shots: [] } } });
+
+    await reanalyzeVideoStory('story-1', { evidenceRef: { artifactId: 'evidence', revision: 2 } })?.completion;
+
+    expect(nodeById('story-1')?.data.analysisError).toMatch(/没有返回事件笔记/);
+    expect(nodeById('story-1')?.data.rows).toEqual([{ shotNumber: 1, visualDescription: '旧的' }]);
+  });
+
   it('节点没记住片源 → 返回 null，不提交', () => {
     seedStoryNode({ sourceVideoUrl: null });
 

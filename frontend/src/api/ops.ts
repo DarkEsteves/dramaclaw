@@ -3154,6 +3154,8 @@ export interface FreezoneAnalyzeVideoStoryPayload {
   sceneThreshold?: number;
   /** Optional total duration (seconds) — improves table timestamp accuracy. */
   durationSec?: number;
+  evidenceRef?: { artifactId: string; revision: number } | null;
+  transcriptRef?: { artifactId: string; revision: number } | null;
 }
 
 export async function submitFreezoneAnalyzeVideoStory(
@@ -3166,6 +3168,8 @@ export async function submitFreezoneAnalyzeVideoStory(
   if (payload.maxFrames != null) body.max_frames = payload.maxFrames;
   if (payload.sceneThreshold != null) body.scene_threshold = payload.sceneThreshold;
   if (payload.durationSec != null) body.duration_sec = payload.durationSec;
+  if (payload.evidenceRef) body.evidence_ref = { artifact_id: payload.evidenceRef.artifactId, revision: payload.evidenceRef.revision };
+  if (payload.transcriptRef) body.transcript_ref = { artifact_id: payload.transcriptRef.artifactId, revision: payload.transcriptRef.revision };
   return await apiCall<FreezoneJobRef>(
     `projects/${encodeURIComponent(project)}/freezone/analyze-video-story`,
     { method: "POST", json: body },

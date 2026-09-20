@@ -31,6 +31,8 @@ import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintMode
 import { ReferenceBlueprintPanel } from '@/features/canvas/remix/blueprintPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
+import { analyzeReferenceVideo } from '@/features/canvas/application/analyzeReferenceVideo';
+import { ReferenceEventList, type ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
 
 type VideoStoryNodeProps = NodeProps & {
   id: string;
@@ -223,8 +225,13 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const reanalyzeBlueprint = useCallback(() => {
     if (!blueprintSource?.videoUrl) return;
     updateNodeData(id, { sourceVideoUrl: blueprintSource.videoUrl, referenceBlueprintRef: null });
-    reanalyzeVideoStory(id, { durationSec: blueprintSource.durationUs / 1_000_000 });
-  }, [blueprintSource, id, updateNodeData]);
+    const videoSource = canvasNodes.find((node) => node.type === CANVAS_NODE_TYPES.video && node.data.videoUrl === blueprintSource.videoUrl);
+    if (videoSource) {
+      analyzeReferenceVideo(videoSource.id, { videoUrl: blueprintSource.videoUrl });
+    } else {
+      reanalyzeVideoStory(id, { durationSec: blueprintSource.durationUs / 1_000_000 });
+    }
+  }, [blueprintSource, canvasNodes, id, updateNodeData]);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'analyze') reanalyzeBlueprint();
   }), [id, reanalyzeBlueprint]);
@@ -256,6 +263,9 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const isAnalyzing = Boolean(data.isAnalyzing);
   const hasError = Boolean(data.analysisError);
   const hasRows = rows.length > 0;
+  const referenceEvents = Array.isArray(data.referenceEvents) ? data.referenceEvents as ReferenceEvent[] : [];
+  const hasReferenceEvents = referenceEvents.length > 0;
+  const stageLabel: Record<string, string> = { preparing: '准备原片', extracting: '提取画面证据', transcribing: '转写同期台词', analyzing: '对照画面与台词' };
 
   // 表格单元格编辑：把编辑后的值写回 data.rows[idx][colKey]。
   // keyframeUrl 列在 StoryCell 里走只读分支，不会调到这里。
@@ -314,9 +324,11 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
         <div className="flex items-center justify-between border-b border-[rgba(255,255,255,0.08)] px-3 py-2">
           <div className="flex items-center gap-2 text-[12px] text-text-muted">
             {isAnalyzing ? (
-              <span>{t(`${V}.parsing`)}</span>
+              <span>{stageLabel[String(data.remixAnalysisStage)] ?? t(`${V}.parsing`)}</span>
             ) : hasError ? (
               <span className="text-red-300">{t(`${V}.parseFailed`)}</span>
+            ) : hasReferenceEvents ? (
+              <span>{referenceEvents.length} 个原片事件</span>
             ) : hasRows ? (
               <span>{t(`${V}.rowCount`, { count: rows.length })}</span>
             ) : (
@@ -336,17 +348,18 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             {t(`${V}.fullscreen`)}
           </button>
         </div>
-        {data.referenceBlueprintRef && (
-          <div className="border-b border-[rgba(255,255,255,0.06)] px-3 py-1.5 text-[11px] text-text-muted">
-            Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}
-          </div>
-        )}
-        <ReferenceBlueprintPanel nodeId={id} source={blueprintSource} rows={rows} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} />
+        <details className="nodrag border-b border-white/[0.08] text-xs text-text-dark">
+          <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">参考蓝图与分析设置{data.referenceBlueprintRef ? ' · 已保存' : ''}</summary>
+          <ReferenceBlueprintPanel nodeId={id} source={blueprintSource} rows={rows} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} />
+        </details>
+        {data.referenceBlueprintRef && <div className="px-3 py-1 text-[11px] text-text-muted">Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}</div>}
         <div className="flex-1 overflow-hidden p-2">
           {isAnalyzing ? (
             <div className="h-full w-full" />
           ) : hasError ? (
             <ErrorStoryState message={data.analysisError ?? t(`${V}.unknownError`)} />
+          ) : hasReferenceEvents ? (
+            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} />
           ) : hasRows ? (
             <StoryTable rows={rows} compact onCellCommit={handleCellCommit} />
           ) : (

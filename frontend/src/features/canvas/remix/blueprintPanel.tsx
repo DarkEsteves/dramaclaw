@@ -8,6 +8,7 @@ interface BlueprintDraft {
   referenceEvidenceRef?: RemixArtifactRef | null;
   referenceBlueprintRef?: RemixArtifactRef | null;
   evidenceOperationId?: string | null;
+  managedEvidenceOperationId?: string | null;
   sourceMediaPath?: string | null;
   blueprintNarrativeRole?: string;
   blueprintPreserveRule?: string;
@@ -35,7 +36,7 @@ export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, 
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
 
   const analyzeEvidence = async () => {
-    if (!project || !source || busy || operationId) return;
+    if (!project || !source || busy || operationId || draft.managedEvidenceOperationId) return;
     setBusy(true); setError(null);
     try {
       const revision = (draft.blueprintRevision ?? 0) + 1;
@@ -99,7 +100,7 @@ export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, 
       {source?.transcriptRef && <span className="text-text-muted">转写 r{source.transcriptRef.revision}</span>}
     </div>
     <div className="mb-2 flex flex-wrap gap-2">
-      <button type="button" disabled={!source || busy || Boolean(operationId)} onClick={() => void analyzeEvidence()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">{operationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
+      <button type="button" disabled={!source || busy || Boolean(operationId || draft.managedEvidenceOperationId)} onClick={() => void analyzeEvidence()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">{operationId || draft.managedEvidenceOperationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
       <button type="button" disabled={!source || busy} onClick={onReanalyze} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">重新分析画面</button>
       {evidenceRef && <span className="text-text-muted">证据 {evidenceRef.artifactId} · r{evidenceRef.revision}</span>}
     </div>

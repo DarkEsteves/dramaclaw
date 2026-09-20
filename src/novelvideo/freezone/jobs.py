@@ -1880,6 +1880,31 @@ async def run_freezone_extract_frames(
     return scene_files
 
 
+async def run_freezone_extract_reference_frames(
+    *, project_dir: Path, job_id: str, video_path: Path,
+    frame_times_us: list[int],
+) -> list[Path]:
+    """Extract the exact source-clock representatives selected by remix evidence."""
+    import asyncio
+
+    out_dir = outputs_dir(project_dir, "freezone_extract") / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for index, time_us in enumerate(frame_times_us):
+        target = out_dir / f"reference_{index:03d}.png"
+        command = [
+            "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path),
+            "-ss", f"{time_us / 1_000_000:.6f}", "-frames:v", "1", str(target),
+        ]
+        completed = await asyncio.to_thread(
+            subprocess.run, command, check=False, capture_output=True, text=True, timeout=120,
+        )
+        if completed.returncode or not target.is_file():
+            raise ValueError(f"reference frame extraction failed: {completed.stderr[-500:]}")
+        paths.append(target)
+    return paths
+
+
 # ============================================================
 # Analyze shots (M1b) — Gemini Vision 拆分镜
 # ============================================================
@@ -1907,6 +1932,7 @@ SHOT_ANALYSIS_PROMPT = """你是一个专业的电影分镜师。下面给你一
 def build_video_story_analysis_prompt(
     *, frame_count: int, duration_sec: Optional[float] = None,
     reference_events: list[dict[str, Any]] | None = None,
+    frame_times_us: list[int] | None = None,
 ) -> str:
     duration_hint = (
         f"视频总时长约 {duration_sec:.2f} 秒。"
@@ -1972,10 +1998,15 @@ JSON schema:
          "frame_pts": event.get("frame_pts", [])[:12]}
         for event in reference_events[:60]
     ]
-    return prompt + (
+    frame_clock = "".join(
+        f"第 {index} 张输入画面时间：{time_us} 微秒。\n"
+        for index, time_us in enumerate(frame_times_us or [], 1)
+    )
+    return prompt + frame_clock + (
         "\n下面是同一原片时间轴上的画面事件与同期台词（时间单位为微秒）：\n"
         + json.dumps(compact, ensure_ascii=False)
         + "\n请结合输入画面与同期台词，为每个事件写画面观察、叙事推断和台词的作用。"
+        "此处请为上列每个事件按顺序输出一个 shots 条目，不采用前述 3-12 段的归并规则。"
         "不得改写事件的起止时间；无法从画面证实的内容不要当作画面观察。"
         "没有同期台词时不要编造台词。\n"
     )
@@ -2078,6 +2109,7 @@ async def run_freezone_analyze_shots(
     analysis_mode: str = "shots",
     duration_sec: Optional[float] = None,
     reference_events: list[dict[str, Any]] | None = None,
+    frame_times_us: list[int] | None = None,
     egress_context: TrustedEgressContext | None = None,
 ) -> dict:
     """Send N frames to a Vision model and parse a structured JSON response.
@@ -2117,6 +2149,7 @@ async def run_freezone_analyze_shots(
             frame_count=len(frame_paths),
             duration_sec=duration_sec,
             reference_events=reference_events,
+            frame_times_us=frame_times_us,
         )
         if mode == "video_story"
         else SHOT_ANALYSIS_PROMPT

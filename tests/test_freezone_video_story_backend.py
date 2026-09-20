@@ -82,6 +82,7 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
         frame_count=2,
         duration_sec=4.0,
         reference_events=[{"start_us": 0, "end_us": 2_000_000, "spoken_text": "hello", "frame_pts": [1], "word_spans": []}],
+        frame_times_us=[500_000, 2_500_000],
     )
 
     assert "hello" in prompt
@@ -89,6 +90,7 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
     assert "画面观察" in prompt
     assert "同期台词" in prompt
     assert "不得改写事件的起止时间" in prompt
+    assert "第 1 张输入画面时间：500000 微秒" in prompt
 
 
 def test_freezone_analyze_request_defaults_to_shots_mode() -> None:
@@ -196,7 +198,7 @@ async def test_video_story_runner_passes_project_timed_events_to_vision(tmp_path
     output = tmp_path / "analysis.json"
     output.write_text("{}")
     captured: dict[str, object] = {}
-    events = [{"start_us": 0, "end_us": 1_000_000, "spoken_text": "hello", "frame_pts": [0], "word_spans": []}]
+    events = [{"start_us": 0, "end_us": 1_000_000, "spoken_text": "hello", "frame_pts": [0], "frame_times_us": [500_000], "word_spans": []}]
 
     def fake_context(project_dir, project_id, video_path, evidence_ref, transcript_ref):
         captured["refs"] = (evidence_ref, transcript_ref)
@@ -212,6 +214,7 @@ async def test_video_story_runner_passes_project_timed_events_to_vision(tmp_path
     monkeypatch.setattr(runner, "load_reference_events", fake_context, raising=False)
     monkeypatch.setattr(runner, "_update", lambda *args: None)
     monkeypatch.setattr(jobs, "run_freezone_extract_frames", fake_frames)
+    monkeypatch.setattr(jobs, "run_freezone_extract_reference_frames", fake_frames, raising=False)
     monkeypatch.setattr(jobs, "run_freezone_analyze_shots", fake_vision)
     monkeypatch.setattr(deps, "make_static_url_for_context", lambda ctx, path: f"/static/{path}")
     evidence_ref = {"artifact_id": "evidence-1", "revision": 1}
@@ -224,7 +227,9 @@ async def test_video_story_runner_passes_project_timed_events_to_vision(tmp_path
 
     assert captured["refs"] == (evidence_ref, transcript_ref)
     assert captured["vision_events"] == events
-    assert result["reference_events"] == events
+    assert result["reference_events"][0]["spoken_text"] == "hello"
+    assert result["reference_events"][0]["frame_url"] == "/static/frame.png"
+    assert result["frame_times_us"] == [500_000]
 
 
 @pytest.mark.asyncio

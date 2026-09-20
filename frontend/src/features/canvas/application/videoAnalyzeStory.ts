@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
 import { submitFreezoneAnalyzeVideoStory } from '@/api/ops';
+import type { RemixArtifactRef } from '@/api/remix';
 import { awaitTaskCompletion } from '@/api/tasks';
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import { readUrl } from '@/lib/url-params';
@@ -30,13 +31,15 @@ function runStoryAnalysis(
   projectId: string,
   storyNodeId: string,
   sourceNodeId: string | null,
-  opts: { videoUrl: string; durationSec?: number },
+  opts: { videoUrl: string; durationSec?: number; evidenceRef?: RemixArtifactRef | null; transcriptRef?: RemixArtifactRef | null },
 ): Promise<void> {
   return (async () => {
     try {
       const submitResp = (await submitFreezoneAnalyzeVideoStory(projectId, {
         videoUrl: opts.videoUrl,
         durationSec: opts.durationSec,
+        ...(opts.evidenceRef ? { evidenceRef: opts.evidenceRef } : {}),
+        ...(opts.transcriptRef ? { transcriptRef: opts.transcriptRef } : {}),
       })) as unknown;
       console.info('[video-analyze] submit response', submitResp);
 
@@ -60,6 +63,9 @@ function runStoryAnalysis(
       }
 
       const rows = normalizeVideoStoryRows(rawResult);
+      if (opts.evidenceRef && (!Array.isArray(rawResult.reference_events) || rawResult.reference_events.length === 0)) {
+        throw new Error('原片联合分析没有返回事件笔记');
+      }
       console.info('[video-analyze] normalized rows', rows.length, rows);
 
       // 把解析结果回填到承载结果的故事节点。
@@ -67,6 +73,7 @@ function runStoryAnalysis(
       done.updateNodeData(storyNodeId, {
         rows,
         rawResult,
+        referenceEvents: Array.isArray(rawResult.reference_events) ? rawResult.reference_events : [],
         isAnalyzing: false,
         analysisError: null,
       } as unknown as Parameters<typeof done.updateNodeData>[1]);
@@ -162,7 +169,7 @@ export function analyzeVideoStory(
  */
 export function reanalyzeVideoStory(
   storyNodeId: string,
-  opts?: { durationSec?: number },
+  opts?: { durationSec?: number; evidenceRef?: RemixArtifactRef | null; transcriptRef?: RemixArtifactRef | null },
 ): VideoAnalyzeStoryResult | null {
   const projectId = readUrl().project;
   if (!projectId) {
@@ -189,6 +196,8 @@ export function reanalyzeVideoStory(
     completion: runStoryAnalysis(projectId, storyNodeId, null, {
       videoUrl: sourceVideoUrl,
       durationSec: opts?.durationSec,
+      evidenceRef: opts?.evidenceRef,
+      transcriptRef: opts?.transcriptRef,
     }),
   };
 }

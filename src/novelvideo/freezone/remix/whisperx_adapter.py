@@ -22,14 +22,16 @@ class WhisperXSpeechAligner:
         self.batch_size = batch_size
 
     def transcribe(self, media_path: Path, language: str) -> dict[str, Any]:
-        whisperx, audio, segments = self._recognize(media_path, language)
+        whisperx, audio, segments, detected_language = self._recognize(media_path, language)
         text = "".join(str(row.get("text", "")) for row in segments)
         if not text.strip():
             return {"status": "no_speech", "words": []}
-        return self._align_words(whisperx, audio, text, language, segments)
+        result = self._align_words(whisperx, audio, text, detected_language, segments)
+        result["language"] = detected_language
+        return result
 
     def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
-        whisperx, audio, segments = self._recognize(media_path, language)
+        whisperx, audio, segments, _ = self._recognize(media_path, language)
         transcript = "".join(str(row.get("text", "")) for row in segments)
         if not transcript.strip():
             return {"status": "no_speech", "words": []}
@@ -45,17 +47,21 @@ class WhisperXSpeechAligner:
             import whisperx
         except ImportError as error:
             raise RuntimeError("WhisperX is not installed") from error
+        language_option = {} if language == "auto" else {"language": language}
         model = whisperx.load_model(
             self.model_name, self.device, compute_type=self.compute_type,
-            language=language, download_root=str(self.model_cache),
-            local_files_only=True,
+            download_root=str(self.model_cache), local_files_only=True,
+            **language_option,
         )
         audio = whisperx.load_audio(str(media_path))
-        result = model.transcribe(audio, batch_size=self.batch_size, language=language)
+        result = model.transcribe(audio, batch_size=self.batch_size, **language_option)
         segments = result.get("segments", [])
         if not isinstance(segments, list):
             raise ValueError("WhisperX returned invalid transcription segments")
-        return whisperx, audio, segments
+        detected_language = result.get("language") if language == "auto" else language
+        if segments and (not isinstance(detected_language, str) or not detected_language):
+            raise ValueError("WhisperX did not report the detected language")
+        return whisperx, audio, segments, detected_language
 
     def _alignment_model(self, whisperx, language: str):
         return whisperx.load_align_model(

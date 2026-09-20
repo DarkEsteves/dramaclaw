@@ -26,6 +26,12 @@ describe('ReferenceBlueprintPanel', () => {
     await waitFor(() => expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } })));
   });
 
+  it('does not start a second extraction while one-click analysis owns the task', () => {
+    render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{ managedEvidenceOperationId: 'running-op' }} onPatch={() => {}} onReanalyze={() => {}} />);
+    expect((screen.getByRole('button', { name: '提取中…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
   it('saves an editable blueprint with explicit evidence lineage', async () => {
     const onPatch = vi.fn();
     render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={onPatch} onReanalyze={() => {}} />);

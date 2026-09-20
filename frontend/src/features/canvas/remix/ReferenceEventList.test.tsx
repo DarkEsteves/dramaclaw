@@ -1,0 +1,23 @@
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
+import { ReferenceEventList } from './ReferenceEventList';
+
+describe('ReferenceEventList', () => {
+  it('shows timed visual and spoken evidence with separate narrative inference', () => {
+    render(<ReferenceEventList videoUrl="/clip.mp4" events={[{
+      start_us: 8_200_000, end_us: 11_500_000,
+      frame_url: '/frame.png', frame_pts: [82], frame_times_us: [8_500_000],
+      spoken_text: '喝第一口咖啡', word_spans: [{ text: '咖啡', start_us: 9_000_000, end_us: 9_500_000 }],
+      visual_observation: '人物拿起杯子', narrative_inference: '产品登场', note_status: 'needs_review',
+    }]} />);
+
+    expect(screen.getByText('08.2–11.5 秒')).toBeTruthy();
+    expect(screen.getByText('喝第一口咖啡')).toBeTruthy();
+    expect(screen.getByText('人物拿起杯子')).toBeTruthy();
+    expect(screen.getByText('产品登场')).toBeTruthy();
+    expect(screen.getByAltText('事件画面 1').getAttribute('src')).toBe('/frame.png');
+    fireEvent.click(screen.getByRole('button', { name: /08.2–11.5 秒/ }));
+    expect(screen.getByLabelText('原片事件预览')).toBeTruthy();
+    expect(screen.getByText(/画面时间/)).toBeTruthy();
+  });
+});

@@ -113,4 +113,19 @@ describe('remix canvas nodes', () => {
     expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
   });
+  it('shows source-clock events in the story node before the detailed table', () => {
+    render(
+      <VideoStoryNode
+        id="reference-1" type="videoStoryNode" zIndex={0} draggable dragging={false}
+        selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0}
+        data={{ displayName: '原片拆解', rows: [], sourceVideoUrl: '/source.mp4', referenceEvents: [{
+          start_us: 1_000_000, end_us: 2_000_000, spoken_text: '你好',
+          visual_observation: '人物举杯', narrative_inference: '产品登场', note_status: 'needs_review',
+        }] }}
+      />,
+    );
+    expect(screen.getByText('1 个原片事件')).toBeTruthy();
+    expect(screen.getByText('人物举杯')).toBeTruthy();
+    expect(screen.getByText('你好')).toBeTruthy();
+  });
 });
