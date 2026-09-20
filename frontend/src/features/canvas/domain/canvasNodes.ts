@@ -796,6 +796,8 @@ export interface TranscriptWord {
   text: string;
   startUs: number;
   endUs: number;
+  startChar?: number;
+  endChar?: number;
   confidence?: number | null;
 }
 

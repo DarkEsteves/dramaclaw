@@ -52,7 +52,38 @@ export class RealignmentRequiredError extends Error {
 export function timelineWords(payload: TranscriptTimeline): TranscriptWord[] {
   if (payload.status !== 'completed' || !Array.isArray(payload.words)) return [];
   return payload.words.filter((word) => typeof word.text === 'string' && Number.isFinite(word.start_us) && Number.isFinite(word.end_us))
-    .map((word) => ({ text: word.text, startUs: word.start_us, endUs: word.end_us, confidence: typeof word.confidence === 'number' ? word.confidence : null }));
+    .map((word) => ({ text: word.text, startUs: word.start_us, endUs: word.end_us,
+      startChar: Number.isInteger(word.start_char) ? Number(word.start_char) : undefined,
+      endChar: Number.isInteger(word.end_char) ? Number(word.end_char) : undefined,
+      confidence: typeof word.confidence === 'number' ? word.confidence : null }));
+}
+
+/** Keep the transcript's punctuation and spaces while making matched words seekable. */
+export function transcriptPlaybackParts(text: string, words: TranscriptWord[]): Array<{ text: string; startUs?: number; endUs?: number }> {
+  const parts: Array<{ text: string; startUs?: number; endUs?: number }> = [];
+  const utf16Offsets = [0];
+  for (const character of text) utf16Offsets.push(utf16Offsets[utf16Offsets.length - 1] + character.length);
+  let cursor = 0;
+  for (const word of words) {
+    const spanStart = word.startChar === undefined ? undefined : utf16Offsets[word.startChar];
+    const spanEnd = word.endChar === undefined ? undefined : utf16Offsets[word.endChar];
+    let position = spanStart !== undefined && spanEnd !== undefined
+      && text.slice(spanStart, spanEnd) === word.text ? spanStart : -1;
+    if (position < cursor) position = -1;
+    if (position < 0) {
+      position = text.indexOf(word.text, cursor);
+      while (position >= 0 && ((/^[A-Za-z0-9]/u.test(word.text) && /[A-Za-z0-9]/u.test(text[position - 1] ?? ''))
+        || (/[A-Za-z0-9]$/u.test(word.text) && /[A-Za-z0-9]/u.test(text[position + word.text.length] ?? '')))) {
+        position = text.indexOf(word.text, position + 1);
+      }
+    }
+    if (position < 0) return [{ text }];
+    if (position > cursor) parts.push({ text: text.slice(cursor, position) });
+    parts.push({ text: word.text, startUs: word.startUs, endUs: word.endUs });
+    cursor = position + word.text.length;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+  return parts;
 }
 
 /** Keep word timing but regenerate character offsets for a corrected transcript. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { correctedTimeline, sourceMediaForTranscript, sourceScriptForTranscript, transcriptSrt, timelineWords } from './transcriptModel';
+import { correctedTimeline, sourceMediaForTranscript, sourceScriptForTranscript, transcriptPlaybackParts, transcriptSrt, timelineWords } from './transcriptModel';
 
 const timeline = {
   schema: 'word_timeline.v1', media_hash: 'hash', language: 'zh', status: 'completed', transcript: '你好',
@@ -10,6 +10,23 @@ const timeline = {
 };
 
 describe('transcript node model', () => {
+  it('preserves separators and repeated words when preparing playback links', () => {
+    expect(transcriptPlaybackParts('go, go!', [
+      { text: 'go', startUs: 100_000, endUs: 200_000 },
+      { text: 'go', startUs: 500_000, endUs: 600_000 },
+    ])).toEqual([
+      { text: 'go', startUs: 100_000, endUs: 200_000 }, { text: ', ' },
+      { text: 'go', startUs: 500_000, endUs: 600_000 }, { text: '!' },
+    ]);
+    expect(transcriptPlaybackParts('corrected text', [{ text: 'old', startUs: 0, endUs: 100_000 }])).toEqual([{ text: 'corrected text' }]);
+    expect(transcriptPlaybackParts('other the', [{ text: 'the', startUs: 500_000, endUs: 600_000, startChar: 6, endChar: 9 }])).toEqual([
+      { text: 'other ' }, { text: 'the', startUs: 500_000, endUs: 600_000 },
+    ]);
+    expect(transcriptPlaybackParts('😀其他他', [{ text: '他', startUs: 500_000, endUs: 600_000, startChar: 3, endChar: 4 }])).toEqual([
+      { text: '😀其他' }, { text: '他', startUs: 500_000, endUs: 600_000 },
+    ]);
+  });
+
   it('chooses connected narration before video and ignores sources without a remix media path', () => {
     const nodes = [
       { id: 'video', data: { remixMedia: { media_path: 'video.mp4', media_kind: 'video', has_audio: true } } },
@@ -23,8 +40,8 @@ describe('transcript node model', () => {
 
   it('turns artifact words into the canvas word representation', () => {
     expect(timelineWords(timeline)).toEqual([
-      { text: '你', startUs: 0, endUs: 500_000, confidence: 0.4 },
-      { text: '好', startUs: 500_000, endUs: 1_000_000, confidence: 0.9 },
+      { text: '你', startUs: 0, endUs: 500_000, startChar: 0, endChar: 1, confidence: 0.4 },
+      { text: '好', startUs: 500_000, endUs: 1_000_000, startChar: 1, endChar: 2, confidence: 0.9 },
     ]);
   });
 

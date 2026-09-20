@@ -62,12 +62,12 @@ describe('TranscriptNode', () => {
   });
 
   it('transcribes the connected audio and persists a word timeline reference', async () => {
-    const { rerender } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const { container, rerender } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     fireEvent.click(screen.getByRole('button', { name: '开始转写' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
     rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
-    expect(screen.getByText('你好')).toBeTruthy();
+    expect(container.querySelector('p')?.textContent).toBe('你好');
     expect(screen.queryByDisplayValue('你')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（2）' }));
     expect(screen.getByDisplayValue('你')).toBeTruthy();
@@ -78,6 +78,40 @@ describe('TranscriptNode', () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     await waitFor(() => expect(state.nodes[1].data.transcriptText).toBe('你好'));
+  });
+
+  it('seeks from a word in the visible transcript while preserving punctuation', () => {
+    state.nodes[1].data = {
+      words: [
+        { text: 'Hello', startUs: 1_200_000, endUs: 1_600_000 },
+        { text: 'world', startUs: 2_100_000, endUs: 2_500_000 },
+      ],
+      transcriptText: 'Hello, world!', status: 'completed', artifactRef: null,
+    };
+    const { container } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const audio = container.querySelector('audio')!;
+
+    expect(container.querySelector('p')?.textContent).toBe('Hello, world!');
+    fireEvent.click(screen.getByRole('button', { name: '跳转到 world，00:02.100' }));
+
+    expect(audio.currentTime).toBe(2.1);
+  });
+
+  it('highlights the word at the current playback time', () => {
+    state.nodes[1].data = {
+      words: [
+        { text: 'Hello', startUs: 1_200_000, endUs: 1_600_000 },
+        { text: 'world', startUs: 2_100_000, endUs: 2_500_000 },
+      ],
+      transcriptText: 'Hello world', status: 'completed', artifactRef: null,
+    };
+    const { container } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const audio = container.querySelector('audio')!;
+    audio.currentTime = 2.2;
+    fireEvent.timeUpdate(audio);
+
+    expect(screen.getByRole('button', { name: '跳转到 world，00:02.100' }).getAttribute('aria-current')).toBe('true');
+    expect(screen.getByRole('button', { name: '跳转到 Hello，00:01.200' }).hasAttribute('aria-current')).toBe(false);
   });
 
   it('saves corrected words as a new artifact revision', async () => {
