@@ -18,6 +18,11 @@ const rows = [{ startTime: '0', endTime: '1', visualDescription: '杯子特写',
 describe('ReferenceBlueprintPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('keeps wheel scrolling inside the expanded blueprint settings', () => {
+    const { container } = render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{}} onPatch={() => {}} onReanalyze={() => {}} />);
+    expect(container.firstElementChild).toHaveClass('nowheel');
+  });
+
   it('extracts full-video evidence and persists the resulting reference', async () => {
     const onPatch = vi.fn();
     render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{}} onPatch={onPatch} onReanalyze={() => {}} />);

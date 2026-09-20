@@ -129,7 +129,7 @@ function StoryTable({ rows, compact, onCellCommit }: StoryTableProps) {
   const { t } = useTranslation();
 
   return (
-    <div className="ui-scrollbar h-full w-full overflow-auto rounded border border-[rgba(255,255,255,0.08)]">
+    <div className="ui-scrollbar nowheel h-full w-full overflow-auto rounded border border-[rgba(255,255,255,0.08)]">
       <table className="min-w-full border-collapse text-left text-[12px] text-text-dark">
         <thead className="sticky top-0 z-10 bg-bg-dark/95 backdrop-blur">
           <tr>
@@ -353,7 +353,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
           <ReferenceBlueprintPanel nodeId={id} source={blueprintSource} rows={rows} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} />
         </details>
         {data.referenceBlueprintRef && <div className="px-3 py-1 text-[11px] text-text-muted">Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}</div>}
-        <div className="flex-1 overflow-hidden p-2">
+        <div className="min-h-0 flex-1 overflow-hidden p-2">
           {isAnalyzing ? (
             <div className="h-full w-full" />
           ) : hasError ? (

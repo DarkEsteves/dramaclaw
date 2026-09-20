@@ -93,7 +93,7 @@ export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, 
     onPatch({ [field]: value, referenceBlueprintRef: null });
   };
 
-  return <section className="ui-scrollbar max-h-[220px] overflow-auto border-b border-white/[0.08] p-3 text-xs text-text-dark">
+  return <section className="ui-scrollbar nowheel max-h-[220px] overflow-auto border-b border-white/[0.08] p-3 text-xs text-text-dark">
     <div className="mb-2 flex items-center gap-2">
       <strong>参考蓝图</strong>
       <span className="text-text-muted">{source ? `原片 ${source.mediaPath}` : '请连接已上传的原片视频'}</span>

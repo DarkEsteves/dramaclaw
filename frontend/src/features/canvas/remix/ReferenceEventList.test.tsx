@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { ReferenceEventList } from './ReferenceEventList';
 
 describe('ReferenceEventList', () => {
+  it('keeps wheel scrolling inside the event list instead of panning the canvas', () => {
+    const { container } = render(<ReferenceEventList events={[]} />);
+    expect(container.firstElementChild).toHaveClass('nowheel');
+  });
+
   it('shows timed visual and spoken evidence with separate narrative inference', () => {
     render(<ReferenceEventList videoUrl="/clip.mp4" events={[{
       start_us: 8_200_000, end_us: 11_500_000,

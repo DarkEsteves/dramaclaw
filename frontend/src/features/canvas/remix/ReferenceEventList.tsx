@@ -23,7 +23,7 @@ function seconds(timeUs: number): string {
 export function ReferenceEventList({ events, videoUrl }: { events: ReferenceEvent[]; videoUrl?: string | null }) {
   const [selected, setSelected] = useState<number | null>(null);
 
-  return <div className="ui-scrollbar h-full overflow-auto text-xs text-text-dark">
+  return <div className="ui-scrollbar nowheel h-full overflow-auto text-xs text-text-dark">
     <div className="sticky top-0 z-10 border-b border-white/[0.08] bg-surface-panel px-3 py-2 text-text-muted">按原片时间排列 · {events.length} 个事件 · 模型判断待核对<div className="mt-1">台词有错词时，请到相连的转写节点校对并保存，再重新分析原片。</div></div>
     {events.map((event, index) => <div key={`${event.start_us}-${event.end_us}-${index}`} className="border-b border-white/[0.06]">
       <button type="button" className="nodrag flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-white/[0.04]" onClick={() => setSelected((current) => current === index ? null : index)}>
