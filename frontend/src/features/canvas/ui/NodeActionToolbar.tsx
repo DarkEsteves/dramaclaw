@@ -1698,7 +1698,7 @@ export const NodeActionToolbar = memo(
               <>
                 {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
                   : isAudioNode(node) ? [
-                    { action: 'open_media', label: audioToolbarState(node.data.audioUrl).mediaLabel, Icon: node.data.audioUrl ? Wand2 : Upload },
+                    ...(audioToolbarState(node.data.audioUrl).canConfigureMedia ? [{ action: 'open_media', label: '音频用途', Icon: Wand2 }] : []),
                     ...(node.data.remixRole === 'narration' && node.data.audioUrl ? [{ action: 'align_script', label: '按脚本对齐', Icon: Workflow }] : []),
                   ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]

@@ -496,7 +496,11 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           这条规则覆盖手动上传 / TTS 合成完成两种情况。
           想要重新合成只能先清掉音频（暂时通过删节点重建）。 */}
       {selected && !isBoxSelecting && !data.audioUrl && (
-        <AudioOperationsPanel nodeId={id} data={data} />
+        <AudioOperationsPanel
+          nodeId={id}
+          data={data}
+          onImportAudio={data.remixRole === 'narration' && readUrl().project ? () => setRemixMediaOpen(true) : undefined}
+        />
       )}
       {data.audioKind !== 'music' && (
         <VoiceSelectionModal

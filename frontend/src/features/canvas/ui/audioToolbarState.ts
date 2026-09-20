@@ -1,7 +1,7 @@
 export function audioToolbarState(audioUrl: string | null | undefined): {
   canTranscribe: boolean;
-  mediaLabel: '上传音频' | '音频用途';
+  canConfigureMedia: boolean;
 } {
   const hasAudio = Boolean(audioUrl?.trim());
-  return { canTranscribe: hasAudio, mediaLabel: hasAudio ? '音频用途' : '上传音频' };
+  return { canTranscribe: hasAudio, canConfigureMedia: hasAudio };
 }

@@ -13,6 +13,7 @@ import {
   Repeat,
   Settings2,
   SlidersHorizontal,
+  Upload,
 } from 'lucide-react';
 
 import {
@@ -95,9 +96,10 @@ function countBillableTextChars(text: string): number {
 interface AudioOperationsPanelProps {
   nodeId: string;
   data: AudioNodeData;
+  onImportAudio?: () => void;
 }
 
-export function AudioOperationsPanel({ nodeId, data }: AudioOperationsPanelProps) {
+export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOperationsPanelProps) {
   const { t } = useTranslation();
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const [isTranslating, setIsTranslating] = useState(false);
@@ -351,6 +353,19 @@ export function AudioOperationsPanel({ nodeId, data }: AudioOperationsPanelProps
       ) : null}
 
       <div className="flex shrink-0 items-center justify-end gap-2 px-3 pb-3 pt-1">
+        {onImportAudio && !isMusic && (
+          <button
+            type="button"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onImportAudio();
+            }}
+            className="mr-auto inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] text-text-muted hover:bg-white/[0.06] hover:text-text-dark"
+          >
+            <Upload className="h-3 w-3" />导入已有配音
+          </button>
+        )}
         <IconButton
           title={modelTaskAccess.message ?? t('node.audioPanel.translate')}
           onClick={handleTranslate}
