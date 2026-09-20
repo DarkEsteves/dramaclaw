@@ -293,7 +293,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
   // 闭包等回来又被 cancelled 挡住，结果谁都写不进 store。请求级去重交给
   // `getCachedAudioReferences` 的 promise cache。
   useEffect(() => {
-    if (data.audioKind === 'music' || speechMode !== 'clone') return;
+    if (data.audioKind === 'music' || data.remixDialogueTurns?.length || speechMode !== 'clone') return;
     const v = data.voiceRef;
     const isFactoryFallback =
       v != null &&
@@ -368,7 +368,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
     return () => {
       cancelled = true;
     };
-  }, [data.audioKind, data.voiceRef, id, speechMode, updateNodeData]);
+  }, [data.audioKind, data.remixDialogueTurns, data.voiceRef, id, speechMode, updateNodeData]);
   const cardToneClass = canvasNodeFrameClass({
     selected,
     mainline: hasMainlineContext,

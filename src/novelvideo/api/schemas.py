@@ -1745,6 +1745,18 @@ class FreezoneAudioVoiceRef(BaseModel):
     )
 
 
+class FreezoneDialogueTurn(BaseModel):
+    speaker: str = Field(min_length=1, max_length=24)
+    text: str = Field(min_length=1, max_length=2000)
+    voice_ref: FreezoneAudioVoiceRef
+
+    @model_validator(mode="after")
+    def validate_spoken_line(self):
+        if not self.text.strip() or self.text.lstrip().startswith((f"{self.speaker}：", f"{self.speaker}:")):
+            raise ValueError("dialogue text must contain spoken words without a speaker label")
+        return self
+
+
 class FreezoneAudioSpeechRequest(FreezoneWorkflowMediaLink):
     """Freezone 音频节点：文本生成语音请求。"""
 
@@ -1782,6 +1794,20 @@ class FreezoneAudioSpeechRequest(FreezoneWorkflowMediaLink):
             "重新解析账号级或项目内参考音频。"
         ),
     )
+    dialogue_turns: Optional[list[FreezoneDialogueTurn]] = Field(
+        default=None, min_length=1, max_length=40,
+        description="改编脚本的角色对白；缺省时保持原单音色生成流程。",
+    )
+
+    @model_validator(mode="after")
+    def validate_dialogue_mode(self):
+        if self.dialogue_turns:
+            if self.speech_mode != "clone":
+                raise ValueError("dialogue turns require clone speech mode")
+            spoken = "\n".join(turn.text.strip() for turn in self.dialogue_turns)
+            if self.text != spoken:
+                raise ValueError("text must match spoken dialogue turns")
+        return self
     target_episode: Optional[int] = Field(
         default=None,
         ge=1,

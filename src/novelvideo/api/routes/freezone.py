@@ -160,6 +160,7 @@ from novelvideo.freezone.audio_node import (
     freezone_audio_eleven_music_output_path,
     freezone_audio_speech_output_path,
     generate_freezone_audio_speech,
+    generate_freezone_dialogue_speech,
     is_readable_audio_file,
     list_user_audio_voices,
     resolve_speech_voice,
@@ -8470,6 +8471,7 @@ def _start_freezone_audio_speech_task(
                 logs=["正在调用 TTS 服务"],
             )
             voice_ref_payload = body.voice_ref.model_dump() if body.voice_ref else None
+            dialogue_turns = [turn.model_dump() for turn in body.dialogue_turns] if body.dialogue_turns else None
             store = await make_sqlite_store(username, project)
             # 同进程执行也走同一条投射路径，好让两个入口读到的项目态形状一致。
             projector = _installed_task_projector()
@@ -8482,25 +8484,23 @@ def _start_freezone_audio_speech_task(
                     project_name=project,
                     episode=int(body.target_episode or 0),
                     task_type=task_type,
-                    extra_config={"voice_ref": voice_ref_payload},
+                    extra_config={"voice_ref": voice_ref_payload, "dialogue_voice_refs": [turn["voice_ref"] for turn in dialogue_turns] if dialogue_turns else []},
                 )
                 if built is not None:
                     from novelvideo.task_backend.projection import read_projection
 
                     projection = read_projection({"projection": built})
-            result = await generate_freezone_audio_speech(
+            generator = generate_freezone_dialogue_speech if dialogue_turns else generate_freezone_audio_speech
+            result = await generator(
                 store=store,
                 username=username,
                 project=project,
                 account_voice_username=account_voice_username,
                 project_dir=project_dir,
                 job_id=job_id,
-                text=body.text,
+                **({"turns": dialogue_turns} if dialogue_turns else {"text": body.text}),
                 emotion_prompt=body.emotion_prompt,
-                voice_ref=voice_ref_payload,
-                speech_mode=body.speech_mode,
-                preset_model=body.preset_model,
-                preset_voice=body.preset_voice,
+                **({} if dialogue_turns else {"voice_ref": voice_ref_payload, "speech_mode": body.speech_mode, "preset_model": body.preset_model, "preset_voice": body.preset_voice}),
                 projection=projection,
             )
             rel = result.audio_path.relative_to(project_dir).as_posix()
@@ -11937,6 +11937,9 @@ async def freezone_audio_speech(
         raise HTTPException(400, "text is required")
     if len(body.text) > 10_000:
         raise HTTPException(400, "text must be <= 10000 characters")
+    dialogue_turns = [turn.model_dump() for turn in body.dialogue_turns] if body.dialogue_turns else None
+    if dialogue_turns and body.text != "\n".join(turn["text"].strip() for turn in dialogue_turns):
+        raise HTTPException(400, "text must match spoken dialogue turns")
     billable_chars = count_billable_text_chars(body.text)
 
     voice_ref_payload = body.voice_ref.model_dump() if body.voice_ref else None
@@ -11948,15 +11951,14 @@ async def freezone_audio_speech(
     else:
         store = await make_sqlite_store_for_context(ctx)
         try:
-            narration_style, speech_voice = await resolve_speech_voice(
-                store=store,
-                username=username,
-                project=project_name,
-                account_voice_username=account_voice_username,
-                project_dir=project_dir,
-                voice_ref=voice_ref_payload,
-            )
-            speech_voice_source = speech_voice.source
+            refs = [turn["voice_ref"] for turn in dialogue_turns] if dialogue_turns else [voice_ref_payload]
+            for selected_ref in refs:
+                narration_style, speech_voice = await resolve_speech_voice(
+                    store=store, username=username, project=project_name,
+                    account_voice_username=account_voice_username,
+                    project_dir=project_dir, voice_ref=selected_ref,
+                )
+            speech_voice_source = "dialogue" if dialogue_turns else speech_voice.source
         except VoicePrerequisiteError as exc:
             logger.info(
                 "freezone_audio_speech_voice_prereq_failed",
@@ -12002,7 +12004,7 @@ async def freezone_audio_speech(
                 project_name=project_name,
                 episode=int(body.target_episode or 0),
                 task_type="freezone_audio_speech",
-                extra_config={"voice_ref": voice_ref_payload},
+                extra_config={"voice_ref": voice_ref_payload, "dialogue_voice_refs": [turn["voice_ref"] for turn in dialogue_turns] if dialogue_turns else []},
             )
             return await _enqueue_freezone_background_job(
                 ctx=ctx,
@@ -12013,6 +12015,7 @@ async def freezone_audio_speech(
                     "text": body.text,
                     "emotion_prompt": body.emotion_prompt,
                     "voice_ref": voice_ref_payload,
+                    **({"dialogue_turns": dialogue_turns} if dialogue_turns else {}),
                     **(
                         {
                             "speech_mode": body.speech_mode,

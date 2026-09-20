@@ -55,6 +55,7 @@ import { useGenerationCreditCost } from '@/lib/queries/generation-credit-cost';
 import { BillingRuleNotConfiguredError } from '@/lib/api-errors';
 import { VoiceSelectionModal } from './VoiceSelectionModal';
 import { requiresCustomVoiceSelection } from './audioVoicePolicy';
+import { missingDialogueSpeakers } from '@/features/canvas/remix/dialogueVoicePolicy';
 
 const PANEL_GAP_PX = 12;
 const PANEL_OVERHANG_PX = 60;
@@ -107,11 +108,16 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
   // 音色设置默认收起，参考 libtv：控制行的设置按钮点开后才展示音色卡。
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  const [dialogueVoicePickerSpeaker, setDialogueVoicePickerSpeaker] = useState<string | null>(null);
   // music 模式：高级设置（音乐时长等）默认收起，点底部设置按钮展开。
   const [showMusicSettings, setShowMusicSettings] = useState(false);
   // 'music'：文字生成音乐(走 /freezone/audio/eleven-music)；缺省/'speech'：克隆音频(TTS)。
   const isMusic = data.audioKind === 'music';
-  const voiceMissing = requiresCustomVoiceSelection(data);
+  const dialogueTurns = data.remixDialogueTurns ?? [];
+  const isDialogue = dialogueTurns.length > 0;
+  const dialogueSpeakers = [...new Set(dialogueTurns.map((turn) => turn.speaker))];
+  const missingSpeakers = missingDialogueSpeakers(dialogueTurns, data.remixSpeakerVoices);
+  const voiceMissing = !isDialogue && requiresCustomVoiceSelection(data);
   // 生成逻辑(含失败重试)抽到 useAudioGeneration，与节点本体的重试共用同一实现。
   const {
     generate: handleSubmit,
@@ -230,7 +236,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
   // 文本框为空但引用了非空文本时也允许提交（effectivePrompt 会回退到上游引用）。
   const submitDisabled =
     isGenerating || billingRuleMissing || modelTaskAccess.blocked ||
-    effectivePrompt.length === 0;
+    effectivePrompt.length === 0 || missingSpeakers.length > 0;
 
   return (
     <OperationPanelShell
@@ -263,7 +269,25 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
         </div>
       )}
 
-      <div className="px-3 pt-3">
+      {isDialogue ? (
+        <div className="px-3 pt-3">
+          <div className={AUDIO_INPUT_LABEL_CLASS}>角色配音 · 按脚本顺序逐句合成</div>
+          <div className="nodrag nowheel ui-scrollbar mt-2 max-h-48 space-y-1.5 overflow-y-auto rounded-[10px] border border-white/[0.08] px-2 py-2 text-[12px] text-text-dark">
+            {dialogueTurns.map((turn, index) => <div key={`${index}-${turn.speaker}`}>{turn.speaker}：{turn.text}</div>)}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {dialogueSpeakers.map((speaker) => <button
+              key={speaker}
+              type="button"
+              aria-label={`为${speaker}选择声线`}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); setDialogueVoicePickerSpeaker(speaker); }}
+              className="nodrag rounded-full border border-white/[0.1] px-2.5 py-1 text-[11px] text-text-dark hover:bg-white/[0.06]"
+            >{speaker} · {data.remixSpeakerVoices?.[speaker]?.label ?? '选择声线'}</button>)}
+          </div>
+          {missingSpeakers.length > 0 && <div className="mt-2 text-[11px] text-amber-300">请先为{missingSpeakers.join('、')}选择声线</div>}
+        </div>
+      ) : <div className="px-3 pt-3">
         <label className="flex flex-col gap-2">
           <span className={AUDIO_INPUT_LABEL_CLASS}>
             {isMusic
@@ -300,7 +324,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
             }`}
           />
         </label>
-      </div>
+      </div>}
 
       {!isMusic && (
       <div className="px-3 pb-3 pt-4">
@@ -383,7 +407,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
             <Languages className="h-4 w-4" />
           )}
         </IconButton>
-        {!isMusic && (
+        {!isMusic && !isDialogue && (
           <IconButton
             title={t('node.audioPanel.voiceSettings')}
             onClick={() => setShowVoiceSettings((v) => !v)}
@@ -412,6 +436,7 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
           disabled={submitDisabled}
           title={
             modelTaskAccess.message
+            ?? (missingSpeakers.length > 0 ? `请先为${missingSpeakers.join('、')}选择声线` : null)
             ?? (voiceMissing
               ? t('node.audioPanel.generateWithoutVoice')
               : t('node.audioPanel.generate'))
@@ -431,14 +456,14 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
         </button>
       </div>
 
-      {!isMusic && showVoiceSettings && (
+      {!isMusic && !isDialogue && showVoiceSettings && (
         <AudioVoiceSettingsPanel nodeId={nodeId} data={data} />
       )}
 
       {isMusic && showMusicSettings && (
         <AudioMusicSettingsPanel nodeId={nodeId} data={data} />
       )}
-      {!isMusic && (
+      {!isMusic && !isDialogue && (
         <VoiceSelectionModal
           open={voicePickerOpen}
           initialTab="mine"
@@ -455,6 +480,24 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
               generationError: null,
             });
             setVoicePickerOpen(false);
+          }}
+        />
+      )}
+      {isDialogue && dialogueVoicePickerSpeaker && (
+        <VoiceSelectionModal
+          open
+          initialTab="mine"
+          currentRef={data.remixSpeakerVoices?.[dialogueVoicePickerSpeaker]?.ref ?? { scope: 'project_narrator' }}
+          onClose={() => setDialogueVoicePickerSpeaker(null)}
+          onPick={({ ref, label, language }) => {
+            updateNodeData(nodeId, {
+              remixSpeakerVoices: {
+                ...data.remixSpeakerVoices,
+                [dialogueVoicePickerSpeaker]: { ref, label, language },
+              },
+              generationError: null,
+            });
+            setDialogueVoicePickerSpeaker(null);
           }}
         />
       )}

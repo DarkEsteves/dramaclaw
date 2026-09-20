@@ -15,6 +15,21 @@ const scriptRef = { artifactId: 'script-a', revision: 3 };
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('remix narration and alignment continuation', () => {
+  it('creates one dialogue-mode audio node without putting role labels in its speakable text', () => {
+    const addNode = vi.fn(() => 'audio');
+    const addEdge = vi.fn(() => 'edge');
+    graphStore.getState.mockReturnValue({
+      nodes: [node('script', 'scriptNode', { remixScriptRef: scriptRef, remixScriptDraft: { dialogue: '男：你好？\n女：你好。' } })],
+      edges: [], addNode, addEdge, setSelectedNode: vi.fn(), requestFocusNode: vi.fn(),
+      findNodePosition: vi.fn(() => ({ x: 300, y: 0 })),
+    });
+    expect(createNarrationFromScript('script')).toBe('audio');
+    expect(addNode).toHaveBeenCalledWith('audioNode', { x: 300, y: 0 }, expect.objectContaining({
+      remixDialogueTurns: [{ speaker: '男', text: '你好？' }, { speaker: '女', text: '你好。' }],
+      text: '男：你好？\n女：你好。',
+    }));
+  });
+
   it('creates one connected narration node prefilled with the exact saved dialogue', () => {
     const addNode = vi.fn(() => 'audio');
     const addEdge = vi.fn(() => 'edge');
@@ -42,6 +57,22 @@ describe('remix narration and alignment continuation', () => {
     });
     expect(createNarrationFromScript('script')).toBe('audio');
     expect(addNode).not.toHaveBeenCalled();
+  });
+
+  it('upgrades an empty pre-existing narration node to speaker mode for the same saved script', () => {
+    const updateNodeData = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [
+        node('script', 'scriptNode', { remixScriptRef: scriptRef, remixScriptDraft: { dialogue: '男：你好？\n女：你好。' } }),
+        node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: scriptRef, text: '男：你好？\n女：你好。' }),
+      ],
+      edges: [edge('script', 'audio')], addNode: vi.fn(), updateNodeData,
+      setSelectedNode: vi.fn(), requestFocusNode: vi.fn(),
+    });
+    expect(createNarrationFromScript('script')).toBe('audio');
+    expect(updateNodeData).toHaveBeenCalledWith('audio', expect.objectContaining({
+      remixDialogueTurns: [{ speaker: '男', text: '你好？' }, { speaker: '女', text: '你好。' }],
+    }));
   });
 
   it('rejects an unsaved script before creating narration', () => {

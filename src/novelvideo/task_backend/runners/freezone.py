@@ -495,6 +495,9 @@ FREEZONE_LEAF_EGRESS: dict[str, LeafEgressRule] = {
     "generate_freezone_audio_speech": LeafEgressRule(
         "novelvideo.freezone.audio_node", LeafEgress.NETWORK, "EG-15a"
     ),
+    "generate_freezone_dialogue_speech": LeafEgressRule(
+        "novelvideo.freezone.audio_node", LeafEgress.NETWORK, "EG-15a"
+    ),
     # 音乐与语音是同一个出网点的两个一跳调用方：都经 `_write_newapi_audio_speech`，
     # claim 的 capability 也都是 `audio.tts.gateway`（`audio_node.py:558`）。
     "generate_freezone_audio_eleven_music": LeafEgressRule(
@@ -1954,7 +1957,7 @@ async def _run_freezone_audio_speech_async(
         make_sqlite_store_for_context,
         make_static_url_for_context,
     )
-    from novelvideo.freezone.audio_node import generate_freezone_audio_speech
+    from novelvideo.freezone.audio_node import generate_freezone_audio_speech, generate_freezone_dialogue_speech
     from novelvideo.freezone.jobs import ensure_freezone_dirs
 
     payload = envelope.get("payload") or {}
@@ -1968,10 +1971,11 @@ async def _run_freezone_audio_speech_async(
     projection = read_projection(payload)
     store = None if projection is not None else await make_sqlite_store_for_context(ctx)
     try:
+        dialogue_turns = payload.get("dialogue_turns")
         result = await _call_freezone_leaf(
             envelope,
-            generate_freezone_audio_speech,
-            "generate_freezone_audio_speech",
+            generate_freezone_dialogue_speech if dialogue_turns else generate_freezone_audio_speech,
+            "generate_freezone_dialogue_speech" if dialogue_turns else "generate_freezone_audio_speech",
             store=store,
             username=ctx.owner_username,
             project=ctx.project_name,
@@ -1982,12 +1986,14 @@ async def _run_freezone_audio_speech_async(
             ),
             project_dir=project_dir,
             job_id=job_id,
-            text=str(payload.get("text") or ""),
+            **({"turns": dialogue_turns} if dialogue_turns else {"text": str(payload.get("text") or "")}),
             emotion_prompt=str(payload.get("emotion_prompt") or ""),
-            voice_ref=payload.get("voice_ref"),
-            speech_mode=str(payload.get("speech_mode") or "clone"),
-            preset_model=str(payload.get("preset_model") or "edge-tts"),
-            preset_voice=str(payload.get("preset_voice") or "Serena"),
+            **({} if dialogue_turns else {
+                "voice_ref": payload.get("voice_ref"),
+                "speech_mode": str(payload.get("speech_mode") or "clone"),
+                "preset_model": str(payload.get("preset_model") or "edge-tts"),
+                "preset_voice": str(payload.get("preset_voice") or "Serena"),
+            }),
             projection=projection,
         )
     finally:

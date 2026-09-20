@@ -249,11 +249,21 @@ async def _build_audio_speech_fields(store: Any, config: Mapping[str, Any]) -> d
     # the whole table is not projected.
     characters = list(await store.list_characters())
     voice_character = _find_named_character(characters, wanted_name) if wanted_name else None
+    dialogue_refs = config.get("dialogue_voice_refs") or []
+    dialogue_names = {
+        str(item.get("character_name") or "").strip()
+        for item in dialogue_refs if isinstance(item, dict)
+    } - {""}
     main_character = next(
         (item for item in characters if bool(getattr(item, "is_main", False))), None
     )
     return {
         "voice_character": _character_to_dict(voice_character) if voice_character else None,
+        **({"voice_characters": {
+            name: _character_to_dict(character)
+            for name in dialogue_names
+            if (character := _find_named_character(characters, name)) is not None
+        }} if dialogue_refs else {}),
         "narrator_main_character": (
             _character_to_dict(main_character) if main_character else None
         ),

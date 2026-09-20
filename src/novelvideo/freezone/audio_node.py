@@ -7,7 +7,7 @@ import json
 import re
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -73,6 +73,70 @@ class VoicePrerequisiteError(RuntimeError):
 
 def freezone_audio_speech_output_path(project_dir: Path, job_id: str) -> Path:
     return outputs_dir(project_dir, "freezone_audio_speech") / f"{job_id}.mp3"
+
+
+def _concat_dialogue_audio(parts: list[Path], output: Path) -> None:
+    if len(parts) == 1:
+        output.write_bytes(parts[0].read_bytes())
+        return
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    for part in parts:
+        command.extend(["-i", str(part)])
+    inputs = "".join(f"[{index}:a]" for index in range(len(parts)))
+    command.extend([
+        "-filter_complex", f"{inputs}concat=n={len(parts)}:v=0:a=1[aout]",
+        "-map", "[aout]", "-c:a", "libmp3lame", str(output),
+    ])
+    subprocess.run(command, check=True, capture_output=True)
+
+
+async def generate_freezone_dialogue_speech(
+    *, store, username: str, project: str, project_dir: Path, job_id: str,
+    turns: list[dict], emotion_prompt: str = "", account_voice_username: str | None = None,
+    projection: Any = None, egress_context: TrustedEgressContext | None = None,
+) -> FreezoneAudioSpeechResult:
+    """Generate each spoken turn with its own voice, then return one audio track."""
+    if not turns or len(turns) > 40:
+        raise ValueError("dialogue must contain 1–40 turns")
+    output = freezone_audio_speech_output_path(project_dir, job_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    try:
+        for index, turn in enumerate(turns):
+            speaker = str(turn.get("speaker") or "").strip()
+            text = str(turn.get("text") or "").strip()
+            voice_ref = turn.get("voice_ref")
+            if not speaker or not text or not isinstance(voice_ref, dict):
+                raise ValueError("each dialogue turn requires speaker, text, and voice_ref")
+            if text.startswith((f"{speaker}：", f"{speaker}:")):
+                raise ValueError("speaker label must not be spoken")
+            turn_projection = projection
+            if projection is not None:
+                name = str(voice_ref.get("character_name") or "").strip()
+                characters = projection.get("voice_characters", {})
+                character = characters.get(name) if isinstance(characters, dict) else None
+                turn_projection = replace(projection, fields={
+                    **projection.fields, "voice_character": character,
+                })
+            part = await generate_freezone_audio_speech(
+                store=store, username=username, project=project,
+                account_voice_username=account_voice_username,
+                project_dir=project_dir, job_id=f"{job_id}-turn-{index + 1}",
+                text=text, emotion_prompt=emotion_prompt, voice_ref=voice_ref,
+                speech_mode="clone", projection=turn_projection,
+                egress_context=egress_context,
+            )
+            parts.append(part.audio_path)
+        await asyncio.to_thread(_concat_dialogue_audio, parts, output)
+        if not output.is_file() or output.stat().st_size <= 0:
+            raise RuntimeError("dialogue audio was not created")
+        return FreezoneAudioSpeechResult(
+            audio_path=output, duration_ms=_duration_ms(output), mime_type="audio/mpeg",
+            model="dialogue", voice_source="dialogue", voice_sha256="",
+        )
+    finally:
+        for part in parts:
+            part.unlink(missing_ok=True)
 
 
 def freezone_audio_eleven_music_output_path(project_dir: Path, job_id: str) -> Path:

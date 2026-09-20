@@ -4,6 +4,7 @@ import { projectMediaPathFromUrl } from './remixMediaPath';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { parseDialogueTurns } from './dialogueTurns';
 
 type Ref = { artifactId: string; revision: number };
 
@@ -37,16 +38,24 @@ export function createNarrationFromScript(scriptId: string): string {
   if (!scriptRef) throw new Error('请先保存改编脚本。');
   const dialogue = (script.data.remixScriptDraft as { dialogue?: unknown } | undefined)?.dialogue;
   if (typeof dialogue !== 'string' || !dialogue.trim()) throw new Error('已保存脚本缺少台词，请重新打开脚本确认。');
+  const parsed = parseDialogueTurns(dialogue);
   const existing = store.nodes.find((node) => node.type === CANVAS_NODE_TYPES.audio
     && node.data.remixRole === 'narration' && sameRef(validRef(node.data.remixScriptRef), scriptRef)
     && store.edges.some((edge) => edge.source === scriptId && edge.target === node.id));
   if (existing) {
+    if (parsed && !existing.data.audioUrl && !existing.data.remixDialogueTurns) {
+      store.updateNodeData(existing.id, {
+        remixDialogueTurns: parsed.turns,
+        remixSpeakerVoices: {},
+      });
+    }
     store.setSelectedNode(existing.id);
     store.requestFocusNode(existing.id);
     return existing.id;
   }
   const childId = store.addNode(CANVAS_NODE_TYPES.audio, store.findNodePosition(scriptId, 480, 210), {
     audioKind: 'speech', remixRole: 'narration', remixScriptRef: scriptRef, text: dialogue,
+    ...(parsed ? { remixDialogueTurns: parsed.turns, remixSpeakerVoices: {} } : {}),
   });
   if (!store.addEdge(scriptId, childId)) {
     store.deleteNodes([childId]);

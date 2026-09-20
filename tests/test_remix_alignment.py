@@ -130,3 +130,50 @@ def test_align_script_uses_engine_character_spans_for_repeated_words(tmp_path: P
     assert result["status"] == "completed"
     assert [(word["start_char"], word["end_char"]) for word in result["words"]] == [(0, 2), (3, 7), (8, 10)]
     assert result["confidence_available"] is True
+
+
+def test_align_script_skips_speaker_labels_and_maps_words_to_original_script(tmp_path: Path) -> None:
+    media = tmp_path / "dialogue.wav"
+    media.write_bytes(b"voice")
+
+    class CheckingAligner(FakeSpeechAligner):
+        def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
+            assert script == "你好？\n再见。"
+            return self.alignment
+
+    result = align_script(
+        media,
+        {"revision": 2, "language": "zh", "dialogue": "男：你好？\n女：再见。"},
+        aligner=CheckingAligner(
+            transcription={"status": "completed", "words": []},
+            alignment={"status": "completed", "words": [
+                {"text": "你好？", "start_char": 0, "end_char": 3, "start_us": 0, "end_us": 500_000},
+                {"text": "再见。", "start_char": 4, "end_char": 7, "start_us": 600_000, "end_us": 1_000_000},
+            ]},
+        ),
+    )
+    assert result["status"] == "completed"
+    assert result["transcript"] == "男：你好？\n女：再见。"
+    assert [(word["start_char"], word["end_char"]) for word in result["words"]] == [(2, 5), (8, 11)]
+
+
+def test_align_script_keeps_single_line_colon_as_spoken_text(tmp_path: Path) -> None:
+    media = tmp_path / "narration.wav"
+    media.write_bytes(b"voice")
+
+    class CheckingAligner(FakeSpeechAligner):
+        def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
+            assert script == "注意：保持安静。"
+            return self.alignment
+
+    result = align_script(
+        media,
+        {"revision": 1, "language": "zh", "dialogue": "注意：保持安静。"},
+        aligner=CheckingAligner(
+            transcription={"status": "completed", "words": []},
+            alignment={"status": "completed", "words": [
+                {"text": "注意", "start_char": 0, "end_char": 2, "start_us": 0, "end_us": 200_000},
+            ]},
+        ),
+    )
+    assert result["words"][0]["start_char"] == 0

@@ -2598,6 +2598,8 @@ export interface FreezoneAudioSpeechPayload extends FreezoneNodeContext {
   emotionPrompt?: string;
   /** 声线引用；不传则用项目默认解说人。 */
   voiceRef?: FreezoneAudioVoiceRef | null;
+  /** Optional remix dialogue mode. Absent for ordinary single-voice audio nodes. */
+  dialogueTurns?: Array<{ speaker: string; text: string; voiceRef: FreezoneAudioVoiceRef }>;
   /** 目标 beat;给定后生成的音频会带上 beat_audio slot_target,可直接 commit。 */
   targetEpisode?: number;
   targetBeat?: number;
@@ -2616,6 +2618,17 @@ export async function submitFreezoneAudioSpeech(
         voice_id: payload.voiceRef.voiceId ?? "",
       }
     : null;
+  const dialogueTurnsBody = payload.dialogueTurns?.map((turn) => ({
+    speaker: turn.speaker,
+    text: turn.text,
+    voice_ref: {
+      scope: turn.voiceRef.scope,
+      character_name: turn.voiceRef.characterName ?? '',
+      identity_id: turn.voiceRef.identityId ?? '',
+      slot: turn.voiceRef.slot ?? '',
+      voice_id: turn.voiceRef.voiceId ?? '',
+    },
+  }));
   return await apiCall<FreezoneJobRef>(
     `projects/${encodeURIComponent(project)}/freezone/audio/speech`,
     {
@@ -2628,6 +2641,7 @@ export async function submitFreezoneAudioSpeech(
         preset_voice: payload.presetVoice ?? "Serena",
         emotion_prompt: payload.emotionPrompt ?? "",
         voice_ref: voiceRefBody,
+        ...(dialogueTurnsBody ? { dialogue_turns: dialogueTurnsBody } : {}),
         target_episode: payload.targetEpisode,
         target_beat: payload.targetBeat,
       },

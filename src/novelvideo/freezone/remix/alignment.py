@@ -7,6 +7,7 @@ import importlib.util
 import os
 import subprocess
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
@@ -65,14 +66,48 @@ def align_script(
     text = script.get("dialogue", script.get("text"))
     if not isinstance(text, str):
         raise ValueError("script dialogue or text is required")
-    raw = _require_aligner(aligner).align(media_path, text, language)
-    return _normalize_result(
+    spoken, original_positions = _spoken_script_positions(text)
+    raw = _require_aligner(aligner).align(media_path, spoken, language)
+    result = _normalize_result(
         raw,
         media_path=media_path,
         language=language,
         script_revision=revision,
-        script_text=text,
+        script_text=spoken,
     )
+    if result["status"] == "completed" and original_positions is not None:
+        for word in result["words"]:
+            start, end = word["start_char"], word["end_char"]
+            word["start_char"] = original_positions[start]
+            word["end_char"] = original_positions[end - 1] + 1
+        result["transcript"] = text
+    return result
+
+
+_SPEAKER_PREFIX = re.compile(r"^\s*[^：:\n]{1,24}[：:]\s*")
+
+
+def _spoken_script_positions(text: str) -> tuple[str, list[int] | None]:
+    """Remove role prefixes for alignment while retaining original code-point offsets."""
+    lines = text.splitlines(keepends=True)
+    nonblank = [line for line in lines if line.strip()]
+    if len(nonblank) < 2 or not all(_SPEAKER_PREFIX.match(line) for line in nonblank):
+        return text, None
+    spoken_chars: list[str] = []
+    positions: list[int] = []
+    source_offset = 0
+    for line in lines:
+        content = line.rstrip("\r\n")
+        prefix = _SPEAKER_PREFIX.match(content)
+        start = prefix.end() if prefix else 0
+        for index in range(start, len(content)):
+            spoken_chars.append(content[index])
+            positions.append(source_offset + index)
+        if line.endswith("\n"):
+            spoken_chars.append("\n")
+            positions.append(source_offset + len(line) - 1)
+        source_offset += len(line)
+    return "".join(spoken_chars), positions
 
 
 def _require_aligner(aligner: SpeechAligner | None) -> SpeechAligner:

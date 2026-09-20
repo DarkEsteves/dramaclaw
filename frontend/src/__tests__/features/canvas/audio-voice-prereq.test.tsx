@@ -52,6 +52,22 @@ describe("AudioOperationsPanel voice prerequisite", () => {
     useCanvasStore.getState().setCanvasData([], []);
   });
 
+  it("shows per-speaker voice controls only for remix dialogue nodes", () => {
+    renderPanel({
+      audioKind: 'speech',
+      text: '男：你好？\n女：你好。',
+      remixDialogueTurns: [{ speaker: '男', text: '你好？' }, { speaker: '女', text: '你好。' }],
+      remixSpeakerVoices: {},
+    });
+    expect(screen.getByText('男：你好？')).toBeTruthy();
+    expect(screen.getByText('女：你好。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '为男选择声线' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '为女选择声线' })).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: '输入要合成的文本' })).toBeNull();
+    expect(screen.queryByText('尚未选中可用的自定义声线')).toBeNull();
+    expect(screen.getByTitle('请先为男、女选择声线')).toHaveProperty('disabled', true);
+  });
+
   it("reloads references after an empty request has settled", async () => {
     let available: string[] = [];
     const load = vi.fn(async () => ({ available: [...available] }));

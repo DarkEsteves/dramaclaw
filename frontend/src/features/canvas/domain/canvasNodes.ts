@@ -682,6 +682,9 @@ export interface AudioNodeData extends NodeDisplayData {
   /** Project-owned audio actually used by transcription and rendering. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
   remixRole?: 'narration' | 'bgm' | 'sfx';
+  /** Present only on an audio node created from role-labelled remix dialogue. */
+  remixDialogueTurns?: import('../remix/dialogueTurns').DialogueTurn[];
+  remixSpeakerVoices?: Record<string, { ref: AudioVoiceRef; label: string; language?: string }>;
   audioUrl: string | null;
   sourceFileName?: string | null;
   durationMs?: number | null;

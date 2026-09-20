@@ -58,6 +58,25 @@ describe("workflow media task association", () => {
       }),
     }));
   });
+
+  it('sends ordered dialogue turns with one voice per speaker without changing legacy fields', async () => {
+    vi.mocked(apiCall).mockResolvedValue({ task_key: 'task-2', job_id: 'job-2' });
+    await submitFreezoneAudioSpeech('project-1', {
+      text: '你好？\n你好。',
+      dialogueTurns: [
+        { speaker: '男', text: '你好？', voiceRef: { scope: 'user_custom', voiceId: 'm' } },
+        { speaker: '女', text: '你好。', voiceRef: { scope: 'user_custom', voiceId: 'f' } },
+      ],
+    });
+    expect(vi.mocked(apiCall).mock.calls[0][1]).toEqual(expect.objectContaining({
+      json: expect.objectContaining({
+        dialogue_turns: [
+          { speaker: '男', text: '你好？', voice_ref: expect.objectContaining({ voice_id: 'm' }) },
+          { speaker: '女', text: '你好。', voice_ref: expect.objectContaining({ voice_id: 'f' }) },
+        ],
+      }),
+    }));
+  });
 });
 
 describe("freezone style template API", () => {

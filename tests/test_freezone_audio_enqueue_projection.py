@@ -177,6 +177,19 @@ async def test_speech_payload_gains_the_projection_when_installed(
 
 
 @pytest.mark.asyncio
+async def test_dialogue_payload_keeps_ordered_turns_and_projects_each_named_voice(
+    speech_harness, projector_installed
+) -> None:
+    turns = [
+        {"speaker": "男", "text": "你好。", "voice_ref": {"scope": "character_default", "character_name": "小明"}},
+        {"speaker": "女", "text": "再见。", "voice_ref": {"scope": "character_default", "character_name": "小明"}},
+    ]
+    payload = await _enqueue_speech(speech_harness, text="你好。\n再见。", dialogue_turns=turns)
+    assert [(turn["speaker"], turn["text"]) for turn in payload["dialogue_turns"]] == [("男", "你好。"), ("女", "再见。")]
+    assert payload["projection"]["fields"]["voice_characters"]["小明"]["name"] == "小明"
+
+
+@pytest.mark.asyncio
 async def test_speech_projection_carries_only_the_characters_actually_consulted(
     speech_harness, projector_installed
 ) -> None:

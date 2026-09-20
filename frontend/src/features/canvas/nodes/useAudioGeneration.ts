@@ -36,6 +36,8 @@ import {
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { missingDialogueSpeakers } from '@/features/canvas/remix/dialogueVoicePolicy';
+import { isLegacyRoleLabelledRemixAudio } from '@/features/canvas/remix/dialogueTurns';
 
 const MAX_MUSIC_PROMPT_CHARS = 4_100;
 
@@ -112,6 +114,7 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
   // 有效 prompt：上游引用的文本不回显进输入框，仅在提交时与本地输入「拼接」成最终
   // prompt（上游在前、本地在后，与 joinUpstreamText 一致用空行分隔，过滤空段）。
   const ownText = deriveAudioText(data);
+  const dialogueTurns = data.remixDialogueTurns ?? [];
   const hasInvalidSpeechInstruction =
     !isMusic && isSpeechGenerationInstruction(ownText);
   useEffect(() => {
@@ -126,7 +129,9 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
       });
     }
   }, [data.audioUrl, hasInvalidSpeechInstruction, nodeId, updateNodeData]);
-  const effectivePrompt = [upstreamTextJoined.trim(), ownText.trim()]
+  const effectivePrompt = dialogueTurns.length > 0
+    ? dialogueTurns.map((turn) => turn.text).join('\n')
+    : [upstreamTextJoined.trim(), ownText.trim()]
     .filter((segment) => segment.length > 0)
     .join('\n\n');
   const emotionPrompt = data.emotionPrompt ?? '';
@@ -151,9 +156,12 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
     const runtimeSpeechMode = legacySpeechVoice && runtimeData.speechMode === 'preset'
       ? 'preset' : 'clone';
     const runtimeOwnText = deriveAudioText(runtimeData);
-    const runtimeEffectivePrompt = [upstreamTextJoined.trim(), runtimeOwnText.trim()]
-      .filter((segment) => segment.length > 0)
-      .join('\n\n');
+    const runtimeDialogueTurns = runtimeData.remixDialogueTurns ?? [];
+    const runtimeEffectivePrompt = runtimeDialogueTurns.length > 0
+      ? runtimeDialogueTurns.map((turn) => turn.text).join('\n')
+      : [upstreamTextJoined.trim(), runtimeOwnText.trim()]
+        .filter((segment) => segment.length > 0)
+        .join('\n\n');
     const runtimeMusicLengthMs = runtimeIsMusic
       ? resolveMusicLengthMs(runtimeData)
       : undefined;
@@ -164,13 +172,22 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
       }
       return {};
     }
-    if (!runtimeIsMusic && requiresCustomVoiceSelection(runtimeData)) {
+    if (isLegacyRoleLabelledRemixAudio(runtimeData)) {
+      updateNodeData(nodeId, { generationError: '这份脚本包含角色标签，请回到脚本点击“制作配音”更新节点后再生成。' });
+      return { skipped: true, reason: 'legacy_dialogue_node' };
+    }
+    if (!runtimeIsMusic && runtimeDialogueTurns.length === 0 && requiresCustomVoiceSelection(runtimeData)) {
       updateNodeData(nodeId, {
         isGenerating: false,
         generationStartedAt: null,
         generationError: t('node.audioNode.selectVoiceFirst'),
       });
       return { skipped: true, reason: 'missing_custom_voice' };
+    }
+    const missingSpeakers = missingDialogueSpeakers(runtimeDialogueTurns, runtimeData.remixSpeakerVoices);
+    if (missingSpeakers.length > 0) {
+      updateNodeData(nodeId, { generationError: `请先为${missingSpeakers.join('、')}选择声线` });
+      return { skipped: true, reason: 'missing_dialogue_voice' };
     }
     const fallbackPrompt = runtimeEffectivePrompt;
     if (fallbackPrompt.length === 0) return {};
@@ -185,70 +202,75 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
       generationError: null,
     });
     try {
-      const selectedUpstreamText = runtimeIsMusic
-        ? ''
-        : selectWorkflowUpstreamText(runtimeData, upstreamContents, upstreamTextJoined);
-      // drama-shot-voice is admitted as literal TTS without a compile receipt.
-      // Other catalog-backed audio Recipes still compile before submission.
-      const speechFallbackPrompt = runtimeIsMusic
-        ? fallbackPrompt
-        : extractExplicitSpeakableAudioText(runtimeOwnText.trim())
-          || extractSpeakableAudioText(runtimeOwnText.trim())
-          || extractExplicitSpeakableAudioText(selectedUpstreamText)
-          || extractSpeakableAudioText(selectedUpstreamText);
-      const catalog = runtimeData.workflowCatalog;
-      const directVoiceRecipe = !runtimeIsMusic
-        && typeof catalog === 'object'
-        && catalog !== null
-        && !Array.isArray(catalog)
-        && 'recipeId' in catalog
-        && catalog.recipeId === 'drama-shot-voice';
-      let workflowRecipeCompileMode: string | null = null;
-      let workflowRecipeIds: string[] = [];
-      const compiledPrompt = directVoiceRecipe
-        ? speechFallbackPrompt
-        : await compileWorkflowNodePrompt({
-        nodeId,
-        nodeData: runtimeData,
-        nodeKind: 'audio',
-        nodePrompt: runtimeOwnText,
-        // Music prompts describe the soundtrack itself. Do not feed the full
-        // upstream script/beat text into the music compiler: the Eleven music
-        // endpoint caps input at 4100 characters and the node prompt already
-        // contains the intended musical direction.
-        upstreamText: selectedUpstreamText,
-        upstreamContents: runtimeIsMusic ? [] : upstreamContents,
-        fallbackPrompt: speechFallbackPrompt,
-        onCompileMetadata: ({ mode, prompt: compiledPrompt, recipeIds }) => {
-          workflowRecipeCompileMode = mode;
-          workflowRecipeIds = recipeIds;
-          const persistedPrompt = runtimeIsMusic
-            ? compiledPrompt
+      let trimmed: string;
+      if (runtimeDialogueTurns.length > 0) {
+        trimmed = runtimeDialogueTurns.map((turn) => turn.text).join('\n');
+      } else {
+        const selectedUpstreamText = runtimeIsMusic
+          ? ''
+          : selectWorkflowUpstreamText(runtimeData, upstreamContents, upstreamTextJoined);
+        // drama-shot-voice is admitted as literal TTS without a compile receipt.
+        // Other catalog-backed audio Recipes still compile before submission.
+        const speechFallbackPrompt = runtimeIsMusic
+          ? fallbackPrompt
+          : extractExplicitSpeakableAudioText(runtimeOwnText.trim())
+            || extractSpeakableAudioText(runtimeOwnText.trim())
+            || extractExplicitSpeakableAudioText(selectedUpstreamText)
+            || extractSpeakableAudioText(selectedUpstreamText);
+        const catalog = runtimeData.workflowCatalog;
+        const directVoiceRecipe = !runtimeIsMusic
+          && typeof catalog === 'object'
+          && catalog !== null
+          && !Array.isArray(catalog)
+          && 'recipeId' in catalog
+          && catalog.recipeId === 'drama-shot-voice';
+        let workflowRecipeCompileMode: string | null = null;
+        let workflowRecipeIds: string[] = [];
+        const compiledPrompt = directVoiceRecipe
+          ? speechFallbackPrompt
+          : await compileWorkflowNodePrompt({
+          nodeId,
+          nodeData: runtimeData,
+          nodeKind: 'audio',
+          nodePrompt: runtimeOwnText,
+          // Music prompts describe the soundtrack itself. Do not feed the full
+          // upstream script/beat text into the music compiler: the Eleven music
+          // endpoint caps input at 4100 characters and the node prompt already
+          // contains the intended musical direction.
+          upstreamText: selectedUpstreamText,
+          upstreamContents: runtimeIsMusic ? [] : upstreamContents,
+          fallbackPrompt: speechFallbackPrompt,
+          onCompileMetadata: ({ mode, prompt: compiledPrompt, recipeIds }) => {
+            workflowRecipeCompileMode = mode;
+            workflowRecipeIds = recipeIds;
+            const persistedPrompt = runtimeIsMusic
+              ? compiledPrompt
+              : resolveSafeSpeechSubmissionText({
+                  compileMode: mode,
+                  compiledPrompt,
+                  recipeIds,
+                  safeFallbackPrompt: speechFallbackPrompt,
+                });
+            updateNodeData(nodeId, {
+              workflowRecipeCompileMode: mode,
+              workflowRecipeCompiledAt: new Date().toISOString(),
+              workflowRecipeCompiledPrompt: compiledPrompt,
+              text: persistedPrompt,
+              workflowRecipeIds: recipeIds,
+            });
+          },
+        });
+        trimmed = directVoiceRecipe
+          ? speechFallbackPrompt
+          : runtimeIsMusic
+            ? normalizeMusicPrompt(compiledPrompt)
             : resolveSafeSpeechSubmissionText({
-                compileMode: mode,
+                compileMode: workflowRecipeCompileMode,
                 compiledPrompt,
-                recipeIds,
+                recipeIds: workflowRecipeIds,
                 safeFallbackPrompt: speechFallbackPrompt,
               });
-          updateNodeData(nodeId, {
-            workflowRecipeCompileMode: mode,
-            workflowRecipeCompiledAt: new Date().toISOString(),
-            workflowRecipeCompiledPrompt: compiledPrompt,
-            text: persistedPrompt,
-            workflowRecipeIds: recipeIds,
-          });
-        },
-      });
-      const trimmed = directVoiceRecipe
-        ? speechFallbackPrompt
-        : runtimeIsMusic
-          ? normalizeMusicPrompt(compiledPrompt)
-          : resolveSafeSpeechSubmissionText({
-              compileMode: workflowRecipeCompileMode,
-              compiledPrompt,
-              recipeIds: workflowRecipeIds,
-              safeFallbackPrompt: speechFallbackPrompt,
-            });
+      }
       if (!trimmed) {
         throw new Error('没有可朗读的旁白或对白');
       }
@@ -273,6 +295,11 @@ export function useAudioGeneration(nodeId: string, data: AudioNodeData) {
             emotionPrompt: (runtimeData.emotionPrompt ?? '').trim() || undefined,
             voiceRef: runtimeData.voiceRef ?? (legacySpeechVoice
               ? { scope: 'project_narrator' } : undefined),
+            ...(runtimeDialogueTurns.length > 0 ? { dialogueTurns: runtimeDialogueTurns.map((turn) => ({
+              speaker: turn.speaker,
+              text: turn.text,
+              voiceRef: runtimeData.remixSpeakerVoices![turn.speaker].ref,
+            })) } : {}),
           });
       // Persist the task handle so a page refresh can resume this job.
       updateNodeData(nodeId, generationTaskDescriptor(ref));
