@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +125,52 @@ def select_reference_frame_times(events: list[dict[str, Any]]) -> list[int]:
     return selected
 
 
+def normalize_reference_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build factual notes from explicit still-frame fields, never free-form motion prose."""
+    normalized: list[dict[str, Any]] = []
+    for shot in shots:
+        if not isinstance(shot, dict):
+            normalized.append({})
+            continue
+        parts = []
+        for field, label in (("visible_subject", "人物"), ("visible_setting", "环境")):
+            value = shot.get(field)
+            if isinstance(value, str) and value.strip():
+                parts.append(f"{label}：{value.strip()}")
+        objects = shot.get("visible_objects")
+        if isinstance(objects, list):
+            names = [value.strip() for value in objects if isinstance(value, str) and value.strip()]
+            if names:
+                parts.append(f"物品：{'、'.join(names)}")
+        visible_text = shot.get("visible_text")
+        visible_text = visible_text.strip() if isinstance(visible_text, str) else ""
+        if visible_text:
+            parts.append(f"画面文字：{visible_text}")
+        normalized.append({**shot, "visible_text": visible_text, "visual_description": "；".join(parts)})
+    return normalized
+
+
+def _transcript_warnings(visible_text: str, spoken_text: str) -> list[dict[str, str]]:
+    caption_words = re.findall(r"[A-Za-z]{2,}", visible_text)
+    spoken_words = re.findall(r"[A-Za-z]{2,}", spoken_text)
+    spoken_counts = Counter(word.casefold() for word in spoken_words)
+    if sum(min(count, spoken_counts[word]) for word, count in Counter(word.casefold() for word in caption_words).items()) < 2:
+        return []
+    warnings = []
+    for caption in caption_words:
+        if len(caption) < 6 or caption.casefold() in spoken_counts:
+            continue
+        candidates = [
+            (SequenceMatcher(None, caption.casefold(), word.casefold()).ratio(), word)
+            for word in spoken_words if len(word) >= 6
+        ]
+        if candidates:
+            score, word = max(candidates)
+            if 0.68 <= score < 1:
+                warnings.append({"transcript_word": word, "caption_word": caption})
+    return warnings
+
+
 def bind_reference_story(
     events: list[dict[str, Any]], shots: list[dict[str, Any]],
     frame_times_us: list[int], frame_urls: list[str],
@@ -150,6 +199,10 @@ def bind_reference_story(
             **event,
             "frame_url": frame_url,
             "analysis_frame_time_us": selected_frame[1] if selected_frame else None,
+            "visible_text": shot.get("visible_text", "") if frame_url else "",
+            "transcript_warnings": _transcript_warnings(
+                str(shot.get("visible_text", "")), str(event.get("spoken_text", ""))
+            ) if frame_url else [],
             "visual_observation": shot.get("visual_description", "") if frame_url else "",
             "narrative_inference": shot.get("narrative", "") if frame_url else "",
             "note_status": "needs_review" if frame_url else "missing_frame",

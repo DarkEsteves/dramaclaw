@@ -98,6 +98,11 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
     assert "事件 2 只对应第 2 张画面" in prompt
     assert "台词不能用来猜测画面" in prompt
     assert "3-12 个叙事镜头" not in prompt
+    assert '"visible_subject"' in prompt
+    assert '"visible_objects"' in prompt
+    assert '"visible_text"' in prompt
+    assert "木勺" in prompt
+    assert "image_prompt 和 motion_prompt 用英文" in prompt
 
 
 def test_freezone_analyze_request_defaults_to_shots_mode() -> None:

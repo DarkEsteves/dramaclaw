@@ -6,6 +6,7 @@ from novelvideo.freezone.remix.reference_context import build_reference_events
 from novelvideo.freezone.remix.reference_context import load_reference_events
 from novelvideo.freezone.remix.reference_context import bind_reference_story
 from novelvideo.freezone.remix.reference_context import select_reference_frame_times
+from novelvideo.freezone.remix.reference_context import normalize_reference_shots
 from novelvideo.freezone.remix.store import RemixArtifactStore
 
 
@@ -98,6 +99,7 @@ def test_story_notes_keep_evidence_times_and_observation_separate_from_inference
     assert notes[0] == {
         **events[0], "visual_observation": "人物起床", "narrative_inference": "提出问题",
         "frame_url": "/one.png", "analysis_frame_time_us": 500_000, "note_status": "needs_review",
+        "visible_text": "", "transcript_warnings": [],
     }
     assert notes[1]["start_us"] == 1_000_000
     assert notes[1]["spoken_text"] == "咖啡"
@@ -146,3 +148,33 @@ def test_fallback_frame_time_is_kept_as_analysis_evidence() -> None:
     notes = bind_reference_story(events, shots, [4_500_000], ["/fallback.png"])
     assert notes[0]["analysis_frame_time_us"] == 4_500_000
     assert notes[0]["frame_times_us"] == []
+
+
+def test_reference_observation_uses_only_static_visible_fields() -> None:
+    shots = [{
+        "visual_description": "女子用木勺搅拌锅具",
+        "visible_subject": "穿粉色围裙的女子",
+        "visible_setting": "有木格栅和绿植的厨房",
+        "visible_objects": ["锅", "白碗"],
+        "visible_text": "YOU'RE TREATING THIS",
+    }]
+    result = normalize_reference_shots(shots)
+    assert "木勺" not in result[0]["visual_description"]
+    assert "搅拌" not in result[0]["visual_description"]
+    assert "粉色围裙" in result[0]["visual_description"]
+    assert result[0]["visible_text"] == "YOU'RE TREATING THIS"
+
+
+def test_caption_conflict_needs_two_matching_anchor_words() -> None:
+    events = [
+        {"start_us": 0, "end_us": 1_000_000, "spoken_text": "Christine, five grams a day.", "frame_times_us": [500_000]},
+        {"start_us": 1_000_000, "end_us": 2_000_000, "spoken_text": "I put it in my coffee", "frame_times_us": [1_500_000]},
+    ]
+    shots = [
+        {"start_time": 0, "end_time": 1, "visible_text": "CREATINE FIVE GRAMS", "visual_description": "罐子"},
+        {"start_time": 1, "end_time": 2, "visible_text": "A DAY EVERY DAY", "visual_description": "咖啡店"},
+    ]
+    notes = bind_reference_story(events, shots, [500_000, 1_500_000], ["/one.png", "/two.png"])
+    assert notes[0]["transcript_warnings"] == [{"transcript_word": "Christine", "caption_word": "CREATINE"}]
+    assert notes[0]["spoken_text"] == "Christine, five grams a day."
+    assert notes[1]["transcript_warnings"] == []

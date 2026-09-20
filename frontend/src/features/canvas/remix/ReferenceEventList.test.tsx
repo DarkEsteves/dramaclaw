@@ -29,4 +29,15 @@ describe('ReferenceEventList', () => {
     expect(screen.getByText('画面未核实')).toBeTruthy();
     expect(screen.getByText(/转写节点校对/)).toBeTruthy();
   });
+
+  it('shows a likely subtitle and transcript mismatch without changing the spoken text', () => {
+    render(<ReferenceEventList events={[{
+      start_us: 4_000_000, end_us: 6_000_000,
+      spoken_text: 'Christine, five grams a day.',
+      visible_text: 'CREATINE FIVE GRAMS',
+      transcript_warnings: [{ transcript_word: 'Christine', caption_word: 'CREATINE' }],
+    }]} />);
+    expect(screen.getByText('Christine, five grams a day.')).toBeTruthy();
+    expect(screen.getByText(/Christine.*CREATINE/)).toBeTruthy();
+  });
 });

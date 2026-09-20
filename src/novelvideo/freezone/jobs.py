@@ -1964,14 +1964,18 @@ def build_video_story_analysis_prompt(
 事件数据：{json.dumps(numbered, ensure_ascii=False)}
 
 必须按事件顺序输出恰好 {len(numbered)} 个 shots，每个事件一个。不得改写事件的起止时间。
-每个事件的 visual_description 只能依据对应的那一张画面；不能参考其他事件的画面。
-台词不能用来猜测画面。静态画面看不出的动作、身份、产品名称、情绪和声音不要编成画面事实。
-画面看不清时 visual_description 用空字符串。画面描述用中文，尽量在 45 字内。
+每个事件只依据对应的那一张静态画面填写 visible_subject、visible_setting、visible_objects、visible_text。
+visible_subject 只写人物可见外观与姿态；visible_setting 只写可见环境；visible_objects 只列清楚可见的物品。
+visible_text 只抄清楚可辨认的画面字幕原文，不要改写或补全。看不清的字段留空，物品留空数组。
+台词不能用来猜测画面。单帧看不出动作过程：即使看到锅，也不能写“用木勺搅拌”，除非木勺确实清楚可见；即使人物伸手，也不能写“自拍”，除非手机清楚可见。
+不要把未露出的道具、动作、身份、情绪和声音写进画面字段。各字段用中文短语，不写完整叙事句。
+visual_description 留空，由程序根据上述静态字段生成画面观察。
 narrative 只简述画面和同期台词在故事中的可能作用；推断应与画面事实分开，尽量在 35 字内。
 spoken_text 是转写结果，可能有错词；不要擅自更改，也不要据此补出看不见的物体。
 keyframes 对每个事件只能填写对应的输入帧序号。严格输出 JSON 对象，不要 markdown。
+image_prompt 和 motion_prompt 用英文，作为后续生成建议；不得把建议中的动作当成已观察到的原片事实。
 
-JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","duration":{duration_sec if duration_sec is not None else 'null'},"shots":[{{"shot":1,"start_time":0.0,"end_time":1.0,"duration":1.0,"visual_description":"中文画面观察","narrative":"中文叙事作用","shot_size":"中景","camera_angle":"平视","camera_movement":"固定","focus_depth":"中等景深","lighting":"中文光线","background_music":"","voice_sound":"","image_prompt":"","motion_prompt":"","keyframes":[1]}}]}}
+JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","duration":{duration_sec if duration_sec is not None else 'null'},"shots":[{{"shot":1,"start_time":0.0,"end_time":1.0,"duration":1.0,"visible_subject":"人物外观与姿态","visible_setting":"可见环境","visible_objects":["清楚可见的物品"],"visible_text":"画面字幕原文","visual_description":"","narrative":"中文叙事作用","shot_size":"中景","camera_angle":"平视","camera_movement":"固定","focus_depth":"中等景深","lighting":"中文光线","background_music":"","voice_sound":"","image_prompt":"A woman in a cafe, medium shot","motion_prompt":"The camera slowly pans left","keyframes":[1]}}]}}
 """
     duration_hint = (
         f"视频总时长约 {duration_sec:.2f} 秒。"
@@ -2226,6 +2230,11 @@ async def run_freezone_analyze_shots(
         await abandon_freezone_vision_egress(vision_egress, submitted=True)
         raise
     await complete_freezone_vision_egress(vision_egress, result=text)
+
+    if mode == "video_story" and reference_events is not None:
+        from novelvideo.freezone.remix.reference_context import normalize_reference_shots
+
+        analyses["shots"] = normalize_reference_shots(analyses.get("shots", []))
 
     payload = {
         "provider": used_provider,
