@@ -66,9 +66,9 @@ export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChang
     }
   };
   return <div className={`nodrag rounded-[12px] p-3 text-xs text-text-dark ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
-    <div className="mb-3 text-[12px] font-medium">{kind === 'video' ? '视频用途' : '音频用途'}</div>
-    <label className="block text-text-muted">{kind === 'video' ? '更换视频文件' : '更换音频文件'}
-      <input aria-label={kind === 'video' ? '更换视频文件' : '更换音频文件'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="nodrag mt-1 block w-full rounded-[12px] border border-white/10 bg-surface-field px-2 py-1.5 text-[11px] text-text-dark file:mr-2 file:rounded-md file:border-0 file:bg-white/10 file:px-2 file:py-1 file:text-text-dark disabled:opacity-50" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+    <div className="mb-3 text-[12px] font-medium">{kind === 'video' ? '视频用途' : sourceUrl || media ? '音频用途' : '上传音频'}</div>
+    <label className="block text-text-muted">{kind === 'video' ? '更换视频文件' : sourceUrl || media ? '更换音频文件' : '选择音频文件'}
+      <input aria-label={kind === 'video' ? '更换视频文件' : sourceUrl || media ? '更换音频文件' : '选择音频文件'} type="file" accept={kind === 'video' ? 'video/*' : 'audio/*'} disabled={busy} className="nodrag mt-1 block w-full rounded-[12px] border border-white/10 bg-surface-field px-2 py-1.5 text-[11px] text-text-dark file:mr-2 file:rounded-md file:border-0 file:bg-white/10 file:px-2 file:py-1 file:text-text-dark disabled:opacity-50" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
     </label>
     <label className="mt-3 block text-text-muted">用途
       <select aria-label="素材用途" value={role} disabled={busy} className="nodrag mt-1 h-9 w-full rounded-[12px] border border-white/10 bg-surface-field px-3 text-xs text-text-dark" onChange={(event) => {

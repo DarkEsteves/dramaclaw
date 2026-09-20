@@ -140,6 +140,7 @@ import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetPr
 import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
 import { scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import { audioToolbarState } from './audioToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
@@ -1682,8 +1683,8 @@ export const NodeActionToolbar = memo(
             {(isVideoNode(node) || isAudioNode(node)) && (
               <UiChipButton
                 key="remix-source-transcribe"
-                className={TOOLBAR_TEXT_BUTTON_CLASS}
-                disabled={!((isVideoNode(node) ? node.data.videoUrl : node.data.audioUrl))}
+                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:!bg-transparent`}
+                disabled={isVideoNode(node) ? !node.data.videoUrl : !audioToolbarState(node.data.audioUrl).canTranscribe}
                 onClick={(event) => {
                   event.stopPropagation();
                   void startSourceTranscript(node.id).then((childId) => {
@@ -1697,7 +1698,7 @@ export const NodeActionToolbar = memo(
               <>
                 {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
                   : isAudioNode(node) ? [
-                    { action: 'open_media', label: '音频用途', Icon: Wand2 },
+                    { action: 'open_media', label: audioToolbarState(node.data.audioUrl).mediaLabel, Icon: node.data.audioUrl ? Wand2 : Upload },
                     ...(node.data.remixRole === 'narration' && node.data.audioUrl ? [{ action: 'align_script', label: '按脚本对齐', Icon: Workflow }] : []),
                   ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
