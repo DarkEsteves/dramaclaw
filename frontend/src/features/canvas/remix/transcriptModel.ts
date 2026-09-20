@@ -58,7 +58,9 @@ export function timelineWords(payload: TranscriptTimeline): TranscriptWord[] {
 /** Keep word timing but regenerate character offsets for a corrected transcript. */
 export function correctedTimeline(payload: TranscriptTimeline, correctedWords: string[], confirmedSameSpeechAndBoundaries: boolean): TranscriptTimeline {
   if (payload.status !== 'completed' || correctedWords.length !== payload.words.length) throw new Error('转写内容已变化，请重新加载');
-  let offset = 0;
+  const source = typeof payload.transcript === 'string' ? payload.transcript : payload.words.map((word) => word.text).join('');
+  let sourceOffset = 0;
+  let revisedText = '';
   const words = payload.words.map((word, index) => {
     const text = correctedWords[index]?.trim();
     if (!text) throw new Error('字词不能为空');
@@ -66,11 +68,17 @@ export function correctedTimeline(payload: TranscriptTimeline, correctedWords: s
     if (changed && (!confirmedSameSpeechAndBoundaries || Array.from(text).length !== Array.from(word.text).length || /\s/u.test(text))) {
       throw new RealignmentRequiredError();
     }
-    const start = offset;
-    offset += text.length;
-    return { ...word, text, start_char: start, end_char: offset, ...(changed ? { timing_status: 'manually_verified', original_text: word.text } : {}) };
+    const sourceStart = Number.isInteger(word.start_char) ? Number(word.start_char) : sourceOffset;
+    const sourceEnd = Number.isInteger(word.end_char) ? Number(word.end_char) : sourceStart + word.text.length;
+    if (sourceStart < sourceOffset || sourceEnd > source.length || source.slice(sourceStart, sourceEnd) !== word.text) throw new Error('转写内容已变化，请重新加载');
+    revisedText += source.slice(sourceOffset, sourceStart);
+    const start = revisedText.length;
+    revisedText += text;
+    sourceOffset = sourceEnd;
+    return { ...word, text, start_char: start, end_char: revisedText.length, ...(changed ? { timing_status: 'manually_verified', original_text: word.text } : {}) };
   });
-  return { ...payload, transcript: words.map((word) => word.text).join(''), words, manual_timing_review: words.some((word) => word.timing_status === 'manually_verified') };
+  revisedText += source.slice(sourceOffset);
+  return { ...payload, transcript: revisedText, words, manual_timing_review: words.some((word) => word.timing_status === 'manually_verified') };
 }
 
 function srtTime(us: number): string {

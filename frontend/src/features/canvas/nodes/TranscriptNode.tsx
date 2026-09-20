@@ -40,6 +40,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const [operationId, setOperationId] = useState<string | null>(typeof data.operationId === 'string' ? data.operationId : null);
   const [language, setLanguage] = useState('zh');
   const [edited, setEdited] = useState<string[]>(() => data.words.map((word) => word.text));
+  const [showWordDetails, setShowWordDetails] = useState(false);
   const [confirmedTiming, setConfirmedTiming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +52,20 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const project = readUrl().project;
   const artifactRef = data.artifactRef as RemixArtifactRef | null | undefined;
   const canSave = Boolean(artifactRef && edited.some((text, index) => text !== data.words[index]?.text));
+  const transcriptText = typeof data.transcriptText === 'string' && data.transcriptText.trim()
+    ? data.transcriptText.trim()
+    : data.words.map((word) => word.text).join('');
+  useEffect(() => {
+    if (!project || !artifactRef || data.transcriptText || data.words.length === 0) return;
+    let cancelled = false;
+    void fetchRemixArtifact(project, artifactRef).then((artifact) => {
+      const payload = artifact.payload as TranscriptTimeline;
+      if (!cancelled && artifact.schema === 'word_timeline.v1' && typeof payload.transcript === 'string') {
+        updateNodeData(id, { transcriptText: payload.transcript });
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [artifactRef?.artifactId, artifactRef?.revision, data.transcriptText, data.words.length, id, project, updateNodeData]);
   useEffect(() => {
     const aligned = data.alignedScriptRef as RemixArtifactRef | null | undefined;
     if (artifactRef && aligned && (!scriptRef || aligned.artifactId !== scriptRef.artifactId || aligned.revision !== scriptRef.revision)) {
@@ -69,7 +84,8 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       const task = await submitRemixProcessAction(project, mode === 'align'
         ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
         : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
-      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, words: [], pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
+      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
+      setShowWordDetails(false);
       setOperationId(task.operation_id);
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
@@ -115,7 +131,8 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         const current = sourceMediaForTranscript(id, store.nodes, store.edges);
         const saved = store.nodes.find((node) => node.id === id)?.data as TranscriptNodeData | undefined;
         if (!current || current.path !== saved?.sourceMediaPath) throw new Error('上游音频已变化，请重新转写');
-        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
+        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, transcriptText: typeof payload.transcript === 'string' ? payload.transcript : words.map((word) => word.text).join(''), status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
+        setShowWordDetails(false);
         setOperationId(null);
       } catch (caught) {
         if (!cancelled) {
@@ -142,7 +159,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       if (!Array.isArray(rawRefs) && (data.alignedScriptRef || payload.script_ref)) throw new Error('无法确认对齐脚本版本，请重新对齐');
       const upstreamRefs = (rawRefs ?? []).map((upstream) => ({ artifactId: upstream.artifact_id, revision: upstream.revision }));
       const saved = await reviseTranscriptArtifact(project, artifactRef, revised, upstreamRefs);
-      updateNodeData(id, { artifactRef: { artifactId: saved.id, revision: saved.revision }, words: timelineWords(revised), status: 'completed', pendingCorrectionText: null });
+      updateNodeData(id, { artifactRef: { artifactId: saved.id, revision: saved.revision }, words: timelineWords(revised), transcriptText: revised.transcript, status: 'completed', pendingCorrectionText: null });
       setConfirmedTiming(false);
     } catch (caught) {
       if (caught instanceof RealignmentRequiredError) {
@@ -181,14 +198,15 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
         {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐'}</p>}
-        {data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
+        {data.words.length > 0 && <><p className="whitespace-pre-wrap px-2 py-2 text-[13px] leading-6 text-text-dark">{transcriptText}</p><button type="button" onClick={() => setShowWordDetails((current) => !current)} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mx-2 my-1`}>{showWordDetails ? '收起逐词校对' : `展开逐词校对（${data.words.length}）`}</button></>}
+        {showWordDetails && data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
           <button type="button" className="w-[145px] shrink-0 text-left font-mono text-[11px] text-text-muted" onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = word.startUs / 1_000_000; }}>{stamp(word.startUs)} – {stamp(word.endUs)}</button>
           <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => { setConfirmedTiming(false); setEdited((current) => current.map((text, position) => position === index ? event.target.value : text)); }} className="nodrag min-w-0 flex-1 rounded-[12px] border border-white/10 bg-surface-field px-2 py-1 outline-none focus:border-white/25" />
           {typeof word.confidence === 'number' && word.confidence < 0.6 && <span className="shrink-0 text-amber-300">低置信度</span>}
         </div>)}
-        {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无对齐字词</p>}
+        {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无转写内容</p>}
       </div>
-      {artifactRef && <div className="border-t border-white/[0.08] p-3 text-xs"><label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><div className="flex flex-wrap gap-2"><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button><button type="button" onClick={() => void exportResult('json')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 SRT</button></div></div>}
+      {artifactRef && <div className="border-t border-white/[0.08] p-3 text-xs">{showWordDetails && <label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label>}<div className="flex flex-wrap gap-2">{showWordDetails && <button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button>}<button type="button" onClick={() => void exportResult('json')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 SRT</button></div></div>}
       {error && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
     </div>
   </div>;

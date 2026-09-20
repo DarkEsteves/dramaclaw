@@ -47,7 +47,13 @@ class FakeWhisperX:
             ]
         else:
             chars = self.chars
-        return {"segments": [{"chars": chars}]}
+        return {"segments": [{
+            "chars": chars,
+            "words": [
+                {"word": "go", "start": 0.0, "end": 0.2, "score": 0.92},
+                {"word": "go", "start": 0.5, "end": 0.7, "score": 0.87},
+            ],
+        }]}
 
 
 def test_unconfigured_engine_stays_unavailable(monkeypatch):
@@ -92,7 +98,7 @@ def test_configured_adapter_returns_no_speech(tmp_path: Path, monkeypatch):
     assert not any(name == "load_align_model" for name, _ in fake.calls)
 
 
-def test_configured_adapter_transcribes_to_timed_characters(tmp_path: Path, monkeypatch):
+def test_configured_adapter_transcribes_to_timed_words(tmp_path: Path, monkeypatch):
     media = tmp_path / "voice.wav"
     media.write_bytes(b"audio")
     cache = tmp_path / "models"
@@ -105,9 +111,8 @@ def test_configured_adapter_transcribes_to_timed_characters(tmp_path: Path, monk
 
     assert result["status"] == "completed"
     assert result["transcript"] == "go go"
-    assert [(word["text"], word["start_us"], word["end_us"]) for word in result["words"]] == [
-        ("g", 0, 100_000), ("o", 100_000, 200_000),
-        ("g", 500_000, 600_000), ("o", 600_000, 700_000),
+    assert [(word["text"], word["start_char"], word["end_char"], word["start_us"], word["end_us"]) for word in result["words"]] == [
+        ("go", 0, 2, 0, 200_000), ("go", 3, 5, 500_000, 700_000),
     ]
 
 

@@ -803,6 +803,7 @@ export interface TranscriptNodeData extends NodeDisplayData {
   /** Immutable transcript artifact, retained when the canvas is saved and reloaded. */
   artifactRef?: { artifactId: string; revision: number } | null;
   words: TranscriptWord[];
+  transcriptText?: string | null;
   status: 'completed' | 'needs_review' | 'failed';
   unresolved?: string[];
   [key: string]: unknown;

@@ -44,6 +44,19 @@ describe('transcript node model', () => {
     expect(() => correctedTimeline(timeline, ['', '好'], true)).toThrow('字词不能为空');
   });
 
+  it('preserves separators in word-level transcripts when a word is corrected', () => {
+    const wordTimeline = {
+      ...timeline,
+      transcript: 'go home',
+      words: [
+        { text: 'go', start_char: 0, end_char: 2, start_us: 0, end_us: 200_000 },
+        { text: 'home', start_char: 3, end_char: 7, start_us: 300_000, end_us: 700_000 },
+      ],
+    };
+
+    expect(correctedTimeline(wordTimeline, ['Go', 'home'], true).transcript).toBe('Go home');
+  });
+
   it('requires explicit same-speech confirmation even when a replacement has the same length', () => {
     expect(() => correctedTimeline(timeline, ['您', '好'], false)).toThrow('需要重新对齐');
   });

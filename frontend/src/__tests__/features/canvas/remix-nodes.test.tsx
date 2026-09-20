@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@xyflow/react', () => ({
@@ -67,6 +67,7 @@ describe('remix canvas nodes', () => {
           displayName: 'Transcript',
           artifactRef: { artifactId: 'artifact-1', revision: 2 },
           status: 'needs_review',
+          transcriptText: 'Hello world',
           words: [
             { text: 'Hello', startUs: 100_000, endUs: 450_000, confidence: 0.42 },
             { text: 'world', startUs: 500_000, endUs: 900_000, confidence: 0.98 },
@@ -77,6 +78,8 @@ describe('remix canvas nodes', () => {
     );
 
     expect(screen.getByText('已完成 · 版本 2')).toBeTruthy();
+    expect(screen.getByText('Hello world')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（2）' }));
     expect(screen.getByDisplayValue('Hello')).toBeTruthy();
     expect(screen.getByText('00:00.100 – 00:00.450')).toBeTruthy();
     expect(screen.getByText('低置信度')).toBeTruthy();

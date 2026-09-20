@@ -67,13 +67,23 @@ describe('TranscriptNode', () => {
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
     rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    expect(screen.getByText('你好')).toBeTruthy();
+    expect(screen.queryByDisplayValue('你')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（2）' }));
     expect(screen.getByDisplayValue('你')).toBeTruthy();
     expect(screen.getByText('低置信度')).toBeTruthy();
+  });
+
+  it('loads the full text for an existing transcript node', async () => {
+    state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(state.nodes[1].data.transcriptText).toBe('你好'));
   });
 
   it('saves corrected words as a new artifact revision', async () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000, confidence: 0.4 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（1）' }));
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
     fireEvent.click(screen.getByRole('checkbox', { name: '仅校正同一发音和词边界，保留原时间' }));
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
@@ -84,6 +94,7 @@ describe('TranscriptNode', () => {
   it('invalidates timing for an unconfirmed same-length replacement', async () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（1）' }));
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您' } });
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
@@ -94,6 +105,7 @@ describe('TranscriptNode', () => {
   it('invalidates timing for a changed phrase even with confirmation', async () => {
     state.nodes[1].data = { words: [{ text: '你', startUs: 0, endUs: 500_000 }], status: 'completed', artifactRef: { artifactId: 'words-1', revision: 1 } };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（1）' }));
     fireEvent.change(screen.getByDisplayValue('你'), { target: { value: '您好' } });
     fireEvent.click(screen.getByRole('checkbox', { name: '仅校正同一发音和词边界，保留原时间' }));
     fireEvent.click(screen.getByRole('button', { name: '保存校字' }));
