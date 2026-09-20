@@ -77,6 +77,20 @@ def test_video_story_prompt_requests_libtv_story_table() -> None:
     assert "严格输出 JSON 对象" in prompt
 
 
+def test_video_story_prompt_uses_timed_reference_events() -> None:
+    prompt = build_video_story_analysis_prompt(
+        frame_count=2,
+        duration_sec=4.0,
+        reference_events=[{"start_us": 0, "end_us": 2_000_000, "spoken_text": "hello", "frame_pts": [1], "word_spans": []}],
+    )
+
+    assert "hello" in prompt
+    assert "2000000" in prompt
+    assert "画面观察" in prompt
+    assert "同期台词" in prompt
+    assert "不得改写事件的起止时间" in prompt
+
+
 def test_freezone_analyze_request_defaults_to_shots_mode() -> None:
     body = freezone_routes.FreezoneAnalyzeShotsRequest(frame_urls=["/static/f1.png"])
 
@@ -167,6 +181,50 @@ async def test_video_story_analysis_uses_shared_freezone_vision_model(
     with Image.open(io.BytesIO(image.data)) as compacted:
         assert compacted.size == (1280, 720)
     assert captured["timeout_seconds"] == FREEZONE_VIDEO_ANALYSIS_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_video_story_runner_passes_project_timed_events_to_vision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.task_backend.runners import freezone as runner
+    from novelvideo.freezone import jobs
+    from novelvideo.api import deps
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"frame")
+    output = tmp_path / "analysis.json"
+    output.write_text("{}")
+    captured: dict[str, object] = {}
+    events = [{"start_us": 0, "end_us": 1_000_000, "spoken_text": "hello", "frame_pts": [0], "word_spans": []}]
+
+    def fake_context(project_dir, project_id, video_path, evidence_ref, transcript_ref):
+        captured["refs"] = (evidence_ref, transcript_ref)
+        return events
+
+    async def fake_frames(**kwargs):
+        return [frame]
+
+    async def fake_vision(**kwargs):
+        captured["vision_events"] = kwargs.get("reference_events")
+        return {"output_path": str(output), "video_story": {"shots": []}, "analyses": [], "model": "test"}
+
+    monkeypatch.setattr(runner, "load_reference_events", fake_context, raising=False)
+    monkeypatch.setattr(runner, "_update", lambda *args: None)
+    monkeypatch.setattr(jobs, "run_freezone_extract_frames", fake_frames)
+    monkeypatch.setattr(jobs, "run_freezone_analyze_shots", fake_vision)
+    monkeypatch.setattr(deps, "make_static_url_for_context", lambda ctx, path: f"/static/{path}")
+    evidence_ref = {"artifact_id": "evidence-1", "revision": 1}
+    transcript_ref = {"artifact_id": "words-1", "revision": 2}
+
+    result = await runner._run_freezone_video_story_async(
+        {"payload": {"job_id": "job", "video_path": str(video), "evidence_ref": evidence_ref, "transcript_ref": transcript_ref}},
+        SimpleNamespace(output_dir=str(tmp_path), project_id="demo"),
+    )
+
+    assert captured["refs"] == (evidence_ref, transcript_ref)
+    assert captured["vision_events"] == events
+    assert result["reference_events"] == events
 
 
 @pytest.mark.asyncio
@@ -315,6 +373,8 @@ async def test_freezone_analyze_video_story_route_starts_single_video_task(
             max_frames=12,
             scene_threshold=0.25,
             duration_sec=15.0,
+            evidence_ref={"artifact_id": "evidence-1", "revision": 2},
+            transcript_ref={"artifact_id": "words-1", "revision": 3},
         ),
         user={"username": username},
     )
@@ -326,6 +386,8 @@ async def test_freezone_analyze_video_story_route_starts_single_video_task(
     assert captured["video_path"] == video_path.as_posix()
     assert captured["max_frames"] == 12
     assert captured["scene_threshold"] == 0.25
+    assert captured["evidence_ref"] == {"artifact_id": "evidence-1", "revision": 2}
+    assert captured["transcript_ref"] == {"artifact_id": "words-1", "revision": 3}
     assert captured["duration_sec"] == 15.0
     assert "provider" not in captured
     assert "model" not in captured

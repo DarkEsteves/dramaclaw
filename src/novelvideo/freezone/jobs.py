@@ -1905,7 +1905,8 @@ SHOT_ANALYSIS_PROMPT = """你是一个专业的电影分镜师。下面给你一
 
 
 def build_video_story_analysis_prompt(
-    *, frame_count: int, duration_sec: Optional[float] = None
+    *, frame_count: int, duration_sec: Optional[float] = None,
+    reference_events: list[dict[str, Any]] | None = None,
 ) -> str:
     duration_hint = (
         f"视频总时长约 {duration_sec:.2f} 秒。"
@@ -1916,7 +1917,7 @@ def build_video_story_analysis_prompt(
             "start_time/end_time，第一镜从 0 开始。"
         )
     )
-    return f"""你是专业影视导演和分镜解析师。下面给你 {frame_count} 张
+    prompt = f"""你是专业影视导演和分镜解析师。下面给你 {frame_count} 张
 按时间顺序抽取的视频关键帧，请解析成 libtv 风格的“视频故事”表。
 
 {duration_hint}
@@ -1961,6 +1962,23 @@ JSON schema:
   ]
 }}
 """
+    if reference_events is None:
+        return prompt
+    import json
+
+    compact = [
+        {"start_us": event["start_us"], "end_us": event["end_us"],
+         "spoken_text": str(event.get("spoken_text", ""))[:500],
+         "frame_pts": event.get("frame_pts", [])[:12]}
+        for event in reference_events[:60]
+    ]
+    return prompt + (
+        "\n下面是同一原片时间轴上的画面事件与同期台词（时间单位为微秒）：\n"
+        + json.dumps(compact, ensure_ascii=False)
+        + "\n请结合输入画面与同期台词，为每个事件写画面观察、叙事推断和台词的作用。"
+        "不得改写事件的起止时间；无法从画面证实的内容不要当作画面观察。"
+        "没有同期台词时不要编造台词。\n"
+    )
 
 
 _MAX_JSON_REPAIRS = 32
@@ -2059,6 +2077,7 @@ async def run_freezone_analyze_shots(
     model: Optional[str] = None,
     analysis_mode: str = "shots",
     duration_sec: Optional[float] = None,
+    reference_events: list[dict[str, Any]] | None = None,
     egress_context: TrustedEgressContext | None = None,
 ) -> dict:
     """Send N frames to a Vision model and parse a structured JSON response.
@@ -2097,6 +2116,7 @@ async def run_freezone_analyze_shots(
         build_video_story_analysis_prompt(
             frame_count=len(frame_paths),
             duration_sec=duration_sec,
+            reference_events=reference_events,
         )
         if mode == "video_story"
         else SHOT_ANALYSIS_PROMPT

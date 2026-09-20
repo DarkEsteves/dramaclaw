@@ -7560,6 +7560,8 @@ async def freezone_analyze_video_story(
             "max_frames": body.max_frames,
             "scene_threshold": body.scene_threshold,
             "duration_sec": body.duration_sec,
+            **({"evidence_ref": body.evidence_ref.model_dump()} if body.evidence_ref else {}),
+            **({"transcript_ref": body.transcript_ref.model_dump()} if body.transcript_ref else {}),
         },
     )
 

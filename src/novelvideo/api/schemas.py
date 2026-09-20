@@ -836,6 +836,11 @@ class FreezoneAnalyzeShotsRequest(BaseModel):
     duration_sec: Optional[float] = None
 
 
+class FreezoneReferenceArtifactRef(BaseModel):
+    artifact_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    revision: int = Field(ge=1)
+
+
 class FreezoneAnalyzeVideoStoryRequest(BaseModel):
     video_url: str = Field(
         description=("视频静态地址。必须是当前项目下真实存在的 /static/... 视频 URL"),
@@ -864,6 +869,8 @@ class FreezoneAnalyzeVideoStoryRequest(BaseModel):
         ),
         examples=[15],
     )
+    evidence_ref: Optional[FreezoneReferenceArtifactRef] = None
+    transcript_ref: Optional[FreezoneReferenceArtifactRef] = None
 
 
 class FreezoneVideoBreakdownRequest(BaseModel):

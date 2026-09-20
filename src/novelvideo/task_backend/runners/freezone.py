@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from novelvideo.i18n_message import MessageLike, lmsg
+from novelvideo.freezone.remix.reference_context import load_reference_events
 from novelvideo.egress_context import (
     TRUSTED_EGRESS_CONTEXT_KEY,
     TrustedEgressContext,
@@ -871,6 +872,19 @@ async def _run_freezone_video_story_async(
     payload = envelope.get("payload") or {}
     job_id = str(payload["job_id"])
     project_dir = Path(str(payload.get("project_dir") or ctx.output_dir))
+    evidence_ref = payload.get("evidence_ref")
+    transcript_ref = payload.get("transcript_ref")
+    if transcript_ref and not evidence_ref:
+        raise ValueError("reference transcript requires matching video evidence")
+    reference_events = None
+    if evidence_ref:
+        video_path = Path(str(payload["video_path"])).resolve()
+        if not video_path.is_relative_to(project_dir.resolve()):
+            raise ValueError("reference video must belong to this project")
+        reference_events = await asyncio.to_thread(
+            load_reference_events, project_dir, ctx.project_id, video_path,
+            evidence_ref, transcript_ref,
+        )
     ensure_freezone_dirs(project_dir)
     _update(ctx, "freezone_video_story", job_id, 0.1, "ffmpeg 抽取关键帧...")
     frame_paths = await _call_freezone_leaf(
@@ -894,6 +908,7 @@ async def _run_freezone_video_story_async(
         0.55,
         f"Vision 解析 {len(frame_paths)} 帧为视频故事...",
     )
+    vision_options = {"reference_events": reference_events} if reference_events is not None else {}
     result = await _call_freezone_leaf(
         envelope,
         run_freezone_analyze_shots,
@@ -905,6 +920,7 @@ async def _run_freezone_video_story_async(
         model=payload.get("model"),
         analysis_mode="video_story",
         duration_sec=payload.get("duration_sec"),
+        **vision_options,
     )
     output_path = Path(str(result["output_path"]))
     return {
@@ -919,6 +935,7 @@ async def _run_freezone_video_story_async(
         "frame_urls": frame_urls,
         "analyses": result.get("analyses"),
         "video_story": result.get("video_story"),
+        **({"reference_events": reference_events} if reference_events is not None else {}),
     }
 
 
