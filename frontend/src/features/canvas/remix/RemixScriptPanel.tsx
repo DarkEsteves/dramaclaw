@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchRemixArtifact, type RemixArtifactRef } from '@/api/remix';
+import { fetchRemixArtifact, generateRemixScriptDraft, type RemixArtifactRef } from '@/api/remix';
 import { saveRemixScriptArtifact } from './remixScriptArtifact';
 import { editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
@@ -22,9 +22,14 @@ interface Props {
 export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [newTopic, setNewTopic] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [blueprintRole, setBlueprintRole] = useState<string | null>(null);
   const dialogueRef = useRef<HTMLTextAreaElement>(null);
+  const draftEditCount = useRef(0);
+  const currentBlueprintRef = useRef(blueprintRef);
+  currentBlueprintRef.current = blueprintRef;
 
   useEffect(() => {
     if (!blueprintRef || !project) return;
@@ -35,7 +40,21 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
     return () => { active = false; };
   }, [blueprintRef?.artifactId, blueprintRef?.revision, project]);
 
-  const changeDraft = (next: RemixScriptDraft) => { setDraft(next); onDraftChange(next); setError(null); };
+  const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; setDraft(next); onDraftChange(next); setError(null); };
+  const generate = async () => {
+    if (generating || saving || !blueprintRef || !newTopic.trim()) return;
+    const source = blueprintRef;
+    const editCount = draftEditCount.current;
+    setGenerating(true); setError(null);
+    try {
+      const next = await generateRemixScriptDraft(project, source, newTopic.trim());
+      const current = currentBlueprintRef.current;
+      if (!current || current.artifactId !== source.artifactId || current.revision !== source.revision) throw new Error('参考蓝图已更新，请重新生成脚本');
+      if (draftEditCount.current !== editCount) throw new Error('生成期间台词已修改，请确认后重新生成');
+      changeDraft(next);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '生成脚本失败'); }
+    finally { setGenerating(false); }
+  };
   const markSelected = () => {
     const field = dialogueRef.current;
     if (!field || field.selectionStart === field.selectionEnd) { setError('先在台词里选中一段文字。'); return; }
@@ -60,6 +79,7 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
     <div className="ui-scrollbar space-y-3 overflow-auto p-4 text-xs">
       {blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
       {blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
+      {blueprintRef && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => setNewTopic(event.target.value)} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>标记选中文本</button>
       <p className="text-text-muted">在台词中选中文字后标记；填写替换画面节点可作为 B-roll 指令。</p>

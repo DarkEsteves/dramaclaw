@@ -15,6 +15,7 @@ from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.freezone.remix.alignment import speech_engine_ready
+from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.project_context import require_project_home_node, resolve_project_context
 from novelvideo.ports import get_task_backend
 from novelvideo.task_identity import project_task_state_key
@@ -57,6 +58,11 @@ class ProcessActionBody(BaseModel):
     node_revision: int = Field(ge=1, strict=True)
 
 
+class ScriptDraftBody(BaseModel):
+    blueprint_ref: dict[str, Any]
+    new_topic: str = Field(min_length=1, max_length=2_000)
+
+
 _PROCESS_TASK_TYPES = {
     "transcribe_media": "remix_transcribe_media",
     "align_script": "remix_align_script",
@@ -94,6 +100,27 @@ async def _call(fn, *args, **kwargs):
 
 def _data(value: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": value}
+
+
+@router.post("/script-drafts")
+async def create_script_draft(project: str, body: ScriptDraftBody, user: dict = Depends(get_api_user)):
+    store = await _store(project, user, "editor")
+    topic = body.new_topic.strip()
+    if not topic:
+        raise HTTPException(422, "new_topic must not be blank")
+    ref = body.blueprint_ref
+    if set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
+        raise HTTPException(422, "blueprint_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] != "reference_blueprint.v1":
+        raise HTTPException(422, "blueprint_ref must reference a saved blueprint")
+    try:
+        draft = await generate_script_draft(
+            blueprint=artifact["payload"], topic=topic, username=str(user.get("username") or "")
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _data(draft)
 
 
 def _operation_view(record: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+import json
+
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+import pytest
+
+from novelvideo.freezone.remix.store import RemixArtifactStore
+
+
+def blueprint_payload() -> dict:
+    return {
+        "narrative_role": "问题开场，演示产品，结尾行动号召",
+        "events": [{"event_id": "hook", "narrative_role": "hook", "description": "早上没精神"}],
+        "preserve_replace_rules": [], "observations": [], "inferences": [], "user_choices": [],
+    }
+
+
+def test_generated_quotes_become_unicode_codepoint_selections() -> None:
+    from novelvideo.freezone.remix.script_draft import draft_from_recipe_output
+
+    draft = draft_from_recipe_output({
+        "dialogue": "早上😴没精神？喝下咖啡，立刻清醒。",
+        "segments": [],
+        "selections": [{"label": "产品登场", "quote": "咖啡"}],
+        "blueprint_mappings": [], "media_requirements": [],
+    })
+
+    assert draft["dialogue"] == "早上😴没精神？喝下咖啡，立刻清醒。"
+    assert draft["selections"] == [{"id": "generated-1", "label": "产品登场", "start": 9, "end": 11}]
+
+
+@pytest.mark.parametrize("quote", ["不存在", "咖啡"])
+def test_generated_quote_must_identify_one_phrase(quote: str) -> None:
+    from novelvideo.freezone.remix.script_draft import draft_from_recipe_output
+
+    dialogue = "喝咖啡，再喝咖啡。" if quote == "咖啡" else "喝茶。"
+    with pytest.raises(ValueError, match="关键句"):
+        draft_from_recipe_output({"dialogue": dialogue, "selections": [{"label": "产品", "quote": quote}]})
+
+
+def test_generated_script_requires_a_semantic_selection() -> None:
+    from novelvideo.freezone.remix.script_draft import draft_from_recipe_output
+
+    with pytest.raises(ValueError, match="关键句"):
+        draft_from_recipe_output({"dialogue": "喝下新咖啡。", "selections": []})
+
+
+@pytest.mark.asyncio
+async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import script_draft
+
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({"dialogue": "新咖啡来了。", "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(script_draft, "generate_recipe_text", generate)
+    draft = await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+
+    assert draft["selections"] == [{"id": "generated-1", "label": "产品登场", "start": 0, "end": 3}]
+    assert calls[0]["recipe_id"] == "reference-remix-script"
+    assert calls[0]["user_goal"] == "新咖啡"
+    assert "问题开场" in calls[0]["upstream_text"]
+
+    async def invalid(**kwargs):
+        return '{"dialogue":"新咖啡来了。","segments":[],"selections":[{"label":"产品登场","quote":"不存在"}],"blueprint_mappings":[],"media_requirements":[]}'
+
+    monkeypatch.setattr(script_draft, "generate_recipe_text", invalid)
+    with pytest.raises(ValueError, match="关键句"):
+        await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+
+
+@pytest.fixture
+def api(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    from novelvideo.api.auth import get_api_user
+    from novelvideo.api.routes import remix as routes
+
+    async def resolve(*, user, project_id, required_role):
+        if project_id != "demo":
+            raise HTTPException(403, "Access denied")
+        return SimpleNamespace(output_dir=str(tmp_path), project_id="demo", is_home_node=True)
+
+    monkeypatch.setattr(routes, "resolve_project_context", resolve)
+    monkeypatch.setattr(routes, "require_project_home_node", lambda ctx, **kwargs: None)
+    app = FastAPI()
+    app.include_router(routes.router, prefix="/api/v1")
+    app.dependency_overrides[get_api_user] = lambda: {"username": "alice"}
+    blueprint = RemixArtifactStore(tmp_path, "demo").create("reference_blueprint.v1", blueprint_payload(), [])
+    return TestClient(app), blueprint
+
+
+def test_script_draft_endpoint_reads_exact_blueprint_and_does_not_publish(api, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from novelvideo.api.routes import remix as routes
+
+    client, blueprint = api
+    calls = []
+
+    async def generate(*, blueprint, topic, username):
+        calls.append((blueprint, topic, username))
+        return {"dialogue": "用新咖啡开始一天。", "selections": [{"id": "generated-1", "label": "产品登场", "start": 2, "end": 5}]}
+
+    monkeypatch.setattr(routes, "generate_script_draft", generate)
+    response = client.post("/api/v1/projects/demo/freezone/remix/script-drafts", json={
+        "blueprint_ref": {"artifact_id": blueprint["id"], "revision": 1}, "new_topic": "新咖啡",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["data"]["dialogue"] == "用新咖啡开始一天。"
+    assert calls == [(blueprint["payload"], "新咖啡", "alice")]
+    assert len(list((tmp_path / "freezone" / "_remix_artifacts").iterdir())) == 1
+
+
+def test_script_draft_endpoint_rejects_wrong_schema_and_other_project(api, tmp_path) -> None:
+    client, _ = api
+    wrong = RemixArtifactStore(tmp_path, "demo").create("remix_script.v1", {
+        "dialogue": "hello", "segments": [], "selections": [], "blueprint_mappings": [], "media_requirements": [],
+    }, [])
+    wrong_response = client.post("/api/v1/projects/demo/freezone/remix/script-drafts", json={
+        "blueprint_ref": {"artifact_id": wrong["id"], "revision": 1}, "new_topic": "咖啡",
+    })
+    assert wrong_response.status_code == 422
+    response = client.post("/api/v1/projects/other/freezone/remix/script-drafts", json={
+        "blueprint_ref": {"artifact_id": "missing", "revision": 1}, "new_topic": "咖啡",
+    })
+    assert response.status_code == 403
+
+
+def test_script_draft_endpoint_rejects_blank_topic(api) -> None:
+    client, blueprint = api
+    response = client.post("/api/v1/projects/demo/freezone/remix/script-drafts", json={
+        "blueprint_ref": {"artifact_id": blueprint["id"], "revision": 1}, "new_topic": "   ",
+    })
+    assert response.status_code == 422

@@ -19,6 +19,11 @@ export function createRemixArtifact(project: string, schema: string, payload: Re
   return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts`, { method: 'POST', json: { schema, payload, upstream_refs: upstreamRefs.map(exactRef) } });
 }
 export function fetchRemixArtifact(project: string, ref: RemixArtifactRef) { return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${ref.artifactId}?revision=${ref.revision}`); }
+export function generateRemixScriptDraft(project: string, blueprintRef: RemixArtifactRef, newTopic: string) {
+  return apiCall<{ dialogue: string; selections: Array<{ id: string; label: string; start: number; end: number }> }>(`projects/${project}/freezone/remix/script-drafts`, {
+    method: 'POST', json: { blueprint_ref: exactRef(blueprintRef), new_topic: newTopic }, timeout: false,
+  });
+}
 export function renderRemixManifest(project: string, request: RemixRenderRequest) { return apiCall<RemixRenderTaskRef>(`projects/${project}/freezone/remix/artifacts/${request.manifestRef.artifactId}/render`, { method: 'POST', json: { revision: request.manifestRef.revision, idempotency_key: request.idempotencyKey, node_revision: request.nodeRevision, ...(request.canvasId ? { canvas_id: request.canvasId } : {}), ...(request.nodeId ? { node_id: request.nodeId } : {}) } }); }
 export function uploadRemixMedia(project: string, file: File) {
   const body = new FormData();
