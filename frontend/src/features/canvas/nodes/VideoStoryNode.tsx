@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Handle,
@@ -28,7 +28,8 @@ import { EditableTableCell } from '@/features/canvas/ui/EditableTableCell';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
-import { ReferenceBlueprintPanel } from '@/features/canvas/remix/blueprintPanel';
+import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
+import { createScriptFromBlueprint } from '@/features/canvas/remix/createScriptFromBlueprint';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
 import { analyzeReferenceVideo } from '@/features/canvas/application/analyzeReferenceVideo';
@@ -40,8 +41,8 @@ type VideoStoryNodeProps = NodeProps & {
   selected?: boolean;
 };
 
-const DEFAULT_WIDTH = 720;
-const DEFAULT_HEIGHT = 360;
+const DEFAULT_WIDTH = 960;
+const DEFAULT_HEIGHT = 560;
 const MIN_WIDTH = 480;
 const MIN_HEIGHT = 240;
 const MAX_WIDTH = 1600;
@@ -220,6 +221,9 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const canvasNodes = useCanvasStore((state) => state.nodes);
   const canvasEdges = useCanvasStore((state) => state.edges);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCreatingScript, setIsCreatingScript] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const blueprintPanelRef = useRef<ReferenceBlueprintPanelHandle>(null);
   const blueprintSource = useMemo(() => connectedBlueprintSources(id, canvasNodes, canvasEdges), [id, canvasNodes, canvasEdges]);
   const patchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
   const reanalyzeBlueprint = useCallback(() => {
@@ -265,6 +269,8 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const hasRows = rows.length > 0;
   const referenceEvents = Array.isArray(data.referenceEvents) ? data.referenceEvents as ReferenceEvent[] : [];
   const hasReferenceEvents = referenceEvents.length > 0;
+  const suggestedNarrativeRole = referenceEvents.map((event) => event.narrative_inference?.trim()).filter(Boolean).slice(0, 3).join(' → ')
+    || rows.map((row) => row.narrative?.trim()).filter(Boolean).slice(0, 3).join(' → ');
   const stageLabel: Record<string, string> = { preparing: '准备原片', extracting: '提取画面证据', transcribing: '转写同期台词', analyzing: '对照画面与台词' };
 
   // 表格单元格编辑：把编辑后的值写回 data.rows[idx][colKey]。
@@ -283,6 +289,21 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     },
     [id, rows, updateNodeData],
   );
+
+  const generateScript = async () => {
+    if (isCreatingScript) return;
+    setIsCreatingScript(true);
+    setScriptError(null);
+    try {
+      if (!blueprintPanelRef.current) throw new Error('参考蓝图设置尚未准备好。');
+      await blueprintPanelRef.current.ensureSaved();
+      createScriptFromBlueprint(id);
+    } catch (cause) {
+      setScriptError(cause instanceof Error ? cause.message : '无法生成改编脚本。');
+    } finally {
+      setIsCreatingScript(false);
+    }
+  };
 
   return (
     <div
@@ -348,9 +369,16 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             {t(`${V}.fullscreen`)}
           </button>
         </div>
+        <div className="flex items-center gap-2 border-b border-white/[0.08] px-3 py-2">
+          <button type="button" onClick={(event) => { event.stopPropagation(); void generateScript(); }} disabled={isAnalyzing || isCreatingScript || (!hasReferenceEvents && !hasRows)} className="tap-button tap-button-quiet-primary nodrag disabled:cursor-not-allowed disabled:opacity-40">
+            {isCreatingScript ? '准备改编脚本…' : '生成改编脚本'}
+          </button>
+          <span className="text-[12px] text-text-muted">先检查原片分析，需要时展开下方规则</span>
+        </div>
+        {scriptError && <div role="alert" className="px-3 py-1 text-[12px] text-red-300">{scriptError}</div>}
         <details className="nodrag border-b border-white/[0.08] text-xs text-text-dark">
           <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">参考蓝图与分析设置{data.referenceBlueprintRef ? ' · 已保存' : ''}</summary>
-          <ReferenceBlueprintPanel nodeId={id} source={blueprintSource} rows={rows} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} />
+          <ReferenceBlueprintPanel ref={blueprintPanelRef} nodeId={id} source={blueprintSource} rows={rows} referenceEvents={referenceEvents} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} suggestedNarrativeRole={suggestedNarrativeRole} />
         </details>
         {data.referenceBlueprintRef && <div className="px-3 py-1 text-[11px] text-text-muted">Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}</div>}
         <div className="min-h-0 flex-1 overflow-hidden p-2">

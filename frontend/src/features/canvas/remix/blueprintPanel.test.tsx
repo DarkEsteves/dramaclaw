@@ -1,3 +1,4 @@
+import { createRef } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,7 +11,7 @@ vi.mock('@/api/remix', () => ({
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
 
 import { createRemixArtifact, submitRemixProcessAction } from '@/api/remix';
-import { ReferenceBlueprintPanel } from './blueprintPanel';
+import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from './blueprintPanel';
 
 const source = { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/reference.mp4', transcriptRef: { artifactId: 'transcript-1', revision: 2 } };
 const rows = [{ startTime: '0', endTime: '1', visualDescription: '杯子特写', narrative: '引出产品' }];
@@ -39,12 +40,21 @@ describe('ReferenceBlueprintPanel', () => {
 
   it('saves an editable blueprint with explicit evidence lineage', async () => {
     const onPatch = vi.fn();
-    render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={onPatch} onReanalyze={() => {}} />);
+    const panel = createRef<ReferenceBlueprintPanelHandle>();
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="story" source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={onPatch} onReanalyze={() => {}} />);
     fireEvent.change(screen.getByLabelText('整体叙事作用'), { target: { value: '先提问题后展示产品' } });
     fireEvent.change(screen.getByLabelText('保留规则'), { target: { value: '保留节奏' } });
     fireEvent.change(screen.getByLabelText('替换规则'), { target: { value: '替换品牌画面' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存参考蓝图' }));
+    await panel.current?.ensureSaved();
     await waitFor(() => expect(createRemixArtifact).toHaveBeenCalledWith('demo', 'reference_blueprint.v1', expect.objectContaining({ narrative_role: '先提问题后展示产品' }), [{ artifactId: 'evidence-1', revision: 1 }, { artifactId: 'transcript-1', revision: 2 }]));
     expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ referenceBlueprintRef: { artifactId: 'blueprint-1', revision: 1 } }));
+  });
+
+  it('reuses the saved blueprint when the rules have not changed', async () => {
+    const panel = createRef<ReferenceBlueprintPanelHandle>();
+    const saved = { artifactId: 'already-saved', revision: 3 };
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="story" source={source} rows={rows} draft={{ referenceBlueprintRef: saved, referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={() => {}} onReanalyze={() => {}} />);
+    expect(await panel.current?.ensureSaved()).toEqual(saved);
+    expect(createRemixArtifact).not.toHaveBeenCalled();
   });
 });

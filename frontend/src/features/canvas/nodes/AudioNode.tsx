@@ -42,6 +42,7 @@ import { setNodeMediaActive } from '@/features/canvas/application/canvasLod';
 import { useNodeGenerationTaskState } from '@/features/canvas/application/useNodeGenerationTaskState';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { RemixMediaInput } from '@/features/canvas/remix/RemixMediaInput';
+import { createAlignedTranscriptFromAudio } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { useCanvasStore, useIsBoxSelecting } from '@/stores/canvasStore';
 import { AudioOperationsPanel } from '@/features/canvas/nodes/AudioOperationsPanel';
@@ -112,6 +113,9 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
   useEffect(() => { if (!selected) setRemixMediaOpen(false); }, [selected]);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'open_media') setRemixMediaOpen(true);
+    if (nodeId === id && action === 'align_script') {
+      void createAlignedTranscriptFromAudio(id).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐'));
+    }
   }), [id]);
   const [voicePickerInitialTab, setVoicePickerInitialTab] = useState<'library' | 'mine'>('library');
   // 重试用与面板提交同一套生成逻辑（hook）。

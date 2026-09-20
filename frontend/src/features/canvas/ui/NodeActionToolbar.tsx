@@ -139,6 +139,9 @@ import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
+import { scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
+import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -564,6 +567,7 @@ export const NodeActionToolbar = memo(
     const canCopyStoryboardText = isStoryboardGen || isStoryboardSplit;
     const tools = useMemo(() => getNodeToolPlugins(node), [node]);
     const nodes = useCanvasStore((state) => state.nodes);
+    const edges = useCanvasStore((state) => state.edges);
     const groupWorkflowNodes = useMemo(
       () =>
         isUngroupableGroup
@@ -1692,15 +1696,33 @@ export const NodeActionToolbar = memo(
             {(isVideoNode(node) || isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
               <>
                 {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
-                  : isAudioNode(node) ? [{ action: 'open_media', label: '音频用途', Icon: Wand2 }]
+                  : isAudioNode(node) ? [
+                    { action: 'open_media', label: '音频用途', Icon: Wand2 },
+                    ...(node.data.remixRole === 'narration' && node.data.audioUrl ? [{ action: 'align_script', label: '按脚本对齐', Icon: Workflow }] : []),
+                  ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
-                  : node.type === CANVAS_NODE_TYPES.script ? [{ action: 'edit_script', label: '编辑改编脚本', Icon: PenLine }, { action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
+                  : node.type === CANVAS_NODE_TYPES.script ? [
+                    { action: 'edit_script', label: '编辑改编脚本', Icon: PenLine },
+                    ...(scriptCanvasState(nodes, edges, node.id).nextAction === 'create_timeline'
+                      ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
+                      : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
+                  ]
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '重新编译', Icon: Workflow }, { action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]
                 ).map(({ action, label, Icon }) => <UiChipButton
                   key={`remix-${action}`}
                   className={TOOLBAR_TEXT_BUTTON_CLASS}
-                  onClick={(event) => { event.stopPropagation(); canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose' | 'create_timeline' | 'create_compose' }); }}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (action === 'align_script') {
+                      void createAlignedTranscriptFromAudio(node.id).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐'));
+                    } else if (action === 'create_narration' || action === 'create_timeline') {
+                      try { action === 'create_narration' ? createNarrationFromScript(node.id) : createTimelineFromScript(node.id); }
+                      catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建后续节点'); }
+                    } else {
+                      canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose' | 'create_compose' });
+                    }
+                  }}
                 ><Icon className="h-3.5 w-3.5" />{label}</UiChipButton>)}
               </>
             )}

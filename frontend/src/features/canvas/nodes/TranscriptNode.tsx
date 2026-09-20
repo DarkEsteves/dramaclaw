@@ -132,12 +132,13 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     finally { setBusy(false); }
   };
   useEffect(() => {
-    if (data.autoStartMode !== 'transcribe') { autoStartConsumed.current = false; return; }
-    if (!source || autoStartConsumed.current) return;
+    const mode = data.autoStartMode;
+    if (mode !== 'transcribe' && mode !== 'align') { autoStartConsumed.current = false; return; }
+    if (!source || (mode === 'align' && !scriptRef) || autoStartConsumed.current) return;
     autoStartConsumed.current = true;
     updateNodeData(id, { autoStartMode: null });
-    void start('transcribe');
-  }, [data.autoStartMode, id, source, start, updateNodeData]);
+    void start(mode);
+  }, [data.autoStartMode, id, source, scriptRef, start, updateNodeData]);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId !== id) return;
     if (action === 'transcribe') void start('transcribe');

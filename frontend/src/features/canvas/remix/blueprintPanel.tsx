@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
 import { createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { VideoStoryRow } from '@/features/canvas/domain/canvasNodes';
 import { readUrl } from '@/lib/url-params';
 import { buildReferenceBlueprint, type BlueprintSources } from './blueprintModel';
+import type { ReferenceEvent } from './ReferenceEventList';
 
 interface BlueprintDraft {
   referenceEvidenceRef?: RemixArtifactRef | null;
@@ -20,18 +21,25 @@ interface Props {
   nodeId: string;
   source: BlueprintSources | null;
   rows: VideoStoryRow[];
+  referenceEvents?: ReferenceEvent[];
   draft: BlueprintDraft;
   onPatch: (patch: Partial<BlueprintDraft>) => void;
   onReanalyze: () => void;
+  suggestedNarrativeRole?: string;
 }
 
-export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, onReanalyze }: Props) {
+export interface ReferenceBlueprintPanelHandle {
+  ensureSaved: () => Promise<RemixArtifactRef>;
+}
+
+export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole }, ref) {
   const project = readUrl().project;
   const [operationId, setOperationId] = useState<string | null>(draft.evidenceOperationId ?? null);
   const [role, setRole] = useState(draft.blueprintNarrativeRole ?? '');
   const [preserve, setPreserve] = useState(draft.blueprintPreserveRule ?? '');
   const [replace, setReplace] = useState(draft.blueprintReplaceRule ?? '');
   const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
 
@@ -75,21 +83,31 @@ export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, 
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [nodeId, operationId, project, onPatch]);
 
-  const save = async () => {
-    if (!project || !source || !evidenceRef || busy) return;
-    if (!role.trim()) { setError('请先填写整体叙事作用'); return; }
+  const ensureSaved = async (): Promise<RemixArtifactRef> => {
+    if (!project || !source) throw new Error('请先连接已上传的原片视频。');
+    if (!evidenceRef) throw new Error('请先完成原片证据提取。');
+    if (busy) throw new Error('参考蓝图正在处理，请稍后再试。');
+    if (draft.referenceBlueprintRef && !dirty) return draft.referenceBlueprintRef;
+    const narrativeRole = role.trim() || suggestedNarrativeRole?.trim() || '';
+    if (!narrativeRole) throw new Error('缺少叙事作用，请在参考蓝图设置中填写。');
     setBusy(true); setError(null);
     try {
-      const payload = buildReferenceBlueprint({ source, rows, narrativeRole: role, preserveRule: preserve, replaceRule: replace, evidenceRef });
+      const payload = buildReferenceBlueprint({ source, rows, referenceEvents, narrativeRole, preserveRule: preserve, replaceRule: replace, evidenceRef });
       const upstream = [evidenceRef, ...(source.transcriptRef ? [source.transcriptRef] : [])];
       const artifact = await createRemixArtifact(project, 'reference_blueprint.v1', payload, upstream);
-      onPatch({ referenceBlueprintRef: { artifactId: artifact.id, revision: artifact.revision }, blueprintNarrativeRole: role, blueprintPreserveRule: preserve, blueprintReplaceRule: replace });
-    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+      const nextRef = { artifactId: artifact.id, revision: artifact.revision };
+      onPatch({ referenceBlueprintRef: nextRef, blueprintNarrativeRole: narrativeRole, blueprintPreserveRule: preserve, blueprintReplaceRule: replace });
+      if (!role.trim()) setRole(narrativeRole);
+      setDirty(false);
+      return nextRef;
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); throw caught; }
     finally { setBusy(false); }
   };
+  useImperativeHandle(ref, () => ({ ensureSaved }));
 
   const edit = (field: 'blueprintNarrativeRole' | 'blueprintPreserveRule' | 'blueprintReplaceRule', value: string, setter: (value: string) => void) => {
     setter(value);
+    setDirty(true);
     onPatch({ [field]: value, referenceBlueprintRef: null });
   };
 
@@ -104,13 +122,13 @@ export function ReferenceBlueprintPanel({ nodeId, source, rows, draft, onPatch, 
       <button type="button" disabled={!source || busy} onClick={onReanalyze} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">重新分析画面</button>
       {evidenceRef && <span className="text-text-muted">证据 {evidenceRef.artifactId} · r{evidenceRef.revision}</span>}
     </div>
-    <p className="mb-2 text-text-muted">画面描述来自模型分析，请核对原片；叙事解释和人工规则分别保存。</p>
+    <p className="mb-2 text-text-muted">画面描述来自模型分析，请核对原片；下方规则会在生成改编脚本时自动保存。</p>
     <label className="mb-1 block">整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
     <div className="grid grid-cols-2 gap-2">
       <label>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
       <label>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
     </div>
-    <div className="mt-2 flex items-center gap-2"><button type="button" disabled={!source || !evidenceRef || busy} onClick={() => void save()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">保存参考蓝图</button>{draft.referenceBlueprintRef && <span>蓝图 {draft.referenceBlueprintRef.artifactId} · r{draft.referenceBlueprintRef.revision}</span>}</div>
+    {draft.referenceBlueprintRef && <div className="mt-2 text-text-muted">蓝图 {draft.referenceBlueprintRef.artifactId} · r{draft.referenceBlueprintRef.revision}</div>}
     {error && <p role="alert" className="mt-1 text-red-300">{error}</p>}
   </section>;
-}
+});

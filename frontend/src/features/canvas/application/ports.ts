@@ -154,7 +154,7 @@ export interface CanvasEventMap {
   };
   'remix-node/action': {
     nodeId: string;
-    action: 'open_media' | 'transcribe' | 'align' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose' | 'create_timeline' | 'create_compose';
+    action: 'open_media' | 'transcribe' | 'align' | 'align_script' | 'analyze' | 'edit_script' | 'create_narration' | 'compile' | 'prepare_compose' | 'create_timeline' | 'create_compose';
   };
   'tool-dialog/open': {
     nodeId: string;

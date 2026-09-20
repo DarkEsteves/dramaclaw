@@ -31,4 +31,16 @@ describe('reference blueprint model', () => {
     expect(payload.user_choices).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'preserve', text: '保留节奏' }), expect.objectContaining({ type: 'replace', text: '替换品牌画面' })]));
     expect(payload.transcript_ref).toEqual({ artifact_id: 'transcript-1', revision: 2 });
   });
+
+  it('uses analyzed reference events when the detailed story rows are empty', () => {
+    const payload = buildReferenceBlueprint({
+      source: { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/video.mp4', transcriptRef: null },
+      rows: [],
+      referenceEvents: [{ start_us: 500_000, end_us: 1_200_000, visual_observation: '人物举杯', spoken_text: '试试这个', narrative_inference: '产品登场', note_status: 'needs_review' }],
+      narrativeRole: '访谈展示产品', preserveRule: '', replaceRule: '',
+    });
+    expect(payload.events).toEqual([expect.objectContaining({ start_time: '0.500', end_time: '1.200', visual_description: '人物举杯', spoken_text: '试试这个', narrative: '产品登场' })]);
+    expect(payload.observations).toEqual([expect.objectContaining({ description: '人物举杯', source: 'reference_event', verified: false })]);
+    expect(payload.inferences).toEqual([expect.objectContaining({ interpretation: '产品登场', source: 'reference_event' })]);
+  });
 });

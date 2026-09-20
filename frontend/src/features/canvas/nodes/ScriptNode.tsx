@@ -85,6 +85,8 @@ import type { RemixArtifactRef } from '@/api/remix';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
+import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
+import { scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
@@ -395,6 +397,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
+  const canvasNodes = useCanvasStore((state) => state.nodes);
+  const canvasEdges = useCanvasStore((state) => state.edges);
   // Subscribe to ONLY one-hop upstream (not the whole nodes array) so unrelated
   // node drags don't re-render this node. See useUpstreamGraph.
   const upstreamNodes = useUpstreamNodes(id);
@@ -402,15 +406,26 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const [isRemixScriptOpen, setRemixScriptOpen] = useState(false);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'edit_script') setRemixScriptOpen(true);
+    if (nodeId === id && action === 'create_narration') {
+      try { createNarrationFromScript(id); }
+      catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建配音节点'); }
+    }
     if (nodeId === id && action === 'create_timeline') {
       try { createTimelineFromScript(id); }
       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建语义时间轴'); }
     }
   }), [id]);
+  useEffect(() => {
+    if (!data.openRemixEditorRequested) return;
+    updateNodeData(id, { openRemixEditorRequested: false });
+    setRemixScriptOpen(true);
+  }, [data.openRemixEditorRequested, id, updateNodeData]);
   const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
+  const isRemixScript = Boolean(blueprintRef || savedRemixRef || remixDraft);
+  const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
   const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
 
@@ -686,7 +701,18 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         <div className="border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
           <span>{remixRef(data.remixScriptRef) ? `参考改编脚本 · 版本 ${remixRef(data.remixScriptRef)?.revision}` : blueprintRef ? '参考改编脚本 · 待保存' : '参考改编脚本 · 可连接视频故事'}</span>
         </div>
-        {hasResult ? (
+        {isRemixScript ? (
+          <div className="nodrag flex min-h-0 flex-1 flex-col gap-2 px-3 py-3 text-xs text-text-muted">
+            {initialRemixDraft.dialogue.trim() ? (
+              <p className="ui-scrollbar min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words leading-5 text-text-dark">{initialRemixDraft.dialogue}</p>
+            ) : (
+              <p className="flex-1">点击“编辑改编脚本”填写台词。</p>
+            )}
+            <div className="border-t border-white/[0.08] pt-2">
+              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本'}`}
+            </div>
+          </div>
+        ) : hasResult ? (
           <>
             <ScriptResultHeader
               title={headerSubtitle}
@@ -760,7 +786,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         )}
       </div>
 
-      {isNodeSelected && (hasUpstream || promptHasContent(data)) && (
+      {isNodeSelected && !isRemixScript && (hasUpstream || promptHasContent(data)) && (
         <ScriptOperationsPanel
           nodeId={id}
           data={data}

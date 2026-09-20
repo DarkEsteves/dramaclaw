@@ -70,22 +70,23 @@ const IMAGE_NODE_TYPES = [
 ] as const;
 
 describe("建边白名单", () => {
+  it("允许保存的改编脚本生成旁白音频的溯源边", () => {
+    expect(isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.script, CANVAS_NODE_TYPES.audio)).toBe(true);
+  });
   it("音频节点连不到图片节点上", () => {
     for (const imageType of IMAGE_NODE_TYPES) {
       expect(isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.audio, imageType)).toBe(false);
     }
   });
 
-  it("音频节点的下游只有视频与视频合成", () => {
-    // 只有这两种节点会读上游音频（视频的声轨素材 / 合成的音频轨），连到别处
-    // 不会有任何效果，只是画布上一根骗人的线。
+  it("音频节点的下游包含声轨、转写、时间轴与合成", () => {
     const allTypes = Object.keys(canvasNodeDefinitions) as CanvasNodeType[];
     const reachable = allTypes.filter((type) =>
       isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.audio, type),
     );
 
     expect([...reachable].sort()).toEqual(
-      [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose].sort(),
+      [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline].sort(),
     );
   });
 
@@ -176,6 +177,7 @@ describe("连线菜单候选", () => {
     // —— AudioOperationsPanel 只读 text 上游。菜单和手动拖线都不该提供。
     expect(getUpstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toEqual([
       CANVAS_NODE_TYPES.textAnnotation,
+      CANVAS_NODE_TYPES.script,
     ]);
     expect(isManualConnectionAllowed(CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.audio)).toBe(
       false,
@@ -199,6 +201,8 @@ describe("连线菜单候选", () => {
     ]);
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toEqual([
       CANVAS_NODE_TYPES.video,
+      CANVAS_NODE_TYPES.transcript,
+      CANVAS_NODE_TYPES.semanticTimeline,
       CANVAS_NODE_TYPES.videoCompose,
     ]);
     // 图片类节点的下游不含音频。

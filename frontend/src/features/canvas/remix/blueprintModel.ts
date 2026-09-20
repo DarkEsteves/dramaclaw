@@ -1,5 +1,6 @@
 import type { RemixArtifactRef } from '@/api/remix';
 import type { VideoStoryRow } from '@/features/canvas/domain/canvasNodes';
+import type { ReferenceEvent } from './ReferenceEventList';
 
 type ConnectedNode = { id: string; data: Record<string, unknown> };
 type ConnectedEdge = { source: string; target: string };
@@ -43,6 +44,7 @@ export function connectedBlueprintSources(nodeId: string, nodes: ConnectedNode[]
 export interface ReferenceBlueprintInput {
   source: BlueprintSources;
   rows: VideoStoryRow[];
+  referenceEvents?: ReferenceEvent[];
   narrativeRole: string;
   preserveRule: string;
   replaceRule: string;
@@ -51,17 +53,26 @@ export interface ReferenceBlueprintInput {
 
 /** Analysis rows are model observations and interpretations; user edits stay distinct. */
 export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<string, unknown> {
-  const observations = input.rows.filter((row) => typeof row.visualDescription === 'string' && row.visualDescription.trim())
-    .map((row, index) => ({ source: 'video_story_analysis', verified: false, shot: index + 1, start_time: row.startTime, end_time: row.endTime, description: row.visualDescription }));
-  const inferences = input.rows.filter((row) => typeof row.narrative === 'string' && row.narrative.trim())
-    .map((row, index) => ({ source: 'video_story_analysis', shot: index + 1, interpretation: row.narrative }));
+  const eventFallback = input.rows.length === 0 ? input.referenceEvents ?? [] : [];
+  const observations = input.rows.length
+    ? input.rows.filter((row) => typeof row.visualDescription === 'string' && row.visualDescription.trim())
+      .map((row, index) => ({ source: 'video_story_analysis', verified: false, shot: index + 1, start_time: row.startTime, end_time: row.endTime, description: row.visualDescription }))
+    : eventFallback.filter((event) => event.visual_observation?.trim())
+      .map((event, index) => ({ source: 'reference_event', verified: false, shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), description: event.visual_observation }));
+  const inferences = input.rows.length
+    ? input.rows.filter((row) => typeof row.narrative === 'string' && row.narrative.trim())
+      .map((row, index) => ({ source: 'video_story_analysis', shot: index + 1, interpretation: row.narrative }))
+    : eventFallback.filter((event) => event.narrative_inference?.trim())
+      .map((event, index) => ({ source: 'reference_event', shot: index + 1, interpretation: event.narrative_inference }));
   const choices = [
     { type: 'preserve', text: input.preserveRule.trim() },
     { type: 'replace', text: input.replaceRule.trim() },
   ].filter((choice) => choice.text);
   return {
     narrative_role: input.narrativeRole.trim(),
-    events: input.rows.map((row, index) => ({ shot: index + 1, start_time: row.startTime, end_time: row.endTime, visual_description: row.visualDescription ?? '', narrative: row.narrative ?? '' })),
+    events: input.rows.length
+      ? input.rows.map((row, index) => ({ shot: index + 1, start_time: row.startTime, end_time: row.endTime, visual_description: row.visualDescription ?? '', narrative: row.narrative ?? '' }))
+      : eventFallback.map((event, index) => ({ shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), visual_description: event.visual_observation ?? '', spoken_text: event.spoken_text ?? '', narrative: event.narrative_inference ?? '', note_status: event.note_status ?? '' })),
     preserve_replace_rules: choices,
     observations,
     inferences,

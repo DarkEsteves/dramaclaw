@@ -801,7 +801,7 @@ export function nodeHasTargetHandle(type: CanvasNodeType): boolean {
 // 任何一条建边路径绕过规则。不在表中的目标类型表示「不额外限制类型」，仅受
 // handle 级默认规则约束。
 const UPSTREAM_SOURCE_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasNodeType[]>> = {
-  // 音频节点的上游只能是文本节点（生成来源），外加视频节点 —— 后者是「人声/背景音
+  // 音频节点的上游是文本/脚本节点（生成来源），外加视频节点 —— 后者是「人声/背景音
   // 分离」动作留下的溯源边：那个动作从一个视频节点同时产出「背景音」音频节点和
   // 「无声」视频节点，两条边一起画回源视频。少了 video 这一项，音频那条边会被建边
   // 收口静默丢掉，画布上一边连着无声视频、一边孤零零挂着背景音。
@@ -811,6 +811,7 @@ const UPSTREAM_SOURCE_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasN
     CANVAS_NODE_TYPES.textAnnotation,
     CANVAS_NODE_TYPES.video,
     CANVAS_NODE_TYPES.videoBreakdown,
+    CANVAS_NODE_TYPES.script,
   ],
   // 逐帧拉片只吃视频：它整个节点就是「把一条视频拆成分镜/动态/音乐」，接进来一张
   // 图或一段文本什么都不会发生，只是画布上一根骗人的线。

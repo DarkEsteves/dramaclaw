@@ -52,6 +52,17 @@ describe('TranscriptNode', () => {
     expect(state.nodes[1].data.autoStartMode).toBeNull();
   });
 
+  it('starts script alignment automatically only with both saved script and narration audio connected', async () => {
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, autoStartMode: 'align' };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({
+      action: 'align_script', mediaPath: 'narration.wav', scriptRef: { artifactId: 'script-1', revision: 3 },
+    })));
+    expect(state.nodes[1].data.autoStartMode).toBeNull();
+  });
+
   it('releases a failed worker task so transcription can be retried', async () => {
     vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'operation-1', status: 'pending', output_refs: [], task_type: 'remix_transcribe_media', task_scope: 'scope-1' } as never);
     vi.mocked(fetchRemixTaskStatus).mockResolvedValueOnce({ status: 'failed', error: 'WhisperX worker failed' });
