@@ -35,6 +35,26 @@ describe('buildNodeRemixManifest', () => {
     ] }]);
   });
 
+  it('groups character-aligned English letters into spoken words', () => {
+    const output = buildNodeRemixManifest({
+      reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'hook', start_frame: 0, end_frame: 30 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: 'go home', selections: [{ selection_id: 'hook', start_char: 0, end_char: 7 }], events: [{ event_id: 'hook', selection_id: 'hook' }] },
+      wordTimeline: { transcript: 'go home', words: [
+        { text: 'g', start_char: 0, end_char: 1, start_us: 0, end_us: 100_000 },
+        { text: 'o', start_char: 1, end_char: 2, start_us: 100_000, end_us: 200_000 },
+        { text: 'h', start_char: 3, end_char: 4, start_us: 500_000, end_us: 600_000 },
+        { text: 'o', start_char: 4, end_char: 5, start_us: 600_000, end_us: 700_000 },
+        { text: 'm', start_char: 5, end_char: 6, start_us: 700_000, end_us: 800_000 },
+        { text: 'e', start_char: 6, end_char: 7, start_us: 800_000, end_us: 900_000 },
+      ] },
+    });
+    expect(output.subtitle_events[0].word_cues).toEqual([
+      { start_char: 0, end_char: 2, start_frame: 0, end_frame: 6 },
+      { start_char: 3, end_char: 7, start_frame: 15, end_frame: 27 },
+    ]);
+  });
+
   it('blocks unresolved required semantic events', () => {
     expect(() => buildNodeRemixManifest({ reference: video, narration: audio, timing: { fps: 30, events: [], unresolved_required_events: [{ event_id: 'hook' }], override_conflicts: [] }, script: { dialogue: '', events: [] } })).toThrow(/未解析/);
   });

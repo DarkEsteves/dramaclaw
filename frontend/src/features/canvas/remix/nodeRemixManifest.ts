@@ -31,8 +31,18 @@ function subtitleWordCues(
   const selectedText = Array.from(script.dialogue).slice(selection.start_char, selection.end_char).join('');
   if (selectedText !== caption) return [];
   const candidates = timeline.words.filter((word) => word.start_char >= selection.start_char && word.end_char <= selection.end_char);
-  const cues: WordCue[] = [];
+  const spokenUnits: WordTimeline['words'] = [];
   for (const word of candidates) {
+    const previous = spokenUnits[spokenUnits.length - 1];
+    if (previous && previous.end_char === word.start_char
+      && /^[A-Za-z0-9'’]+$/u.test(previous.text) && /^[A-Za-z0-9'’]+$/u.test(word.text)) {
+      previous.text += word.text;
+      previous.end_char = word.end_char;
+      previous.end_us = word.end_us;
+    } else spokenUnits.push({ ...word });
+  }
+  const cues: WordCue[] = [];
+  for (const word of spokenUnits) {
     const start = Math.max(startFrame, Math.floor(word.start_us * fps / 1_000_000));
     const end = Math.min(endFrame, Math.ceil(word.end_us * fps / 1_000_000));
     const startAfterPrevious = Math.max(start, cues.length ? cues[cues.length - 1].end_frame : startFrame);
