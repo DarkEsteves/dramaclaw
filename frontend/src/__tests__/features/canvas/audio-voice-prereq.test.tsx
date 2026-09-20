@@ -75,6 +75,17 @@ describe("AudioOperationsPanel voice prerequisite", () => {
     expect(screen.getByTitle('请先为s、w选择声线')).toHaveProperty('disabled', true);
   });
 
+  it("saves a separate voice design draft for the selected speaker", () => {
+    renderPanel({ audioKind: 'speech', dialogueVoiceMode: 'dialogue', text: 's:wew\nw:fwefw' });
+    fireEvent.click(screen.getByRole('button', { name: '为s选择声线' }));
+    fireEvent.click(screen.getByRole('button', { name: '设计音色' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '声音描述' }), {
+      target: { value: '轻快的年轻男声' },
+    });
+    const saved = useCanvasStore.getState().nodes.find((node) => node.id === 'audio-1')?.data as AudioNodeData;
+    expect(saved.voiceDesignDrafts?.s?.description).toBe('轻快的年轻男声');
+  });
+
   it("keeps manual single-voice mode until the user switches it", () => {
     renderPanel({ audioKind: 'speech', text: 's:wew\nw:fwefw' });
     expect(screen.queryByRole('button', { name: '为s选择声线' })).toBeNull();

@@ -508,6 +508,12 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           onClose={() => setVoicePickerOpen(false)}
           currentRef={currentVoiceRef}
           initialTab={voicePickerInitialTab}
+          designRole="旁白"
+          designDraft={data.voiceDesignDrafts?.['旁白'] ?? { name: '旁白音色', description: '', previewText: (data.text ?? '').slice(0, 300) }}
+          onDesignDraftChange={(draft) => {
+            const current = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data as AudioNodeData | undefined;
+            updateNodeData(id, { voiceDesignDrafts: { ...current?.voiceDesignDrafts, 旁白: draft } });
+          }}
           onPick={({ ref, label, language }) => {
             updateNodeData(id, {
               speechMode: 'clone',

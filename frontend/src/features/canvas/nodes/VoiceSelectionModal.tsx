@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { Loader2, Plus, Search, X, AudioWaveform } from 'lucide-react';
 import { toast } from 'sonner';
 
-import type { AudioVoiceRef } from '@/features/canvas/domain/canvasNodes';
+import type { AudioVoiceRef, VoiceDesignDraft } from '@/features/canvas/domain/canvasNodes';
 import {
   createFreezoneAudioVoice,
   fetchFreezoneAudioReferences,
@@ -73,7 +73,7 @@ function isAllowedAudioFile(file: File): boolean {
   return true;
 }
 
-type TabId = 'library' | 'mine';
+type TabId = 'library' | 'mine' | 'design';
 
 export interface VoicePickResult {
   ref: AudioVoiceRef;
@@ -87,6 +87,9 @@ interface VoiceSelectionModalProps {
   currentRef: AudioVoiceRef;
   onPick: (result: VoicePickResult) => void;
   initialTab?: TabId;
+  designRole?: string;
+  designDraft?: VoiceDesignDraft;
+  onDesignDraftChange?: (draft: VoiceDesignDraft) => void;
 }
 
 export function VoiceSelectionModal({
@@ -95,6 +98,9 @@ export function VoiceSelectionModal({
   currentRef,
   onPick,
   initialTab = 'library',
+  designRole,
+  designDraft,
+  onDesignDraftChange,
 }: VoiceSelectionModalProps) {
   const { t } = useTranslation();
   const [tab, setTab] = useState<TabId>('library');
@@ -133,7 +139,7 @@ export function VoiceSelectionModal({
   // 打开时拉一次（音色库 + 我的音色共享同一份 references 数据）
   useEffect(() => {
     if (!open) return;
-    setTab(initialTab);
+    setTab(initialTab === 'design' && !designRole ? 'library' : initialTab);
     void reload();
   }, [initialTab, open, reload]);
 
@@ -169,7 +175,7 @@ export function VoiceSelectionModal({
           </button>
         </header>
 
-        <TabsRow tab={tab} onChange={setTab} />
+        <TabsRow tab={tab} onChange={setTab} showDesign={Boolean(designRole && onDesignDraftChange)} />
 
         {tab === 'library' ? (
           <LibraryTab
@@ -179,7 +185,7 @@ export function VoiceSelectionModal({
             loading={loading}
             error={error}
           />
-        ) : (
+        ) : tab === 'mine' ? (
           <MyVoicesTab
             currentRef={currentRef}
             onPick={onPick}
@@ -188,7 +194,9 @@ export function VoiceSelectionModal({
             error={error}
             onReload={reload}
           />
-        )}
+        ) : designRole && designDraft && onDesignDraftChange ? (
+          <VoiceDesignTab role={designRole} draft={designDraft} onChange={onDesignDraftChange} />
+        ) : null}
       </div>
     </div>
   );
@@ -203,13 +211,15 @@ export function VoiceSelectionModal({
 interface TabsRowProps {
   tab: TabId;
   onChange: (tab: TabId) => void;
+  showDesign: boolean;
 }
 
-function TabsRow({ tab, onChange }: TabsRowProps) {
+function TabsRow({ tab, onChange, showDesign }: TabsRowProps) {
   const { t } = useTranslation();
   const tabs: Array<{ id: TabId; label: string }> = [
     { id: 'library', label: t('node.voiceModal.tab.library') },
     { id: 'mine', label: t('node.voiceModal.tab.mine') },
+    ...(showDesign ? [{ id: 'design' as const, label: '设计音色' }] : []),
   ];
   return (
     <div className="flex items-center gap-2 px-5">
@@ -232,6 +242,49 @@ function TabsRow({ tab, onChange }: TabsRowProps) {
       })}
     </div>
   );
+}
+
+function VoiceDesignTab({ role, draft, onChange }: {
+  role: string;
+  draft: VoiceDesignDraft;
+  onChange: (draft: VoiceDesignDraft) => void;
+}) {
+  const fieldClass = 'w-full rounded-[10px] border border-white/[0.1] bg-white/[0.03] px-3 py-2 text-[13px] text-text-dark outline-none placeholder:text-text-muted/70 focus:border-white/20';
+  return <div className="ui-scrollbar flex-1 overflow-y-auto px-5 pb-5 pt-4">
+    <div className="mb-3 text-[13px] font-medium text-text-dark">为{role}设计音色</div>
+    <div className="mb-4 rounded-[10px] border border-amber-300/20 bg-amber-300/[0.06] px-3 py-2 text-[12px] leading-5 text-amber-200">
+      NewAPI 音色设计模型尚未开放。可先保存方案；目前不会提交生成请求或扣费。
+    </div>
+    <div className="flex flex-col gap-4">
+      <label className="flex flex-col gap-1.5 text-[12px] text-text-muted">
+        音色名称
+        <input aria-label="音色名称" value={draft.name} maxLength={60}
+          onChange={(event) => onChange({ ...draft, name: event.target.value })}
+          placeholder={`例如：${role}的访谈声线`} className={fieldClass} />
+      </label>
+      <label className="flex flex-col gap-1.5 text-[12px] text-text-muted">
+        声音描述
+        <textarea aria-label="声音描述" value={draft.description} maxLength={500}
+          onChange={(event) => onChange({ ...draft, description: event.target.value })}
+          placeholder="描述年龄感、音色、口音、语气和节奏，例如：年轻、清亮、说话自然的访谈主持人"
+          className={`${fieldClass} min-h-28 resize-y`} />
+      </label>
+      <label className="flex flex-col gap-1.5 text-[12px] text-text-muted">
+        试听文案
+        <textarea aria-label="试听文案" value={draft.previewText} maxLength={300}
+          onChange={(event) => onChange({ ...draft, previewText: event.target.value })}
+          placeholder="填一句角色会说的话，用于生成音色试听"
+          className={`${fieldClass} min-h-20 resize-y`} />
+      </label>
+    </div>
+    <div className="mt-4 flex items-center justify-between gap-3">
+      <span className="text-[11px] text-text-muted">方案随画布保存；模型开放后可从这里生成并试听。</span>
+      <button type="button" disabled title="NewAPI 音色设计模型尚未开放"
+        className="rounded-full border border-white/[0.1] px-3 py-1.5 text-[12px] text-text-muted/70 disabled:cursor-not-allowed">
+        生成试听 · 模型未开放
+      </button>
+    </div>
+  </div>;
 }
 
 // ---------------------------------------------------------------------------

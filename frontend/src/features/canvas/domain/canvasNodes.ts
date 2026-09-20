@@ -678,6 +678,12 @@ export interface AudioVoiceRef {
   voiceId?: string;
 }
 
+export interface VoiceDesignDraft {
+  name: string;
+  description: string;
+  previewText: string;
+}
+
 export interface AudioNodeData extends NodeDisplayData {
   /** Project-owned audio actually used by transcription and rendering. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
@@ -687,6 +693,8 @@ export interface AudioNodeData extends NodeDisplayData {
   /** Present only on an audio node created from role-labelled remix dialogue. */
   remixDialogueTurns?: import('../remix/dialogueTurns').DialogueTurn[];
   remixSpeakerVoices?: Record<string, { ref: AudioVoiceRef; label: string; language?: string }>;
+  /** Saved per role while voice design is unavailable; no model request is made. */
+  voiceDesignDrafts?: Record<string, VoiceDesignDraft>;
   audioUrl: string | null;
   sourceFileName?: string | null;
   durationMs?: number | null;

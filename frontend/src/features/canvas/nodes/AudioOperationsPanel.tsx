@@ -19,6 +19,7 @@ import {
 import {
   type AudioNodeData,
   type AudioVoiceRef,
+  type VoiceDesignDraft,
 } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { useUpstreamContents } from '@/features/canvas/application/useUpstreamGraph';
@@ -65,6 +66,22 @@ const PANEL_EXPANDED_WIDTH_PX = 760;
 const AUDIO_INPUT_LABEL_CLASS = 'text-[12px] font-medium text-text-muted/90';
 const AUDIO_INPUT_FIELD_CLASS =
   'nodrag nowheel w-full rounded-[10px] border border-white/[0.08] bg-transparent px-3 text-[13px] text-text-dark outline-none transition-colors placeholder:text-text-muted/70 hover:border-white/[0.12] focus:border-white/20';
+
+function designDraftFor(data: AudioNodeData, role: string, sampleText: string): VoiceDesignDraft {
+  return data.voiceDesignDrafts?.[role] ?? {
+    name: role === '旁白' ? '旁白音色' : `${role}的音色`,
+    description: '',
+    previewText: sampleText.trim().slice(0, 300),
+  };
+}
+
+function saveDesignDraft(nodeId: string, role: string, draft: VoiceDesignDraft): void {
+  const store = useCanvasStore.getState();
+  const current = store.nodes.find((node) => node.id === nodeId)?.data as AudioNodeData | undefined;
+  store.updateNodeData(nodeId, {
+    voiceDesignDrafts: { ...current?.voiceDesignDrafts, [role]: draft },
+  });
+}
 
 // music 模式时长默认 30s（对齐后端 music_length_ms 默认 30000）。
 export const DEFAULT_MUSIC_LENGTH_MS = 30000;
@@ -482,6 +499,9 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
           open={voicePickerOpen}
           initialTab="mine"
           currentRef={data.voiceRef ?? { scope: 'project_narrator' }}
+          designRole="旁白"
+          designDraft={designDraftFor(data, '旁白', text)}
+          onDesignDraftChange={(draft) => saveDesignDraft(nodeId, '旁白', draft)}
           onClose={() => setVoicePickerOpen(false)}
           onPick={({ ref, label, language }) => {
             updateNodeData(nodeId, {
@@ -502,6 +522,9 @@ export function AudioOperationsPanel({ nodeId, data, onImportAudio }: AudioOpera
           open
           initialTab="mine"
           currentRef={data.remixSpeakerVoices?.[dialogueVoicePickerSpeaker]?.ref ?? { scope: 'project_narrator' }}
+          designRole={dialogueVoicePickerSpeaker}
+          designDraft={designDraftFor(data, dialogueVoicePickerSpeaker, dialogueTurns.find((turn) => turn.speaker === dialogueVoicePickerSpeaker)?.text ?? '')}
+          onDesignDraftChange={(draft) => saveDesignDraft(nodeId, dialogueVoicePickerSpeaker, draft)}
           onClose={() => setDialogueVoicePickerSpeaker(null)}
           onPick={({ ref, label, language }) => {
             updateNodeData(nodeId, {
@@ -793,6 +816,9 @@ function AudioVoiceSettingsPanel({ nodeId, data }: AudioVoiceSettingsPanelProps)
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         currentRef={currentRef}
+        designRole="旁白"
+        designDraft={designDraftFor(data, '旁白', deriveAudioText(data))}
+        onDesignDraftChange={(draft) => saveDesignDraft(nodeId, '旁白', draft)}
         onPick={({ ref, label, language }) => {
           updateNodeData(nodeId, {
             speechMode: 'clone',
