@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
@@ -112,6 +112,43 @@ describe('TranscriptNode', () => {
 
     expect(screen.getByRole('button', { name: '跳转到 world，00:02.100' }).getAttribute('aria-current')).toBe('true');
     expect(screen.getByRole('button', { name: '跳转到 Hello，00:01.200' }).hasAttribute('aria-current')).toBe(false);
+  });
+
+  it('follows short words between browser timeupdate events while playing', () => {
+    state.nodes[1].data = {
+      words: [
+        { text: 'need', startUs: 13_005_000, endUs: 13_185_000 },
+        { text: 'this', startUs: 13_185_000, endUs: 13_446_000 },
+        { text: 'way', startUs: 13_446_000, endUs: 13_686_000 },
+      ],
+      transcriptText: 'need this way', status: 'completed', artifactRef: null,
+    };
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+    try {
+      const { container, unmount } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+      const audio = container.querySelector('audio')!;
+      audio.currentTime = 13.05;
+      fireEvent.play(audio);
+      expect(screen.getByRole('button', { name: '跳转到 need，00:13.005' }).getAttribute('aria-current')).toBe('true');
+
+      audio.currentTime = 13.23;
+      act(() => { frames.shift()?.(0); });
+      expect(screen.getByRole('button', { name: '跳转到 this，00:13.185' }).getAttribute('aria-current')).toBe('true');
+
+      audio.currentTime = 13.5;
+      act(() => { frames.shift()?.(0); });
+      expect(screen.getByRole('button', { name: '跳转到 way，00:13.446' }).getAttribute('aria-current')).toBe('true');
+      unmount();
+      expect(cancelFrame).toHaveBeenCalled();
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
   });
 
   it('saves corrected words as a new artifact revision', async () => {
