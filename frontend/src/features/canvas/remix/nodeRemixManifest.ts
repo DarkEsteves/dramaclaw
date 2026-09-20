@@ -9,17 +9,40 @@ export interface CompiledTiming {
 
 interface ScriptEvent { event_id: string; caption?: string; selection_id?: string; visual_node_id?: string; sfx_node_id?: string }
 interface ScriptPayload { dialogue: string; events: ScriptEvent[]; selections?: Array<{ selection_id: string; start_char: number; end_char: number }> }
+interface WordTimeline { transcript: string; words: Array<{ text: string; start_char: number; end_char: number; start_us: number; end_us: number }> }
+interface WordCue { start_char: number; end_char: number; start_frame: number; end_frame: number }
 
 interface Inputs {
   reference: UploadedRemixMedia;
   narration: UploadedRemixMedia;
   timing: CompiledTiming;
   script: ScriptPayload;
+  wordTimeline?: WordTimeline;
   visuals?: Record<string, UploadedRemixMedia>;
   audioTracks?: Array<{ id: string; role: 'bgm' | 'sfx'; media: UploadedRemixMedia }>;
 }
 
-export function buildNodeRemixManifest({ reference, narration, timing, script, visuals = {}, audioTracks = [] }: Inputs) {
+function subtitleWordCues(
+  selection: NonNullable<ScriptPayload['selections']>[number] | undefined,
+  caption: string, script: ScriptPayload, timeline: WordTimeline | undefined,
+  startFrame: number, endFrame: number, fps: number,
+): WordCue[] {
+  if (!selection || !timeline || timeline.transcript !== script.dialogue) return [];
+  const selectedText = Array.from(script.dialogue).slice(selection.start_char, selection.end_char).join('');
+  if (selectedText !== caption) return [];
+  const candidates = timeline.words.filter((word) => word.start_char >= selection.start_char && word.end_char <= selection.end_char);
+  const cues: WordCue[] = [];
+  for (const word of candidates) {
+    const start = Math.max(startFrame, Math.floor(word.start_us * fps / 1_000_000));
+    const end = Math.min(endFrame, Math.ceil(word.end_us * fps / 1_000_000));
+    const startAfterPrevious = Math.max(start, cues.length ? cues[cues.length - 1].end_frame : startFrame);
+    if (startAfterPrevious >= end) return [];
+    cues.push({ start_char: word.start_char - selection.start_char, end_char: word.end_char - selection.start_char, start_frame: startAfterPrevious, end_frame: end });
+  }
+  return cues;
+}
+
+export function buildNodeRemixManifest({ reference, narration, timing, script, wordTimeline, visuals = {}, audioTracks = [] }: Inputs) {
   if (reference.media_kind !== 'video') throw new Error('参考素材必须是视频');
   if (narration.media_kind !== 'audio' && !(narration.media_kind === 'video' && narration.has_audio)) throw new Error('需要实际旁白音轨');
   if (timing.unresolved_required_events.length) throw new Error('存在未解析的必需事件');
@@ -33,7 +56,7 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, v
     { media_id: 'narration', kind: 'audio', project_path: narration.media_path, media_hash: `sha256:${narration.media_hash}` },
   ];
   const layers: Array<Record<string, unknown>> = [{ media_id: 'reference', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
-  const subtitles: Array<{ text: string; start_frame: number; end_frame: number }> = [];
+  const subtitles: Array<{ text: string; start_frame: number; end_frame: number; word_cues?: WordCue[] }> = [];
   const audioEvents: Array<Record<string, unknown>> = [{ media_id: 'narration', role: 'narration', start_frame: 0, end_frame: durationFrames, volume: 1 }];
   for (const track of audioTracks) {
     if (track.media.media_kind !== 'audio') throw new Error(`${track.role} 必须是音频文件`);
@@ -47,7 +70,10 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, v
     if (!rule) throw new Error(`事件 ${event.event_id} 缺少脚本规则`);
     const selection = script.selections?.find((item) => item.selection_id === rule.selection_id);
     const caption = rule.caption || (selection ? Array.from(script.dialogue).slice(selection.start_char, selection.end_char).join('') : '');
-    if (caption.trim()) subtitles.push({ text: caption.trim(), start_frame: event.start_frame, end_frame: event.end_frame });
+    if (caption.trim()) {
+      const wordCues = subtitleWordCues(selection, caption.trim(), script, wordTimeline, event.start_frame, event.end_frame, fps);
+      subtitles.push({ text: caption.trim(), start_frame: event.start_frame, end_frame: event.end_frame, ...(wordCues.length ? { word_cues: wordCues } : {}) });
+    }
     if (rule.visual_node_id) {
       const media = visuals[rule.visual_node_id];
       if (!media || media.media_kind !== 'video') throw new Error(`事件 ${event.event_id} 缺少替换画面`);

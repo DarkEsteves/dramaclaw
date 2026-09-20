@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from novelvideo.freezone.remix.render import (
+    _ass_document,
     build_manifest,
     render_manifest,
     validate_manifest,
@@ -48,6 +49,16 @@ def _pixel(
         check=True,
     )
     return tuple(result.stdout[:3])
+
+
+def _subtitle_pixels(path: Path, seconds: float) -> bytes:
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(path),
+         "-frames:v", "1", "-vf", "crop=180:120:0:200", "-pix_fmt", "rgb24",
+         "-f", "rawvideo", "pipe:1"],
+        capture_output=True, check=True,
+    )
+    return result.stdout
 
 
 def _manifest() -> dict:
@@ -100,6 +111,50 @@ def test_manifest_requires_a_narration_track() -> None:
     manifest["audio_events"] = []
     with pytest.raises(ValueError, match="narration"):
         validate_manifest(manifest)
+
+
+def test_word_cues_render_one_active_word_at_a_time() -> None:
+    event = {"text": "go home", "start_frame": 0, "end_frame": 30, "word_cues": [
+        {"start_char": 0, "end_char": 2, "start_frame": 0, "end_frame": 10},
+        {"start_char": 3, "end_char": 7, "start_frame": 15, "end_frame": 30},
+    ]}
+    manifest = _manifest()
+    manifest["subtitle_events"] = [event]
+    validate_manifest(manifest)
+
+    lines = [line for line in _ass_document([event], width=180, height=320, fps=30).splitlines() if line.startswith("Dialogue:")]
+    assert len(lines) == 3
+    assert "{\\c&H00CFBD00&\\b1}go{\\r} home" in lines[0]
+    assert lines[1].endswith("go home")
+    assert "go {\\c&H00CFBD00&\\b1}home{\\r}" in lines[2]
+
+
+def test_manifest_rejects_word_cues_outside_subtitle_text_or_time() -> None:
+    manifest = _manifest()
+    manifest["subtitle_events"][0]["word_cues"] = [
+        {"start_char": 0, "end_char": 8, "start_frame": 15, "end_frame": 20}
+    ]
+    with pytest.raises(ValueError, match="word cue"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_rendered_subtitle_highlight_changes_with_the_spoken_word(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=black:s=180x320", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    manifest = _manifest()
+    manifest["media_bindings"] = [row for row in manifest["media_bindings"] if row["media_id"] != "product"]
+    manifest["layers"] = [manifest["layers"][0]]
+    manifest["subtitle_events"] = [{"text": "go home", "start_frame": 0, "end_frame": 60, "word_cues": [
+        {"start_char": 0, "end_char": 2, "start_frame": 0, "end_frame": 20},
+        {"start_char": 3, "end_char": 7, "start_frame": 20, "end_frame": 40},
+    ]}]
+    paths = {"background": background, "voice": voice}
+    output = render_manifest(_bind_media_hashes(manifest, paths), media_paths=paths, output_path=tmp_path / "out.mp4")
+
+    assert _subtitle_pixels(output, 0.3) != _subtitle_pixels(output, 0.9)
 
 
 def test_manifest_requires_exact_media_content_hash() -> None:

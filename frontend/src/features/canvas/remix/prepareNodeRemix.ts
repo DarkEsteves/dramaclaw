@@ -72,6 +72,13 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const timingSources = timingArtifact.upstream_refs;
   if (!timingSources?.some((ref) => ref.artifact_id === scriptRef.artifactId && ref.revision === scriptRef.revision)) throw new Error('时间轴不是由当前脚本版本编译');
   if (!timingSources.some((ref) => ref.artifact_id === transcriptRef.artifactId && ref.revision === transcriptRef.revision)) throw new Error('时间轴不是由当前对齐版本编译');
+  const transcriptArtifact = await fetchRemixArtifact(project, transcriptRef);
+  if (transcriptArtifact.schema !== 'word_timeline.v1' || transcriptArtifact.payload.status !== 'completed') throw new Error('当前对齐转写未完成');
+  if (!transcriptArtifact.upstream_refs?.some((ref) => ref.artifact_id === scriptRef.artifactId && ref.revision === scriptRef.revision)
+    || transcriptArtifact.payload.script_revision !== scriptRef.revision
+    || transcriptArtifact.payload.transcript !== scriptArtifact.payload.dialogue) throw new Error('对齐转写不是由当前脚本生成');
+  const transcriptMediaHash = transcriptArtifact.payload.media_hash;
+  if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visuals = Object.fromEntries(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'visual' && node.data.remixMedia).map((node) => [node.id, node.data.remixMedia as UploadedRemixMedia]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)
     .map((node) => ({ id: node.id, role: node.data.remixRole as 'bgm' | 'sfx', media: node.data.remixMedia as UploadedRemixMedia }));
@@ -79,11 +86,12 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
     reference, narration, visuals, audioTracks,
     timing: timingArtifact.payload as unknown as CompiledTiming,
     script: scriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['script'],
+    wordTimeline: transcriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['wordTimeline'],
   });
   const manifest = await createRemixArtifact(project, 'composition_manifest.v1', {
     ...payload,
-    source_versions: [{ artifact_id: timingRef.artifactId, revision: timingRef.revision }, { artifact_id: scriptRef.artifactId, revision: scriptRef.revision }, { artifact_id: blueprintRef.artifactId, revision: blueprintRef.revision }],
-  }, [timingRef, scriptRef, blueprintRef]);
+    source_versions: [{ artifact_id: timingRef.artifactId, revision: timingRef.revision }, { artifact_id: scriptRef.artifactId, revision: scriptRef.revision }, { artifact_id: blueprintRef.artifactId, revision: blueprintRef.revision }, { artifact_id: transcriptRef.artifactId, revision: transcriptRef.revision }],
+  }, [timingRef, scriptRef, blueprintRef, transcriptRef]);
   const timingEvents = (timingArtifact.payload.events as CompiledTiming['events']) ?? [];
   const scriptEvents = (scriptArtifact.payload.events as Array<{ event_id: string; caption?: string }>) ?? [];
   const scriptSelections = (scriptArtifact.payload.selections as Array<{ selection_id: string; start_char: number; end_char: number }>) ?? [];

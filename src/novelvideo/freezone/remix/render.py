@@ -175,6 +175,22 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         _interval(event, duration_frames)
         if not isinstance(event.get("text"), str) or not event["text"].strip():
             raise ValueError("subtitle text is required")
+        cues = event.get("word_cues", [])
+        if not isinstance(cues, list):
+            raise ValueError("subtitle word cues must be a list")
+        previous_frame, previous_char = event["start_frame"], 0
+        for cue in cues:
+            if not isinstance(cue, dict):
+                raise ValueError("subtitle word cue must be an object")
+            start_char, end_char = cue.get("start_char"), cue.get("end_char")
+            start_frame, end_frame = cue.get("start_frame"), cue.get("end_frame")
+            if (
+                any(type(value) is not int for value in (start_char, end_char, start_frame, end_frame))
+                or not previous_char <= start_char < end_char <= len(event["text"])
+                or not previous_frame <= start_frame < end_frame <= event["end_frame"]
+            ):
+                raise ValueError("subtitle word cue exceeds its text or time interval")
+            previous_frame, previous_char = end_frame, end_char
     audio_events = manifest.get("audio_events", [])
     if not any(row.get("role") == "narration" for row in audio_events):
         raise ValueError("narration audio event is required")
@@ -216,18 +232,33 @@ def _ass_document(
     )
     lines = []
     for event in events:
-        safe = (
-            event["text"]
-            .replace("\\", r"\\")
-            .replace("{", r"\{")
-            .replace("}", r"\}")
-            .replace("\n", r"\N")
-        )
-        lines.append(
-            f"Dialogue: 0,{_ass_time(event['start_frame'], fps)},{_ass_time(event['end_frame'], fps)},"
-            f"Default,,0,0,0,,{safe}"
-        )
+        cues = event.get("word_cues", [])
+        boundaries = sorted({event["start_frame"], event["end_frame"], *(frame for cue in cues for frame in (cue["start_frame"], cue["end_frame"]))})
+        for start, end in zip(boundaries, boundaries[1:]):
+            active = next((cue for cue in cues if cue["start_frame"] <= start < cue["end_frame"]), None)
+            if active is None:
+                safe = _ass_escape(event["text"])
+            else:
+                left, right = active["start_char"], active["end_char"]
+                safe = (
+                    _ass_escape(event["text"][:left])
+                    + r"{\c&H00CFBD00&\b1}" + _ass_escape(event["text"][left:right])
+                    + r"{\r}" + _ass_escape(event["text"][right:])
+                )
+            lines.append(
+                f"Dialogue: 0,{_ass_time(start, fps)},{_ass_time(end, fps)},"
+                f"Default,,0,0,0,,{safe}"
+            )
     return header + "\n".join(lines) + "\n"
+
+
+def _ass_escape(text: str) -> str:
+    return (
+        text.replace("\\", r"\\")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("\n", r"\N")
+    )
 
 
 def _duration_seconds(path: Path) -> float:

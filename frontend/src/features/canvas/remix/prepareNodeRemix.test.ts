@@ -29,11 +29,12 @@ describe('prepareNodeRemix', () => {
     const edges = [edge('video', 'timeline'), edge('audio', 'timeline'), edge('story', 'script'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose')];
     api.fetchRemixArtifact.mockImplementation((_project: string, ref: { artifactId: string }) => ref.artifactId === 'timing-1'
       ? Promise.resolve({ schema: 'performance_timing.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }, { artifact_id: 'words-1', revision: 1 }], payload: { media_hash: `sha256:${'b'.repeat(64)}`, fps: 30, events: [{ event_id: 'e1', start_frame: 0, end_frame: 30 }], unresolved_required_events: [], override_conflicts: [] } })
-      : ref.artifactId === 'script-1' ? Promise.resolve({ schema: 'remix_script.v1', upstream_refs: [{ artifact_id: 'blueprint-1', revision: 1 }], payload: { dialogue: '你好', selections: [{ selection_id: 'e1', start_char: 0, end_char: 2 }], events: [{ event_id: 'e1', caption: '你好' }] } })
+      : ref.artifactId === 'script-1' ? Promise.resolve({ schema: 'remix_script.v1', upstream_refs: [{ artifact_id: 'blueprint-1', revision: 1 }], payload: { dialogue: '你好', selections: [{ selection_id: 'e1', start_char: 0, end_char: 2 }], events: [{ event_id: 'e1', selection_id: 'e1', caption: '你好' }] } })
+        : ref.artifactId === 'words-1' ? Promise.resolve({ schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }], payload: { status: 'completed', media_hash: `sha256:${'b'.repeat(64)}`, script_revision: 1, transcript: '你好', words: [{ text: '你', start_char: 0, end_char: 1, start_us: 0, end_us: 400_000 }, { text: '好', start_char: 1, end_char: 2, start_us: 400_000, end_us: 1_000_000 }] } })
         : Promise.resolve({ schema: 'reference_blueprint.v1', payload: { media_hash: 'a'.repeat(64) } }));
     api.createRemixArtifact.mockResolvedValue({ id: 'manifest-1', revision: 1 });
     expect(await prepareNodeRemix('demo', nodes, edges, 'compose')).toEqual({ manifestRef: { artifactId: 'manifest-1', revision: 1 }, events: [{ selectionId: 'e1', startFrame: 0, endFrame: 30 }], selections: [{ id: 'e1', label: '你好', start: 0, end: 2 }], unresolvedRequiredEvents: [] });
-    expect(api.createRemixArtifact).toHaveBeenCalledWith('demo', 'composition_manifest.v1', expect.objectContaining({ subtitle_events: [{ text: '你好', start_frame: 0, end_frame: 30 }] }), [timingRef, scriptRef, blueprintRef]);
+    expect(api.createRemixArtifact).toHaveBeenCalledWith('demo', 'composition_manifest.v1', expect.objectContaining({ subtitle_events: [{ text: '你好', start_frame: 0, end_frame: 30, word_cues: [{ start_char: 0, end_char: 1, start_frame: 0, end_frame: 12 }, { start_char: 1, end_char: 2, start_frame: 12, end_frame: 30 }] }] }), [timingRef, scriptRef, blueprintRef, transcriptRef]);
   });
 
   it('changes the input fingerprint when an upstream artifact revision changes', () => {

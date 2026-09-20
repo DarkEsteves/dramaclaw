@@ -17,6 +17,24 @@ describe('buildNodeRemixManifest', () => {
     expect(output.media_bindings).toHaveLength(2);
   });
 
+  it('adds word cue frames when a subtitle matches its aligned script selection', () => {
+    const output = buildNodeRemixManifest({
+      reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'reveal', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '喝一口咖啡', selections: [{ selection_id: 'reveal', start_char: 0, end_char: 5 }], events: [{ event_id: 'reveal', selection_id: 'reveal', caption: '喝一口咖啡' }] },
+      wordTimeline: { transcript: '喝一口咖啡', words: [
+        { text: '喝', start_char: 0, end_char: 1, start_us: 400_000, end_us: 700_000 },
+        { text: '一口', start_char: 1, end_char: 3, start_us: 700_000, end_us: 900_000 },
+        { text: '咖啡', start_char: 3, end_char: 5, start_us: 900_000, end_us: 1_400_000 },
+      ] },
+    });
+    expect(output.subtitle_events).toEqual([{ text: '喝一口咖啡', start_frame: 12, end_frame: 45, word_cues: [
+      { start_char: 0, end_char: 1, start_frame: 12, end_frame: 21 },
+      { start_char: 1, end_char: 3, start_frame: 21, end_frame: 27 },
+      { start_char: 3, end_char: 5, start_frame: 27, end_frame: 42 },
+    ] }]);
+  });
+
   it('blocks unresolved required semantic events', () => {
     expect(() => buildNodeRemixManifest({ reference: video, narration: audio, timing: { fps: 30, events: [], unresolved_required_events: [{ event_id: 'hook' }], override_conflicts: [] }, script: { dialogue: '', events: [] } })).toThrow(/未解析/);
   });
