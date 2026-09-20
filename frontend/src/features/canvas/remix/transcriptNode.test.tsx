@@ -31,7 +31,7 @@ vi.mock('@/api/remix', () => ({
 vi.mock('./transcriptArtifactApi', () => ({ reviseTranscriptArtifact: vi.fn(async () => ({ id: 'words-1', revision: 2 })) }));
 
 import { TranscriptNode } from '../nodes/TranscriptNode';
-import { fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction } from '@/api/remix';
+import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction } from '@/api/remix';
 import { reviseTranscriptArtifact } from './transcriptArtifactApi';
 
 const flowProps = { type: 'transcriptNode', zIndex: 0, draggable: true, dragging: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
@@ -162,5 +162,68 @@ describe('TranscriptNode', () => {
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toBeNull());
     expect(state.nodes[1].data.status).toBe('needs_review');
+  });
+
+  it('explains a script mismatch instead of reporting silence', async () => {
+    vi.mocked(fetchRemixArtifact).mockResolvedValueOnce({
+      id: 'words-1', revision: 1, schema: 'word_timeline.v1', payload: {
+        status: 'script_mismatch', words: [], mismatch: { reason: 'ASR transcript does not match the script' },
+      },
+    } as never);
+    state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1', sourceMediaPath: 'narration.wav' };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    await waitFor(() => expect(state.nodes[1].data).toMatchObject({ operationId: null, status: 'needs_review' }));
+    expect(screen.getByText(/脚本与音频不一致/)).toBeTruthy();
+    expect(screen.queryByText(/没有识别到人声/)).toBeNull();
+  });
+
+  it('does not accept an alignment completed for a previous script revision', async () => {
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = {
+      words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1',
+      sourceMediaPath: 'narration.wav', pendingScriptRef: { artifactId: 'script-1', revision: 2 },
+    };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    await waitFor(() => expect(state.nodes[1].data.operationId).toBeNull());
+    expect(state.nodes[1].data.artifactRef).toBeNull();
+    expect(screen.getByText(/脚本已修改/)).toBeTruthy();
+  });
+
+  it('rejects an alignment artifact linked to a different script revision', async () => {
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 2 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = {
+      words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1',
+      sourceMediaPath: 'narration.wav', pendingScriptRef: { artifactId: 'script-1', revision: 2 },
+    };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    await waitFor(() => expect(state.nodes[1].data.operationId).toBeNull());
+    expect(state.nodes[1].data.artifactRef).toBeNull();
+    expect(screen.getByText(/对齐结果对应的脚本版本不一致/)).toBeTruthy();
+  });
+
+  it('accepts a completed alignment linked to the current script revision', async () => {
+    vi.mocked(fetchRemixArtifact).mockResolvedValueOnce({
+      id: 'words-1', revision: 1, schema: 'word_timeline.v1',
+      upstream_refs: [{ artifact_id: 'script-1', revision: 2 }],
+      payload: { status: 'completed', script_revision: 2, transcript: '你好', words: [
+        { text: '你', start_char: 0, end_char: 1, start_us: 0, end_us: 500_000 },
+        { text: '好', start_char: 1, end_char: 2, start_us: 500_000, end_us: 1_000_000 },
+      ] },
+    } as never);
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 2 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = {
+      words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1',
+      sourceMediaPath: 'narration.wav', pendingScriptRef: { artifactId: 'script-1', revision: 2 },
+    };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
+    expect(state.nodes[1].data.alignedScriptRef).toEqual({ artifactId: 'script-1', revision: 2 });
   });
 });

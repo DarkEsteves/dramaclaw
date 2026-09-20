@@ -127,12 +127,36 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         if (cancelled) return;
         if (artifact.schema !== 'word_timeline.v1') throw new Error('转写产物格式错误');
         const payload = artifact.payload as TranscriptTimeline;
-        const words = timelineWords(payload);
-        if (payload.status !== 'completed' || words.length === 0) throw new Error('没有识别到人声，请检查素材');
         const store = useCanvasStore.getState();
         const current = sourceMediaForTranscript(id, store.nodes, store.edges);
         const saved = store.nodes.find((node) => node.id === id)?.data as TranscriptNodeData | undefined;
         if (!current || current.path !== saved?.sourceMediaPath) throw new Error('上游音频已变化，请重新转写');
+        const pendingScript = saved?.pendingScriptRef as RemixArtifactRef | null | undefined;
+        const currentScript = sourceScriptForTranscript(id, store.nodes, store.edges);
+        if (pendingScript && (!currentScript || pendingScript.artifactId !== currentScript.artifactId || pendingScript.revision !== currentScript.revision)) {
+          const message = '脚本已修改，请按当前脚本重新对齐';
+          updateNodeData(id, { artifactRef: null, operationId: null, pendingScriptRef: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
+          setError(message);
+          setOperationId(null);
+          return;
+        }
+        if (pendingScript && (payload.script_revision !== pendingScript.revision
+          || !artifact.upstream_refs?.some((ref) => ref.artifact_id === pendingScript.artifactId && ref.revision === pendingScript.revision))) {
+          const message = '对齐结果对应的脚本版本不一致，请重新对齐';
+          updateNodeData(id, { artifactRef: null, operationId: null, pendingScriptRef: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
+          setError(message);
+          setOperationId(null);
+          return;
+        }
+        if (payload.status === 'script_mismatch') {
+          const message = '脚本与音频不一致，请核对台词后重新对齐';
+          updateNodeData(id, { artifactRef: null, operationId: null, pendingScriptRef: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
+          setError(message);
+          setOperationId(null);
+          return;
+        }
+        const words = timelineWords(payload);
+        if (payload.status !== 'completed' || words.length === 0) throw new Error('没有识别到人声，请检查素材');
         updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, transcriptText: typeof payload.transcript === 'string' ? payload.transcript : words.map((word) => word.text).join(''), status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
         setShowWordDetails(false);
         setOperationId(null);
@@ -199,7 +223,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         </div>
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
-        {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐'}</p>}
+        {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.unresolved?.[0] || (data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐')}</p>}
         {data.words.length > 0 && <><p className="whitespace-pre-wrap px-2 py-2 text-[13px] leading-6 text-text-dark">{playbackParts.map((part, index) => part.startUs === undefined
           ? <span key={index}>{part.text}</span>
           : <button key={index} type="button" aria-label={`跳转到 ${part.text}，${stamp(part.startUs)}`} aria-current={playheadUs >= part.startUs && playheadUs < part.endUs! ? 'true' : undefined} onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = part.startUs! / 1_000_000; setPlayheadUs(part.startUs!); }} className={`nodrag rounded-sm text-inherit hover:bg-white/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/50 ${playheadUs >= part.startUs && playheadUs < part.endUs! ? 'bg-primary/25' : ''}`}>{part.text}</button>)}</p><button type="button" onClick={() => setShowWordDetails((current) => !current)} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mx-2 my-1`}>{showWordDetails ? '收起逐词校对' : `展开逐词校对（${data.words.length}）`}</button></>}
@@ -211,7 +235,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无转写内容</p>}
       </div>
       {artifactRef && <div className="border-t border-white/[0.08] p-3 text-xs">{showWordDetails && <label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label>}<div className="flex flex-wrap gap-2">{showWordDetails && <button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button>}<button type="button" onClick={() => void exportResult('json')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 SRT</button></div></div>}
-      {error && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
+      {error && error !== data.unresolved?.[0] && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
     </div>
   </div>;
 });
