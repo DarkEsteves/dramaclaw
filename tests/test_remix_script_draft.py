@@ -72,6 +72,37 @@ def test_generated_script_requires_a_semantic_selection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_broll_plan_uses_v2_recipe_and_rejects_unknown_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({
+            "dialogue": "新品登场", "segments": [], "selections": [], "blueprint_mappings": [],
+            "media_requirements": [{"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "产品特写"}],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    script = {"dialogue": "新品登场", "segments": [], "selections": [], "events": [{"event_id": "product"}], "blueprint_mappings": [], "media_requirements": []}
+    plan = await broll_plan.generate_broll_plan(script=script, username="alice")
+
+    assert plan["media_requirements"][0]["event_id"] == "product"
+    assert calls[0]["recipe_id"] == "reference-broll-plan"
+
+    async def invalid(**_kwargs):
+        return json.dumps({
+            "dialogue": "新品登场", "segments": [], "selections": [], "blueprint_mappings": [],
+            "media_requirements": [{"event_id": "missing", "required": True, "purpose": "展示产品", "suggested_query": "产品特写"}],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", invalid)
+    with pytest.raises(ValueError, match="event_id"):
+        await broll_plan.generate_broll_plan(script=script, username="alice")
+
+
+@pytest.mark.asyncio
 async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
     from novelvideo.freezone.remix import script_draft
 
@@ -138,6 +169,35 @@ def test_script_draft_endpoint_reads_exact_blueprint_and_does_not_publish(api, m
     assert response.json()["data"]["dialogue"] == "用新咖啡开始一天。"
     assert calls == [(blueprint["payload"], "新咖啡", "alice")]
     assert len(list((tmp_path / "freezone" / "_remix_artifacts").iterdir())) == 2
+
+
+def test_broll_plan_endpoint_publishes_validated_plan_from_exact_script(api, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from novelvideo.api.routes import remix as routes
+
+    client, blueprint = api
+    store = RemixArtifactStore(tmp_path, "demo")
+    script = store.create("remix_script.v1", {
+        "dialogue": "新品登场", "segments": [], "selections": [], "events": [{"event_id": "product"}],
+        "blueprint_mappings": [], "media_requirements": [],
+    }, [{"artifact_id": blueprint["id"], "revision": blueprint["revision"]}])
+
+    async def generate(*, script, username):
+        assert username == "alice"
+        return {
+            "dialogue": script["dialogue"], "segments": [], "selections": [], "blueprint_mappings": [],
+            "media_requirements": [{"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "产品特写"}],
+        }
+
+    monkeypatch.setattr(routes, "generate_broll_plan", generate)
+    response = client.post("/api/v1/projects/demo/freezone/remix/broll-plans", json={
+        "script_ref": {"artifact_id": script["id"], "revision": script["revision"]},
+    })
+
+    assert response.status_code == 200
+    artifact = response.json()["data"]
+    assert artifact["schema"] == "remix_script.v1"
+    assert artifact["upstream_refs"] == [{"artifact_id": script["id"], "revision": 1, "project_id": "demo"}]
+    assert artifact["payload"]["media_requirements"][0]["required"] is True
 
 
 def test_script_draft_endpoint_rejects_wrong_schema_and_other_project(api, tmp_path) -> None:

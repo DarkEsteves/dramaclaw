@@ -371,7 +371,12 @@ export interface VideoComposeNodeData extends NodeDisplayData {
   remixWorkbenchDraft?: import('../remix/workbenchModel').RemixWorkbenchDraft;
   /** Remix manifests use the versioned layered renderer, not the legacy clip editor. */
   remixManifestRef?: { artifactId: string; revision: number } | null;
+  /** Exact manifest revision currently loaded into the editor. */
+  remixManifestLoadedRef?: { artifactId: string; revision: number } | null;
+  remixManifestLoadState?: 'idle' | 'loading' | 'ready' | 'failed';
+  remixManifestDirty?: boolean;
   remixInputFingerprint?: string;
+  remixInputsCurrent?: boolean;
   remixOperationId?: string | null;
   remixNodeRevision?: number;
   remixEvents?: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>;

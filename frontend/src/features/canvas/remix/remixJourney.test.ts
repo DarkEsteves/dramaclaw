@@ -42,6 +42,10 @@ describe('reference video remix canvas journey', () => {
 
   it('supports manual narration upload without requiring a voice provider', () => {
     const graph = completeThroughScript();
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ kind: 'action', action: 'plan_broll', label: '规划 B-roll' });
+    graph.nodes[2].data.remixBrollPlanRef = ref('broll-plan');
+    graph.nodes[2].data.remixBrollScriptRef = ref('script');
+    graph.nodes[2].data.remixBrollRequirements = [];
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ kind: 'action', action: 'create_narration', label: '创建旁白节点' });
     graph.nodes.push(node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('script'), text: '新品登场' }));
     graph.edges.push(edge('script', 'audio'));
@@ -51,8 +55,12 @@ describe('reference video remix canvas journey', () => {
   it('stops for missing required B-roll and then advances alignment through editable MP4', () => {
     const graph = completeThroughScript();
     const draft = graph.nodes[2].data.remixScriptDraft as { selections: Array<Record<string, unknown>> };
-    draft.selections[0] = { ...draft.selections[0], visualNodeId: 'visual' };
+    graph.nodes[2].data.remixBrollPlanRef = ref('broll-plan');
+    graph.nodes[2].data.remixBrollScriptRef = ref('script');
+    graph.nodes[2].data.remixBrollRequirements = [{ event_id: 'product', required: true }];
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ kind: 'input', targetNodeId: 'script', label: '补齐必需 B-roll' });
+    draft.selections[0] = { ...draft.selections[0], visualNodeId: 'visual' };
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ kind: 'input', label: '补齐必需 B-roll' });
     draft.selections[0].visualMediaRevision = 'c'.repeat(64);
 
     graph.nodes.push(
@@ -73,8 +81,40 @@ describe('reference video remix canvas journey', () => {
     graph.edges.push(edge('timeline', 'compose'));
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'prepare_manifest' });
     graph.nodes[graph.nodes.length - 1].data.remixManifestRef = ref('manifest');
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'wait', label: '加载合成清单' });
+    graph.nodes[graph.nodes.length - 1].data.remixManifestLoadedRef = ref('manifest');
+    graph.nodes[graph.nodes.length - 1].data.remixManifestLoadState = 'ready';
+    graph.nodes[graph.nodes.length - 1].data.remixManifestDirty = false;
+    graph.nodes[graph.nodes.length - 1].data.remixNodeRevision = 1;
+    graph.nodes[graph.nodes.length - 1].data.remixInputFingerprint = 'current';
+    graph.nodes[graph.nodes.length - 1].data.remixInputsCurrent = true;
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'render_export' });
     graph.nodes[graph.nodes.length - 1].data.resultVideoUrl = '/media/final.mp4';
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'complete', label: '成片可编辑并可下载 MP4' });
+  });
+
+  it('surfaces dirty, conflicting, unresolved and stale manifests before export', () => {
+    const graph = completeThroughScript();
+    graph.nodes[2].data.remixBrollPlanRef = ref('broll');
+    graph.nodes[2].data.remixBrollScriptRef = ref('script');
+    graph.nodes[2].data.remixBrollRequirements = [];
+    graph.nodes.push(
+      node('audio', 'audioNode', { audioUrl: '/voice.wav', remixRole: 'narration', remixScriptRef: ref('script'), remixMedia: { media_kind: 'audio', media_hash: 'b'.repeat(64), media_path: 'voice.wav', url: '/voice.wav' } }),
+      node('words', 'transcriptNode', { artifactRef: ref('words'), alignedScriptRef: ref('script'), status: 'completed', sourceMediaPath: 'voice.wav', sourceMediaHash: 'b'.repeat(64) }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing'), compiledMediaHash: `sha256:${'b'.repeat(64)}`, events: [] }),
+      node('compose', 'videoComposeNode', { remixManifestRef: ref('manifest'), remixManifestLoadedRef: ref('manifest'), remixManifestLoadState: 'ready', remixManifestDirty: false, remixNodeRevision: 1, remixInputFingerprint: 'current', remixInputsCurrent: true }),
+    );
+    graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose'));
+    const compose = graph.nodes[graph.nodes.length - 1];
+    compose.data.remixManifestDirty = true;
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'save_manifest', label: '保存合成清单修改' });
+    compose.data.remixManifestDirty = false; compose.data.remixManifestConflicts = ['字幕冲突'];
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', label: '处理清单冲突' });
+    compose.data.remixManifestConflicts = []; compose.data.unresolvedRequiredEvents = ['product'];
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', targetNodeId: 'timeline', label: '修正未解析事件' });
+    compose.data.unresolvedRequiredEvents = []; compose.data.remixInputsCurrent = false;
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'prepare_manifest', label: '上游已变化，更新清单' });
+    compose.data.remixInputsCurrent = true; compose.data.remixManifestLoadState = 'failed';
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', label: '合成清单加载失败', inputHint: expect.stringContaining('重新生成') });
   });
 });

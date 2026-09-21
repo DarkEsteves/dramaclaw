@@ -145,6 +145,7 @@ import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/f
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
 import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
+import { advanceRemixJourneyStep } from '@/features/canvas/remix/remixJourneyActions';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1648,31 +1649,26 @@ export const NodeActionToolbar = memo(
 
     const advanceRemixJourney = useCallback(() => {
       if (!remixJourneyStep) return;
-      setSelectedNode(remixJourneyStep.targetNodeId);
-      requestFocusNode(remixJourneyStep.targetNodeId);
-      if (!remixJourneyStep.action) return;
-      try {
-        switch (remixJourneyStep.action) {
-          case 'analyze_reference': {
-            const source = nodes.find((candidate) => candidate.id === remixJourneyStep.targetNodeId);
-            if (!source || typeof source.data.videoUrl !== 'string' || !source.data.videoUrl) throw new Error('请先上传参考视频');
-            const started = analyzeReferenceVideo(source.id, { videoUrl: source.data.videoUrl });
-            setSelectedNode(started.nodeId); requestFocusNode(started.nodeId);
-            break;
-          }
-          case 'continue_story': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'continue_story' }); break;
-          case 'edit_script': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'edit_script' }); break;
-          case 'create_narration': createNarrationFromScript(remixJourneyStep.targetNodeId); break;
-          case 'align_narration': void createAlignedTranscriptFromAudio(remixJourneyStep.targetNodeId).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐')); break;
-          case 'create_timeline': createTimelineFromScript(remixJourneyStep.targetNodeId); break;
-          case 'compile_timeline': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'compile' }); break;
-          case 'create_compose': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'create_compose' }); break;
-          case 'prepare_manifest': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'prepare_compose' }); break;
-          case 'render_export': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'render_export' }); break;
-        }
-      } catch (cause) {
+      void advanceRemixJourneyStep(remixJourneyStep, {
+        focus: (targetNodeId) => {
+          setSelectedNode(targetNodeId);
+          requestFocusNode(targetNodeId);
+        },
+        notify: (message) => toast.info(message),
+        analyzeReference: (targetNodeId) => {
+          const source = nodes.find((candidate) => candidate.id === targetNodeId);
+          if (!source || typeof source.data.videoUrl !== 'string' || !source.data.videoUrl) throw new Error('请先上传参考视频');
+          const started = analyzeReferenceVideo(source.id, { videoUrl: source.data.videoUrl });
+          setSelectedNode(started.nodeId); requestFocusNode(started.nodeId);
+        },
+        publish: (targetNodeId, action) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action }),
+        createNarration: (targetNodeId) => { createNarrationFromScript(targetNodeId); },
+        alignNarration: (targetNodeId) => createAlignedTranscriptFromAudio(targetNodeId),
+        createTimeline: (targetNodeId) => { createTimelineFromScript(targetNodeId); },
+        createCompose: (targetNodeId) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action: 'create_compose' }),
+      }).catch((cause) => {
         toast.error(cause instanceof Error ? cause.message : '无法继续改编');
-      }
+      });
     }, [nodes, remixJourneyStep, requestFocusNode, setSelectedNode]);
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;

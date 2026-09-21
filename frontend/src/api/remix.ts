@@ -27,6 +27,11 @@ export function generateRemixScriptDraft(project: string, blueprintRef: RemixArt
     method: 'POST', json: { blueprint_ref: exactRef(blueprintRef), new_topic: newTopic }, timeout: false,
   });
 }
+export function generateRemixBrollPlan(project: string, scriptRef: RemixArtifactRef) {
+  return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/broll-plans`, {
+    method: 'POST', json: { script_ref: exactRef(scriptRef) }, timeout: false,
+  });
+}
 export function renderRemixManifest(project: string, request: RemixRenderRequest) { return apiCall<RemixRenderTaskRef>(`projects/${project}/freezone/remix/artifacts/${request.manifestRef.artifactId}/render`, { method: 'POST', json: { revision: request.manifestRef.revision, idempotency_key: request.idempotencyKey, node_revision: request.nodeRevision, ...(request.canvasId ? { canvas_id: request.canvasId } : {}), ...(request.nodeId ? { node_id: request.nodeId } : {}) } }); }
 export function uploadRemixMedia(project: string, file: File) {
   const body = new FormData();

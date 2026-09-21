@@ -70,6 +70,12 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }));
   });
 
+  it('shows the Recipe requirement beside the exact B-roll event', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '必须看见产品', suggested_query: '咖啡杯特写' }]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByText('必需 B-roll · 必须看见产品 · 咖啡杯特写')).toBeInTheDocument();
+  });
+
   it('attaches an existing canvas visual and stores its immutable media revision', async () => {
     const onAttachVisual = vi.fn(async () => 'f'.repeat(64));
     const onDraftChange = vi.fn();

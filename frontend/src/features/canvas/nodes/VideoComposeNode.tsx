@@ -96,7 +96,9 @@ export const VideoComposeNode = memo(
     const [isManifestSaving, setManifestSaving] = useState(false);
     const prepareClaimRef = useRef(false);
     const submitRemixRef = useRef<null | (() => void)>(null);
+    const saveManifestRef = useRef<null | (() => void)>(null);
     const [autoRenderRequested, setAutoRenderRequested] = useState(false);
+    const [autoSaveRequested, setAutoSaveRequested] = useState(false);
     const [recoveredRemixOperationId, setRecoveredRemixOperationId] = useState<string | null>(null);
 
     const seedNodeIds = useMemo(
@@ -128,17 +130,27 @@ export const VideoComposeNode = memo(
       && manifestArtifact
       && manifestArtifact.id === data.remixManifestRef?.artifactId
       && manifestArtifact.revision === data.remixManifestRef?.revision);
+    const remixInputsCurrent = typeof data.remixInputFingerprint === 'string'
+      && data.remixInputFingerprint.length > 0
+      && currentRemixInputFingerprint === data.remixInputFingerprint;
 
     useEffect(() => {
-      if (!project || !data.remixManifestRef) { setManifestArtifact(null); setManifestDraft(null); setLoadedManifestRefKey(null); return; }
+      if (data.remixInputsCurrent === remixInputsCurrent) return;
+      updateNodeData(id, { remixInputsCurrent });
+    }, [data.remixInputsCurrent, id, remixInputsCurrent, updateNodeData]);
+
+    useEffect(() => {
+      if (!project || !data.remixManifestRef) { setManifestArtifact(null); setManifestDraft(null); setLoadedManifestRefKey(null); updateNodeData(id, { remixManifestLoadedRef: null, remixManifestLoadState: 'idle', remixManifestDirty: false }); return; }
       let cancelled = false;
+      updateNodeData(id, { remixManifestLoadedRef: null, remixManifestLoadState: 'loading' });
       void Promise.resolve(fetchRemixArtifact(project, data.remixManifestRef)).then((artifact) => {
         if (cancelled) return;
         if (!artifact) return;
         setManifestArtifact(artifact); setManifestDraft(artifact.payload as ManifestPayload); setLoadedManifestRefKey(`${artifact.id}:${artifact.revision}`); setManifestDirty(false);
-      }).catch((error) => { if (!cancelled) setRemixError(error instanceof Error ? error.message : String(error)); });
+        updateNodeData(id, { remixManifestLoadedRef: { artifactId: artifact.id, revision: artifact.revision }, remixManifestLoadState: 'ready', remixManifestDirty: false });
+      }).catch((error) => { if (!cancelled) { setRemixError(error instanceof Error ? error.message : String(error)); updateNodeData(id, { remixManifestLoadedRef: null, remixManifestLoadState: 'failed' }); } });
       return () => { cancelled = true; };
-    }, [project, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision]);
+    }, [project, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision, id, updateNodeData]);
 
     useEffect(() => {
       if (!project || !data.remixManifestRef || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.remixOperationId) return;
@@ -202,7 +214,7 @@ export const VideoComposeNode = memo(
       try {
         const state = useCanvasStore.getState();
         const prepared = await prepareNodeRemix(project, state.nodes, state.edges, id, data.remixManifestRef);
-        updateNodeData(id, { remixManifestRef: prepared.manifestRef, remixEvents: prepared.events, remixSelections: prepared.selections, unresolvedRequiredEvents: prepared.unresolvedRequiredEvents, remixManifestConflicts: prepared.conflicts ?? [], remixInputFingerprint: remixGraphFingerprint(state.nodes, state.edges, id), remixNodeRevision: (data.remixNodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null });
+        updateNodeData(id, { remixManifestRef: prepared.manifestRef, remixManifestLoadedRef: null, remixManifestLoadState: 'loading', remixManifestDirty: false, remixEvents: prepared.events, remixSelections: prepared.selections, unresolvedRequiredEvents: prepared.unresolvedRequiredEvents, remixManifestConflicts: prepared.conflicts ?? [], remixInputFingerprint: remixGraphFingerprint(state.nodes, state.edges, id), remixInputsCurrent: true, remixNodeRevision: (data.remixNodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null });
         setRecoveredRemixOperationId(null);
         setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
       } catch (caught) {
@@ -215,6 +227,7 @@ export const VideoComposeNode = memo(
     useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
       if (nodeId === id && action === 'prepare_compose') void handlePrepareRemix();
       if (nodeId === id && action === 'render_export') setAutoRenderRequested(true);
+      if (nodeId === id && action === 'save_manifest') setAutoSaveRequested(true);
     }), [id, handlePrepareRemix]);
 
     useEffect(() => {
@@ -222,6 +235,12 @@ export const VideoComposeNode = memo(
       setAutoRenderRequested(false);
       submitRemixRef.current();
     }, [autoRenderRequested, manifestReady]);
+
+    useEffect(() => {
+      if (!autoSaveRequested || !manifestReady || !saveManifestRef.current) return;
+      setAutoSaveRequested(false);
+      saveManifestRef.current();
+    }, [autoSaveRequested, manifestReady]);
 
     useEffect(() => {
       if (!data.autoPrepareRequested || !hasSemanticTimeline) return;
@@ -362,7 +381,7 @@ export const VideoComposeNode = memo(
 
     if (data.remixManifestRef && (data.remixInputFingerprint || !data.remixWorkbenchDraft)) {
       const conflicts = data.remixManifestConflicts ?? [];
-      const inputsCurrent = !data.remixInputFingerprint || currentRemixInputFingerprint === data.remixInputFingerprint;
+      const inputsCurrent = remixInputsCurrent;
       const exportable = manifestReady && inputsCurrent && canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts }) && !manifestDirty;
       const nodeRevision = data.remixNodeRevision;
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
@@ -377,7 +396,7 @@ export const VideoComposeNode = memo(
             (manifestArtifact.upstream_refs ?? []).map((ref) => ({ artifactId: ref.artifact_id, revision: ref.revision })));
           const ref = { artifactId: saved.id, revision: saved.revision };
           setManifestArtifact(saved); setManifestDraft(saved.payload as ManifestPayload); setManifestDirty(false);
-          updateNodeData(id, { remixManifestRef: ref, remixNodeRevision: (nodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null, remixManifestConflicts: conflicts });
+          updateNodeData(id, { remixManifestRef: ref, remixManifestLoadedRef: ref, remixManifestLoadState: 'ready', remixManifestDirty: false, remixNodeRevision: (nodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null, remixManifestConflicts: conflicts });
           setRemixTask(null); setRecoveredRemixOperationId(null); setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
         } catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
         finally { setManifestSaving(false); }
@@ -400,13 +419,14 @@ export const VideoComposeNode = memo(
         finally { setRemixSubmitting(false); }
       };
       submitRemixRef.current = () => { void submit(); };
+      saveManifestRef.current = () => { void saveManifest(); };
       return <div className="group relative w-[380px]" onClick={() => setSelectedNode(id)}>
         <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
         <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
           <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={manifestReady && previewState === 'current' ? 'text-green-300' : manifestReady && previewState === 'stale' ? 'text-amber-300' : ''}>{!manifestReady ? '正在加载清单…' : previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
-          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} disabled={isManifestSaving} onManifestChange={(next) => { if (!manifestReady || isManifestSaving) return; setManifestDraft(next); setManifestDirty(true); }} />
+          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} disabled={isManifestSaving} onManifestChange={(next) => { if (!manifestReady || isManifestSaving) return; setManifestDraft(next); setManifestDirty(true); updateNodeData(id, { remixManifestDirty: true }); }} />
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
             <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
             {manifestDirty ? <button type="button" disabled={isManifestSaving || conflicts.length > 0 || !manifestReady} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}
@@ -424,6 +444,7 @@ export const VideoComposeNode = memo(
     }
 
     submitRemixRef.current = null;
+    saveManifestRef.current = null;
 
     return (
       <div

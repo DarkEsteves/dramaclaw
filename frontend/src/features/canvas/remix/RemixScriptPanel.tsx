@@ -15,6 +15,7 @@ interface Props {
   blueprintRef: RemixArtifactRef | null;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
+  brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onDraftChange: (draft: RemixScriptDraft) => void;
@@ -22,7 +23,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -123,7 +124,9 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>标记选中文本</button>
       <p className="text-text-muted">在台词中选中文字后标记；填写替换画面节点可作为 B-roll 指令。</p>
-      {draft.selections.map((selection, index) => <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
+      {draft.selections.map((selection, index) => {
+        const requirement = brollRequirements.find((item) => item.event_id === selection.id);
+        return <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
         <label>事件名称<input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className={fieldClass} /></label>
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
@@ -136,8 +139,9 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
           {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">素材节点已创建，生成或上传完成后再保存。</span>}
         </div>
+        {requirement?.required && <p className="col-span-6 text-amber-300">必需 B-roll · {requirement.purpose} · {requirement.suggested_query}</p>}
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
-      </div>)}
+      </div>})}
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div>
     <div className="flex justify-end border-t border-white/10 px-4 py-3"><button type="button" disabled={saving || !project} onClick={() => void save()} className="nodrag h-9 rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground disabled:opacity-50">{saving ? '保存中…' : '保存脚本版本'}</button></div>

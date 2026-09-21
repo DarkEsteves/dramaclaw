@@ -2,8 +2,8 @@ import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/
 
 export type RemixJourneyAction =
   | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
-  | 'align_narration' | 'create_timeline' | 'compile_timeline'
-  | 'create_compose' | 'prepare_manifest' | 'render_export';
+  | 'plan_broll' | 'align_narration' | 'create_timeline' | 'compile_timeline'
+  | 'create_compose' | 'prepare_manifest' | 'save_manifest' | 'render_export';
 
 export type RemixJourneyStep = {
   kind: 'action' | 'input' | 'wait' | 'complete';
@@ -45,10 +45,16 @@ function directChild(nodes: CanvasNode[], edges: CanvasEdge[], sourceId: string,
   return nodes.find((node) => ids.has(node.id) && node.type === type);
 }
 
-function missingBroll(node: CanvasNode): boolean {
-  const draft = node.data.remixScriptDraft as { selections?: Array<{ visualNodeId?: unknown; visualMediaRevision?: unknown }> } | undefined;
-  return Boolean(draft?.selections?.some((selection) => selection.visualNodeId
-    && (typeof selection.visualMediaRevision !== 'string' || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision))));
+function missingRequiredBroll(node: CanvasNode): boolean {
+  const draft = node.data.remixScriptDraft as { selections?: Array<{ id?: unknown; visualNodeId?: unknown; visualMediaRevision?: unknown }> } | undefined;
+  const requirements = Array.isArray(node.data.remixBrollRequirements)
+    ? node.data.remixBrollRequirements as Array<{ event_id?: unknown; required?: unknown }> : [];
+  return requirements.some((requirement) => {
+    if (requirement.required !== true || typeof requirement.event_id !== 'string') return false;
+    const selection = draft?.selections?.find((item) => item.id === requirement.event_id);
+    return !selection?.visualNodeId || typeof selection.visualMediaRevision !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision);
+  });
 }
 
 /** Resolve exactly one visible next step from the selected remix graph. */
@@ -72,7 +78,11 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   const script = directChild(nodes, edges, story.id, CANVAS_NODE_TYPES.script);
   if (!script) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '填写新主题并生成脚本', inputHint: '输入新主题后生成可编辑台词。' };
   if (!ref(script.data.remixScriptRef)) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '填写新主题并生成脚本', inputHint: '确认台词、语义区间和素材要求后保存。' };
-  if (missingBroll(script)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，生成或上传标记事件所需的画面素材。' };
+  if (script.data.remixBrollPlanStatus === 'running') return { kind: 'wait', targetNodeId: script.id, label: '等待 B-roll 规划' };
+  if (!ref(script.data.remixBrollPlanRef) || !sameRef(script.data.remixBrollScriptRef, script.data.remixScriptRef)) {
+    return { kind: 'action', action: 'plan_broll', targetNodeId: script.id, label: '规划 B-roll' };
+  }
+  if (missingRequiredBroll(script)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，为每个必需事件生成或上传画面并完成绑定。' };
 
   const scriptRef = script.data.remixScriptRef;
   const audio = directChild(nodes, edges, script.id, CANVAS_NODE_TYPES.audio);
@@ -103,6 +113,16 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
   if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };
   if (!ref(compose.data.remixManifestRef)) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '生成合成清单' };
+  if (compose.data.remixManifestLoadState === 'failed') return { kind: 'input', targetNodeId: compose.id, label: '合成清单加载失败', inputHint: '打开合成节点查看错误，并重新生成合成清单。' };
+  if (compose.data.remixManifestLoadState !== 'ready' || !sameRef(compose.data.remixManifestLoadedRef, compose.data.remixManifestRef)) return { kind: 'wait', targetNodeId: compose.id, label: '加载合成清单', inputHint: '清单加载完成后才能检查并导出。' };
+  if (compose.data.remixManifestDirty === true) return { kind: 'action', action: 'save_manifest', targetNodeId: compose.id, label: '保存合成清单修改' };
+  if (compose.data.remixManifestDirty !== false) return { kind: 'input', targetNodeId: compose.id, label: '确认合成清单状态', inputHint: '打开合成节点，等待清单状态同步后再导出。' };
+  const conflicts = Array.isArray(compose.data.remixManifestConflicts) ? compose.data.remixManifestConflicts : [];
+  if (conflicts.length) return { kind: 'input', targetNodeId: compose.id, label: '处理清单冲突', inputHint: String(conflicts.join('；')) };
+  const unresolved = Array.isArray(compose.data.unresolvedRequiredEvents) ? compose.data.unresolvedRequiredEvents : [];
+  if (unresolved.length) return { kind: 'input', targetNodeId: timeline.id, label: '修正未解析事件', inputHint: `仍需修正：${unresolved.join('、')}` };
+  if (typeof compose.data.remixInputFingerprint !== 'string' || !compose.data.remixInputFingerprint || compose.data.remixInputsCurrent !== true) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '上游已变化，更新清单' };
+  if (!Number.isInteger(compose.data.remixNodeRevision) || Number(compose.data.remixNodeRevision) < 1) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '更新合成清单版本' };
   if (compose.data.remixOperationId && !compose.data.resultVideoUrl) return { kind: 'wait', targetNodeId: compose.id, label: '等待成片导出' };
   if (!compose.data.resultVideoUrl) return { kind: 'action', action: 'render_export', targetNodeId: compose.id, label: '导出 MP4' };
   return { kind: 'complete', targetNodeId: compose.id, label: '成片可编辑并可下载 MP4' };

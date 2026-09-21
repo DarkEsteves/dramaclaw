@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('./client', () => ({ apiCall: vi.fn(async (_path: string, _options?: unknown) => ({})) }));
 
 import { apiCall } from './client';
-import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixScriptDraft, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
+import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixBrollPlan, generateRemixScriptDraft, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
 
 describe('remix API contract', () => {
   it('sends exact artifact refs and render revision to the backend routes', async () => {
@@ -49,6 +49,13 @@ describe('remix API contract', () => {
     await generateRemixScriptDraft('demo', { artifactId: 'blueprint-1', revision: 3 }, '新咖啡');
     expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/script-drafts', {
       method: 'POST', json: { blueprint_ref: { artifact_id: 'blueprint-1', revision: 3 }, new_topic: '新咖啡' }, timeout: false,
+    });
+  });
+
+  it('plans B-roll from an exact saved script revision', async () => {
+    await generateRemixBrollPlan('demo', { artifactId: 'script-1', revision: 4 });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/broll-plans', {
+      method: 'POST', json: { script_ref: { artifact_id: 'script-1', revision: 4 } }, timeout: false,
     });
   });
 });

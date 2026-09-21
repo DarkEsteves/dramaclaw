@@ -81,7 +81,7 @@ import {
 } from '@/features/canvas/ui/NodeGenerationHistory';
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
-import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
+import { attachRemixMedia, generateRemixBrollPlan, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
@@ -137,6 +137,9 @@ function remixRef(value: unknown): RemixArtifactRef | null {
   const ref = value as Record<string, unknown>;
   return typeof ref.artifactId === 'string' && Number.isInteger(ref.revision) && Number(ref.revision) > 0
     ? { artifactId: ref.artifactId, revision: Number(ref.revision) } : null;
+}
+function sameRemixRef(left: RemixArtifactRef | null, right: RemixArtifactRef | null): boolean {
+  return Boolean(left && right && left.artifactId === right.artifactId && left.revision === right.revision);
 }
 const SPAWN_TEXT_HEIGHT = 320;
 const SPAWN_VIDEO_WIDTH = 580;
@@ -407,6 +410,29 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const [isRemixScriptOpen, setRemixScriptOpen] = useState(false);
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'edit_script') setRemixScriptOpen(true);
+    if (nodeId === id && action === 'plan_broll') {
+      const store = useCanvasStore.getState();
+      const current = store.nodes.find((candidate) => candidate.id === id);
+      const scriptRef = remixRef(current?.data.remixScriptRef);
+      const project = readUrl().project;
+      if (!scriptRef || !project) { toast.error('请先保存改编脚本'); return; }
+      store.updateNodeData(id, { remixBrollPlanStatus: 'running', remixBrollPlanError: null });
+      void generateRemixBrollPlan(project, scriptRef).then((artifact) => {
+        const latest = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+        if (!sameRemixRef(remixRef(latest?.data.remixScriptRef), scriptRef)) return;
+        useCanvasStore.getState().updateNodeData(id, {
+          remixBrollPlanRef: { artifactId: artifact.id, revision: artifact.revision },
+          remixBrollScriptRef: scriptRef,
+          remixBrollRequirements: Array.isArray(artifact.payload.media_requirements) ? artifact.payload.media_requirements : [],
+          remixBrollPlanStatus: 'completed', remixBrollPlanError: null,
+        });
+      }).catch((cause) => {
+        const latest = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+        if (!sameRemixRef(remixRef(latest?.data.remixScriptRef), scriptRef)) return;
+        useCanvasStore.getState().updateNodeData(id, { remixBrollPlanStatus: 'failed', remixBrollPlanError: cause instanceof Error ? cause.message : String(cause) });
+        toast.error(cause instanceof Error ? cause.message : 'B-roll 规划失败');
+      });
+    }
     if (nodeId === id && action === 'create_narration') {
       try { createNarrationFromScript(id); }
       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建配音节点'); }
@@ -826,10 +852,11 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             blueprintRef={blueprintRef}
             visualNodes={remixVisualNodes}
             sfxNodes={remixSfxNodes}
+            brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
-            onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef })}
-            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, remixBlueprintRef: blueprintRef }); setRemixScriptOpen(false); }}
+            onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null })}
+            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, remixBlueprintRef: blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

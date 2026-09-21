@@ -20,6 +20,7 @@ from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifact
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.freezone.remix.script_draft import generate_script_draft
+from novelvideo.freezone.remix.broll_plan import generate_broll_plan
 from novelvideo.project_context import require_project_home_node, resolve_project_context
 from novelvideo.ports import get_task_backend
 from novelvideo.task_identity import project_task_state_key
@@ -68,6 +69,10 @@ class ProcessActionBody(BaseModel):
 class ScriptDraftBody(BaseModel):
     blueprint_ref: dict[str, Any]
     new_topic: str = Field(min_length=1, max_length=2_000)
+
+
+class BrollPlanBody(BaseModel):
+    script_ref: dict[str, Any]
 
 
 _PROCESS_TASK_TYPES = {
@@ -257,6 +262,25 @@ async def create_script_draft(project: str, body: ScriptDraftBody, user: dict = 
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return _data(draft)
+
+
+@router.post("/broll-plans")
+async def create_broll_plan(project: str, body: BrollPlanBody, user: dict = Depends(get_api_user)):
+    store = await _store(project, user, "editor")
+    ref = body.script_ref
+    if set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
+        raise HTTPException(422, "script_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] != "remix_script.v1":
+        raise HTTPException(422, "script_ref must reference a saved remix script")
+    try:
+        payload = await generate_broll_plan(
+            script=artifact["payload"], username=str(user.get("username") or "")
+        )
+        published = await _call(store.create, "remix_script.v1", payload, [ref])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _data(published)
 
 
 def _operation_view(record: dict[str, Any]) -> dict[str, Any]:
