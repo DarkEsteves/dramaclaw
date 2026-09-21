@@ -80,6 +80,7 @@ export const VideoComposeNode = memo(
     const updateNodeInternals = useUpdateNodeInternals();
     const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
     const updateNodeData = useCanvasStore((state) => state.updateNodeData);
+    const currentRemixInputFingerprint = useCanvasStore((state) => remixGraphFingerprint(state.nodes, state.edges, id));
     const upstreamNodes = useUpstreamNodes(id);
     const [isEditorOpen, setEditorOpen] = useState(false);
     const [isRemixWorkbenchOpen, setRemixWorkbenchOpen] = useState(false);
@@ -357,8 +358,7 @@ export const VideoComposeNode = memo(
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
         ? t('videoCompose.node.remixRevisionMissing')
         : (data.unresolvedRequiredEvents ?? []).join(', ');
-      const actualFingerprint = remixGraphFingerprint(useCanvasStore.getState().nodes, useCanvasStore.getState().edges, id);
-      const previewState = previewStatus(data.remixManifestRef, data.remixRenderManifestRef, actualFingerprint, data.remixInputFingerprint);
+      const previewState = previewStatus(data.remixManifestRef, data.remixRenderManifestRef, currentRemixInputFingerprint, data.remixInputFingerprint);
       const saveManifest = async () => {
         if (!project || !manifestReady || !manifestArtifact || !manifestDraft || !manifestDirty || conflicts.length) return;
         setManifestSaving(true); setRemixError(null);
@@ -374,8 +374,7 @@ export const VideoComposeNode = memo(
       };
       const submit = async () => {
         if (!project || !exportable || nodeRevision == null) return;
-        const current = useCanvasStore.getState();
-        if (data.remixInputFingerprint && remixGraphFingerprint(current.nodes, current.edges, id) !== data.remixInputFingerprint) {
+        if (data.remixInputFingerprint && currentRemixInputFingerprint !== data.remixInputFingerprint) {
           setRemixError('上游素材或产物已变化，请重新生成合成清单');
           return;
         }

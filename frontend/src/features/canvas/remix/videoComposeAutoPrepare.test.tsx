@@ -1,17 +1,23 @@
-import { StrictMode } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode, useSyncExternalStore } from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const updateNodeData = vi.fn();
+const canvasActions = vi.hoisted(() => ({ updateNodeData: vi.fn(), setSelectedNode: vi.fn() }));
 const prepareNodeRemix = vi.hoisted(() => vi.fn());
 const remixGraphFingerprint = vi.hoisted(() => vi.fn(() => 'current-fingerprint'));
 const renderRemixManifest = vi.hoisted(() => vi.fn());
 const fetchRemixArtifact = vi.hoisted(() => vi.fn());
 const reviseRemixArtifact = vi.hoisted(() => vi.fn());
-const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[] }));
+const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[], listeners: new Set<() => void>() }));
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: Object.assign((selector: (state: unknown) => unknown) => selector({ updateNodeData, setSelectedNode: vi.fn() }), { getState: () => graphState }) }));
+vi.mock('@/stores/canvasStore', () => {
+  const state = { get nodes() { return graphState.nodes; }, get edges() { return graphState.edges; }, updateNodeData: canvasActions.updateNodeData, setSelectedNode: canvasActions.setSelectedNode };
+  return { useCanvasStore: Object.assign((selector: (value: typeof state) => unknown) => useSyncExternalStore(
+    (listener) => { graphState.listeners.add(listener); return () => graphState.listeners.delete(listener); },
+    () => selector(state),
+  ), { getState: () => state }) };
+});
 vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNodes: () => [{ id: 'timing', type: 'semanticTimelineNode', data: {} }] }));
 vi.mock('@/features/canvas/domain/nodeDisplay', () => ({ localizeNodeDisplayName: () => 'Compose' }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
@@ -33,6 +39,7 @@ describe('VideoComposeNode automatic preparation', () => {
     vi.clearAllMocks();
     graphState.nodes = [];
     graphState.edges = [];
+    graphState.listeners.clear();
     remixGraphFingerprint.mockReturnValue('current-fingerprint');
     fetchRemixArtifact.mockReset();
     reviseRemixArtifact.mockReset();
@@ -125,5 +132,16 @@ describe('VideoComposeNode automatic preparation', () => {
     fireEvent.click(screen.getByRole('button', { name: '更新清单' }));
     expect(prepareNodeRemix).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue('尚未保存')).toBeTruthy();
+  });
+
+  it('reacts to a deep ancestor fingerprint change and immediately marks the preview stale', async () => {
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixRenderManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [], resultVideoUrl: '/api/v1/projects/demo/media/out.mp4' }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(await screen.findByText('预览与导出一致')).toBeTruthy();
+    remixGraphFingerprint.mockReturnValue('deep-ancestor-revision-changed');
+    act(() => graphState.listeners.forEach((listener) => listener()));
+    expect(await screen.findByText('预览已过期')).toBeTruthy();
   });
 });

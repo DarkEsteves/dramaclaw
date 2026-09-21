@@ -96,6 +96,16 @@ describe('prepareNodeRemix', () => {
     expect(replaced).not.toBe(before);
   });
 
+  it('changes the fingerprint when a visual source URL is replaced but stale remix metadata remains', () => {
+    const staleMedia = media('video', 'a');
+    const visual = node('visual', 'videoNode', { remixRole: 'visual', videoUrl: '/take-a.mp4', previewImageUrl: '/take-a.jpg', remixMedia: staleMedia });
+    const compose = node('compose', 'videoComposeNode', {});
+    const edges = [edge('visual', 'compose')];
+    const before = remixGraphFingerprint([visual, compose], edges, 'compose');
+    const after = remixGraphFingerprint([node('visual', 'videoNode', { ...visual.data, videoUrl: '/take-b.mp4', previewImageUrl: '/take-b.jpg' }), compose], edges, 'compose');
+    expect(after).not.toBe(before);
+  });
+
   it('refuses to prepare an existing compose after narration audio was cleared', async () => {
     const nodes = [
       node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
