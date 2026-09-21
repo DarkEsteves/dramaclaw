@@ -697,6 +697,7 @@ async def test_generate_recipe_text_executes_compiled_instruction(monkeypatch):
             pass
 
         async def run(self, task):
+            captured["task"] = task
             assert "生成三屏详情页方案" in task
             assert "Produce the final text deliverable now" in task
             return SimpleNamespace(output="# 详情页方案")
@@ -725,6 +726,89 @@ async def test_generate_recipe_text_executes_compiled_instruction(monkeypatch):
     assert captured["brainclaw_profile_variant"] == BrainClawProfileVariant(
         "recipe/ecommerce-text-plan@1.0.0"
     )
+    assert "Structured output contract" not in str(captured["task"])
+    assert "JSON Schema" not in str(captured["task"])
+
+
+def test_v2_executor_contract_serializes_exact_schema_without_changing_v1_prompt():
+    base = "Compiled instruction\n\nExecution requirement:\nProduce the final text deliverable now."
+    schema = {
+        "type": "object",
+        "required": ["media_requirements"],
+        "properties": {
+            "media_requirements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["event_id", "required", "purpose", "suggested_query"],
+                },
+            }
+        },
+    }
+
+    assert recipe_runtime.append_structured_output_contract(
+        base, {"schema_version": "dramaclaw.recipe.v1"}
+    ) == base
+    v2 = recipe_runtime.append_structured_output_contract(
+        base,
+        {"schema_version": "dramaclaw.recipe.v2", "output_schema": schema},
+    )
+    assert "Return only one JSON value" in v2
+    assert json.dumps(schema, ensure_ascii=False, sort_keys=True) in v2
+    for field in ("media_requirements", "event_id", "required", "purpose", "suggested_query"):
+        assert field in v2
+
+
+@pytest.mark.asyncio
+async def test_generate_recipe_text_sends_v2_output_schema_to_executor(monkeypatch):
+    captured: dict[str, object] = {}
+    schema = {
+        "type": "object",
+        "required": ["media_requirements"],
+        "properties": {"media_requirements": {"type": "array", "items": {
+            "type": "object",
+            "required": ["event_id", "required", "purpose", "suggested_query"],
+        }}},
+    }
+    monkeypatch.setattr(
+        recipe_runtime,
+        "get_recipe_for_runtime",
+        lambda **_kwargs: {
+            "schema_version": "dramaclaw.recipe.v2",
+            "id": "reference-broll-plan",
+            "version": "1.1.0",
+            "output_kind": "text",
+            "system_prompt": "为每个事件规划 B-roll",
+            "output_schema": schema,
+            "_catalog_source": "builtin",
+        },
+    )
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            captured["system_prompt"] = _kwargs.get("system_prompt")
+
+        async def run(self, task):
+            captured["task"] = task
+            return SimpleNamespace(output='{"media_requirements":[]}')
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr(
+        "novelvideo.config.get_newapi_text_pydantic_model",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    await recipe_runtime.generate_recipe_text(
+        username="local",
+        recipe_id="reference-broll-plan",
+        node_kind="text",
+        node_prompt="判断每个事件是否需要 B-roll",
+    )
+
+    assert json.dumps(schema, ensure_ascii=False, sort_keys=True) in str(captured["task"])
+    assert "Return only one JSON value" in str(captured["task"])
+    for field in ("event_id", "required", "purpose", "suggested_query"):
+        assert field in str(captured["task"])
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,22 @@ def validate_structured_recipe_output(recipe: dict[str, Any], content: str) -> d
     return value
 
 
+def append_structured_output_contract(task: str, recipe: dict[str, Any]) -> str:
+    """Append the exact v2 JSON contract while preserving every v1 prompt byte."""
+    if recipe.get("schema_version") != "dramaclaw.recipe.v2":
+        return task
+    output_schema = recipe.get("output_schema")
+    if not isinstance(output_schema, dict) or not output_schema:
+        raise RecipeRuntimeError("v2 recipe output_schema is required for execution")
+    serialized = json.dumps(output_schema, ensure_ascii=False, sort_keys=True)
+    return (
+        f"{task}\n\nStructured output contract:\n"
+        "Return only one JSON value. Do not use Markdown fences or add explanatory text. "
+        "The JSON value must match this exact JSON Schema:\n"
+        f"{serialized}"
+    )
+
+
 def publish_structured_recipe_output(
     *, recipe: dict[str, Any], content: str, project_dir, project_id: str,
     created_by: str, upstream_refs: list[dict[str, Any]],
@@ -801,6 +817,7 @@ async def generate_recipe_text(**compile_args: Any) -> str:
         skill_version=str(skill.get("version") or "") if skill else "",
     )
     task += "\n\nExecution requirement:\nProduce the final text deliverable now."
+    task = append_structured_output_contract(task, _combined_recipe(recipes))
 
     from novelvideo.config import get_newapi_text_pydantic_model
 
