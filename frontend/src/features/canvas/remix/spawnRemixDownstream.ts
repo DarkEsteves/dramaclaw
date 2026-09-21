@@ -89,7 +89,12 @@ export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[]
   const reference = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia);
   if (reference.length !== 1) throw new Error('请先连接一个参考视频素材。');
   if (!ancestors(nodes, edges, blueprint[0].id).some((node) => node.id === reference[0].id)) throw new Error('请将参考视频连接到参考故事蓝图。');
-  const narration = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration' && node.data.remixMedia);
+  const narrationNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration');
+  if (narrationNodes.length > 1) throw new Error('旁白音频必须且只能有一个。');
+  if (narrationNodes.length === 1 && (typeof narrationNodes[0].data.audioUrl !== 'string' || !narrationNodes[0].data.audioUrl)) {
+    throw new Error('当前配音没有音频，请先生成或上传配音。');
+  }
+  const narration = narrationNodes.filter((node) => node.data.remixMedia);
   const referenceMedia = reference[0].data.remixMedia as { has_audio?: boolean };
   if (narration.length !== 1 && (narration.length > 1 || !referenceMedia.has_audio)) throw new Error('请先连接旁白音频，或使用带声音的参考视频。');
   const transcriptAncestors = ancestors(nodes, edges, words[0].id);

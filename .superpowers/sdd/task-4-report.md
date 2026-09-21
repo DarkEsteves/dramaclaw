@@ -12,6 +12,7 @@ Implemented the complete Task 4 timing and selection closure.
 - Replacing narration media immediately invalidates its connected alignment artifact and pending operation, so the script toolbar cannot keep pointing at an old alignment task. A cleared narration cannot reuse an old transcript.
 - Narration identity comparison canonicalizes both the upload API's raw 64-character digest and timing artifacts' `sha256:<digest>` form, so the same production take is accepted while a different digest still blocks export.
 - Fixed-frame edits require a complete, increasing start/end pair. Start-only, end-only, and reversed ranges remain in the controls and produce an inline error before any compile task is submitted.
+- Clearing a narration's `audioUrl` blocks compose even if its former `remixMedia`, alignment, and timing nodes are still connected; the reference video's audio cannot silently mask the cleared selected take.
 
 ## TDD evidence
 
@@ -25,13 +26,14 @@ New tests were first observed failing for:
 - narration replacement invalidating an in-flight or completed alignment.
 - production-format media hash prefix normalization;
 - start-only, end-only, and reversed fixed-frame edits.
+- cleared narration with retained media and timing state.
 
 The narration-speed gate verifies a one-second semantic event moves from frames `30–60` at 1x to `15–30` at 2x at 30 fps.
 
 ## Verification
 
 - `uv run pytest tests/test_remix_timing.py tests/test_remix_processing_tasks.py tests/test_remix_artifacts.py tests/test_remix_script_draft.py tests/test_remix_alignment.py tests/test_remix_render.py -q` — 77 passed.
-- `npm test -- --run src/features/canvas/remix` — 174 passed.
+- `npm test -- --run src/features/canvas/remix` — 175 passed.
 - `npx tsc -b --pretty false` — passed.
 - `uv run ruff check ...` for all changed Python modules/tests — passed.
 - `git diff --check` — passed.
