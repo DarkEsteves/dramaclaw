@@ -2108,7 +2108,31 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         return {};
       }
       const normalizedEdges = normalizeEdgesWithNodes(edges, state.nodes);
+      const previousEdgesById = new Map(state.edges.map((edge) => [edge.id, edge] as const));
+      const nextEdgesById = new Map(normalizedEdges.map((edge) => [edge.id, edge] as const));
+      const changedImageTargets = new Set<string>();
+      for (const edgeId of new Set([...previousEdgesById.keys(), ...nextEdgesById.keys()])) {
+        const previous = previousEdgesById.get(edgeId);
+        const next = nextEdgesById.get(edgeId);
+        const unchanged = previous && next
+          && previous.source === next.source
+          && previous.target === next.target
+          && previous.sourceHandle === next.sourceHandle
+          && previous.targetHandle === next.targetHandle
+          && JSON.stringify(previous.data ?? null) === JSON.stringify(next.data ?? null);
+        if (unchanged) continue;
+        for (const target of [previous?.target, next?.target]) {
+          const targetNode = state.nodes.find((node) => node.id === target);
+          if (targetNode && isImageGenNode(targetNode)) changedImageTargets.add(targetNode.id);
+        }
+      }
+      let nextNodes = state.nodes;
+      for (const target of changedImageTargets) {
+        const patches = visualGenerationRequestMutationPatches(nextNodes, normalizedEdges, target, {});
+        nextNodes = applyVisualGenerationRequestPatches(nextNodes, patches);
+      }
       return {
+        nodes: nextNodes,
         edges: normalizedEdges,
         history: {
           past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),

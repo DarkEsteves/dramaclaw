@@ -147,6 +147,84 @@ describe('故事板详情 · 图片生成表单', () => {
     });
   });
 
+  it('a reference edge replaced during generation rejects the old late result', async () => {
+    let resolveTask!: (value: unknown) => void;
+    vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }) as never);
+    const imageNode = emptyImageGenNode({ prompt: '旧请求' });
+    const oldReference = {
+      id: 'old-reference',
+      type: CANVAS_NODE_TYPES.upload,
+      position: { x: -300, y: 0 },
+      data: { imageUrl: '/old-reference.png' },
+    } as CanvasNode;
+    const newReference = {
+      id: 'new-reference',
+      type: CANVAS_NODE_TYPES.upload,
+      position: { x: -300, y: 200 },
+      data: { imageUrl: '/new-reference.png' },
+    } as CanvasNode;
+    useCanvasStore.getState().setCanvasData(
+      [imageNode, oldReference, newReference],
+      [{ id: 'e-old-reference-gen-1', source: 'old-reference', target: 'gen-1' }],
+    );
+    openDetail('图片节点 3');
+    fireEvent.click(within(detailPanel()).getByRole('button', { name: '生成' }));
+    await waitFor(() => expect(submitFreezoneGen).toHaveBeenCalled());
+
+    useCanvasStore.getState().replaceEdges([
+      { id: 'e-new-reference-gen-1', source: 'new-reference', target: 'gen-1' },
+    ]);
+    resolveTask({ result: { output_url: '/late-old-request.png' } });
+
+    await waitFor(() => {
+      const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
+      expect(data.remixVisualRequestRevision).toBe(2);
+      expect(data.isGenerating).toBe(false);
+      expect(data.generationTaskKey).toBeNull();
+      expect(data.imageUrl).toBeNull();
+      expect(data.generationError).toBeFalsy();
+    });
+  });
+
+  it('a reference edge replaced during generation rejects the old late error', async () => {
+    let rejectTask!: (error: Error) => void;
+    vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectTask = reject; }));
+    const imageNode = emptyImageGenNode({ prompt: '旧请求' });
+    const oldReference = {
+      id: 'old-reference',
+      type: CANVAS_NODE_TYPES.upload,
+      position: { x: -300, y: 0 },
+      data: { imageUrl: '/old-reference.png' },
+    } as CanvasNode;
+    const newReference = {
+      id: 'new-reference',
+      type: CANVAS_NODE_TYPES.upload,
+      position: { x: -300, y: 200 },
+      data: { imageUrl: '/new-reference.png' },
+    } as CanvasNode;
+    useCanvasStore.getState().setCanvasData(
+      [imageNode, oldReference, newReference],
+      [{ id: 'e-old-reference-gen-1', source: 'old-reference', target: 'gen-1' }],
+    );
+    openDetail('图片节点 3');
+    fireEvent.click(within(detailPanel()).getByRole('button', { name: '生成' }));
+    await waitFor(() => expect(submitFreezoneGen).toHaveBeenCalled());
+
+    useCanvasStore.getState().replaceEdges([
+      { id: 'e-new-reference-gen-1', source: 'new-reference', target: 'gen-1' },
+    ]);
+    rejectTask(new Error('old request failed'));
+
+    await waitFor(() => {
+      const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
+      expect(data.remixVisualRequestRevision).toBe(2);
+      expect(data.isGenerating).toBe(false);
+      expect(data.generationTaskKey).toBeNull();
+      expect(data.imageUrl).toBeNull();
+      expect(data.generationError).toBeFalsy();
+    });
+  });
+
   it('an agent generic count edit during generation rejects the old late result', async () => {
     let resolveTask!: (value: unknown) => void;
     vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }) as never);

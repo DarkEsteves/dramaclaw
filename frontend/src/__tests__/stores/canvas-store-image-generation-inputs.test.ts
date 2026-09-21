@@ -54,6 +54,25 @@ describe('canvasStore image generation input edges', () => {
     expect(useCanvasStore.getState().nodes.find((item) => item.id === 'image')?.data.remixVisualRequestRevision).toBe(6);
   });
 
+  it('replaceEdges uses the same request and compose invalidation path for changed image inputs', () => {
+    useCanvasStore.getState().replaceEdges([
+      { id: 'e-reference-image', source: 'reference', target: 'image' },
+      { id: 'e-image-compose', source: 'image', target: 'compose' },
+    ]);
+
+    expect(useCanvasStore.getState().nodes.find((item) => item.id === 'image')?.data).toMatchObject({
+      remixVisualRequestRevision: 5,
+      remixVisualOutputCurrent: false,
+      isGenerating: false,
+      generationTaskKey: null,
+    });
+    expect(useCanvasStore.getState().nodes.find((item) => item.id === 'compose')?.data).toMatchObject({
+      remixInputsCurrent: false,
+      remixOperationId: null,
+      resultVideoUrl: null,
+    });
+  });
+
   it('generic request-field edits bump revision while result and status patches do not', () => {
     useCanvasStore.getState().updateNodeData('image', {
       generationError: 'provider failed',

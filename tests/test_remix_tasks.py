@@ -91,7 +91,7 @@ def test_repeated_render_request_returns_same_task_without_requeue(client):
     assert len(queued) == 1
 
 
-def test_render_retries_operation_left_without_task_id(client, monkeypatch: pytest.MonkeyPatch):
+def test_render_retries_only_after_proven_pre_accept_rejection(client, monkeypatch: pytest.MonkeyPatch):
     from novelvideo.api.routes import remix as routes
 
     api, queued = client
@@ -106,19 +106,45 @@ def test_render_retries_operation_left_without_task_id(client, monkeypatch: pyte
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise RuntimeError("queue unavailable")
+            raise ValueError("invalid queue request")
         return await original_enqueue(*args, **kwargs)
 
     monkeypatch.setattr(backend, "enqueue_project_task", fail_once)
     monkeypatch.setattr(routes, "get_task_backend", lambda: backend)
 
-    with pytest.raises(RuntimeError, match="queue unavailable"):
+    with pytest.raises(ValueError, match="invalid queue request"):
         api.post(url, json=body)
     retried = api.post(url, json=body)
 
     assert retried.status_code == 200
     assert retried.json()["data"]["task_id"] == "task-1"
     assert len(queued) == 1
+
+
+def test_render_timeout_keeps_submission_for_reconciliation_without_requeue(client, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    from novelvideo.api.routes import remix as routes
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
+    backend = routes.get_task_backend()
+
+    async def ambiguous_timeout(*args, **kwargs):
+        raise TimeoutError("accepted response was lost")
+
+    monkeypatch.setattr(backend, "enqueue_project_task", ambiguous_timeout)
+    monkeypatch.setattr(routes, "get_task_backend", lambda: backend)
+    body = {"revision": 1, "idempotency_key": "render-ambiguous", "node_revision": 4}
+    with pytest.raises(TimeoutError, match="response was lost"):
+        api.post(f"{BASE}/{created['id']}/render", json=body)
+
+    operation = RemixOperationStore(tmp_path, "demo").list(limit=1)[0]
+    assert operation["status"] == "pending_reconciliation"
+    assert operation["submission_owner"]
+    repeated = api.post(f"{BASE}/{created['id']}/render", json=body)
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_status"] == "pending_reconciliation"
+    assert queued == []
 
 
 def test_render_does_not_requeue_when_result_published_before_task_binding(client, tmp_path):
@@ -334,6 +360,38 @@ def test_reference_analysis_action_queues_project_media_without_speech_engine(cl
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"video").hexdigest()
 
 
+def test_processing_action_transport_error_is_reconciled_without_resubmission(client, tmp_path, monkeypatch):
+    from novelvideo.api.routes import remix as routes
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    media = tmp_path / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"video")
+    backend = routes.get_task_backend()
+
+    async def disconnected_after_accept(*args, **kwargs):
+        raise ConnectionError("connection closed after submit")
+
+    monkeypatch.setattr(backend, "enqueue_project_task", disconnected_after_accept)
+    monkeypatch.setattr(routes, "get_task_backend", lambda: backend)
+    body = {
+        "action": "analyze_reference_video",
+        "payload": {"media_path": "media/reference.mp4"},
+        "idempotency_key": "analysis-ambiguous",
+        "node_revision": 1,
+    }
+    with pytest.raises(ConnectionError, match="after submit"):
+        api.post("/api/v1/projects/demo/freezone/remix/actions", json=body)
+
+    operation = RemixOperationStore(tmp_path, "demo").list(limit=1)[0]
+    assert operation["status"] == "pending_reconciliation"
+    repeated = api.post("/api/v1/projects/demo/freezone/remix/actions", json=body)
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_status"] == "pending_reconciliation"
+    assert queued == []
+
+
 def test_processing_action_rejects_unsafe_media_and_unknown_action(client):
     api, queued = client
     base = "/api/v1/projects/demo/freezone/remix/actions"
@@ -449,3 +507,35 @@ def test_runner_resolves_only_saved_project_local_media(tmp_path, monkeypatch: p
     )
     assert recorded["status"] == "needs_confirmation"
     assert recorded["output_refs"] == [{"project_path": result["output_path"]}]
+
+
+def test_render_runner_rehashes_manifest_media_immediately_before_render(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.task_backend.runners import remix as runner
+
+    for path in (tmp_path / "media/background.png", tmp_path / "media/narration.wav"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    artifact = RemixArtifactStore(tmp_path, "demo").create(
+        schema="composition_manifest.v1", payload=manifest(), upstream_refs=[]
+    )
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.start(
+        idempotency_key="mutated-render", input_refs=[{"artifact_id": artifact["id"], "revision": 1}],
+        producer_version="remix-render.v1", normalized_parameters={"job_id": "b" * 64}, node_revision=2,
+    )
+    (tmp_path / "media/background.png").write_bytes(b"replacement")
+    monkeypatch.setattr(
+        runner, "render_manifest",
+        lambda *args, **kwargs: pytest.fail("changed media must be rejected before render"),
+    )
+
+    guarded = runner._with_operation_failure_transition(runner.run_remix_render)
+    with pytest.raises(ValueError, match="changed since manifest was saved"):
+        guarded(
+            {"payload": {"job_id": "b" * 64, "manifest_ref": {"artifact_id": artifact["id"], "revision": 1},
+                         "node_revision": 2, "operation_id": operation["operation_id"]}},
+            SimpleNamespace(output_dir=str(tmp_path), project_id="demo"),
+        )
+    assert operations.get(operation["operation_id"])["status"] == "failed"

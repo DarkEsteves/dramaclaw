@@ -5090,7 +5090,7 @@ async def _dispatch_ready_remix_workflow_actions(
     *, ctx: Any, state_dir: Path, output_dir: Path, run: dict[str, Any]
 ) -> dict[str, Any]:
     """Dispatch dependency-ready deterministic remix steps from one approved run."""
-    from novelvideo.api.routes.remix import prepare_registered_action
+    from novelvideo.api.routes.remix import prepare_registered_action, record_enqueue_exception
     from novelvideo.freezone.remix.operations import RemixOperationStore
     from novelvideo.freezone.remix.store import RemixArtifactStore
     from novelvideo.freezone.workflow_contract_generated import PROCESSING_ACTION_TYPES
@@ -5146,41 +5146,8 @@ async def _dispatch_ready_remix_workflow_actions(
         task_key = project_task_state_key(
             prepared["task_type"], ctx.project_id, 0, scope=scope
         )
-        if not operation.get("task_id") and operation.get("status") != "needs_confirmation":
-            owner = uuid.uuid4().hex
-            fencing_token = await asyncio.to_thread(
-                operations.claim_submission, operation["operation_id"], owner=owner,
-            )
-            if fencing_token is None:
-                continue
-            try:
-                queued = await get_task_backend().enqueue_project_task(
-                    ctx,
-                    product_surface="freezone",
-                    task_type=prepared["task_type"],
-                    queue_kind=prepared["queue_kind"],
-                    episode=0,
-                    scope=scope,
-                    payload={
-                        **prepared["task_payload"],
-                        "operation_id": operation["operation_id"],
-                        "workflow_run_id": run["run_id"],
-                        "workflow_node_id": node_id,
-                    },
-                )
-            except Exception:
-                await asyncio.to_thread(
-                    operations.release_submission, operation["operation_id"],
-                    owner=owner, fencing_token=fencing_token,
-                )
-                raise
-            operation = await asyncio.to_thread(
-                operations.bind_task,
-                operation["operation_id"],
-                task_id=queued.task_state.task_id,
-                owner=owner,
-                fencing_token=fencing_token,
-            )
+        # Persist the workflow → operation identity before crossing the enqueue
+        # boundary, so a crash can recover the exact deterministic project task.
         run = await asyncio.to_thread(
             bind_workflow_action_processing_operation,
             project_dir=state_dir,
@@ -5190,6 +5157,78 @@ async def _dispatch_ready_remix_workflow_actions(
             action=action_name,
             operation_id=operation["operation_id"],
         )
+
+        async def reconcile_ambiguous_submission(current: dict[str, Any]) -> dict[str, Any]:
+            if current.get("task_id") or current.get("status") != "pending_reconciliation":
+                return current
+            task = await asyncio.to_thread(
+                get_task_manager().get_task_for_project,
+                ctx,
+                prepared["task_type"],
+                0,
+                beat_num=None,
+                scope=scope,
+            )
+            owner = current.get("submission_owner")
+            fence = current.get("submission_fence")
+            if task is None or not owner or type(fence) is not int:
+                return current
+            try:
+                return await asyncio.to_thread(
+                    operations.bind_task,
+                    current["operation_id"],
+                    task_id=task.task_id,
+                    owner=owner,
+                    fencing_token=fence,
+                )
+            except ValueError:
+                return await asyncio.to_thread(operations.get, current["operation_id"])
+
+        operation = await reconcile_ambiguous_submission(operation)
+        if operation.get("status") == "pending_reconciliation" and not operation.get("task_id"):
+            continue
+        if not operation.get("task_id") and operation.get("status") != "needs_confirmation":
+            owner = uuid.uuid4().hex
+            fencing_token = await asyncio.to_thread(
+                operations.claim_submission, operation["operation_id"], owner=owner,
+            )
+            if fencing_token is None:
+                operation = await asyncio.to_thread(operations.get, operation["operation_id"])
+                operation = await reconcile_ambiguous_submission(operation)
+                if not operation.get("task_id"):
+                    continue
+            else:
+                try:
+                    queued = await get_task_backend().enqueue_project_task(
+                        ctx,
+                        product_surface="freezone",
+                        task_type=prepared["task_type"],
+                        queue_kind=prepared["queue_kind"],
+                        episode=0,
+                        scope=scope,
+                        payload={
+                            **prepared["task_payload"],
+                            "operation_id": operation["operation_id"],
+                            "workflow_run_id": run["run_id"],
+                            "workflow_node_id": node_id,
+                        },
+                    )
+                except Exception as exc:
+                    await record_enqueue_exception(
+                        operations,
+                        operation["operation_id"],
+                        owner=owner,
+                        fencing_token=fencing_token,
+                        error=exc,
+                    )
+                    raise
+                operation = await asyncio.to_thread(
+                    operations.bind_task,
+                    operation["operation_id"],
+                    task_id=queued.task_state.task_id,
+                    owner=owner,
+                    fencing_token=fencing_token,
+                )
         run = await asyncio.to_thread(
             update_workflow_run,
             project_dir=state_dir,

@@ -342,6 +342,32 @@ def _operation_view(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def record_enqueue_exception(
+    operations: RemixOperationStore,
+    operation_id: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    error: Exception,
+) -> None:
+    """Release only definite pre-accept rejections; preserve ambiguous submissions."""
+    if isinstance(error, ValueError):
+        await run_in_threadpool(
+            operations.release_submission,
+            operation_id,
+            owner=owner,
+            fencing_token=fencing_token,
+        )
+        return
+    await run_in_threadpool(
+        operations.submission_outcome_unknown,
+        operation_id,
+        owner=owner,
+        fencing_token=fencing_token,
+        reason=f"enqueue outcome unknown: {type(error).__name__}",
+    )
+
+
 def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     expected = {
         "transcribe_media": ({"media_path", "language"}, set()),
@@ -486,10 +512,10 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             ctx, product_surface="freezone", task_type=task_type, queue_kind=prepared["queue_kind"],
             episode=0, scope=scope, payload={**prepared["task_payload"], "operation_id": operation["operation_id"]},
         )
-    except Exception:
-        await run_in_threadpool(
-            operations.release_submission, operation["operation_id"],
-            owner=owner, fencing_token=fencing_token,
+    except Exception as exc:
+        await record_enqueue_exception(
+            operations, operation["operation_id"], owner=owner,
+            fencing_token=fencing_token, error=exc,
         )
         raise
     await run_in_threadpool(
@@ -604,10 +630,10 @@ async def render_artifact(
             "node_revision": body.node_revision,
             },
         )
-    except Exception:
-        await run_in_threadpool(
-            operations.release_submission, operation["operation_id"],
-            owner=owner, fencing_token=fencing_token,
+    except Exception as exc:
+        await record_enqueue_exception(
+            operations, operation["operation_id"], owner=owner,
+            fencing_token=fencing_token, error=exc,
         )
         raise
     await run_in_threadpool(

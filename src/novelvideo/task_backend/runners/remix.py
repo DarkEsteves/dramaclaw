@@ -164,6 +164,15 @@ def _project_media_paths(project_dir: Path, manifest: dict[str, Any]) -> dict[st
         candidate = (root / relative).resolve()
         if not candidate.is_relative_to(root) or not candidate.is_file():
             raise FileNotFoundError(f"bound media is unavailable: {media_id}")
+        expected_hash = binding.get("media_hash")
+        if not isinstance(expected_hash, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", expected_hash):
+            raise ValueError(f"media binding {media_id} lacks a valid content hash")
+        digest = hashlib.sha256()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1_048_576), b""):
+                digest.update(chunk)
+        if f"sha256:{digest.hexdigest()}" != expected_hash:
+            raise ValueError(f"bound media changed since manifest was saved: {media_id}")
         resolved[media_id] = candidate
     return resolved
 

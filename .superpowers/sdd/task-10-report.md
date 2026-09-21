@@ -150,3 +150,21 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   frontend recovery, store, and Agent-command tests passed; TypeScript, Ruff, and diff
   checks passed. The preceding 265-test frontend recovery run remains green for the
   same implementation series.
+
+## Absolute recovery review closure
+
+- Workflow actions persist their processing operation identity before enqueue. A crash
+  or ambiguous response can therefore find the deterministic project task, fenced-bind
+  it to the original operation, and resume the existing action without another paid
+  submission.
+- Enqueue failures release ownership only for a proven pre-accept validation error.
+  Timeouts, disconnects, and other ambiguous failures retain the fenced claim in
+  `pending_reconciliation`; direct render, processing actions, and workflow dispatch
+  all use this rule.
+- The render runner hashes every manifest-bound media file immediately before FFmpeg.
+  An in-place file replacement fails the operation before any render starts.
+- Bulk `replaceEdges` now uses the same centralized image request invalidation as
+  individual edge changes: it versions affected requests once, clears stale task state,
+  invalidates reachable compose output, and rejects late success or error callbacks.
+- Final absolute-review verification: 264 Python recovery/workflow tests and 83 focused
+  frontend recovery/store tests passed; TypeScript, Ruff, and diff checks passed.

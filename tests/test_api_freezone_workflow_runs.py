@@ -2913,6 +2913,127 @@ def test_concurrent_workflow_processing_dispatch_enqueues_once(
     assert calls == 1
 
 
+def test_workflow_processing_persists_operation_before_ambiguous_enqueue_and_reconciles_task(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.workflow_runs import list_workflow_runs
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"reference")
+    accepted_task = SimpleNamespace(
+        task_id="accepted-before-timeout", task_type="remix_analyze_reference_video",
+        status="pending", scope=None,
+    )
+
+    class AmbiguousBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            accepted_task.scope = kwargs["scope"]
+            raise TimeoutError("queue accepted but response was lost")
+
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: AmbiguousBackend())
+    body = {
+        "idempotency_key": "workflow-ambiguous-enqueue",
+        "actions": [{
+            "node_id": "analysis", "action": "analyze_reference_video",
+            "node_revision": 4, "payload": {"media_path": "media/reference.mp4"},
+        }],
+    }
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    with pytest.raises(TimeoutError, match="response was lost"):
+        workflow_run_client.post(base, json=body)
+
+    run = list_workflow_runs(
+        project_dir=workflow_run_client.state_dir, canvas_id="default"
+    )[0]
+    action = run["actions"][0]
+    assert action["processing_operation_id"]
+    operation = RemixOperationStore(workflow_run_client.state_dir, "proj_demo").get(
+        action["processing_operation_id"]
+    )
+    assert operation["status"] == "pending_reconciliation"
+    assert operation["task_id"] == ""
+
+    monkeypatch.setattr(
+        freezone, "get_task_manager",
+        lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: accepted_task),
+    )
+    recovered = workflow_run_client.post(base, json=body)
+
+    assert recovered.status_code == 200
+    recovered_action = recovered.json()["data"]["actions"][0]
+    assert recovered_action["processing_operation_id"] == operation["operation_id"]
+    assert recovered_action["status"] == "running"
+    assert RemixOperationStore(workflow_run_client.state_dir, "proj_demo").get(
+        operation["operation_id"]
+    )["task_id"] == accepted_task.task_id
+
+
+def test_workflow_processing_recovers_task_after_crash_and_submission_lease_expiry(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    import novelvideo.freezone.remix.operations as operations_module
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.workflow_runs import list_workflow_runs
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    now = [1_000.0]
+    monkeypatch.setattr(operations_module.time, "time", lambda: now[0])
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"reference")
+    accepted_task = SimpleNamespace(
+        task_id="accepted-before-crash", task_type="remix_analyze_reference_video",
+        status="pending", scope=None,
+    )
+
+    class CrashAfterAcceptBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            accepted_task.scope = kwargs["scope"]
+            raise SimulatedProcessCrash()
+
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: CrashAfterAcceptBackend())
+    body = {
+        "idempotency_key": "workflow-crash-window",
+        "actions": [{
+            "node_id": "analysis", "action": "analyze_reference_video",
+            "node_revision": 4, "payload": {"media_path": "media/reference.mp4"},
+        }],
+    }
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    with pytest.raises(SimulatedProcessCrash):
+        workflow_run_client.post(base, json=body)
+
+    action = list_workflow_runs(
+        project_dir=workflow_run_client.state_dir, canvas_id="default"
+    )[0]["actions"][0]
+    operation = RemixOperationStore(workflow_run_client.state_dir, "proj_demo").get(
+        action["processing_operation_id"]
+    )
+    assert operation["status"] == "pending"
+    assert operation["submission_owner"]
+
+    now[0] += 61
+    monkeypatch.setattr(
+        freezone, "get_task_manager",
+        lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: accepted_task),
+    )
+    recovered = workflow_run_client.post(base, json=body)
+
+    assert recovered.status_code == 200
+    assert recovered.json()["data"]["actions"][0]["status"] == "running"
+    durable = RemixOperationStore(workflow_run_client.state_dir, "proj_demo").get(
+        operation["operation_id"]
+    )
+    assert durable["task_id"] == accepted_task.task_id
+    assert durable["submission_bound_fence"] == operation["submission_fence"]
+
+
 def test_workflow_run_processing_action_requires_exact_registered_payload(
     workflow_run_client: TestClient,
 ) -> None:

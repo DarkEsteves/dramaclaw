@@ -238,6 +238,32 @@ class RemixOperationStore:
                     changes.update(status="pending", reconciliation_reason="")
                 self._update(operation_id, guard, **changes)
 
+    def submission_outcome_unknown(
+        self,
+        operation_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Fence an ambiguous enqueue without allowing a replacement paid submission."""
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if (
+                record.get("submission_owner") != owner
+                or record.get("submission_fence") != fencing_token
+                or record.get("task_id")
+            ):
+                return record
+            if record["status"] not in {"pending", "pending_reconciliation"}:
+                return record
+            return self._update(
+                operation_id,
+                guard,
+                status="pending_reconciliation",
+                reconciliation_reason=reason.strip() or "enqueue_outcome_unknown",
+            )
+
     def mark_stale(self, operation_id: str, *, reason: str) -> dict[str, Any]:
         with self._locked() as guard:
             record = self._read(operation_id)
