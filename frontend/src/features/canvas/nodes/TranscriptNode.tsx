@@ -3,7 +3,7 @@ import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflo
 import { FileText } from 'lucide-react';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { TranscriptNodeData } from '@/features/canvas/domain/canvasNodes';
-import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, timelineWords, transcriptPlaybackParts, transcriptSrt, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
+import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, speechReviewItems, timelineWords, transcriptPlaybackParts, transcriptSrt, type SpeechMismatch, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArtifactApi';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
@@ -57,6 +57,17 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     ? data.transcriptText
     : data.words.map((word) => word.text).join('');
   const playbackParts = useMemo(() => transcriptPlaybackParts(transcriptText, data.words), [transcriptText, data.words]);
+  const speechMismatch = data.speechMismatch as SpeechMismatch | null | undefined;
+  const speechReview = useMemo(() => speechReviewItems(speechMismatch), [speechMismatch]);
+  const hasSpeechReview = Boolean(speechMismatch?.report);
+  const reviewScript = () => {
+    const expected = (data.pendingScriptRef ?? scriptRef) as RemixArtifactRef | null | undefined;
+    const scriptNode = nodes.find((node) => {
+      const ref = node.data.remixScriptRef as RemixArtifactRef | null | undefined;
+      return expected && ref?.artifactId === expected.artifactId && ref.revision === expected.revision;
+    });
+    if (scriptNode) setSelectedNode(scriptNode.id);
+  };
   useEffect(() => {
     const media = mediaRef.current;
     if (!media) return;
@@ -125,7 +136,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       const task = await submitRemixProcessAction(project, mode === 'align'
         ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
         : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
-      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
+      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, reviewArtifactRef: null, speechMismatch: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
       setShowWordDetails(false);
       setOperationId(task.operation_id);
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
@@ -190,7 +201,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         }
         if (payload.status === 'script_mismatch') {
           const message = '脚本与音频不一致，请核对台词后重新对齐';
-          updateNodeData(id, { artifactRef: null, operationId: null, pendingScriptRef: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
+          updateNodeData(id, { artifactRef: null, reviewArtifactRef: { artifactId: artifact.id, revision: artifact.revision }, speechMismatch: payload.mismatch ?? null, operationId: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
           setError(message);
           setOperationId(null);
           return;
@@ -264,6 +275,13 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
         {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.unresolved?.[0] || (data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐')}</p>}
+        {hasSpeechReview && <div className="mx-2 mb-2 rounded-[12px] border border-white/10 bg-surface-field p-2 text-xs text-text-muted">
+          <ul className="space-y-1">{(speechReview.length ? speechReview : ['对齐覆盖不完整，请核对台词']).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+          <div className="mt-2 flex gap-2">
+            <button type="button" onClick={reviewScript} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>校对台词</button>
+            <button type="button" disabled={!scriptRef || busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>重新对齐</button>
+          </div>
+        </div>}
         {data.words.length > 0 && <><p className="whitespace-pre-wrap px-2 py-2 text-[13px] leading-6 text-text-dark">{playbackParts.map((part, index) => part.startUs === undefined
           ? <span key={index}>{part.text}</span>
           : <button key={index} type="button" aria-label={`跳转到 ${part.text}，${stamp(part.startUs)}`} aria-current={activePartIndex === index ? 'true' : undefined} onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = part.startUs! / 1_000_000; setActivePartIndex(index); }} className={`nodrag rounded-sm text-inherit hover:bg-white/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/50 ${activePartIndex === index ? 'bg-primary/25' : ''}`}>{part.text}</button>)}</p><button type="button" onClick={() => setShowWordDetails((current) => !current)} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mx-2 my-1`}>{showWordDetails ? '收起逐词校对' : `展开逐词校对（${data.words.length}）`}</button></>}

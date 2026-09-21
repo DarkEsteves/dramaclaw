@@ -177,3 +177,53 @@ def test_align_script_keeps_single_line_colon_as_spoken_text(tmp_path: Path) -> 
         ),
     )
     assert result["words"][0]["start_char"] == 0
+
+
+def test_align_script_preserves_match_report_and_maps_script_ranges_after_role_prefixes(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "dialogue.wav"
+    media.write_bytes(b"voice")
+    report = {
+        "normalized_script": "你好再见",
+        "normalized_asr": "你号再见",
+        "matched_characters": 3,
+        "script_characters": 4,
+        "character_coverage": 0.75,
+        "required_script_covered": True,
+        "substitutions": [{
+            "script_range": {"text": "好", "start_char": 1, "end_char": 2, "normalized_start": 1, "normalized_end": 2},
+            "asr_range": {"text": "号", "start_char": 1, "end_char": 2, "normalized_start": 1, "normalized_end": 2},
+            "confidence": "low",
+            "provenance": "asr_comparison",
+        }],
+        "insertions": [],
+        "omissions": [],
+    }
+
+    result = align_script(
+        media,
+        {"revision": 2, "language": "zh", "dialogue": "男：你好\n女：再见"},
+        aligner=FakeSpeechAligner(
+            transcription={"status": "completed", "words": []},
+            alignment={
+                "status": "completed",
+                "match_report": report,
+                "words": [
+                    {"text": "你", "start_char": 0, "end_char": 1, "start_us": 0, "end_us": 100_000},
+                    {"text": "好", "start_char": 1, "end_char": 2, "start_us": 100_000, "end_us": 200_000},
+                    {"text": "再", "start_char": 3, "end_char": 4, "start_us": 300_000, "end_us": 400_000},
+                    {"text": "见", "start_char": 4, "end_char": 5, "start_us": 400_000, "end_us": 500_000},
+                ],
+            },
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert result["match_report"]["substitutions"][0]["script_range"] == {
+        "text": "好",
+        "start_char": 3,
+        "end_char": 4,
+        "normalized_start": 1,
+        "normalized_end": 2,
+    }

@@ -8,6 +8,7 @@ import os
 import subprocess
 import json
 import re
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
@@ -81,7 +82,40 @@ def align_script(
             word["start_char"] = original_positions[start]
             word["end_char"] = original_positions[end - 1] + 1
         result["transcript"] = text
+    if original_positions is not None:
+        _map_match_report_to_original_script(result, original_positions)
     return result
+
+
+def _map_match_report_to_original_script(
+    result: dict[str, Any], original_positions: list[int]
+) -> None:
+    report = result.get("match_report")
+    if not isinstance(report, dict):
+        mismatch = result.get("mismatch")
+        report = mismatch.get("report") if isinstance(mismatch, dict) else None
+    if not isinstance(report, dict):
+        return
+    for key in ("substitutions", "omissions"):
+        differences = report.get(key)
+        if not isinstance(differences, list):
+            continue
+        for difference in differences:
+            span = difference.get("script_range") if isinstance(difference, dict) else None
+            if not isinstance(span, dict):
+                continue
+            start, end = span.get("start_char"), span.get("end_char")
+            if not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if start < end and end <= len(original_positions):
+                span["start_char"] = original_positions[start]
+                span["end_char"] = original_positions[end - 1] + 1
+            elif start == end:
+                span["start_char"] = span["end_char"] = (
+                    original_positions[start]
+                    if start < len(original_positions)
+                    else original_positions[-1] + 1
+                )
 
 
 _SPEAKER_PREFIX = re.compile(r"^\s*[^：:\n]{1,24}[：:]\s*")
@@ -246,13 +280,16 @@ def _normalize_result(
     transcript = script_text if script_text is not None else raw.get("transcript")
     if not isinstance(transcript, str):
         transcript = "".join(word["text"] for word in words)
-    return {
+    normalized = {
         **common,
         "status": "completed",
         "transcript": transcript,
         "words": words,
         "confidence_available": any(word["confidence"] is not None for word in words),
     }
+    if isinstance(raw.get("match_report"), dict):
+        normalized["match_report"] = deepcopy(raw["match_report"])
+    return normalized
 
 
 def _normalize_words(raw_words: object, script_text: str | None) -> list[dict[str, Any]]:

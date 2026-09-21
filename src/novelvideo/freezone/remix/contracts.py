@@ -39,6 +39,47 @@ class WordSpan(_Contract):
         return self
 
 
+class NormalizedTextRange(_Contract):
+    """One normalized comparison range mapped back to source code-point offsets."""
+
+    text: str
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+    normalized_start: int = Field(ge=0)
+    normalized_end: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_ranges(self) -> "NormalizedTextRange":
+        if self.end_char < self.start_char or self.normalized_end < self.normalized_start:
+            raise ValueError("comparison ranges must be ordered")
+        return self
+
+
+class SpeechDifference(_Contract):
+    """A reviewable difference; ASR evidence is deliberately low confidence."""
+
+    script_range: NormalizedTextRange
+    asr_range: NormalizedTextRange
+    confidence: Literal["low"] = "low"
+    provenance: Literal["asr_comparison"] = "asr_comparison"
+
+
+class MatchReport(_Contract):
+    """Normalized ASR/script comparison without treating ASR as ground truth."""
+
+    normalized_script: str
+    normalized_asr: str
+    matched_characters: int = Field(ge=0)
+    script_characters: int = Field(ge=0)
+    character_coverage: float = Field(ge=0, le=1)
+    required_script_covered: bool
+    substitutions: list[SpeechDifference]
+    insertions: list[SpeechDifference]
+    omissions: list[SpeechDifference]
+    provenance: Literal["whisperx_asr_comparison"] = "whisperx_asr_comparison"
+    asr_is_ground_truth: Literal[False] = False
+
+
 class WordTimeline(_Contract):
     schema_name: Literal["word_timeline.v1"] | None = Field(
         default=None, alias="schema"
@@ -53,6 +94,7 @@ class WordTimeline(_Contract):
     confidence_available: bool | None = None
     words: list[WordSpan]
     mismatch: dict[str, Any] | None = None
+    match_report: MatchReport | None = None
 
     @model_validator(mode="after")
     def _validate_status_and_source(self) -> "WordTimeline":

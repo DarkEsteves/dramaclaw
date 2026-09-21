@@ -2,8 +2,99 @@
 
 from __future__ import annotations
 
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
+
+from .contracts import MatchReport, NormalizedTextRange, SpeechDifference
+
+
+MIN_SCRIPT_CHARACTER_COVERAGE = 0.8
+
+
+def compare_spoken_script(script: str, asr: str) -> MatchReport:
+    """Compare spoken characters while retaining offsets into both source strings.
+
+    Punctuation, spacing, case and compatibility forms do not affect coverage.
+    Differences are low confidence evidence because an ASR hypothesis is not an
+    authoritative transcript of the recorded performance.
+    """
+    script_chars, script_offsets = _normalized_characters(script)
+    asr_chars, asr_offsets = _normalized_characters(asr)
+    normalized_script = "".join(script_chars)
+    normalized_asr = "".join(asr_chars)
+    substitutions: list[SpeechDifference] = []
+    insertions: list[SpeechDifference] = []
+    omissions: list[SpeechDifference] = []
+    matched = 0
+    for tag, script_start, script_end, asr_start, asr_end in SequenceMatcher(
+        None, normalized_script, normalized_asr, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            matched += script_end - script_start
+            continue
+        difference = SpeechDifference(
+            script_range=_source_range(
+                script, script_offsets, script_start, script_end
+            ),
+            asr_range=_source_range(asr, asr_offsets, asr_start, asr_end),
+        )
+        if tag == "replace":
+            substitutions.append(difference)
+        elif tag == "insert":
+            insertions.append(difference)
+        else:
+            omissions.append(difference)
+    script_count = len(normalized_script)
+    coverage = matched / script_count if script_count else float(not normalized_asr)
+    return MatchReport(
+        normalized_script=normalized_script,
+        normalized_asr=normalized_asr,
+        matched_characters=matched,
+        script_characters=script_count,
+        character_coverage=coverage,
+        required_script_covered=not omissions,
+        substitutions=substitutions,
+        insertions=insertions,
+        omissions=omissions,
+    )
+
+
+def _normalized_characters(text: str) -> tuple[list[str], list[tuple[int, int]]]:
+    characters: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    for index, character in enumerate(text):
+        for normalized in unicodedata.normalize("NFKC", character).casefold():
+            if normalized.isalnum():
+                characters.append(normalized)
+                offsets.append((index, index + 1))
+    return characters, offsets
+
+
+def _source_range(
+    source: str,
+    offsets: list[tuple[int, int]],
+    normalized_start: int,
+    normalized_end: int,
+) -> NormalizedTextRange:
+    if normalized_start < normalized_end:
+        start_char = offsets[normalized_start][0]
+        end_char = offsets[normalized_end - 1][1]
+    else:
+        start_char = (
+            offsets[normalized_start][0]
+            if normalized_start < len(offsets)
+            else len(source)
+        )
+        end_char = start_char
+    return NormalizedTextRange(
+        text=source[start_char:end_char],
+        start_char=start_char,
+        end_char=end_char,
+        normalized_start=normalized_start,
+        normalized_end=normalized_end,
+    )
 
 
 class WhisperXSpeechAligner:
@@ -35,12 +126,32 @@ class WhisperXSpeechAligner:
         transcript = "".join(str(row.get("text", "")) for row in segments)
         if not transcript.strip():
             return {"status": "no_speech", "words": []}
-        if _script_check(transcript) != _script_check(script):
+        report = compare_spoken_script(script, transcript)
+        serialized_report = report.model_dump(mode="json")
+        if report.omissions:
             return {
                 "status": "script_mismatch", "words": [],
-                "mismatch": {"reason": "ASR transcript does not match the script"},
+                "mismatch": {
+                    "reason": "ASR omitted required script text",
+                    "report": serialized_report,
+                },
             }
-        return self._force_align_characters(whisperx, audio, script, language, segments)
+        if report.character_coverage < MIN_SCRIPT_CHARACTER_COVERAGE:
+            return {
+                "status": "script_mismatch", "words": [],
+                "mismatch": {
+                    "reason": "ASR character coverage below alignment threshold",
+                    "minimum_character_coverage": MIN_SCRIPT_CHARACTER_COVERAGE,
+                    "report": serialized_report,
+                },
+            }
+        result = self._force_align_characters(
+            whisperx, audio, script, language, segments
+        )
+        result["match_report"] = serialized_report
+        if result["status"] == "script_mismatch":
+            result.setdefault("mismatch", {})["report"] = serialized_report
+        return result
 
     def _recognize(self, media_path: Path, language: str):
         try:
@@ -121,17 +232,31 @@ class WhisperXSpeechAligner:
                 "mismatch": {"reason": "forced alignment did not preserve the script"},
             }
         words = []
+        untimed_required: list[int] = []
         for index, char in enumerate(chars):
             letter = char["char"]
             if letter.isspace() or "start" not in char or "end" not in char:
+                if _is_required_character(letter):
+                    untimed_required.append(index)
                 continue
             start, end = float(char["start"]), float(char["end"])
             if end <= start:
+                if _is_required_character(letter):
+                    untimed_required.append(index)
                 continue
             words.append({
                 "text": letter, "start_char": index, "end_char": index + 1,
                 "start": start, "end": end,
             })
+        if untimed_required:
+            return {
+                "status": "script_mismatch",
+                "words": [],
+                "mismatch": {
+                    "reason": "forced alignment left required script characters untimed",
+                    "untimed_script_ranges": _contiguous_ranges(untimed_required),
+                },
+            }
         if not words:
             return {
                 "status": "script_mismatch", "words": [],
@@ -140,5 +265,18 @@ class WhisperXSpeechAligner:
         return {"status": "completed", "transcript": text, "words": words}
 
 
-def _script_check(text: str) -> str:
-    return "".join(character for character in text.casefold() if not character.isspace())
+def _is_required_character(value: object) -> bool:
+    return any(
+        character.isalnum()
+        for character in unicodedata.normalize("NFKC", str(value))
+    )
+
+
+def _contiguous_ranges(indices: list[int]) -> list[dict[str, int]]:
+    ranges: list[dict[str, int]] = []
+    for index in indices:
+        if ranges and ranges[-1]["end_char"] == index:
+            ranges[-1]["end_char"] = index + 1
+        else:
+            ranges.append({"start_char": index, "end_char": index + 1})
+    return ranges

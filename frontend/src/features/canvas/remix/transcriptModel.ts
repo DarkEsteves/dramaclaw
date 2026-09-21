@@ -43,6 +43,36 @@ export interface TranscriptTimeline extends Record<string, unknown> {
   status: string;
   words: TimelineWord[];
   transcript?: string | null;
+  mismatch?: SpeechMismatch | null;
+}
+
+interface SpeechTextRange { text?: unknown; start_char?: unknown; end_char?: unknown }
+interface SpeechDifference { script_range?: SpeechTextRange; asr_range?: SpeechTextRange }
+interface SpeechMatchReport {
+  substitutions?: unknown;
+  insertions?: unknown;
+  omissions?: unknown;
+  character_coverage?: unknown;
+}
+export interface SpeechMismatch { reason?: unknown; report?: SpeechMatchReport | null }
+
+function differences(value: unknown): SpeechDifference[] {
+  return Array.isArray(value) ? value.filter((item): item is SpeechDifference => Boolean(item && typeof item === 'object')) : [];
+}
+
+function rangeText(value: SpeechTextRange | undefined): string {
+  return typeof value?.text === 'string' ? value.text : '';
+}
+
+/** Turn backend comparison evidence into compact review rows without trusting ASR as truth. */
+export function speechReviewItems(mismatch: SpeechMismatch | null | undefined): string[] {
+  const report = mismatch?.report;
+  if (!report || typeof report !== 'object') return [];
+  return [
+    ...differences(report.substitutions).map((item) => `可能替换：${rangeText(item.script_range)} → ${rangeText(item.asr_range)}（ASR 低置信度）`),
+    ...differences(report.omissions).map((item) => `缺少：${rangeText(item.script_range)}`),
+    ...differences(report.insertions).map((item) => `可能多读：${rangeText(item.asr_range)}（ASR 低置信度）`),
+  ];
 }
 
 export class RealignmentRequiredError extends Error {

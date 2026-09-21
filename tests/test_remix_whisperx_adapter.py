@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from novelvideo.freezone.remix import alignment
+from novelvideo.freezone.remix import whisperx_adapter
 
 
 class FakeWhisperX:
@@ -157,6 +158,86 @@ def test_configured_adapter_reports_script_mismatch_before_forced_alignment(tmp_
     assert not any(name == "load_align_model" for name, _ in fake.calls)
 
 
+def test_spoken_script_comparison_treats_asr_differences_as_low_confidence_evidence():
+    assert hasattr(whisperx_adapter, "compare_spoken_script")
+    report = whisperx_adapter.compare_spoken_script(
+        "今天想喝馋奶茶，喝完还是不得劲！",
+        "今天想喝茶奶茶 喝完还是不得见。",
+    )
+
+    assert report.normalized_script == "今天想喝馋奶茶喝完还是不得劲"
+    assert report.normalized_asr == "今天想喝茶奶茶喝完还是不得见"
+    assert report.character_coverage == pytest.approx(12 / 14)
+    assert report.omissions == []
+    assert report.insertions == []
+    assert [
+        (difference.script_range.text, difference.asr_range.text)
+        for difference in report.substitutions
+    ] == [("馋", "茶"), ("劲", "见")]
+    assert {difference.confidence for difference in report.substitutions} == {"low"}
+    assert {difference.provenance for difference in report.substitutions} == {
+        "asr_comparison"
+    }
+
+
+def test_configured_adapter_force_aligns_high_coverage_generated_speech_differences(
+    tmp_path: Path, monkeypatch
+):
+    script = "今天想喝馋奶茶，喝完还是不得劲！"
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+    fake = FakeWhisperX(
+        transcript="今天想喝茶奶茶 喝完还是不得见。",
+        chars=[
+            {"char": character, "start": index / 10, "end": (index + 1) / 10}
+            for index, character in enumerate(script)
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.align_script(
+        media, {"revision": 3, "language": "zh", "text": script}
+    )
+
+    assert result["status"] == "completed"
+    assert result["transcript"] == script
+    assert result["match_report"]["character_coverage"] == pytest.approx(12 / 14)
+    assert [row["script_range"]["text"] for row in result["match_report"]["substitutions"]] == ["馋", "劲"]
+    assert any(name == "load_align_model" for name, _ in fake.calls)
+
+
+def test_configured_adapter_blocks_a_truly_omitted_required_phrase(
+    tmp_path: Path, monkeypatch
+):
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+    fake = FakeWhisperX(transcript="今天想喝馋奶茶。")
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.align_script(
+        media,
+        {
+            "revision": 4,
+            "language": "zh",
+            "text": "今天想喝馋奶茶，喝完以后马上出发。",
+        },
+    )
+
+    assert result["status"] == "script_mismatch"
+    assert result["mismatch"]["reason"] == "ASR omitted required script text"
+    assert result["mismatch"]["report"]["omissions"][0]["script_range"]["text"] == "喝完以后马上出发"
+    assert result["mismatch"]["report"]["required_script_covered"] is False
+    assert not any(name == "load_align_model" for name, _ in fake.calls)
+
+
 def test_spoken_text_with_no_timed_characters_is_not_reported_as_silence(tmp_path: Path, monkeypatch):
     media = tmp_path / "voice.wav"
     media.write_bytes(b"audio")
@@ -172,6 +253,34 @@ def test_spoken_text_with_no_timed_characters_is_not_reported_as_silence(tmp_pat
     result = alignment.align_script(media, {"revision": 1, "language": "en", "text": "go go"})
 
     assert result["status"] == "script_mismatch"
+
+
+def test_partially_untimed_required_characters_do_not_publish_a_timeline(
+    tmp_path: Path, monkeypatch
+):
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+    fake = FakeWhisperX(
+        transcript="go",
+        chars=[
+            {"char": "g", "start": 0.0, "end": 0.1},
+            {"char": "o", "start": 0.1, "end": 0.1},
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.align_script(
+        media, {"revision": 1, "language": "en", "text": "go"}
+    )
+
+    assert result["status"] == "script_mismatch"
+    assert result["mismatch"]["untimed_script_ranges"] == [
+        {"start_char": 1, "end_char": 2}
+    ]
 
 
 def test_engine_requires_existing_local_cache(tmp_path: Path, monkeypatch):
