@@ -10,7 +10,7 @@
       "required_event": "商品登场",
       "required_event_selection": {"id": "product-reveal", "start_char": 4, "end_char": 8},
       "script_path": "zh-clear/script.txt",
-      "voices": [{"id": "fast", "audio": "zh-clear/narration-fast.wav", "annotations": "zh-clear/fast-annotations.json"}, {"id": "slow", "audio": "zh-clear/narration-slow.wav", "annotations": "zh-clear/slow-annotations.json"}],
+      "voices": [{"id": "fast", "speech_rate": "fast", "audio": "zh-clear/narration-fast.wav", "annotations": "zh-clear/fast-annotations.json"}, {"id": "slow", "speech_rate": "slow", "audio": "zh-clear/narration-slow.wav", "annotations": "zh-clear/slow-annotations.json"}],
       "render": {"background": "zh-clear/background.png", "broll": "zh-clear/broll.mp4", "caption": "商品登场", "duration_frames": 900, "width": 1080, "height": 1920, "fps": 30},
       "manual_boundary_count": 0
     },
@@ -22,36 +22,52 @@
       "required_event": "product reveal",
       "required_event_selection": {"id": "product-reveal", "start_char": 6, "end_char": 20},
       "script_path": "en-clear/script.txt",
-      "voices": [{"id": "fast", "audio": "en-clear/narration-fast.wav", "annotations": "en-clear/fast-annotations.json"}, {"id": "slow", "audio": "en-clear/narration-slow.wav", "annotations": "en-clear/slow-annotations.json"}],
+      "voices": [{"id": "fast", "speech_rate": "fast", "audio": "en-clear/narration-fast.wav", "annotations": "en-clear/fast-annotations.json"}, {"id": "slow", "speech_rate": "slow", "audio": "en-clear/narration-slow.wav", "annotations": "en-clear/slow-annotations.json"}],
       "render": {"background": "en-clear/background.png", "broll": "en-clear/broll.mp4", "caption": "product reveal", "duration_frames": 900, "width": 1080, "height": 1920, "fps": 30},
       "manual_boundary_count": 0
     },
     {
       "case_id": "repeated-numbers-emoji",
-      "language": "zh",
+      "language": "en",
       "category": "repeated_words_numbers_emoji",
-      "required_assets": ["repeated-numbers-emoji/narration.wav", "repeated-numbers-emoji/alignment.json"],
+      "required_assets": ["repeated-numbers-emoji/narration.wav", "repeated-numbers-emoji/script.txt", "repeated-numbers-emoji/annotations.json"],
+      "script_path": "repeated-numbers-emoji/script.txt",
+      "voices": [{"id": "edge", "speech_rate": "normal", "audio": "repeated-numbers-emoji/narration.wav", "annotations": "repeated-numbers-emoji/annotations.json"}],
+      "required_event": "second repeated phrase",
+      "required_event_selection": {"id": "second-repeat", "start_char": 10, "end_char": 15},
+      "required_script_features": {"repeated_text": "again", "number": "2", "emoji": "🎬"},
+      "fps": 30,
       "manual_boundary_count": 0
     },
     {
       "case_id": "no-speech",
       "language": "en",
       "category": "no_speech",
-      "required_assets": ["no-speech/reference.mp4"],
+      "required_assets": ["no-speech/reference.mp4", "no-speech/silence.wav", "no-speech/script.txt"],
+      "script_path": "no-speech/script.txt",
+      "voices": [{"id": "silent", "audio": "no-speech/silence.wav", "expected": "no_speech"}],
       "manual_boundary_count": 0
     },
     {
       "case_id": "script-mismatch",
       "language": "en",
       "category": "script_mismatch",
-      "required_assets": ["script-mismatch/omission-narration.wav", "script-mismatch/insertion-narration.wav", "script-mismatch/alignment.json"],
+      "required_assets": ["script-mismatch/omission-narration.wav", "script-mismatch/insertion-narration.wav", "script-mismatch/script.txt"],
+      "script_path": "script-mismatch/script.txt",
+      "voices": [{"id": "omission", "audio": "script-mismatch/omission-narration.wav", "expected": "script_mismatch"}, {"id": "insertion", "audio": "script-mismatch/insertion-narration.wav", "expected": "script_mismatch"}],
       "manual_boundary_count": 0
     },
     {
       "case_id": "vfr-crop-speed",
       "language": "en",
       "category": "vfr_crop_speed",
-      "required_assets": ["vfr-crop-speed/source-vfr.mp4", "vfr-crop-speed/narration.wav", "vfr-crop-speed/alignment.json"],
+      "required_assets": ["vfr-crop-speed/source-vfr.mp4", "vfr-crop-speed/narration.wav", "vfr-crop-speed/script.txt", "vfr-crop-speed/annotations.json"],
+      "script_path": "vfr-crop-speed/script.txt",
+      "voices": [{"id": "normal", "speech_rate": "normal", "audio": "vfr-crop-speed/narration.wav", "annotations": "vfr-crop-speed/annotations.json"}],
+      "required_event": "event after speed transform",
+      "required_event_selection": {"id": "speed-event", "start_char": 0, "end_char": 5},
+      "fps": 30,
+      "video_transform": {"source": "vfr-crop-speed/source-vfr.mp4", "crop": {"x": 10, "y": 10, "width": 100, "height": 160}, "speed": 1.25},
       "manual_boundary_count": 0
     }
   ]

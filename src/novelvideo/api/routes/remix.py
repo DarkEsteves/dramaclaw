@@ -6,6 +6,8 @@ from typing import Any, Annotated, Literal
 import hashlib
 import importlib.util
 import os
+import subprocess
+import sys
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,7 +18,6 @@ from novelvideo.api.auth import get_api_user
 from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
-from novelvideo.freezone.remix.alignment import speech_engine_ready
 from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.project_context import require_project_home_node, resolve_project_context
 from novelvideo.ports import get_task_backend
@@ -74,16 +75,76 @@ _PROCESS_TASK_TYPES = {
 
 
 def _speech_engine_ready() -> bool:
-    return speech_engine_ready()
+    return bool(_speech_engine_readiness()["ready"])
+
+
+def _complete_model_snapshot(root: Path, required: tuple[str, ...]) -> bool:
+    return any(
+        all(
+            (snapshot / name).is_file() and (snapshot / name).stat().st_size > 0
+            for name in required
+        )
+        for snapshot in root.glob("snapshots/*")
+        if snapshot.is_dir()
+    )
+
+
+def _cached_speech_models_ready(cache: Path) -> bool:
+    model_name = os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small").strip()
+    asr = cache / f"models--Systran--faster-whisper-{model_name}"
+    chinese = (
+        cache
+        / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
+    )
+    english = cache / "wav2vec2_fairseq_base_ls960_asr_ls960.pth"
+    return (
+        _complete_model_snapshot(
+            asr, ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt")
+        )
+        and _complete_model_snapshot(
+            chinese, ("pytorch_model.bin", "config.json", "vocab.json")
+        )
+        and english.is_file()
+        and english.stat().st_size > 0
+    )
+
+
+def _probe_whisperx_import(python: Path) -> tuple[str | None, str | None]:
+    environment = {
+        **os.environ,
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+    }
+    try:
+        result = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import whisperx; print(getattr(whisperx, '__version__', 'unknown'))",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "WhisperX Python import probe could not complete"
+    if result.returncode:
+        return None, "WhisperX Python cannot import WhisperX in offline mode"
+    version = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "unknown"
+    return version, None
 
 
 def _speech_engine_readiness() -> dict[str, Any]:
-    """Describe local speech configuration without importing or starting WhisperX."""
+    """Verify the configured local speech runtime without loading model weights."""
     engine = os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "").strip()
     cache_value = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE", "").strip()
     python_value = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", "").strip()
     cache = Path(cache_value) if cache_value else None
     python = Path(python_value) if python_value else None
+    external_python = python is not None
 
     if python is not None:
         python_status = (
@@ -92,31 +153,42 @@ def _speech_engine_readiness() -> dict[str, Any]:
             else "missing"
         )
     else:
-        python_status = (
-            "in-process" if importlib.util.find_spec("whisperx") else "missing"
-        )
-    cache_status = "available" if cache and cache.is_dir() else "missing"
+        python = Path(sys.executable)
+        python_status = "in-process" if importlib.util.find_spec("whisperx") else "missing"
+    if not cache or not cache.is_dir():
+        cache_status = "missing"
+    elif _cached_speech_models_ready(cache):
+        cache_status = "available"
+    else:
+        cache_status = "incomplete"
 
     error = None
+    whisperx_version = None
     if engine != "whisperx":
         error = "DRAMACLAW_REMIX_SPEECH_ENGINE must be set to whisperx"
-    elif cache_status == "missing":
+    elif not cache or not cache.is_dir():
         error = (
             f"WhisperX model cache directory is missing: {cache}"
             if cache is not None
             else "DRAMACLAW_REMIX_MODEL_CACHE must name an existing local directory"
         )
+    elif not _cached_speech_models_ready(cache):
+        model_name = os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small").strip()
+        error = f"WhisperX cached model files are incomplete for {model_name} ASR plus English and Chinese alignment"
     elif python_status == "missing":
         error = (
             f"WhisperX Python executable is missing or not executable: {python}"
-            if python is not None
+            if external_python
             else "WhisperX is not installed in the API Python environment"
         )
+    else:
+        whisperx_version, error = _probe_whisperx_import(python)
     return {
         "ready": error is None,
         "engine": engine or "disabled",
         "python": python_status,
         "model_cache": cache_status,
+        "whisperx_version": whisperx_version,
         "downloads_allowed": False,
         "error": error,
     }
@@ -151,7 +223,7 @@ def _data(value: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/speech-readiness")
 async def read_speech_readiness(user: dict = Depends(get_api_user)):
-    return _data(_speech_engine_readiness())
+    return _data(await run_in_threadpool(_speech_engine_readiness))
 
 
 @router.post("/script-drafts")

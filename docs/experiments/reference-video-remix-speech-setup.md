@@ -8,7 +8,7 @@ scripts/start-remix-speech.sh
 
 默认路径是 `$HOME/.local/share/dramaclaw/whisperx-venv/bin/python` 和 `$HOME/.cache/dramaclaw/whisperx-models`。可以通过下面两个同名环境变量覆盖。脚本显式清空控制面、Redis 和 Celery 配置，以单租户 CE 运行；脚本中不保存凭证。模型目录缺失或为空、Python 不可执行、API 未在超时内就绪时，脚本会带原因退出。
 
-探活地址为 `GET /api/v1/projects/local/freezone/remix/speech-readiness`。它只检查配置、目录和可执行文件，不导入 WhisperX、不运行子进程也不下载权重。返回值包含 `ready`、`python`、`model_cache`、`downloads_allowed: false` 和可操作的 `error`。
+探活地址为 `GET /api/v1/projects/local/freezone/remix/speech-readiness`。它先检查 small ASR、中英文对齐缓存的关键文件，再用配置的 Python 在 `HF_HUB_OFFLINE`、`TRANSFORMERS_OFFLINE` 和 `HF_DATASETS_OFFLINE` 模式下导入 WhisperX 并返回版本；它不会加载模型权重或下载文件。返回值包含 `ready`、`python`、`model_cache`、`whisperx_version`、`downloads_allowed: false` 和可操作的 `error`。
 
 语音任务默认关闭。只有在目标机器上安装 WhisperX、预先准备好 ASR 与对齐模型权重，并配置以下环境变量后，`transcribe_media` 与 `align_script` 才会接受任务：
 
@@ -37,7 +37,7 @@ WhisperX 3.8.6 的强制对齐还需要 NLTK 的 `punkt_tab` 数据；安装后�
 
 - macOS 26.6.2 arm64、CPU、并发上限 1、batch size 1、int8；FFmpeg/FFprobe 8.1。
 - WhisperX 3.8.6（BSD-2-Clause）、PyTorch 2.8.0。ASR 缓存为 `Systran/faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120`；中文对齐缓存为 `99ccb2737be22b8bb50dcfcc39ad4d567fb90cfd`，英文对齐文件 SHA-256 为 `488fd4f16de84438ffc945334278c1b9fb9b7159a806c1080b16111a958c945d`。本地缓存没有可审计的权重许可证元数据，报告将两项许可证记为 `unverified-local-cache`，这本身是生产采用前的阻塞项。
-- 六类清单均提供了本地合成输入，报告保留每个媒体的 FFprobe 输出。本次进程内首先运行的中文项为 4.619 秒、进程峰值 1170.453 MiB；随后英文项为 0.560 秒、累计进程峰值 1441.922 MiB。合成纯音不是真实语音，两项清晰语音都按脚本不匹配失败，不能用于准确率结论。
-- `no-speech` 和预期脚本不匹配类别被记录为预期状态；重复词/数字/emoji 与 VFR/裁切/变速仍缺少可执行的真实 fixture 协议。CUDA、Linux 和其他主机未测。
+- 六类清单均提供了本地合成输入，报告保留每个媒体的 FFprobe 输出。内存字段是各项结束时整个进程的累计高水位，不能当作该项独占内存。合成纯音不是真实语音，两项清晰语音都按脚本不匹配失败，不能用于准确率结论。
+- harness 现在实际执行重复词/数字/emoji、无语音、脚本不匹配和 VFR/裁切/变速协议；当前本地输入仍不具备合法来源、逐文件清单和人工标注来源，因此这些执行结果不能转为生产验收。CUDA、Linux 和其他主机未测。
 
-生产语音门槛仍为 **blocked**：合格的中文和英文人工边界均为 0，P95 均未测。只有 `approved-real` 输入可以计入门槛；每种语言必须至少 100 个手工边界、同一脚本两种语速、P95 不超过 200 ms，并记录模型、权重和主机版本。拿到合法样片和标注后继续使用同一条 P0 命令，把 `--fixture-kind` 改为 `approved-real`，不要修改报告算法或用合成边界补数。
+生产语音门槛仍为 **blocked**：合格的中文和英文人工边界均为 0，P95 均未测。命令行 `--fixture-kind` 只是报告标签，不能让素材合格；必须为每项 fixture 提供已批准来源，为每个文件提供匹配的 SHA-256/来源/许可证/审批/取得时间，并让人工标注绑定音频哈希和标注者/复核者记录。每种语言还必须至少 100 个手工边界、同一脚本两种语速、P95 不超过 200 ms，并记录非占位的模型、权重和主机版本与许可证。不要修改报告算法或用合成边界补数。

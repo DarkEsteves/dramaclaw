@@ -66,6 +66,8 @@ class WhisperXAlignmentRunner:
             waveform, batch_size=self.batch_size, language=language
         )
         transcript = "".join(segment["text"] for segment in transcription["segments"])
+        if not transcription["segments"] or not transcript.strip():
+            raise ValueError("ASR produced no speech segments")
         if _normalize_for_script_check(transcript) != _normalize_for_script_check(
             script
         ):
@@ -244,7 +246,12 @@ def evaluate_p0_gate(
         case_id = str(case.get("case_id", "unknown"))
         status = case.get("status")
         unresolved = case.get("unresolved_required_events", [])
-        if status not in {"rendered", "expected_no_speech", "expected_unresolved"}:
+        if status not in {
+            "rendered",
+            "validated",
+            "expected_no_speech",
+            "expected_unresolved",
+        }:
             blockers.append(
                 f"{case_id} has no conclusive result ({status or 'missing status'})"
             )
