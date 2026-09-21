@@ -5,12 +5,195 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from novelvideo.freezone.remix import p0
 from novelvideo.freezone.remix.p0 import compile_events, render_sample
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _remix_client() -> TestClient:
+    from novelvideo.api.auth import get_api_user
+    from novelvideo.api.routes import remix
+
+    app = FastAPI()
+    app.include_router(remix.router, prefix="/api/v1")
+    app.dependency_overrides[get_api_user] = lambda: {"username": "local-test"}
+    return TestClient(app)
+
+
+def test_speech_readiness_accepts_configured_executable_and_cache_without_running_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "models"
+    cache.mkdir()
+    python = tmp_path / "whisperx-python"
+    python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("readiness must not execute or download anything"),
+    )
+
+    response = _remix_client().get(
+        "/api/v1/projects/local/freezone/remix/speech-readiness"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "ready": True,
+            "engine": "whisperx",
+            "python": "external",
+            "model_cache": "available",
+            "downloads_allowed": False,
+            "error": None,
+        },
+    }
+
+
+def test_speech_readiness_reports_missing_cache_without_downloading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "whisperx-python"
+    python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    python.chmod(0o755)
+    missing = tmp_path / "missing-model-cache"
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(missing))
+    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("readiness must not execute or download anything"),
+    )
+
+    response = _remix_client().get(
+        "/api/v1/projects/local/freezone/remix/speech-readiness"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "ready": False,
+        "engine": "whisperx",
+        "python": "external",
+        "model_cache": "missing",
+        "downloads_allowed": False,
+        "error": f"WhisperX model cache directory is missing: {missing}",
+    }
+
+
+def test_local_speech_launcher_pins_ce_paths_and_checks_readiness() -> None:
+    launcher = ROOT / "scripts" / "start-remix-speech.sh"
+
+    result = subprocess.run(
+        ["bash", "-n", str(launcher)], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    source = launcher.read_text(encoding="utf-8")
+    assert "DRAMACLAW_REMIX_SPEECH_ENGINE=whisperx" in source
+    assert "DRAMACLAW_REMIX_WHISPERX_PYTHON" in source
+    assert "DRAMACLAW_REMIX_MODEL_CACHE" in source
+    assert "ST_EDITION=ce" in source
+    assert "ST_CONTROL_PLANE_DSN=" in source
+    assert "/speech-readiness" in source
+    assert "API_KEY" not in source
+
+
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required"
+)
+def test_p0_command_records_synthetic_fixture_evidence_without_qualifying_it(
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    source = asset_root / "silent.mp4"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=blue:s=160x90:r=30:d=0.2",
+        "-an",
+        str(source),
+    )
+    manifest = tmp_path / "cases.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "case_id": "no-speech",
+                        "language": "en",
+                        "category": "no_speech",
+                        "required_assets": ["silent.mp4"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "report"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "experiments" / "reference_video_remix_p0.py"),
+            "--cases",
+            str(manifest),
+            "--asset-root",
+            str(asset_root),
+            "--output-dir",
+            str(output_dir),
+            "--fixture-kind",
+            "synthetic-local",
+            "--speech-concurrency",
+            "1",
+            "--asr-weight-version",
+            "synthetic-none",
+            "--asr-weight-license",
+            "not-applicable",
+            "--alignment-weight-version",
+            "synthetic-none",
+            "--alignment-weight-license",
+            "not-applicable",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2, result.stderr
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["fixture_kind"] == "synthetic-local"
+    assert report["host"]["platform"]
+    assert report["speech_runtime"]["concurrency_limit"] == 1
+    assert report["speech_runtime"]["asr_weight"] == {
+        "version": "synthetic-none",
+        "license": "not-applicable",
+    }
+    assert report["cases"][0]["elapsed_s"] >= 0
+    assert report["cases"][0]["peak_memory_mb"] > 0
+    assert report["cases"][0]["input_probes"]["silent.mp4"]["streams"][0][
+        "codec_type"
+    ] == "video"
+    assert any(
+        "approved-real" in blocker for blocker in report["p0_gate"]["blockers"]
+    )
 
 
 def _ffmpeg(*args: str) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Annotated, Literal
 import hashlib
+import importlib.util
+import os
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -75,6 +77,51 @@ def _speech_engine_ready() -> bool:
     return speech_engine_ready()
 
 
+def _speech_engine_readiness() -> dict[str, Any]:
+    """Describe local speech configuration without importing or starting WhisperX."""
+    engine = os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "").strip()
+    cache_value = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE", "").strip()
+    python_value = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", "").strip()
+    cache = Path(cache_value) if cache_value else None
+    python = Path(python_value) if python_value else None
+
+    if python is not None:
+        python_status = (
+            "external"
+            if python.is_file() and os.access(python, os.X_OK)
+            else "missing"
+        )
+    else:
+        python_status = (
+            "in-process" if importlib.util.find_spec("whisperx") else "missing"
+        )
+    cache_status = "available" if cache and cache.is_dir() else "missing"
+
+    error = None
+    if engine != "whisperx":
+        error = "DRAMACLAW_REMIX_SPEECH_ENGINE must be set to whisperx"
+    elif cache_status == "missing":
+        error = (
+            f"WhisperX model cache directory is missing: {cache}"
+            if cache is not None
+            else "DRAMACLAW_REMIX_MODEL_CACHE must name an existing local directory"
+        )
+    elif python_status == "missing":
+        error = (
+            f"WhisperX Python executable is missing or not executable: {python}"
+            if python is not None
+            else "WhisperX is not installed in the API Python environment"
+        )
+    return {
+        "ready": error is None,
+        "engine": engine or "disabled",
+        "python": python_status,
+        "model_cache": cache_status,
+        "downloads_allowed": False,
+        "error": error,
+    }
+
+
 async def _store(project: str, user: dict, role: str) -> RemixArtifactStore:
     ctx = await resolve_project_context(user=user, project_id=project, required_role=role)
     require_project_home_node(ctx, operation="access remix artifact files")
@@ -100,6 +147,11 @@ async def _call(fn, *args, **kwargs):
 
 def _data(value: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": value}
+
+
+@router.get("/speech-readiness")
+async def read_speech_readiness(user: dict = Depends(get_api_user)):
+    return _data(_speech_engine_readiness())
 
 
 @router.post("/script-drafts")
