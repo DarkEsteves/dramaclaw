@@ -46,6 +46,16 @@ describe('prepareNodeRemix', () => {
     expect(after).not.toBe(before);
   });
 
+  it('changes the fingerprint when a deep story blueprint revision changes', () => {
+    const compose = node('compose', 'videoComposeNode', {});
+    const script = node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 1 } });
+    const story = node('story', 'videoStoryNode', { referenceBlueprintRef: { artifactId: 'blueprint', revision: 1 } });
+    const edges = [edge('story', 'script'), edge('script', 'compose')];
+    const before = remixGraphFingerprint([story, script, compose], edges, 'compose');
+    const after = remixGraphFingerprint([node('story', 'videoStoryNode', { referenceBlueprintRef: { artifactId: 'blueprint', revision: 2 } }), script, compose], edges, 'compose');
+    expect(after).not.toBe(before);
+  });
+
   it('publishes a connected image node only when its selected media revision still matches', async () => {
     const scriptRef = { artifactId: 'script-1', revision: 1 };
     const timingRef = { artifactId: 'timing-1', revision: 1 };

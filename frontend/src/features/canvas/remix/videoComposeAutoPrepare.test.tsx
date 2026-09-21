@@ -66,9 +66,7 @@ describe('VideoComposeNode automatic preparation', () => {
       remixInputFingerprint: 'prepared-with-audio-fingerprint', remixNodeRevision: 1,
       unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [],
     }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).not.toBeDisabled());
-    fireEvent.click(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' }));
-    await waitFor(() => expect(screen.getByText('上游素材或产物已变化，请重新生成合成清单')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled());
     expect(renderRemixManifest).not.toHaveBeenCalled();
   });
 
@@ -143,5 +141,21 @@ describe('VideoComposeNode automatic preparation', () => {
     remixGraphFingerprint.mockReturnValue('deep-ancestor-revision-changed');
     act(() => graphState.listeners.forEach((listener) => listener()));
     expect(await screen.findByText('预览已过期')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
+  });
+
+  it('locks manifest inputs while a delayed revision save is in flight', async () => {
+    let finishSave!: (value: unknown) => void;
+    const payload = { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '初稿', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [], source_versions: [] };
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload });
+    reviseRemixArtifact.mockImplementation(() => new Promise((resolve) => { finishSave = resolve; }));
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    const input = await screen.findByLabelText('字幕 1');
+    fireEvent.change(input, { target: { value: '准备保存' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存清单修改' }));
+    expect(input).toBeDisabled();
+    fireEvent.change(input, { target: { value: '保存过程中又改了' } });
+    expect(input).toHaveValue('准备保存');
+    await act(async () => finishSave({ id: 'manifest', schema: 'composition_manifest.v1', revision: 3, upstream_refs: [], payload: { ...payload, subtitle_events: [{ text: '准备保存', start_frame: 0, end_frame: 30 }] } }));
   });
 });

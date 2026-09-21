@@ -22,6 +22,8 @@ A follow-up review added two more red assertions: MP4 preview/update controls we
 
 Closure review added two stale-detection red tests: replacing a source URL while stale `remixMedia` metadata remained did not change the fingerprint, and a deep ancestor revision did not rerender the compose node. The fingerprint now includes current visual URLs and the node subscribes to the computed full ancestor-graph fingerprint.
 
+Final review added two more red regressions: a deep `referenceBlueprintRef` revision was omitted from the fingerprint, and editable inputs allowed a delayed revision response to overwrite post-submit edits. Artifact references are now normalized generically from all `*Ref`/`*Refs` fields, and the editor is locked for the duration of a manifest save.
+
 ## What changed
 
 - The remix compose node loads the exact saved `composition_manifest.v1` revision and projects its visual layers, subtitle events and audio events into the existing remix editor.
@@ -33,13 +35,15 @@ Closure review added two stale-detection red tests: replacing a source URL while
 - MP4 preview/download and update are hidden or disabled until the exact artifact ref loads. Update is also disabled while local overrides are dirty, and the action handler rejects indirect update requests in that state.
 - Replacing `videoUrl`, `imageUrl` or `previewImageUrl` invalidates the prepared manifest even if old attached-media metadata remains.
 - The compose node reactively subscribes to the complete ancestor graph fingerprint, so deep artifact/media revisions mark preview stale immediately.
+- All recognized remix artifact refs, including `referenceBlueprintRef`, participate in the normalized graph fingerprint; stale inputs also disable submit immediately.
+- Layer, subtitle and audio inputs are disabled while `reviseRemixArtifact` is pending, preventing an older response from clearing or overwriting newer local edits.
 - Preview freshness compares both the exact rendered manifest ref and the current upstream graph fingerprint. The node labels the confirmed result current or stale.
 - The current confirmed result exposes inline video preview plus MP4, exact manifest JSON and frame-derived SRT downloads.
 - `render_preview_frame` extracts a boundary frame from the same full FFmpeg manifest render path used by export. The probe compares its bytes with the matching exported frame.
 
 ## Verification
 
-- `pnpm exec vitest run src/features/canvas/remix` — 30 files, 208 tests passed.
+- `pnpm exec vitest run src/features/canvas/remix` — 30 files, 210 tests passed.
 - `uv run pytest tests/test_remix_render.py tests/test_remix_tasks.py tests/test_remix_result_confirmation.py tests/test_api_remix_artifacts.py -q` — 44 passed, 8 existing dependency warnings.
 - `pnpm exec tsc -b --pretty false` — passed.
 - `uv run ruff check src/novelvideo/freezone/remix/render.py tests/test_remix_render.py` — passed.

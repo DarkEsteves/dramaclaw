@@ -27,6 +27,22 @@ function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): 
 export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], composeId: string): string {
   const upstream = ancestors(nodes, edges, composeId);
   const included = new Set([composeId, ...upstream.map((node) => node.id)]);
+  const artifactRefs = (data: Record<string, unknown>) => {
+    const normalized: Record<string, Array<{ artifactId: string; revision: number }>> = {};
+    for (const [key, value] of Object.entries(data).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!/Refs?$/u.test(key)) continue;
+      const values = Array.isArray(value) ? value : [value];
+      const refs = values.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== 'object') return [];
+        const raw = candidate as Record<string, unknown>;
+        const artifactId = raw.artifactId ?? raw.artifact_id;
+        const revision = raw.revision;
+        return typeof artifactId === 'string' && typeof revision === 'number' && Number.isInteger(revision) ? [{ artifactId, revision }] : [];
+      });
+      if (refs.length) normalized[key] = refs;
+    }
+    return normalized;
+  };
   return JSON.stringify({ nodes: upstream.map((node) => ({
     id: node.id,
     type: node.type,
@@ -36,8 +52,7 @@ export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], 
     previewImageUrl: 'previewImageUrl' in node.data ? node.data.previewImageUrl ?? null : undefined,
     audioUrl: node.type === CANVAS_NODE_TYPES.audio ? node.data.audioUrl ?? null : undefined,
     role: 'remixRole' in node.data ? node.data.remixRole : undefined,
-    scriptRef: 'remixScriptRef' in node.data ? node.data.remixScriptRef : undefined,
-    artifactRef: 'artifactRef' in node.data ? node.data.artifactRef : undefined,
+    artifactRefs: artifactRefs(node.data as Record<string, unknown>),
   })).sort((left, right) => left.id.localeCompare(right.id)), edges: edges.filter((edge) => included.has(edge.source) && included.has(edge.target))
     .map((edge) => ({ source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle }))
     .sort((left, right) => `${left.source}:${left.target}:${left.sourceHandle}`.localeCompare(`${right.source}:${right.target}:${right.sourceHandle}`)) });

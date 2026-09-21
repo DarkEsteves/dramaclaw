@@ -353,7 +353,8 @@ export const VideoComposeNode = memo(
 
     if (data.remixManifestRef && (data.remixInputFingerprint || !data.remixWorkbenchDraft)) {
       const conflicts = data.remixManifestConflicts ?? [];
-      const exportable = manifestReady && canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts }) && !manifestDirty;
+      const inputsCurrent = !data.remixInputFingerprint || currentRemixInputFingerprint === data.remixInputFingerprint;
+      const exportable = manifestReady && inputsCurrent && canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts }) && !manifestDirty;
       const nodeRevision = data.remixNodeRevision;
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
         ? t('videoCompose.node.remixRevisionMissing')
@@ -395,7 +396,7 @@ export const VideoComposeNode = memo(
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
           <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={manifestReady && previewState === 'current' ? 'text-green-300' : manifestReady && previewState === 'stale' ? 'text-amber-300' : ''}>{!manifestReady ? '正在加载清单…' : previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
-          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} onManifestChange={(next) => { if (!manifestReady) return; setManifestDraft(next); setManifestDirty(true); }} />
+          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} disabled={isManifestSaving} onManifestChange={(next) => { if (!manifestReady || isManifestSaving) return; setManifestDraft(next); setManifestDirty(true); }} />
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
             <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
             {manifestDirty ? <button type="button" disabled={isManifestSaving || conflicts.length > 0 || !manifestReady} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}

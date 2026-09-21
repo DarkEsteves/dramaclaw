@@ -1,7 +1,7 @@
 import type { NamedSelection } from './model';
 import { applyManifestEdit, projectManifestTimeline, type ManifestPayload } from './manifestEditor';
 
-export function RemixEditor({ selections, events, manifest, onManifestChange }: { selections: NamedSelection[]; events: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>; manifest?: ManifestPayload | null; onManifestChange?: (manifest: ManifestPayload) => void }) {
+export function RemixEditor({ selections, events, manifest, onManifestChange, disabled = false }: { selections: NamedSelection[]; events: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>; manifest?: ManifestPayload | null; onManifestChange?: (manifest: ManifestPayload) => void; disabled?: boolean }) {
   const projected = manifest ? projectManifestTimeline(manifest) : null;
   return <section className="ui-scrollbar max-h-72 space-y-2 overflow-auto text-[12px] text-text-dark">
     {selections.map((selection) => {
@@ -12,14 +12,14 @@ export function RemixEditor({ selections, events, manifest, onManifestChange }: 
       <div className="text-text-muted">画面层 · {projected.layers.length}</div>
       {projected.layers.map((layer, index) => <div key={`${layer.mediaId}-${index}`} className="grid grid-cols-[1fr_auto_auto] items-center gap-2 rounded-[8px] bg-white/[0.03] px-2 py-1.5">
         <span className="truncate">{layer.mediaId}</span><span>{layer.startFrame}–{layer.endFrame} 帧</span>
-        <input aria-label={`${layer.mediaId} 结束帧`} className="nodrag w-14 rounded-[6px] border border-white/10 bg-black/20 px-1 py-0.5" type="number" value={layer.endFrame} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'layers', index, field: 'end_frame', value: Number(event.target.value) }))} />
+        <input aria-label={`${layer.mediaId} 结束帧`} disabled={disabled} className="nodrag w-14 rounded-[6px] border border-white/10 bg-black/20 px-1 py-0.5 disabled:opacity-50" type="number" value={layer.endFrame} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'layers', index, field: 'end_frame', value: Number(event.target.value) }))} />
       </div>)}
       <div className="text-text-muted">字幕 · {projected.subtitles.length}</div>
-      {projected.subtitles.map((subtitle, index) => <input key={`${subtitle.startFrame}-${index}`} aria-label={`字幕 ${index + 1}`} className="nodrag w-full rounded-[6px] border border-white/10 bg-black/20 px-2 py-1" value={subtitle.text} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'subtitle_events', index, field: 'text', value: event.target.value }))} />)}
+      {projected.subtitles.map((subtitle, index) => <input key={`${subtitle.startFrame}-${index}`} aria-label={`字幕 ${index + 1}`} disabled={disabled} className="nodrag w-full rounded-[6px] border border-white/10 bg-black/20 px-2 py-1 disabled:opacity-50" value={subtitle.text} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'subtitle_events', index, field: 'text', value: event.target.value }))} />)}
       <div className="text-text-muted">音频 · {projected.audio.length}</div>
       {projected.audio.map((track, index) => <label key={`${track.mediaId}-${index}`} className="grid grid-cols-[1fr_auto] items-center gap-2 rounded-[8px] bg-white/[0.03] px-2 py-1.5">
         <span className="truncate">{track.role} · {track.mediaId}</span>
-        <input aria-label={`${track.mediaId} 音量`} className="nodrag w-16 rounded-[6px] border border-white/10 bg-black/20 px-1 py-0.5" type="number" min="0" max="2" step="0.05" value={track.volume} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'audio_events', index, field: 'volume', value: Number(event.target.value) }))} />
+        <input aria-label={`${track.mediaId} 音量`} disabled={disabled} className="nodrag w-16 rounded-[6px] border border-white/10 bg-black/20 px-1 py-0.5 disabled:opacity-50" type="number" min="0" max="2" step="0.05" value={track.volume} onChange={(event) => manifest && onManifestChange?.(applyManifestEdit(manifest, { collection: 'audio_events', index, field: 'volume', value: Number(event.target.value) }))} />
       </label>)}
     </div> : null}
   </section>;
