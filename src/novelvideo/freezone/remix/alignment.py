@@ -6,12 +6,16 @@ import hashlib
 import importlib.util
 import os
 import subprocess
+import threading
 import json
 import re
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
+
+
+_SPEECH_ENGINE_SLOT = threading.BoundedSemaphore(value=1)
 
 
 class SpeechAligner(Protocol):
@@ -34,7 +38,8 @@ def transcribe_media(
     Unicode code-point spans are derived in stream order.
     """
     _validate_media_and_language(media_path, language)
-    raw = _require_aligner(aligner).transcribe(media_path, language)
+    with _SPEECH_ENGINE_SLOT:
+        raw = _require_aligner(aligner).transcribe(media_path, language)
     return _normalize_result(
         raw,
         media_path=media_path,
@@ -68,7 +73,8 @@ def align_script(
     if not isinstance(text, str):
         raise ValueError("script dialogue or text is required")
     spoken, original_positions = _spoken_script_positions(text)
-    raw = _require_aligner(aligner).align(media_path, spoken, language)
+    with _SPEECH_ENGINE_SLOT:
+        raw = _require_aligner(aligner).align(media_path, spoken, language)
     result = _normalize_result(
         raw,
         media_path=media_path,

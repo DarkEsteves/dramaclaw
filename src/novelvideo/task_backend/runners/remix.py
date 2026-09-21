@@ -236,7 +236,7 @@ def _with_operation_failure_transition(runner):
 
 
 register_project_task_runner("remix_render", _with_operation_failure_transition(run_remix_render), requires_home_node=True, lane="ffmpeg")
-register_project_task_runner("remix_transcribe_media", _with_operation_failure_transition(run_remix_transcribe_media), requires_home_node=True)
+register_project_task_runner("remix_transcribe_media", _with_operation_failure_transition(run_remix_transcribe_media), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_analyze_reference_video", _with_operation_failure_transition(run_remix_analyze_reference_video), requires_home_node=True)
-register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True)
+register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_compile_semantic_timeline", _with_operation_failure_transition(run_remix_compile_semantic_timeline), requires_home_node=True)

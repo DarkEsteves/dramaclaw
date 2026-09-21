@@ -32,7 +32,8 @@
 | 局部重跑 | 通过 | 字幕样式只重渲染；单个 B-roll 只重生该素材及合成；脚本/旁白才会重对齐和重编译。 |
 | 刷新/迟到/并发 | 通过 | 重开使用已绑定 task 对账；超时不重投；取消/过期/旧 revision 结果只留历史；提交和确认都有 fencing token。 |
 | 兼容与隔离 | 通过 | Recipe v1 指令不变，manifest v1 走旧 renderer，旧 canvas fixture 可读；跨项目 ref、绝对/上跳路径、symlink payload 被拒绝，删除产物不命中假缓存。 |
-| 资源限制 | 通过 | 转写/分析进受限 default lane，渲染进 ffmpeg lane；CE 默认 ffmpeg 并发 1、等待 64，全局队列满映射 HTTP 429；worker 取消/超时进待对账状态。 |
+| 资源限制 | 通过 | WhisperX 转写/对齐进独立 speech lane，全局、项目及项目用户默认并发都为 1，等待 64，进程内另有单槽信号量；无语音的参考视频分析保持 default lane，渲染进 ffmpeg lane，各 lane 互不阻塞；排队任务可取消，队列满映射 HTTP 429。 |
+| 独立 WhisperX Python | 通过（自动化） | 浏览器人工检查先发现脚本启动丢失包上下文，随后发现独立环境没有应用侧 Pydantic。入口现显式加入包根；适配器内部的对照 DTO 改为仅用标准库，worker 无需安装应用依赖。readiness 直接启动真实 worker 的离线 probe，而非只探测 `import whisperx`。隔离 `-S` Python 回归与本机实际 WhisperX venv probe 均返回成功；浏览器复测仍待操作者完成。 |
 | 计费/授权 | 通过 | 确定性处理动作不伪造 Recipe 计费；创作 Recipe 继续使用预留/结算/待人工复核协议；读需 viewer、写/提交需 editor 且只能在项目 home node。 |
 | 真实语音边界 | **阻塞** | 合格中文/英文人工边界都是 0，P95 未测；模型权重许可证仍为 `unverified-local-cache`。 |
 
@@ -60,7 +61,13 @@ uv run pytest -q tests/test_remix_*.py tests/test_workflow_stable_contract.py te
 # 313 passed
 
 uv run pytest -q
-# 6631 passed / 19 skipped / 3 deselected
+# 6639 passed / 19 skipped / 3 deselected（语音并发和 worker 包装修复后）
+
+uv run pytest -q tests/test_remix_whisperx_adapter.py tests/test_remix_alignment.py tests/test_remix_p0.py tests/test_remix_tasks.py tests/test_task_backend_limits.py tests/test_task_runner_home_node_placement.py tests/contract/test_l014_inline_task_backend_concurrency.py
+# 102 passed（独立运行时零应用依赖与 readiness worker probe 修复后）
+
+uv run pytest -q tests/test_remix_whisperx_adapter.py::test_external_whisperx_worker_script_bootstraps_project_package tests/test_remix_whisperx_adapter.py::test_external_whisperx_aligner_runs_real_worker_subprocess tests/test_remix_whisperx_adapter.py::test_external_whisperx_python_runs_isolated_worker
+# 3 passed；前两项是真实子进程，未 mock subprocess
 
 pnpm exec vitest run src/features/canvas/remix src/api/remix.test.ts src/__tests__/features/canvas/remix-nodes.test.tsx src/__tests__/features/freezone/workflow-run-recovery-bar.test.tsx src/__tests__/features/superchat/chat-task-status-bar.test.ts
 # 38 files / 297 passed

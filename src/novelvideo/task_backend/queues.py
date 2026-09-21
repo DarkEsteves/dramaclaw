@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-QUEUE_KINDS = {"default", "video", "world", "ffmpeg"}
+QUEUE_KINDS = {"default", "video", "world", "ffmpeg", "speech"}
 
 
 def normalize_queue_kind(kind: str | None) -> str:

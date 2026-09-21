@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 from typing import Any
 
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
@@ -79,6 +82,46 @@ def test_transcribe_explicitly_returns_no_speech(tmp_path: Path) -> None:
     assert result["transcript"] == ""
     assert result["words"] == []
     assert result["confidence_available"] is False
+
+
+def test_speech_engine_calls_have_a_process_wide_single_slot(tmp_path: Path) -> None:
+    media = tmp_path / "speech.wav"
+    media.write_bytes(b"audio")
+    active = 0
+    max_active = 0
+    first_entered = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+
+    class BlockingAligner:
+        def transcribe(self, media_path, language):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                first_entered.set()
+            try:
+                release.wait(timeout=3)
+                return {"status": "no_speech", "words": []}
+            finally:
+                with lock:
+                    active -= 1
+
+    aligner = BlockingAligner()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(transcribe_media, media, "en", aligner=aligner)
+            for _ in range(2)
+        ]
+        assert first_entered.wait(timeout=1)
+        time.sleep(0.05)
+        assert max_active == 1
+        release.set()
+        assert [future.result(timeout=3)["status"] for future in futures] == [
+            "no_speech",
+            "no_speech",
+        ]
+    assert max_active == 1
 
 
 def test_align_script_marks_sequential_text_mismatch_without_guessing_repeated_words(tmp_path: Path) -> None:

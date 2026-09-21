@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Annotated, Literal
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -158,12 +159,10 @@ def _probe_whisperx_import(python: Path) -> tuple[str | None, str | None]:
         "HF_DATASETS_OFFLINE": "1",
     }
     try:
+        worker = Path(__file__).parents[2] / "freezone" / "remix" / "whisperx_worker.py"
         result = subprocess.run(
-            [
-                str(python),
-                "-c",
-                "import whisperx; print(getattr(whisperx, '__version__', 'unknown'))",
-            ],
+            [str(python), str(worker)],
+            input=json.dumps({"action": "probe"}),
             check=False,
             capture_output=True,
             text=True,
@@ -171,10 +170,14 @@ def _probe_whisperx_import(python: Path) -> tuple[str | None, str | None]:
             env=environment,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None, "WhisperX Python import probe could not complete"
+        return None, "WhisperX worker runtime probe could not complete"
     if result.returncode:
-        return None, "WhisperX Python cannot import WhisperX in offline mode"
-    version = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "unknown"
+        return None, "WhisperX worker runtime cannot start in offline mode"
+    try:
+        payload = json.loads(result.stdout)
+        version = str(payload["whisperx_version"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, "WhisperX worker runtime probe returned invalid JSON"
     return version, None
 
 
@@ -465,7 +468,7 @@ def prepare_registered_action(
         }
     else:
         scope = ""
-        queue_kind = "default"
+        queue_kind = "speech" if action in {"transcribe_media", "align_script"} else "default"
         producer_version = "remix-process.v1"
     task_payload["node_revision"] = node_revision
     return {

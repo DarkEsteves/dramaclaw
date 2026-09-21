@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -374,6 +375,76 @@ def test_external_whisperx_python_runs_isolated_worker(tmp_path: Path, monkeypat
     assert command[0] == str(python)
     assert command[1].endswith("whisperx_worker.py")
     assert json.loads(options["input"])["language"] == "zh"
+
+
+def test_external_whisperx_worker_script_bootstraps_project_package(tmp_path: Path):
+    """The production script invocation must resolve package-relative imports."""
+    worker = Path(alignment.__file__).with_name("whisperx_worker.py")
+    request = {
+        "action": "probe-package-import",
+        "media_path": str(tmp_path / "unused.wav"),
+        "language": "zh",
+        "script": None,
+        "model_cache": str(tmp_path),
+        "model_name": "small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "batch_size": 1,
+    }
+
+    completed = subprocess.run(
+        [sys.executable, str(worker)],
+        cwd=tmp_path,
+        input=json.dumps(request),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "unknown WhisperX worker action" in completed.stderr
+    assert "attempted relative import with no known parent package" not in completed.stderr
+
+
+def test_external_whisperx_aligner_runs_real_worker_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Exercise the configured external-Python path without mocking subprocess."""
+    fake_site = tmp_path / "fake-site"
+    fake_site.mkdir()
+    (fake_site / "whisperx.py").write_text(
+        """
+class _Model:
+    def transcribe(self, audio, batch_size, **options):
+        return {"segments": [], "language": options.get("language", "zh")}
+
+def load_model(*args, **kwargs):
+    return _Model()
+
+def load_audio(path):
+    return path
+""",
+        encoding="utf-8",
+    )
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+    isolated_python = tmp_path / "isolated-python"
+    isolated_python.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -S \"$@\"\n",
+        encoding="utf-8",
+    )
+    isolated_python.chmod(0o755)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(isolated_python))
+    monkeypatch.setenv("PYTHONPATH", str(fake_site))
+
+    result = alignment.configured_speech_aligner().transcribe(media, "zh")
+
+    assert result == {"status": "no_speech", "words": []}
 
 
 def test_external_whisperx_python_must_exist(tmp_path: Path, monkeypatch):

@@ -23,6 +23,8 @@ export DRAMACLAW_REMIX_BATCH_SIZE=4
 export DRAMACLAW_REMIX_WHISPERX_PYTHON=/absolute/path/to/whisperx-venv/bin/python
 ```
 
+`transcribe_media` 和 `align_script` 固定进入独立的 `speech` 任务队列，不与普通文本/分析任务共用 `default` 执行槽。CE 默认的全局并发、项目并发和项目内单用户并发都是 1，全局等待队列上限是 64；适配器调用还有一层进程内单槽信号量，防止绕过任务队列的调用同时加载权重。排队任务可以正常取消，不会阻塞 `default`、`ffmpeg`、`video` 或 `world` lane。如需改队列上限，可使用 `ST_CE_GLOBAL_MAX_QUEUED_SPEECH_TASKS`；生产默认不建议调高上述并发 1 的闸门。
+
 模型目录必须事先存在。适配器向 WhisperX 的 ASR 加载传入 `local_files_only=True`，向对齐模型加载传入 `model_cache_only=True`。模型缺失、损坏或不支持指定语言时任务报错，不会自动下载权重。需要在隔离的试验环境固定 WhisperX 及模型版本，并按 [P0 计划](reference-video-remix-p0.md) 用真实样片与人工标注测准确率、耗时及内存，再确定生产依赖和并发配置。
 
 WhisperX 3.8.6 的强制对齐还需要 NLTK 的 `punkt_tab` 数据；安装后应在 WhisperX 虚拟环境中运行 `python -m nltk.downloader punkt_tab`，并确认该环境能找到 `tokenizers/punkt_tab/english/`。

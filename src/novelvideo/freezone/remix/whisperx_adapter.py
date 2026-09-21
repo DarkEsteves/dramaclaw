@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from .contracts import MatchReport, NormalizedTextRange, SpeechDifference
+
+@dataclass(frozen=True)
+class NormalizedTextRange:
+    """Dependency-free comparison range used inside the external worker."""
+
+    text: str
+    start_char: int
+    end_char: int
+    normalized_start: int
+    normalized_end: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.start_char,
+            self.end_char,
+            self.normalized_start,
+            self.normalized_end,
+        ) < 0 or self.end_char < self.start_char or self.normalized_end < self.normalized_start:
+            raise ValueError("comparison ranges must be non-negative and ordered")
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SpeechDifference:
+    script_range: NormalizedTextRange
+    asr_range: NormalizedTextRange
+    confidence: str = "low"
+    provenance: str = "asr_comparison"
+
+
+@dataclass(frozen=True)
+class MatchReport:
+    normalized_script: str
+    normalized_asr: str
+    matched_characters: int
+    script_characters: int
+    character_coverage: float
+    required_script_covered: bool
+    substitutions: list[SpeechDifference]
+    insertions: list[SpeechDifference]
+    omissions: list[SpeechDifference]
+    provenance: str = "whisperx_asr_comparison"
+    asr_is_ground_truth: bool = False
+
+    def model_dump(self, **_options: Any) -> dict[str, Any]:
+        return asdict(self)
 
 
 MIN_SCRIPT_CHARACTER_COVERAGE = 0.8

@@ -47,3 +47,30 @@
 ## Release decision
 
 The native fixed-media canvas journey is **demo-ready**. It is **not production speech-ready**: there are zero eligible Chinese and English manual boundary fixtures, so P95 alignment is unmeasured, and the locally cached ASR/alignment weights still lack the required verified license/source record. Production approval requires at least 100 human-reviewed boundaries per language, P95 ≤200 ms, the six-class real-media provenance manifest, verified model licenses, and target Linux/GPU cold/warm latency, memory and concurrency measurements.
+
+## Review closure: speech admission
+
+- WhisperX transcription and forced alignment now use a dedicated `speech` lane. Its CE global concurrency, project concurrency and project-user concurrency all default to 1; the global pending bound is 64. Reference-frame evidence analysis remains on `default` because it does not load WhisperX.
+- A process-wide bounded semaphore also wraps the actual adapter call, so accidental direct calls cannot load two speech engines inside one API/worker process.
+- The concurrency regression starts speech work for two different projects/users, proves only one enters while an unrelated default-lane task completes, then cancels the queued speech task and proves it never starts.
+- Focused queue, limit, registry, alignment, action-routing, task-state and inline-backend verification passed 379 tests. Manual browser verification was deliberately not claimed in this report; use the two-terminal steps below.
+- The operator's first browser run exposed a real external-worker packaging failure: launching `whisperx_worker.py` by path imported its sibling outside the `novelvideo` package, so that sibling's relative contract import failed. After that fix, the next run exposed a second boundary error: the isolated WhisperX environment correctly had no application-side Pydantic. The worker now adds its package root, while the adapter's internal speech-comparison DTOs use only the standard library. The external environment therefore needs WhisperX and its own dependencies only.
+- A real subprocess regression runs the configured external-Python path through an isolated `python -S` wrapper with no application site-packages and without mocking `subprocess.run`. Readiness now starts the actual worker in offline `probe` mode, so package/runtime dependency failures are rejected before a job is accepted. The actual local `~/.local/share/dramaclaw/whisperx-venv/bin/python` probe returned code 0 and valid JSON. The operator still needs to repeat the browser journey after the API restart, so this is recorded as found and fixed rather than as a manual pass.
+- Repository-wide backend after the speech-lane and initial worker packaging fix: 6,639 passed, 19 skipped, 3 deselected. After removing the worker's application dependency and changing readiness to probe the worker itself, the complete affected speech/task subset passed 102 tests. Ruff, stable workflow contract, license-inventory coverage, `git diff --check`, and full-tree gitleaks all passed.
+
+### Local manual browser journey
+
+Terminal 1, from this worktree:
+
+```sh
+scripts/start-remix-speech.sh
+```
+
+Terminal 2:
+
+```sh
+cd frontend
+pnpm dev --host 127.0.0.1 --port 5173
+```
+
+Open `http://127.0.0.1:5173`, create/open a project and Freezone canvas, add a reference video, run transcription, then submit an alignment while the first speech task is active. In the task center, check that the second speech task waits or is rejected by the per-user admission gate, ordinary canvas actions still run, and a queued speech task can be cancelled. Continue through blueprint, script, B-roll, narration, timing and compose export. This is an operator checklist, not a recorded manual pass.

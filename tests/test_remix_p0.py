@@ -73,7 +73,9 @@ def test_speech_readiness_probes_whisperx_import_and_expected_cached_models_offl
         calls.append((command, kwargs))
         assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
         assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
-        return subprocess.CompletedProcess(command, 0, "3.8.6\n", "")
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps({"whisperx_version": "3.8.6"}), ""
+        )
 
     from novelvideo.api.routes import remix as routes
 
@@ -97,6 +99,10 @@ def test_speech_readiness_probes_whisperx_import_and_expected_cached_models_offl
         },
     }
     assert len(calls) == 1
+    command, options = calls[0]
+    assert command[0] == str(python)
+    assert command[1].endswith("whisperx_worker.py")
+    assert json.loads(options["input"]) == {"action": "probe"}
 
 
 def test_speech_readiness_reports_missing_cache_without_downloading(
@@ -189,7 +195,7 @@ def test_speech_readiness_rejects_python_that_cannot_import_whisperx(
     )
 
     assert response.json()["data"]["ready"] is False
-    assert "cannot import WhisperX" in response.json()["data"]["error"]
+    assert "worker runtime cannot start" in response.json()["data"]["error"]
 
 
 def test_local_speech_launcher_pins_ce_paths_and_checks_readiness() -> None:

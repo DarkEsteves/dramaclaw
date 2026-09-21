@@ -447,6 +447,101 @@ async def test_gate3_world_lane_saturation_does_not_starve_default_lane(
 
 
 @pytest.mark.asyncio
+async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_cancels_queue(
+    monkeypatch,
+    _task_ports,
+    signed_inline_backend,
+    tmp_path,
+):
+    import novelvideo.task_backend.runners  # noqa: F401
+    from novelvideo.task_backend import registry as task_registry
+
+    monkeypatch.setattr(
+        task_registry,
+        "_PROJECT_TASK_RUNNERS",
+        dict(task_registry._PROJECT_TASK_RUNNERS),
+    )
+    monkeypatch.setattr(
+        task_registry,
+        "_PROJECT_TASK_PLACEMENTS",
+        dict(task_registry._PROJECT_TASK_PLACEMENTS),
+    )
+    monkeypatch.setenv("ST_CE_GLOBAL_MAX_ACTIVE_SPEECH_TASKS", "1")
+    monkeypatch.setenv("ST_PROJECT_MAX_ACTIVE_SPEECH_TASKS", "1")
+    monkeypatch.setenv("ST_PROJECT_USER_MAX_ACTIVE_SPEECH_TASKS", "1")
+    backend = signed_inline_backend()
+    ctx_a = _ctx(tmp_path, "speech_a", requester="speaker_a")
+    ctx_b = _ctx(tmp_path, "speech_b", requester="speaker_b")
+    release = threading.Event()
+    default_done = threading.Event()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    started: list[str] = []
+
+    def speech_runner(envelope, run_ctx):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            started.append(envelope["project_id"])
+        try:
+            release.wait(timeout=3)
+            return {"ok": True}
+        finally:
+            with lock:
+                active -= 1
+
+    def default_runner(envelope, run_ctx):
+        default_done.set()
+        return {"ok": True}
+
+    register_project_task_runner("l014_speech_running", speech_runner, lane="speech")
+    register_project_task_runner("l014_speech_queued", speech_runner, lane="speech")
+    register_project_task_runner("l014_speech_unrelated", default_runner)
+
+    await backend.enqueue_project_task(
+        ctx_a,
+        task_type="l014_speech_running",
+        product_surface="freezone",
+        episode=1,
+        queue_kind="speech",
+    )
+    await _wait_for_status(_task_ports, ctx_a, "l014_speech_running", "running")
+    queued = await backend.enqueue_project_task(
+        ctx_b,
+        task_type="l014_speech_queued",
+        product_surface="freezone",
+        episode=1,
+        queue_kind="speech",
+    )
+    await backend.enqueue_project_task(
+        ctx_a,
+        task_type="l014_speech_unrelated",
+        product_surface="freezone",
+        episode=1,
+        queue_kind="default",
+    )
+
+    assert await asyncio.to_thread(default_done.wait, 1) is True
+    assert backend.lane_snapshot()["speech"] == {
+        "active": 1,
+        "queued": 1,
+        "concurrency": 1,
+    }
+    assert max_active == 1
+    assert started == [ctx_a.project_id]
+
+    await backend.cancel_project_task(ctx_b, queued.task_state)
+    await _wait_for_status(_task_ports, ctx_b, "l014_speech_queued", "cancelled")
+    assert backend.lane_snapshot()["speech"]["queued"] == 0
+    release.set()
+    await _wait_lane_idle(backend, "speech")
+    assert max_active == 1
+    assert started == [ctx_a.project_id]
+
+
+@pytest.mark.asyncio
 async def test_gate3_same_lane_overflow_is_explicitly_queued_and_cancelable(
     monkeypatch,
     _task_ports,

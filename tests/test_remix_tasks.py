@@ -391,9 +391,51 @@ def test_processing_action_queues_once_with_project_local_media(client, tmp_path
     assert first.json()["data"]["task_type"] == "remix_transcribe_media"
     assert second.json()["data"]["task_id"] == first.json()["data"]["task_id"]
     assert len(queued) == 1
-    assert queued[0]["queue_kind"] == "default"
+    assert queued[0]["queue_kind"] == "speech"
     assert queued[0]["payload"]["media_path"] == "media/voice.wav"
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"voice").hexdigest()
+
+
+def test_alignment_action_uses_the_same_bounded_speech_lane(client, tmp_path):
+    api, queued = client
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    script = api.post(
+        BASE,
+        json={
+            "schema": "remix_script.v1",
+            "payload": {
+                "language": "zh",
+                "dialogue": "你好",
+                "segments": [],
+                "selections": [],
+                "blueprint_mappings": [],
+                "media_requirements": [],
+            },
+            "upstream_refs": [],
+        },
+    ).json()["data"]
+
+    response = api.post(
+        "/api/v1/projects/demo/freezone/remix/actions",
+        json={
+            "action": "align_script",
+            "payload": {
+                "media_path": "media/voice.wav",
+                "script_ref": {
+                    "artifact_id": script["id"],
+                    "revision": script["revision"],
+                },
+            },
+            "idempotency_key": "align-speech-lane",
+            "node_revision": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    assert queued[0]["task_type"] == "remix_align_script"
+    assert queued[0]["queue_kind"] == "speech"
 
 
 def test_reference_analysis_action_queues_project_media_without_speech_engine(client, tmp_path, monkeypatch):
@@ -410,6 +452,7 @@ def test_reference_analysis_action_queues_project_media_without_speech_engine(cl
     })
     assert response.status_code == 200
     assert response.json()["data"]["task_type"] == "remix_analyze_reference_video"
+    assert queued[0]["queue_kind"] == "default"
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"video").hexdigest()
 
 
