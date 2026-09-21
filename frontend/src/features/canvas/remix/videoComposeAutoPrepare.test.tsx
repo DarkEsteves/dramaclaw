@@ -95,8 +95,11 @@ describe('VideoComposeNode automatic preparation', () => {
     expect(await screen.findByDisplayValue('旧字幕')).toBeTruthy();
     view.rerender(<VideoComposeNode id="compose" type="videoComposeNode" data={{ ...base, remixManifestRef: { artifactId: 'new', revision: 2 }, remixRenderManifestRef: { artifactId: 'new', revision: 2 } }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     expect(screen.queryByDisplayValue('旧字幕')).toBeNull();
+    expect(screen.queryByText('预览成片')).toBeNull();
+    expect(screen.queryByText('下载 MP4')).toBeNull();
     expect(screen.queryByText('下载 JSON')).toBeNull();
     expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '更新清单' })).toBeDisabled();
     resolveNext({ id: 'new', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [] } });
   });
 
@@ -110,5 +113,17 @@ describe('VideoComposeNode automatic preparation', () => {
     expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
     expect(screen.getByText(/旧画面覆盖与新时间轴冲突/)).toBeTruthy();
     expect(reviseRemixArtifact).not.toHaveBeenCalled();
+  });
+
+  it('blocks recompile while manifest overrides are unsaved', async () => {
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '保存前', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    fireEvent.change(await screen.findByLabelText('字幕 1'), { target: { value: '尚未保存' } });
+    expect(screen.getByRole('button', { name: '更新清单' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '更新清单' }));
+    expect(prepareNodeRemix).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('尚未保存')).toBeTruthy();
   });
 });

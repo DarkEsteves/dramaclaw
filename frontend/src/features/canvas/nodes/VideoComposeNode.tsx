@@ -189,6 +189,10 @@ export const VideoComposeNode = memo(
 
     const handlePrepareRemix = useCallback(async () => {
       if (!project || prepareClaimRef.current) return;
+      if (manifestDirty || (data.remixManifestRef && !manifestReady)) {
+        setRemixError(manifestDirty ? '请先保存清单修改，再更新清单' : '当前清单仍在加载，请稍后再试');
+        return;
+      }
       prepareClaimRef.current = true;
       setRemixPreparing(true);
       setRemixError(null);
@@ -204,16 +208,17 @@ export const VideoComposeNode = memo(
         prepareClaimRef.current = false;
         setRemixPreparing(false);
       }
-    }, [project, id, updateNodeData, data.remixNodeRevision]);
+    }, [project, id, updateNodeData, data.remixNodeRevision, data.remixManifestRef, manifestDirty, manifestReady]);
     useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
       if (nodeId === id && action === 'prepare_compose') void handlePrepareRemix();
     }), [id, handlePrepareRemix]);
 
     useEffect(() => {
       if (!data.autoPrepareRequested || !hasSemanticTimeline) return;
+      if (data.remixManifestRef && !manifestReady) return;
       updateNodeData(id, { autoPrepareRequested: false });
       void handlePrepareRemix();
-    }, [data.autoPrepareRequested, hasSemanticTimeline, id, handlePrepareRemix, updateNodeData]);
+    }, [data.autoPrepareRequested, data.remixManifestRef, hasSemanticTimeline, id, handlePrepareRemix, manifestReady, updateNodeData]);
 
     useEffect(() => {
       updateNodeInternals(id);
@@ -390,19 +395,19 @@ export const VideoComposeNode = memo(
         <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
-          <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={previewState === 'current' ? 'text-green-300' : previewState === 'stale' ? 'text-amber-300' : ''}>{previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
+          <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={manifestReady && previewState === 'current' ? 'text-green-300' : manifestReady && previewState === 'stale' ? 'text-amber-300' : ''}>{!manifestReady ? '正在加载清单…' : previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
           <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} onManifestChange={(next) => { if (!manifestReady) return; setManifestDraft(next); setManifestDirty(true); }} />
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
             <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
             {manifestDirty ? <button type="button" disabled={isManifestSaving || conflicts.length > 0 || !manifestReady} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}
-            <button type="button" disabled={isRemixPreparing || !project} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>更新清单</button>
+            <button type="button" disabled={isRemixPreparing || !project || !manifestReady || manifestDirty} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>更新清单</button>
           </div>
           {manifestDirty ? <div className="mt-2 text-[12px] text-amber-300">修改尚未保存；保存后才能预览或导出该版本。</div> : null}
           {conflicts.length ? <div className="mt-2 text-[12px] text-amber-300">手工修改与新清单冲突：{conflicts.join('；')}</div> : null}
           {(!exportable || nodeRevision == null) && !manifestDirty ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: conflicts.join('；') || blockReason })}</div> : null}
           {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
           {data.remixOperationId && !data.resultVideoUrl ? <div className="mt-2 text-[12px] text-text-muted">合成任务处理中，完成后会回填到本节点。</div> : null}
-          {data.resultVideoUrl ? <div className="mt-2 space-y-2"><video className="nodrag aspect-[9/16] max-h-60 w-full rounded-[8px] bg-black" src={data.resultVideoUrl} controls /><div className="flex flex-wrap gap-3 text-[12px] text-primary underline"><a href={data.resultVideoUrl} target="_blank" rel="noreferrer">预览成片</a><a href={data.resultVideoUrl.replace('/media/', '/files/')} download>下载 MP4</a>{manifestReady && manifestArtifact ? <><a href={textDownloadUrl(JSON.stringify(manifestArtifact.payload, null, 2), 'application/json')} download={`manifest-r${manifestArtifact.revision}.json`}>下载 JSON</a><a href={textDownloadUrl(manifestToSrt(manifestArtifact.payload as ManifestPayload), 'application/x-subrip')} download={`subtitles-r${manifestArtifact.revision}.srt`}>下载 SRT</a></> : null}</div></div> : null}
+          {data.resultVideoUrl && manifestReady ? <div className="mt-2 space-y-2"><video className="nodrag aspect-[9/16] max-h-60 w-full rounded-[8px] bg-black" src={data.resultVideoUrl} controls /><div className="flex flex-wrap gap-3 text-[12px] text-primary underline"><a href={data.resultVideoUrl} target="_blank" rel="noreferrer">预览成片</a><a href={data.resultVideoUrl.replace('/media/', '/files/')} download>下载 MP4</a>{manifestArtifact ? <><a href={textDownloadUrl(JSON.stringify(manifestArtifact.payload, null, 2), 'application/json')} download={`manifest-r${manifestArtifact.revision}.json`}>下载 JSON</a><a href={textDownloadUrl(manifestToSrt(manifestArtifact.payload as ManifestPayload), 'application/x-subrip')} download={`subtitles-r${manifestArtifact.revision}.srt`}>下载 SRT</a></> : null}</div></div> : null}
           {remixError ? <div className="mt-2 text-[12px] text-red-300">{remixError}</div> : null}
         </div>
       </div>;

@@ -18,6 +18,8 @@ Independent review then produced four regression tests before fixes:
 
 The first three tests failed for the reviewed reasons, then passed after the fixes.
 
+A follow-up review added two more red assertions: MP4 preview/update controls were still exposed during a rapid ref switch, and update remained enabled for an unsaved draft. Exact-ref readiness now gates every manifest-bound action and dirty drafts must be saved before recompilation.
+
 ## What changed
 
 - The remix compose node loads the exact saved `composition_manifest.v1` revision and projects its visual layers, subtitle events and audio events into the existing remix editor.
@@ -26,13 +28,14 @@ The first three tests failed for the reviewed reasons, then passed after the fix
 - Every compiled layer and audio event has a stable `row_id`; ambiguous legacy identities conflict instead of choosing the first repeated row.
 - Artifact state is keyed to the loaded ref, so a rapid ref switch immediately hides and disables the previous draft, save, export and structured downloads.
 - Existing override conflicts block save as well as export; an unrelated edit cannot clear them.
+- MP4 preview/download and update are hidden or disabled until the exact artifact ref loads. Update is also disabled while local overrides are dirty, and the action handler rejects indirect update requests in that state.
 - Preview freshness compares both the exact rendered manifest ref and the current upstream graph fingerprint. The node labels the confirmed result current or stale.
 - The current confirmed result exposes inline video preview plus MP4, exact manifest JSON and frame-derived SRT downloads.
 - `render_preview_frame` extracts a boundary frame from the same full FFmpeg manifest render path used by export. The probe compares its bytes with the matching exported frame.
 
 ## Verification
 
-- `pnpm exec vitest run src/features/canvas/remix` — 30 files, 205 tests passed.
+- `pnpm exec vitest run src/features/canvas/remix` — 30 files, 206 tests passed.
 - `uv run pytest tests/test_remix_render.py tests/test_remix_tasks.py tests/test_remix_result_confirmation.py tests/test_api_remix_artifacts.py -q` — 44 passed, 8 existing dependency warnings.
 - `pnpm exec tsc -b --pretty false` — passed.
 - `uv run ruff check src/novelvideo/freezone/remix/render.py tests/test_remix_render.py` — passed.
