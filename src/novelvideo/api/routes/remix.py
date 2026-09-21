@@ -31,6 +31,7 @@ from novelvideo.task_state import get_task_manager
 
 
 router = APIRouter(prefix="/projects/{project}/freezone/remix", tags=["freezone-remix"])
+MAX_RENDER_INPUT_FINGERPRINT_CHARS = 5 * 1024 * 1024
 
 
 class CreateArtifactBody(BaseModel):
@@ -53,7 +54,7 @@ class RenderArtifactBody(BaseModel):
     node_revision: int = Field(ge=1, strict=True)
     canvas_id: str = ""
     node_id: str = ""
-    input_fingerprint: str = ""
+    input_fingerprint: str = Field(default="", max_length=MAX_RENDER_INPUT_FINGERPRINT_CHARS)
     regenerate: bool = False
 
 

@@ -111,17 +111,17 @@ def test_bound_render_accepts_and_persists_full_graph_fingerprint(client, tmp_pa
                         "artifactRef": [{"artifactId": f"artifact-{index}", "revision": index + 1}]
                     },
                 }
-                for index in range(12)
+                for index in range(24)
             ],
             "edges": [
                 {"source": f"visual-{index}", "target": "compose", "sourceHandle": None, "targetHandle": None}
-                for index in range(12)
+                for index in range(24)
             ],
         },
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert len(fingerprint) > 256
+    assert len(fingerprint) > 7_904
 
     response = api.post(
         f"{BASE}/{created['id']}/render",
@@ -140,6 +140,33 @@ def test_bound_render_accepts_and_persists_full_graph_fingerprint(client, tmp_pa
     operation_id = response.json()["data"]["operation_id"]
     operation = RemixOperationStore(tmp_path, "demo").get(operation_id)
     assert operation["normalized_parameters"]["input_fingerprint"] == fingerprint
+
+
+def test_bound_render_rejects_oversized_fingerprint_before_handler(client, tmp_path):
+    from novelvideo.api.routes.remix import MAX_RENDER_INPUT_FINGERPRINT_CHARS
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    created = api.post(
+        BASE,
+        json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []},
+    ).json()["data"]
+
+    response = api.post(
+        f"{BASE}/{created['id']}/render",
+        json={
+            "revision": 1,
+            "idempotency_key": "oversized-fingerprint",
+            "node_revision": 4,
+            "canvas_id": "canvas-a",
+            "node_id": "compose",
+            "input_fingerprint": "x" * (MAX_RENDER_INPUT_FINGERPRINT_CHARS + 1),
+        },
+    )
+
+    assert response.status_code == 422
+    assert queued == []
+    assert RemixOperationStore(tmp_path, "demo").list() == []
 
 
 def test_repeated_render_request_returns_same_task_without_requeue(client):
