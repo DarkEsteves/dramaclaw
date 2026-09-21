@@ -9,6 +9,7 @@ export function markPreviewStale(state: Pick<ManifestEditorState, 'revision' | '
 export function canExportManifest(state: Pick<ManifestEditorState, 'unresolvedRequiredEvents' | 'conflicts'>): boolean { return !(state.unresolvedRequiredEvents?.length || state.conflicts?.length); }
 
 function identityFor(collection: ManifestCollection, row: ManifestRow): Record<string, unknown> {
+  if (typeof row.row_id === 'string' && row.row_id) return { row_id: row.row_id };
   if (collection === 'layers') return { media_id: row.media_id, z_order: row.z_order };
   if (collection === 'audio_events') return { media_id: row.media_id, role: row.role };
   return { start_frame: row.start_frame, end_frame: row.end_frame };
@@ -26,7 +27,9 @@ export function applyManifestEdit(payload: ManifestPayload, edit: { collection: 
 export function reapplyManifestOverrides(compiled: ManifestPayload, overrides: ManifestOverride[]): { payload: ManifestPayload; conflicts: string[] } {
   const payload = clone(compiled); payload.manual_overrides = clone(overrides); const conflicts: string[] = [];
   for (const override of overrides) {
-    const row = payload[override.target].find((item) => Object.entries(override.identity).every(([key, value]) => item[key] === value));
+    const matches = payload[override.target].filter((item) => Object.entries(override.identity).every(([key, value]) => item[key] === value));
+    if (matches.length > 1) { conflicts.push(`${override.target}.${override.field} has an ambiguous legacy identity`); continue; }
+    const row = matches[0];
     if (!row || row[override.field] !== override.base_value) { conflicts.push(`${override.target}.${override.field} 的上游值已变化`); continue; }
     row[override.field] = override.value;
   }

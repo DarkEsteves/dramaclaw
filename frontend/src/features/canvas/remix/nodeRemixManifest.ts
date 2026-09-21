@@ -67,14 +67,14 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
     { media_id: 'background', kind: background.media_kind, purpose: 'background', project_path: background.media_path, media_hash: `sha256:${background.media_hash}`, ...(background.media_kind === 'video' && background.duration_us < narration.duration_us ? { loop: true } : {}) },
     { media_id: 'narration', kind: 'audio', project_path: narration.media_path, media_hash: `sha256:${narration.media_hash}` },
   ];
-  const layers: Array<Record<string, unknown>> = [{ media_id: 'background', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
+  const layers: Array<Record<string, unknown>> = [{ row_id: 'background', media_id: 'background', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
   const subtitles: Array<{ text: string; start_frame: number; end_frame: number; word_cues?: WordCue[] }> = [];
-  const audioEvents: Array<Record<string, unknown>> = [{ media_id: 'narration', role: 'narration', start_frame: 0, end_frame: durationFrames, volume: 1 }];
+  const audioEvents: Array<Record<string, unknown>> = [{ row_id: 'narration', media_id: 'narration', role: 'narration', start_frame: 0, end_frame: durationFrames, volume: 1 }];
   for (const track of audioTracks) {
     if (track.media.media_kind !== 'audio') throw new Error(`${track.role} 必须是音频文件`);
     const mediaId = `${track.role}-${track.id}`;
     bindings.push({ media_id: mediaId, kind: 'audio', project_path: track.media.media_path, media_hash: `sha256:${track.media.media_hash}`, ...(track.role === 'bgm' && track.media.duration_us < narration.duration_us ? { loop: true } : {}) });
-    if (track.role === 'bgm') audioEvents.push({ media_id: mediaId, role: 'bgm', start_frame: 0, end_frame: durationFrames, volume: 0.3, duck_under_narration: 0.35 });
+    if (track.role === 'bgm') audioEvents.push({ row_id: `bgm:${track.id}`, media_id: mediaId, role: 'bgm', start_frame: 0, end_frame: durationFrames, volume: 0.3, duck_under_narration: 0.35 });
   }
   for (const event of timing.events) {
     if (!Number.isInteger(event.start_frame) || !Number.isInteger(event.end_frame) || event.start_frame < 0 || event.end_frame <= event.start_frame || event.end_frame > durationFrames) throw new Error(`事件 ${event.event_id} 超出素材时长`);
@@ -92,7 +92,7 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
       if (!rule.visual_media_revision || media.media_hash !== rule.visual_media_revision) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);
       const mediaId = `visual-${rule.visual_node_id}`;
       if (!bindings.some((binding) => binding.media_id === mediaId)) bindings.push({ media_id: mediaId, kind: media.media_kind, project_path: media.media_path, media_hash: `sha256:${media.media_hash}` });
-      layers.push({ media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
+      layers.push({ row_id: `visual:${event.event_id}`, media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
     }
     if (!caption.trim() && !rule.visual_node_id) throw new Error(`事件 ${event.event_id} 没有字幕或画面输出`);
     if (rule.sfx_node_id) {
@@ -100,7 +100,7 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
       if (!sfx) throw new Error(`事件 ${event.event_id} 缺少音效素材`);
       const length = Math.floor(sfx.media.duration_us * fps / 1_000_000);
       if (length < 1) throw new Error(`事件 ${event.event_id} 的音效时长不足一帧`);
-      audioEvents.push({ media_id: `sfx-${sfx.id}`, role: 'sfx', start_frame: event.start_frame, end_frame: Math.min(event.end_frame, event.start_frame + length), volume: 1 });
+      audioEvents.push({ row_id: `sfx:${event.event_id}:${sfx.id}`, media_id: `sfx-${sfx.id}`, role: 'sfx', start_frame: event.start_frame, end_frame: Math.min(event.end_frame, event.start_frame + length), volume: 1 });
     }
   }
   return {

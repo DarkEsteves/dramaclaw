@@ -18,7 +18,7 @@ describe('buildNodeRemixManifest', () => {
     expect(output.subtitle_events).toEqual([{ text: '喝一口咖啡', start_frame: 12, end_frame: 45 }]);
     expect(output.manifest_version).toBe(2);
     expect(output.output_spec).toMatchObject({ width: 1080, height: 1920, fps: 30, subtitle_safe_area: { left: 90, right: 90, top: 120, bottom: 180 } });
-    expect(output.layers).toEqual([{ media_id: 'background', start_frame: 0, end_frame: 120, z_order: 0, fit: 'cover' }]);
+    expect(output.layers).toEqual([{ row_id: 'background', media_id: 'background', start_frame: 0, end_frame: 120, z_order: 0, fit: 'cover' }]);
     expect(output.media_bindings).not.toContainEqual(expect.objectContaining({ media_id: 'reference' }));
     expect(output.media_bindings).toHaveLength(2);
   });
@@ -84,6 +84,19 @@ describe('buildNodeRemixManifest', () => {
     expect(output.media_bindings).toContainEqual(expect.objectContaining({ media_id: 'bgm-bgm-node', loop: true }));
   });
 
+  it('assigns stable unique row IDs when one visual and SFX are reused by repeated events', () => {
+    const sfx = { ...audio, media_path: 'input/sfx.wav', media_hash: 'd'.repeat(64), duration_us: 500_000 };
+    const output = buildNodeRemixManifest({ reference: video, background, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'first', start_frame: 0, end_frame: 30 }, { event_id: 'second', start_frame: 60, end_frame: 90 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '重复素材', events: [
+        { event_id: 'first', caption: '第一次', visual_node_id: 'visual', visual_media_revision: image.media_hash, sfx_node_id: 'sfx' },
+        { event_id: 'second', caption: '第二次', visual_node_id: 'visual', visual_media_revision: image.media_hash, sfx_node_id: 'sfx' },
+      ] }, visuals: { visual: image }, audioTracks: [{ id: 'sfx', role: 'sfx', media: sfx }],
+    });
+    expect(output.layers.filter((row) => row.media_id === 'visual-visual').map((row) => row.row_id)).toEqual(['visual:first', 'visual:second']);
+    expect(output.audio_events.filter((row) => row.role === 'sfx').map((row) => row.row_id)).toEqual(['sfx:first:sfx', 'sfx:second:sfx']);
+  });
+
   it('binds an uploaded image by exact project path and selected media revision', () => {
     const output = buildNodeRemixManifest({ reference: video, background, narration: audio,
       timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
@@ -91,7 +104,7 @@ describe('buildNodeRemixManifest', () => {
       visuals: { 'image-1': image },
     });
     expect(output.media_bindings).toContainEqual({ media_id: 'visual-image-1', kind: 'image', project_path: image.media_path, media_hash: `sha256:${image.media_hash}` });
-    expect(output.layers).toContainEqual({ media_id: 'visual-image-1', start_frame: 12, end_frame: 45, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
+    expect(output.layers).toContainEqual({ row_id: 'visual:product', media_id: 'visual-image-1', start_frame: 12, end_frame: 45, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
   });
 
   it('binds an uploaded video by exact project path and selected media revision', () => {

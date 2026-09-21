@@ -48,6 +48,19 @@ describe('remix manifest editor', () => {
     expect(result.payload.subtitle_events[0].text).toBe('模型重写');
   });
 
+  it('refuses to replay an ambiguous legacy override onto repeated rows', () => {
+    const compiled = manifest();
+    compiled.layers = [
+      { media_id: 'product', start_frame: 0, end_frame: 20, z_order: 1 },
+      { media_id: 'product', start_frame: 30, end_frame: 50, z_order: 1 },
+    ];
+    const result = reapplyManifestOverrides(compiled, [{
+      target: 'layers', identity: { media_id: 'product', z_order: 1 }, field: 'end_frame', base_value: 20, value: 25,
+    }]);
+    expect(result.conflicts).toEqual([expect.stringContaining('ambiguous')]);
+    expect(result.payload.layers.map((row) => row.end_frame)).toEqual([20, 50]);
+  });
+
   it('exports SRT from the exact current manifest frames', () => {
     expect(manifestToSrt(manifest())).toContain('00:00:01,000 --> 00:00:02,000\n咖啡登场');
   });

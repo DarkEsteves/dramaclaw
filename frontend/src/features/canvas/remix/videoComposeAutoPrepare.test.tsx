@@ -7,6 +7,7 @@ const prepareNodeRemix = vi.hoisted(() => vi.fn());
 const remixGraphFingerprint = vi.hoisted(() => vi.fn(() => 'current-fingerprint'));
 const renderRemixManifest = vi.hoisted(() => vi.fn());
 const fetchRemixArtifact = vi.hoisted(() => vi.fn());
+const reviseRemixArtifact = vi.hoisted(() => vi.fn());
 const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[] }));
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -20,7 +21,7 @@ vi.mock('@/features/canvas/remix/prepareNodeRemix', () => ({ prepareNodeRemix, r
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
 vi.mock('@/api/remix', () => ({
   listRemixOperations: vi.fn(async () => ({ items: [] })),
-  fetchRemixOperation: vi.fn(), fetchRemixArtifact, reviseRemixArtifact: vi.fn(), confirmRemixOperation: vi.fn(), renderRemixManifest,
+  fetchRemixOperation: vi.fn(), fetchRemixArtifact, reviseRemixArtifact, confirmRemixOperation: vi.fn(), renderRemixManifest,
 }));
 vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true), applyRemoteFreezoneCanvas: vi.fn() }));
 vi.mock('@/api/canvas', () => ({ getFreezoneCanvas: vi.fn() }));
@@ -34,6 +35,7 @@ describe('VideoComposeNode automatic preparation', () => {
     graphState.edges = [];
     remixGraphFingerprint.mockReturnValue('current-fingerprint');
     fetchRemixArtifact.mockReset();
+    reviseRemixArtifact.mockReset();
   });
   it('publishes one manifest under StrictMode while preparation is pending', async () => {
     let release!: (value: { manifestRef: { artifactId: string; revision: number }; events: []; selections: []; unresolvedRequiredEvents: [] }) => void;
@@ -47,6 +49,9 @@ describe('VideoComposeNode automatic preparation', () => {
   });
 
   it('does not export an already prepared manifest after narration is cleared', async () => {
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 1, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
     graphState.nodes = [{ id: 'audio', type: 'audioNode', data: { audioUrl: null, remixMedia: { media_hash: 'old' } } }];
     remixGraphFingerprint.mockReturnValue('cleared-narration-fingerprint');
     render(<VideoComposeNode id="compose" type="videoComposeNode" data={{
@@ -54,6 +59,7 @@ describe('VideoComposeNode automatic preparation', () => {
       remixInputFingerprint: 'prepared-with-audio-fingerprint', remixNodeRevision: 1,
       unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [],
     }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' }));
     await waitFor(() => expect(screen.getByText('上游素材或产物已变化，请重新生成合成清单')).toBeTruthy());
     expect(renderRemixManifest).not.toHaveBeenCalled();
@@ -75,5 +81,34 @@ describe('VideoComposeNode automatic preparation', () => {
     expect(screen.getByText('下载 MP4').getAttribute('href')).toContain('/files/');
     expect(screen.getByText('下载 JSON').getAttribute('download')).toBe('manifest-r2.json');
     expect(screen.getByText('下载 SRT').getAttribute('href')).toContain('application/x-subrip');
+  });
+
+  it('never exposes the old draft or downloads while a new manifest ref is loading', async () => {
+    let resolveNext!: (value: unknown) => void;
+    fetchRemixArtifact
+      .mockResolvedValueOnce({ id: 'old', schema: 'composition_manifest.v1', revision: 1, upstream_refs: [], payload: {
+        output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '旧字幕', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [], source_versions: [],
+      } })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNext = resolve; }));
+    const base = { displayName: 'Compose', remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 1, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [], resultVideoUrl: '/api/v1/projects/demo/media/out.mp4' };
+    const view = render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ ...base, remixManifestRef: { artifactId: 'old', revision: 1 }, remixRenderManifestRef: { artifactId: 'old', revision: 1 } }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(await screen.findByDisplayValue('旧字幕')).toBeTruthy();
+    view.rerender(<VideoComposeNode id="compose" type="videoComposeNode" data={{ ...base, remixManifestRef: { artifactId: 'new', revision: 2 }, remixRenderManifestRef: { artifactId: 'new', revision: 2 } }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(screen.queryByDisplayValue('旧字幕')).toBeNull();
+    expect(screen.queryByText('下载 JSON')).toBeNull();
+    expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
+    resolveNext({ id: 'new', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [] } });
+  });
+
+  it('does not let an unrelated edit dismiss unresolved override conflicts', async () => {
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '当前字幕', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixManifestConflicts: ['旧画面覆盖与新时间轴冲突'], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    fireEvent.change(await screen.findByLabelText('字幕 1'), { target: { value: '无关修改' } });
+    expect(screen.getByRole('button', { name: '保存清单修改' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
+    expect(screen.getByText(/旧画面覆盖与新时间轴冲突/)).toBeTruthy();
+    expect(reviseRemixArtifact).not.toHaveBeenCalled();
   });
 });

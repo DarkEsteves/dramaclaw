@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import shutil
 import subprocess
+from array import array
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -598,7 +601,7 @@ def test_render_manifest_respects_position_size_and_opacity(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
-def test_preview_frame_is_extracted_from_exact_manifest_render_at_event_boundary(tmp_path: Path) -> None:
+def test_preview_frames_match_exact_manifest_before_inside_and_after_event_boundaries(tmp_path: Path) -> None:
     background = tmp_path / "background.png"
     product = tmp_path / "product.mp4"
     voice = tmp_path / "voice.wav"
@@ -607,9 +610,47 @@ def test_preview_frame_is_extracted_from_exact_manifest_render_at_event_boundary
     _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
     paths = {"background": background, "product": product, "voice": voice}
     manifest = _bind_media_hashes(_manifest(), paths)
+    manifest["layers"][1].update({"x": 0, "y": 0, "width": 180, "height": 160})
     export = render_manifest(manifest, media_paths=paths, output_path=tmp_path / "export.mp4")
-    preview = render_preview_frame(manifest, media_paths=paths, frame=15, output_path=tmp_path / "preview.png")
+    for frame in (14, 15, 44, 45):
+        preview = render_preview_frame(manifest, media_paths=paths, frame=frame, output_path=tmp_path / f"preview-{frame}.png")
+        exported_frame = tmp_path / f"exported-{frame}.png"
+        _ffmpeg("-i", str(export), "-vf", f"select=eq(n\\,{frame})", "-vsync", "0", "-frames:v", "1", str(exported_frame))
+        assert hashlib.sha256(preview.read_bytes()).digest() == hashlib.sha256(exported_frame.read_bytes()).digest()
+    assert _pixel(export, 14 / 30)[2] > _pixel(export, 14 / 30)[0] * 2
+    assert _pixel(export, 15 / 30)[0] > _pixel(export, 15 / 30)[2] * 2
+    assert _pixel(export, 44 / 30)[0] > _pixel(export, 44 / 30)[2] * 2
+    assert _pixel(export, 45 / 30)[2] > _pixel(export, 45 / 30)[0] * 2
+    assert _subtitle_pixels(export, 15 / 30) != _subtitle_pixels(export, 14 / 30)
+    assert _subtitle_pixels(export, 44 / 30) != _subtitle_pixels(export, 45 / 30)
 
-    exported_frame = tmp_path / "exported.png"
-    _ffmpeg("-i", str(export), "-vf", "select=eq(n\\,15)", "-vsync", "0", "-frames:v", "1", str(exported_frame))
-    assert hashlib.sha256(preview.read_bytes()).digest() == hashlib.sha256(exported_frame.read_bytes()).digest()
+
+def _audio_rms(path: Path) -> float:
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"],
+        check=True, capture_output=True,
+    )
+    samples = array("f")
+    samples.frombytes(result.stdout)
+    return math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_exact_manifest_narration_role_and_volume_are_measurable_in_export(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    manifest = _manifest()
+    manifest["media_bindings"] = [manifest["media_bindings"][0], manifest["media_bindings"][2]]
+    manifest["layers"] = [manifest["layers"][0]]
+    manifest["subtitle_events"] = []
+    paths = {"background": background, "voice": voice}
+    _bind_media_hashes(manifest, paths)
+    loud = render_manifest(manifest, media_paths=paths, output_path=tmp_path / "loud.mp4")
+    quiet_manifest = deepcopy(manifest)
+    quiet_manifest["audio_events"][0].update({"role": "narration", "volume": 0.2})
+    quiet = render_manifest(quiet_manifest, media_paths=paths, output_path=tmp_path / "quiet.mp4")
+
+    ratio = _audio_rms(quiet) / _audio_rms(loud)
+    assert 0.15 < ratio < 0.25
