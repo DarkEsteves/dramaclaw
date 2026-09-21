@@ -7,6 +7,28 @@ import {
   type CanvasNode,
 } from '@/features/canvas/domain/canvasNodes';
 
+const VISUAL_GENERATION_REQUEST_FIELDS = new Set([
+  'prompt',
+  'model',
+  'styleTemplateId',
+  'aspectRatio',
+  'requestAspectRatio',
+  'size',
+  'quality',
+  'modelParams',
+  'cameraSelection',
+  'referenceImageUrl',
+]);
+
+export function changesVisualGenerationRequest(
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): boolean {
+  if (Object.prototype.hasOwnProperty.call(patch, 'remixVisualRequestRevision')) return false;
+  return Object.entries(patch).some(([key, value]) =>
+    VISUAL_GENERATION_REQUEST_FIELDS.has(key) && !Object.is(current[key], value));
+}
+
 /**
  * Build the durable node patches for one image-generation input mutation.
  * Kept store-independent so toolbar/forms and generic graph edge mutations use

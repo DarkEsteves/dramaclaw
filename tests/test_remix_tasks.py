@@ -232,6 +232,42 @@ def test_simultaneous_render_api_calls_enqueue_once(client, monkeypatch: pytest.
     assert calls == 1
 
 
+def test_cancel_during_delayed_enqueue_cannot_leave_a_paid_task_unbound(client, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    from novelvideo.api.routes import remix as routes
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, _queued = client
+    created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowBackend:
+        async def enqueue_project_task(self, ctx, **kwargs):
+            entered.set()
+            await asyncio.to_thread(release.wait, 2)
+            return SimpleNamespace(task_state=SimpleNamespace(task_id="paid-task"), backend="local", queue="ffmpeg")
+
+    monkeypatch.setattr(routes, "get_task_backend", lambda: SlowBackend())
+    body = {"revision": 1, "idempotency_key": "cancel-during-submit", "node_revision": 4}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        submitting = executor.submit(api.post, f"{BASE}/{created['id']}/render", json=body)
+        assert entered.wait(2)
+        operation = RemixOperationStore(tmp_path, "demo").list(limit=1)[0]
+        cancelling = api.post(
+            f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition",
+            json={"outcome": "cancelled", "reason": "user_cancelled"},
+        )
+        release.set()
+        submitted = submitting.result(timeout=2)
+
+    assert cancelling.status_code == 422
+    assert "submission" in cancelling.json()["detail"]
+    assert submitted.status_code == 200
+    durable = RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])
+    assert durable["task_id"] == "paid-task"
+    assert durable["status"] == "pending"
+
+
 def test_force_regenerate_is_reachable_through_render_api(client):
     api, queued = client
     created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]

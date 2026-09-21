@@ -114,3 +114,19 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   explicit regenerate path creates a linked successor.
 - Final acceptance verification: 253 Python recovery/workflow tests and 78 focused
   frontend tests passed; TypeScript, Ruff, and diff checks passed.
+
+## Submission and agent-mutation race closure
+
+- Cancellation now respects the active submission ownership lease. A cancel request
+  cannot move an operation out of `pending` while a paid enqueue is still waiting to
+  bind its task ID, preventing an accepted provider task from becoming unbound.
+- The canvas store itself recognizes image-generation request fields. Agent
+  `update_node_data` and any other generic `updateNodeData` caller now use the same
+  durable visual request revision and downstream invalidation as the visible form.
+  Result, task-status, and error patches remain ordinary updates and do not create a
+  false request revision.
+- A delayed-enqueue cancellation race proves the accepted task is bound, and an Agent
+  prompt edit during an in-flight generation proves the old success/error cannot write
+  back afterward.
+- Final verification: 254 Python recovery/workflow tests and 265 frontend recovery,
+  store, and Agent-command tests passed; TypeScript, Ruff, and diff checks passed.

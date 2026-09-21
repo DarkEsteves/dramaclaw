@@ -197,7 +197,10 @@ class RemixOperationStore:
             claim_active = bool(record.get("submission_owner")) and time.time() - claimed_at < lease_seconds
             if record["status"] != "pending" or record.get("task_id") or claim_active:
                 return False
-            self._update(operation_id, guard, submission_owner=owner, submission_claimed_at=time.time())
+            self._update(
+                operation_id, guard, submission_owner=owner,
+                submission_claimed_at=time.time(), submission_lease_seconds=lease_seconds,
+            )
             return True
 
     def release_submission(self, operation_id: str, *, owner: str) -> None:
@@ -235,6 +238,11 @@ class RemixOperationStore:
             record = self._read(operation_id)
             if record["status"] == "cancelled":
                 return record
+            submission_claimed_at = float(record.get("submission_claimed_at") or 0)
+            submission_lease_seconds = int(record.get("submission_lease_seconds") or 60)
+            if (record.get("submission_owner")
+                    and time.time() - submission_claimed_at < submission_lease_seconds):
+                raise ValueError("operation submission is in progress")
             if record["status"] in {"confirming", "cancelling"}:
                 raise ValueError("operation confirmation or cancellation is in progress")
             if record["status"] not in {"pending", "pending_reconciliation", "needs_confirmation"}:

@@ -48,6 +48,7 @@ import {
 } from '@/features/canvas/domain/canvasNodes';
 import {
   applyVisualGenerationRequestPatches,
+  changesVisualGenerationRequest,
   visualGenerationRequestMutationPatches,
 } from '@/features/canvas/remix/visualGenerationRequest';
 import {
@@ -3387,14 +3388,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   updateNodeData: (nodeId, data, options) => {
     set((state) => {
+      const targetNode = state.nodes.find((node) => node.id === nodeId);
+      const rawPatch = data as Record<string, unknown>;
+      const patches = targetNode && isImageGenNode(targetNode)
+        && changesVisualGenerationRequest(targetNode.data as Record<string, unknown>, rawPatch)
+        ? visualGenerationRequestMutationPatches(state.nodes, state.edges, nodeId, rawPatch)
+        : new Map<string, Record<string, unknown>>([[nodeId, rawPatch]]);
       let changed = false;
       let fmvContinuityCleared = false;
       const nextNodes = state.nodes.map((node) => {
-        if (node.id !== nodeId) {
-          return node;
-        }
+        const nodePatch = patches.get(node.id);
+        if (!nodePatch) return node;
 
-        const hasDataChange = Object.entries(data).some(([key, nextValue]) => {
+        const hasDataChange = Object.entries(nodePatch).some(([key, nextValue]) => {
           const previousValue = (node.data as Record<string, unknown>)[key];
           return !Object.is(previousValue, nextValue);
         });
@@ -3404,7 +3410,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
         const mergedData = {
           ...node.data,
-          ...data,
+          ...nodePatch,
         } as CanvasNodeData;
         // 切到「独立开场」即刻清理上次自动承接的残留：删自动绑定的尾帧参考边、剥离
         // [FMV自动承接] 提示词段，而不是拖到下次生成入口（ensureVideoContinuity 的
@@ -3426,14 +3432,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }
         const storyClipLayout = isStoryClipNodeInCanvas(node, state.nodes);
         const synchronizedData = storyClipLayout
-          ? synchronizeStoryMediaMetadata(node, data, preparedData)
+          ? synchronizeStoryMediaMetadata(node, nodePatch as Partial<CanvasNodeData>, preparedData)
           : preparedData;
         const resizedNode = maybeApplyImageAutoResize(
           {
             ...node,
             data: synchronizedData,
           },
-          data,
+          nodePatch as Partial<CanvasNodeData>,
           { storyClipLayout },
         );
 

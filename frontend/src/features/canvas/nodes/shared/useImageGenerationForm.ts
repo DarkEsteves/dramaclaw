@@ -612,6 +612,7 @@ export function useImageGenerationForm(
           workflowRecipeCompiledPrompt: compiledPrompt,
           prompt: compiledPrompt,
           workflowRecipeIds: recipeIds,
+          remixVisualRequestRevision: generationVisualRequestRevision,
         });
         },
       });

@@ -53,4 +53,21 @@ describe('canvasStore image generation input edges', () => {
     useCanvasStore.getState().onEdgesChange([{ id: edgeId, type: 'remove' }]);
     expect(useCanvasStore.getState().nodes.find((item) => item.id === 'image')?.data.remixVisualRequestRevision).toBe(6);
   });
+
+  it('generic request-field edits bump revision while result and status patches do not', () => {
+    useCanvasStore.getState().updateNodeData('image', {
+      generationError: 'provider failed',
+      isGenerating: false,
+      imageUrl: '/result.png',
+    });
+    expect(useCanvasStore.getState().nodes.find((item) => item.id === 'image')?.data.remixVisualRequestRevision).toBe(4);
+
+    useCanvasStore.getState().updateNodeData('image', { model: 'new-model' });
+    expect(useCanvasStore.getState().nodes.find((item) => item.id === 'image')?.data).toMatchObject({
+      model: 'new-model',
+      remixVisualRequestRevision: 5,
+      remixVisualOutputCurrent: false,
+      generationTaskKey: null,
+    });
+  });
 });

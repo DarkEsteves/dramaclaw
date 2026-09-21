@@ -7,6 +7,11 @@ import { submitFreezoneGen } from '@/api/ops';
 import { awaitTaskCompletion } from '@/api/tasks';
 import { CANVAS_NODE_TYPES, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { AssetBoardView } from '@/features/canvas/ui/asset-board/AssetBoardView';
+import {
+  applyCanvasChatCommands,
+  CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+  extractCanvasChatCommandEnvelopes,
+} from '@/features/freezone/canvasChatCommands';
 import { useCanvasStore } from '@/stores/canvasStore';
 
 vi.mock('react-i18next', () => ({
@@ -134,6 +139,32 @@ describe('故事板详情 · 图片生成表单', () => {
 
     await waitFor(() => {
       const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
+      expect(data.remixVisualRequestRevision).toBe(2);
+      expect(data.isGenerating).toBe(false);
+      expect(data.generationTaskKey).toBeNull();
+      expect(data.imageUrl).toBeNull();
+      expect(data.generationError).toBeFalsy();
+    });
+  });
+
+  it('an agent update_node_data edit during generation rejects the old late result', async () => {
+    let resolveTask!: (value: unknown) => void;
+    vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }) as never);
+    seed([emptyImageGenNode({ prompt: 'Agent 修改前' })]);
+    openDetail('图片节点 3');
+    fireEvent.click(within(detailPanel()).getByRole('button', { name: '生成' }));
+    await waitFor(() => expect(submitFreezoneGen).toHaveBeenCalled());
+
+    const applied = applyCanvasChatCommands(extractCanvasChatCommandEnvelopes([{
+      schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+      commands: [{ type: 'update_node_data', node_id: 'gen-1', data: { prompt: 'Agent 修改后' } }],
+    }]));
+    expect(applied.errors).toEqual([]);
+    resolveTask({ result: { output_url: '/late-agent-request.png' } });
+
+    await waitFor(() => {
+      const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
+      expect(data.prompt).toBe('Agent 修改后');
       expect(data.remixVisualRequestRevision).toBe(2);
       expect(data.isGenerating).toBe(false);
       expect(data.generationTaskKey).toBeNull();
