@@ -147,7 +147,9 @@ describe('reference video remix canvas journey', () => {
     );
     graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('background', 'script'), edge('timeline', 'compose'));
     const compose = graph.nodes[graph.nodes.length - 1];
-    compose.data.remixManifestDirty = true;
+    compose.data.remixManifestDirty = true; compose.data.remixManifestConflicts = ['仍待处理的字幕冲突'];
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'resolve_manifest_conflicts', label: '处理清单冲突' });
+    compose.data.remixManifestConflicts = [];
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'save_manifest', label: '保存合成清单修改' });
     compose.data.remixManifestDirty = false; compose.data.remixManifestConflicts = ['字幕冲突'];
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'action', action: 'resolve_manifest_conflicts', label: '处理清单冲突' });
