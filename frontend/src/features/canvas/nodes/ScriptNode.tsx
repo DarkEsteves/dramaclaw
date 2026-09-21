@@ -86,7 +86,7 @@ import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
-import { scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
@@ -424,7 +424,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
-  const isRemixScript = Boolean(blueprintRef || savedRemixRef || remixDraft);
+  const remixScriptLabel = remixScriptEditorLabel(data, Boolean(blueprintRef));
+  const isRemixScript = Boolean(remixScriptLabel);
   const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
   const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
@@ -698,15 +699,15 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             durationMs={data.generationDurationMs}
           />
         )}
-        <div className="border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
-          <span>{remixRef(data.remixScriptRef) ? `参考改编脚本 · 版本 ${remixRef(data.remixScriptRef)?.revision}` : blueprintRef ? '参考改编脚本 · 待保存' : '参考改编脚本 · 可连接视频故事'}</span>
-        </div>
+        {isRemixScript && <div className="border-b border-white/[0.08] px-3 py-1.5 text-[11px] text-text-muted">
+          <span>{remixRef(data.remixScriptRef) ? `参考改编脚本 · 版本 ${remixRef(data.remixScriptRef)?.revision}` : '参考改编脚本 · 待保存'}</span>
+        </div>}
         {isRemixScript ? (
           <div className="nodrag flex min-h-0 flex-1 flex-col gap-2 px-3 py-3 text-xs text-text-muted">
             {initialRemixDraft.dialogue.trim() ? (
               <p className="ui-scrollbar min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words leading-5 text-text-dark">{initialRemixDraft.dialogue}</p>
             ) : (
-              <p className="flex-1">点击“编辑改编脚本”填写台词。</p>
+              <p className="flex-1">点击“{remixScriptLabel}”填写台词。</p>
             )}
             <div className="border-t border-white/[0.08] pt-2">
               {`${initialRemixDraft.selections.length} 个语义事件 · ${remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'view_alignment' ? '对齐中：查看进度' : remixNextAction === 'align_narration' ? '下一步：按脚本对齐' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本'}`}

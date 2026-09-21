@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '../domain/canvasNodes';
-import { scriptCanvasState } from './scriptCanvasState';
+import { remixScriptEditorLabel, scriptCanvasState } from './scriptCanvasState';
 
 const node = (id: string, type: string, data: Record<string, unknown> = {}) => ({ id, type, data, position: { x: 0, y: 0 } }) as CanvasNode;
 const edge = (source: string, target: string) => ({ id: `${source}-${target}`, source, target }) as CanvasEdge;
 const saved = { artifactId: 'script', revision: 2 };
 
 describe('script canvas state', () => {
+  it('shows the remix editor only for a linked or existing remix script', () => {
+    expect(remixScriptEditorLabel({}, false)).toBeNull();
+    expect(remixScriptEditorLabel({ prompt: '普通分镜提示词' }, false)).toBeNull();
+    expect(remixScriptEditorLabel({}, true)).toBe('编写改编脚本');
+    expect(remixScriptEditorLabel({ remixScriptDraft: { dialogue: '新台词', selections: [] } }, false)).toBe('编辑改编脚本');
+    expect(remixScriptEditorLabel({ remixScriptRef: saved }, false)).toBe('编辑改编脚本');
+  });
+
   it('shows the draft and asks to save when there is no saved script', () => {
     expect(scriptCanvasState([node('s', 'scriptNode', { remixScriptDraft: { dialogue: '新台词', selections: [] } })], [], 's')).toEqual({
       dialogue: '新台词', eventCount: 0, status: 'unsaved', nextAction: 'edit_script',

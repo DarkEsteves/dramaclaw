@@ -139,7 +139,7 @@ import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
-import { scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import { audioToolbarState } from './audioToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
@@ -1635,6 +1635,10 @@ export const NodeActionToolbar = memo(
       node.data.workflowRecipeCompileMode === "timeout_fallback";
     const remixScriptState = node.type === CANVAS_NODE_TYPES.script
       ? scriptCanvasState(nodes, edges, node.id) : null;
+    const remixScriptLabel = node.type === CANVAS_NODE_TYPES.script
+      ? remixScriptEditorLabel(node.data, edges.some((edge) => edge.target === node.id
+        && nodes.some((source) => source.id === edge.source && source.type === CANVAS_NODE_TYPES.videoStory && Boolean(source.data.referenceBlueprintRef))))
+      : null;
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;
 
@@ -1704,8 +1708,8 @@ export const NodeActionToolbar = memo(
                     ...(node.data.remixRole === 'narration' && node.data.audioUrl ? [{ action: 'align_script', label: '按脚本对齐', Icon: Workflow }] : []),
                   ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
-                  : node.type === CANVAS_NODE_TYPES.script ? [
-                    { action: 'edit_script', label: '编辑改编脚本', Icon: PenLine },
+                  : node.type === CANVAS_NODE_TYPES.script ? remixScriptLabel ? [
+                    { action: 'edit_script', label: remixScriptLabel, Icon: PenLine },
                     ...(remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
                       : remixScriptState?.nextAction === 'view_alignment'
@@ -1713,7 +1717,7 @@ export const NodeActionToolbar = memo(
                       : remixScriptState?.nextAction === 'align_narration'
                       ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
                       : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
-                  ]
+                  ] : []
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '重新编译', Icon: Workflow }, { action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]
                 ).map(({ action, label, Icon }) => <UiChipButton

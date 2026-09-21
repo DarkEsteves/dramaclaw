@@ -3,6 +3,14 @@ import { planTimelineFromScript } from './spawnRemixDownstream';
 import type { RemixScriptDraft } from './remixScriptModel';
 
 type ArtifactRef = { artifactId?: string; revision?: number };
+export function remixScriptEditorLabel(data: CanvasNode['data'], hasBlueprint: boolean): '编写改编脚本' | '编辑改编脚本' | null {
+  const isRemix = hasBlueprint || Boolean(data.remixScriptRef || data.remixScriptLastSavedRef || data.remixScriptDraft || data.openRemixEditorRequested);
+  if (!isRemix) return null;
+  const dialogue = (data.remixScriptDraft as RemixScriptDraft | undefined)?.dialogue;
+  return (typeof dialogue === 'string' && dialogue.trim()) || data.remixScriptRef || data.remixScriptLastSavedRef
+    ? '编辑改编脚本' : '编写改编脚本';
+}
+
 function sameRef(left: unknown, right: unknown): boolean {
   const a = left as ArtifactRef | undefined;
   const b = right as ArtifactRef | undefined;
