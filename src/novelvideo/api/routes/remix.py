@@ -324,7 +324,9 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
 @router.post("/actions")
 async def enqueue_process_action(project: str, body: ProcessActionBody, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "editor")
-    if body.action in {"transcribe_media", "align_script"} and not _speech_engine_ready():
+    if body.action in {"transcribe_media", "align_script"} and not await run_in_threadpool(
+        _speech_engine_ready
+    ):
         raise HTTPException(503, "Speech alignment engine is not configured")
     try:
         refs, parameters = await run_in_threadpool(_action_inputs, store, body.action, body.payload)

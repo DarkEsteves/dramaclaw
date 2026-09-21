@@ -159,6 +159,39 @@ def _valid_provenance(value: Any, *, fixture: bool = False) -> bool:
     )
 
 
+def _consumed_asset_paths(case: dict[str, Any]) -> list[str]:
+    """Return every declared or structurally consumed input path for a case."""
+    paths = {
+        relative
+        for relative in case.get("required_assets", [])
+        if isinstance(relative, str) and relative
+    }
+    script_path = case.get("script_path")
+    if isinstance(script_path, str) and script_path:
+        paths.add(script_path)
+    voices = case.get("voices")
+    if isinstance(voices, list):
+        for voice in voices:
+            if not isinstance(voice, dict):
+                continue
+            for key in ("audio", "annotations"):
+                relative = voice.get(key)
+                if isinstance(relative, str) and relative:
+                    paths.add(relative)
+    render = case.get("render")
+    if isinstance(render, dict):
+        for key in ("background", "broll"):
+            relative = render.get(key)
+            if isinstance(relative, str) and relative:
+                paths.add(relative)
+    video_transform = case.get("video_transform")
+    if isinstance(video_transform, dict):
+        source = video_transform.get("source")
+        if isinstance(source, str) and source:
+            paths.add(source)
+    return sorted(paths)
+
+
 def _fixture_evidence_blockers(
     fixture_data: dict[str, Any], asset_root: Path
 ) -> list[str]:
@@ -194,8 +227,8 @@ def _fixture_evidence_blockers(
         if not isinstance(inventory, dict):
             blockers.append(f"{case_id} asset inventory is missing")
             inventory = {}
-        for relative in case.get("required_assets", []):
-            path_value = Path(relative) if isinstance(relative, str) else Path("/")
+        for relative in _consumed_asset_paths(case):
+            path_value = Path(relative)
             if path_value.is_absolute() or ".." in path_value.parts:
                 blockers.append(
                     f"{case_id} inventory path is not project relative: {relative}"
@@ -396,7 +429,9 @@ def _case_report(
     runner: WhisperXAlignmentRunner | None,
 ) -> tuple[dict[str, Any], list[float]]:
     started = time.monotonic()
-    required_assets = [asset_root / relative for relative in case["required_assets"]]
+    required_assets = [
+        asset_root / relative for relative in _consumed_asset_paths(case)
+    ]
     missing = [
         str(path.relative_to(asset_root))
         for path in required_assets

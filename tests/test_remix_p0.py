@@ -357,6 +357,54 @@ def test_fixture_evidence_requires_six_categories_hashes_rates_and_manual_proven
     assert any("manual annotation provenance" in blocker for blocker in blockers)
 
 
+def test_fixture_evidence_derives_every_consumed_path_when_required_assets_is_empty(
+    tmp_path: Path,
+) -> None:
+    harness = _harness_module()
+    case = {
+        "case_id": "structural-paths",
+        "language": "en",
+        "category": "vfr_crop_speed",
+        "required_assets": [],
+        "script_path": "case/script.txt",
+        "voices": [
+            {
+                "id": "normal",
+                "audio": "case/voice.wav",
+                "annotations": "case/annotations.json",
+            }
+        ],
+        "render": {
+            "background": "case/background.png",
+            "broll": "case/broll.mp4",
+        },
+        "video_transform": {"source": "case/source-vfr.mp4"},
+        "provenance": {
+            "kind": "approved-real",
+            "source_id": "controlled-structural-paths",
+            "license": "LicenseRef-Controlled-Test",
+            "approved_by": "asset-reviewer",
+            "approved_at": "2026-09-21",
+            "approval_id": "approval-structural-paths",
+        },
+        "asset_inventory": {},
+    }
+
+    blockers = harness._fixture_evidence_blockers({"cases": [case]}, tmp_path)
+
+    for path in (
+        "case/script.txt",
+        "case/voice.wav",
+        "case/annotations.json",
+        "case/background.png",
+        "case/broll.mp4",
+        "case/source-vfr.mp4",
+    ):
+        assert (
+            f"structural-paths inventory provenance is missing for {path}" in blockers
+        )
+
+
 def test_fixture_evidence_accepts_verified_six_category_inventory(
     tmp_path: Path,
 ) -> None:

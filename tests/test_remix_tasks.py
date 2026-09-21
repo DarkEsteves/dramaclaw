@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 import hashlib
 
@@ -220,6 +221,42 @@ def test_speech_action_reports_unavailable_engine_before_queueing(client, monkey
 
     assert response.status_code == 503
     assert queued == []
+
+
+def test_speech_action_runs_readiness_probe_off_the_async_event_loop(
+    client, tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    api, queued = client
+    from novelvideo.api.routes import remix as routes
+
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    calls = []
+
+    def readiness() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            calls.append("worker-thread")
+            return True
+        raise AssertionError("readiness probe blocked the async API event loop")
+
+    monkeypatch.setattr(routes, "_speech_engine_ready", readiness)
+
+    response = api.post(
+        "/api/v1/projects/demo/freezone/remix/actions",
+        json={
+            "action": "transcribe_media",
+            "payload": {"media_path": "media/voice.wav", "language": "en"},
+            "idempotency_key": "threaded-readiness",
+            "node_revision": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == ["worker-thread"]
+    assert len(queued) == 1
 
 
 def test_enqueue_render_rejects_invalid_saved_manifest_before_queueing(client, monkeypatch: pytest.MonkeyPatch):
