@@ -17,11 +17,12 @@
 - Initial UI run failed because selected media revisions were not captured and the create/upload affordances did not exist.
 - Initial attachment UI test failed because unversioned existing visuals were not attached.
 - Initial save guard test failed because scripts could publish a visual node without a media revision.
+- Review race regressions initially failed because attachment mutated the canvas node before the panel's request-token check, and a rejected stale request still surfaced its error.
 
 ## Verification
 
-- `npm test -- --run src/features/canvas/remix/*.test.ts src/features/canvas/remix/*.test.tsx` — 30 files, 192 tests passed after review fixes.
-- Focused final B-roll binding/RemixScriptPanel/manifest/preparation run — 4 files, 28 tests passed.
+- `npm test -- --run src/features/canvas/remix/*.test.ts src/features/canvas/remix/*.test.tsx` — 30 files, 194 tests passed after review fixes.
+- Focused final B-roll binding/RemixScriptPanel run — 2 files, 12 tests passed.
 - `uv run pytest -q tests/test_api_remix_media.py tests/test_remix_render.py` — 21 passed; 8 existing dependency deprecation warnings.
 - `npx tsc -b --pretty false` — passed.
 - `uv run ruff check src/novelvideo/api/routes/remix_media.py tests/test_api_remix_media.py tests/test_remix_render.py` — passed.
@@ -37,3 +38,5 @@
 - The semantic-selection upload action now creates a normal upload node. It accepts images and videos, and the existing upload-node morph keeps the node ID and compatible edge.
 - Async visual attachment records the intended selection, merges the returned revision into the latest draft, and ignores stale attachment completions. Edits made while attachment is pending are retained.
 - Added regressions for replacement after binding, video-capable upload node creation, stale preparation binding, and editing during an outstanding attachment.
+- Media attachment now returns a deferred commit. The panel commits it only after confirming the request is still current and the selection still points to that node, so an out-of-order success cannot overwrite the latest node binding. Stale rejections are ignored by the same request-token check.
+- Added deterministic regressions for A/B attachment successes completing out of order and for an old rejection arriving after a newer success.

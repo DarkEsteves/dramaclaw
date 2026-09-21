@@ -106,4 +106,45 @@ describe('RemixScriptPanel', () => {
       selections: [expect.objectContaining({ label: '新品登场', visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })],
     })));
   });
+
+  it('commits only the latest visual when attachment successes finish out of order', async () => {
+    let releaseA!: (value: { mediaRevision: string; commit: () => void }) => void;
+    let releaseB!: (value: { mediaRevision: string; commit: () => void }) => void;
+    const commitA = vi.fn();
+    const commitB = vi.fn();
+    const onAttachVisual = vi.fn((nodeId: string) => new Promise<{ mediaRevision: string; commit: () => void }>((resolve) => {
+      if (nodeId === 'image-a') releaseA = resolve;
+      else releaseB = resolve;
+    }));
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[{ id: 'image-a', label: 'A' }, { id: 'image-b', label: 'B' }]} sfxNodes={[]} onAttachVisual={onAttachVisual} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    const select = screen.getByLabelText('产品登场画面');
+    fireEvent.change(select, { target: { value: 'image-a' } });
+    fireEvent.change(select, { target: { value: 'image-b' } });
+    releaseB({ mediaRevision: 'b'.repeat(64), commit: commitB });
+    await waitFor(() => expect(commitB).toHaveBeenCalledOnce());
+    releaseA({ mediaRevision: 'a'.repeat(64), commit: commitA });
+
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] })));
+    expect(commitA).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale attachment rejection after a newer visual succeeds', async () => {
+    let rejectA!: (cause: Error) => void;
+    const commitB = vi.fn();
+    const onAttachVisual = vi.fn((nodeId: string) => nodeId === 'image-a'
+      ? new Promise<{ mediaRevision: string; commit: () => void }>((_resolve, reject) => { rejectA = reject; })
+      : Promise.resolve({ mediaRevision: 'b'.repeat(64), commit: commitB }));
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[{ id: 'image-a', label: 'A' }, { id: 'image-b', label: 'B' }]} sfxNodes={[]} onAttachVisual={onAttachVisual} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    const select = screen.getByLabelText('产品登场画面');
+    fireEvent.change(select, { target: { value: 'image-a' } });
+    fireEvent.change(select, { target: { value: 'image-b' } });
+    await waitFor(() => expect(commitB).toHaveBeenCalledOnce());
+    rejectA(new Error('旧请求失败'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] }));
+  });
 });

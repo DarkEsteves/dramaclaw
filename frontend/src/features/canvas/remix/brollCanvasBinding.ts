@@ -11,6 +11,11 @@ interface BrollCanvasStore {
   findNodePosition: (nodeId: string, width: number, height: number) => { x: number; y: number };
 }
 
+export interface BrollVisualAttachment {
+  mediaRevision: string;
+  commit: () => void;
+}
+
 export function createBrollVisualNode(store: BrollCanvasStore, scriptId: string, mode: 'generate' | 'upload', selectionId: string) {
   if (!store.nodes.some((node) => node.id === scriptId)) return null;
   const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
@@ -52,14 +57,18 @@ export async function attachBrollVisualMedia(
   visual: CanvasNode,
   attach: (project: string, mediaPath: string) => Promise<RemixUploadedMedia>,
   updateNodeData: (nodeId: string, data: Partial<CanvasNodeData>) => void,
-): Promise<string> {
+): Promise<BrollVisualAttachment> {
   const mediaPath = currentVisualProjectPath(project, visual);
   if (!mediaPath) throw new Error('请先在素材节点完成生成或上传');
   const existing = visual.data.remixMedia;
   if (existing && typeof existing === 'object' && 'media_path' in existing && existing.media_path === mediaPath
-    && 'media_hash' in existing && typeof existing.media_hash === 'string') return existing.media_hash;
+    && 'media_hash' in existing && typeof existing.media_hash === 'string') {
+    return { mediaRevision: existing.media_hash, commit: () => {} };
+  }
   const media = await attach(project, mediaPath);
   if (media.media_kind !== 'image' && media.media_kind !== 'video') throw new Error('B-roll 只支持图片或视频');
-  updateNodeData(visual.id, { remixMedia: media, remixRole: 'visual' });
-  return media.media_hash;
+  return {
+    mediaRevision: media.media_hash,
+    commit: () => updateNodeData(visual.id, { remixMedia: media, remixRole: 'visual' }),
+  };
 }

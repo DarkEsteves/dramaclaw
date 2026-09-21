@@ -14,11 +14,13 @@ describe('B-roll canvas binding', () => {
     const updateNodeData = vi.fn();
     const attach = vi.fn(async () => ({ media_path: 'freezone/image/new.png', media_hash: 'b'.repeat(64), media_kind: 'image' as const, url: '/static/projects/demo/freezone/image/new.png', size: 1, duration_us: 0 }));
 
-    const revision = await attachBrollVisualMedia('demo', current, attach, updateNodeData);
+    const attachment = await attachBrollVisualMedia('demo', current, attach, updateNodeData);
 
     expect(attach).toHaveBeenCalledWith('demo', 'freezone/image/new.png');
+    expect(updateNodeData).not.toHaveBeenCalled();
+    attachment.commit();
     expect(updateNodeData).toHaveBeenCalledWith('visual', expect.objectContaining({ remixMedia: expect.objectContaining({ media_hash: 'b'.repeat(64) }), remixRole: 'visual' }));
-    expect(revision).toBe('b'.repeat(64));
+    expect(attachment.mediaRevision).toBe('b'.repeat(64));
   });
 
   it('creates a normal upload node that accepts image or video and preserves its edge', () => {

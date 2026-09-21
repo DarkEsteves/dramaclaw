@@ -4,6 +4,7 @@ import { saveRemixScriptArtifact } from './remixScriptArtifact';
 import { editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
+import type { BrollVisualAttachment } from './brollCanvasBinding';
 
 const fieldClass = 'nodrag mt-1 w-full rounded-[12px] border border-white/10 bg-surface-field px-3 py-2 text-text-dark outline-none focus:border-white/25';
 
@@ -15,7 +16,7 @@ interface Props {
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
-  onAttachVisual?: (nodeId: string) => Promise<string>;
+  onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onDraftChange: (draft: RemixScriptDraft) => void;
   onSave: (ref: RemixArtifactRef) => void;
   onClose: () => void;
@@ -89,13 +90,18 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
       : item) });
     try {
       const knownRevision = visualNodes.find((node) => node.id === nodeId)?.mediaRevision;
-      const mediaRevision = nodeId && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
+      const attachment = nodeId && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
       if (visualBindingRequest.current.get(selectionId) !== request) return;
       const latest = draftRef.current;
+      const selectionStillUsesNode = latest.selections.some((item) => item.id === selectionId && item.visualNodeId === nodeId);
+      if (!selectionStillUsesNode) return;
+      const mediaRevision = typeof attachment === 'string' ? attachment : attachment?.mediaRevision;
+      if (attachment && typeof attachment !== 'string') attachment.commit();
       changeDraft({ ...latest, selections: latest.selections.map((item) => item.id === selectionId && item.visualNodeId === nodeId
         ? { ...item, visualMediaRevision: nodeId ? mediaRevision : undefined }
         : item) });
     } catch (cause) {
+      if (visualBindingRequest.current.get(selectionId) !== request) return;
       setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');
     }
   };
