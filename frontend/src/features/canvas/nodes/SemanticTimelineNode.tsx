@@ -153,6 +153,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     setBusy(true);
     setError(null);
     try {
+      const compiledOverrides = buildTimelineOverrides(overrides);
       const aligned = await fetchRemixArtifact(project, exactWordRef);
       if (aligned.schema !== 'word_timeline.v1' || aligned.payload.status !== 'completed') throw new Error('转写节点需要完成脚本与语音对齐。');
       const editMap = buildTimelineEditMap(Array.isArray(aligned.payload.words) ? aligned.payload.words : [], data.editMap);
@@ -160,7 +161,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       const nodeRevision = currentInputsRef.current.revision + 1;
       const task = await submitRemixProcessAction(project, {
         action: 'compile_semantic_timeline', scriptRef: exactScriptRef, wordTimelineRef: exactWordRef,
-        editMap, overrides: buildTimelineOverrides(overrides), fps: data.fps ?? 30,
+        editMap, overrides: compiledOverrides, fps: data.fps ?? 30,
         idempotencyKey: crypto.randomUUID(), nodeRevision,
       });
       currentInputsRef.current.revision = nodeRevision;

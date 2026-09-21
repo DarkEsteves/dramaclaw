@@ -109,6 +109,20 @@ describe('source-first remix graph plans', () => {
     expect(() => planComposeFromTimeline(nodes, edges, 'timeline')).toThrow('重新编译');
   });
 
+  it('accepts the same production narration digest with or without the sha256 prefix', () => {
+    const digest = 'a'.repeat(64);
+    const nodes = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: { media_hash: 'v', has_audio: true } }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: ref('b') }),
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixMedia: { media_hash: digest }, audioUrl: '/voice.wav' }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: ref('t'), compiledMediaHash: `sha256:${digest}`, events: [] }),
+    ];
+    const edges = [edge('video', 'story'), edge('story', 'script'), edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words'), edge('script', 'timeline'), edge('words', 'timeline')];
+    expect(planComposeFromTimeline(nodes, edges, 'timeline')).toEqual({ sourceIds: ['timeline'] });
+  });
+
   it('creates and connects one timeline with an automatic compile request', () => {
     const addNode = vi.fn(() => 'timeline');
     const addEdge = vi.fn(() => 'edge');

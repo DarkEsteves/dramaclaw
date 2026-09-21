@@ -39,7 +39,18 @@ export function buildTimelineOverrides(values: Record<string, TimelineEventOverr
     if (Number.isInteger(value.minimumDurationFrames) && Number(value.minimumDurationFrames) > 0) {
       rows.push({ event_id: eventId, kind: 'minimum_duration_frames', frames: value.minimumDurationFrames });
     }
-    if (Number.isInteger(value.startFrame) && Number.isInteger(value.endFrame)) {
+    const hasStart = value.startFrame !== undefined;
+    const hasEnd = value.endFrame !== undefined;
+    if (hasStart !== hasEnd) {
+      throw new Error(`${eventId} 的固定起始帧和固定结束帧必须同时填写`);
+    }
+    if (hasStart && (!Number.isInteger(value.startFrame) || !Number.isInteger(value.endFrame))) {
+      throw new Error(`${eventId} 的固定帧必须是整数`);
+    }
+    if (hasStart && (Number(value.startFrame) < 0 || Number(value.endFrame) <= Number(value.startFrame))) {
+      throw new Error(`${eventId} 的固定结束帧必须晚于固定起始帧`);
+    }
+    if (hasStart && hasEnd) {
       rows.push({ event_id: eventId, kind: 'fixed_frames', start_frame: value.startFrame, end_frame: value.endFrame });
     }
     return rows;

@@ -14,6 +14,12 @@ function sameRef(left: Ref | null, right: Ref | null): boolean {
   return Boolean(left && right && left.artifactId === right.artifactId && left.revision === right.revision);
 }
 
+function canonicalMediaHash(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith('sha256:') ? normalized : `sha256:${normalized}`;
+}
+
 function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): CanvasNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const result: CanvasNode[] = [];
@@ -92,7 +98,8 @@ export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[]
     throw new Error('语义时间轴缺少配音版本信息，请重新编译。');
   }
   if (narration.length === 1
-    && (narration[0].data.remixMedia as { media_hash?: unknown }).media_hash !== timeline?.data.compiledMediaHash) {
+    && canonicalMediaHash((narration[0].data.remixMedia as { media_hash?: unknown }).media_hash)
+      !== canonicalMediaHash(timeline?.data.compiledMediaHash)) {
     throw new Error('语义时间轴使用了旧的配音版本，请重新编译。');
   }
   if (narration.length === 0 && !transcriptAncestors.some((node) => node.id === reference[0].id)) throw new Error('请将参考视频连接到转写节点。');

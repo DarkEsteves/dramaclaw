@@ -43,6 +43,16 @@ describe('SemanticTimelineNode', () => {
     await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } })));
   });
 
+  it('keeps an incomplete fixed-frame edit visible and reports it before submitting', async () => {
+    render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    const start = screen.getByLabelText('产品登场 固定起始帧') as HTMLInputElement;
+    fireEvent.change(start, { target: { value: '12' } });
+    fireEvent.click(screen.getByRole('button', { name: '重新编译' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('同时填写'));
+    expect(start.value).toBe('12');
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
   it('resumes a persisted compile operation after mounting without submitting another task', async () => {
     vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'op-1', task_id: null, status: 'needs_confirmation', node_revision: 1, input_refs: [{ artifact_id: 'script-art', revision: 1 }, { artifact_id: 'words-art', revision: 1 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] });
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
