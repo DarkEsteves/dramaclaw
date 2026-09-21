@@ -33,7 +33,7 @@
 | 刷新/迟到/并发 | 通过 | 重开使用已绑定 task 对账；超时不重投；取消/过期/旧 revision 结果只留历史；提交和确认都有 fencing token。 |
 | 兼容与隔离 | 通过 | Recipe v1 指令不变，manifest v1 走旧 renderer，旧 canvas fixture 可读；跨项目 ref、绝对/上跳路径、symlink payload 被拒绝，删除产物不命中假缓存。 |
 | 资源限制 | 通过 | WhisperX 转写/对齐进独立 speech lane，全局、项目及项目用户默认并发都为 1，等待 64，进程内另有单槽信号量；无语音的参考视频分析保持 default lane，渲染进 ffmpeg lane，各 lane 互不阻塞；排队任务可取消，队列满映射 HTTP 429。 |
-| 独立 WhisperX Python | 通过（自动化） | 浏览器人工检查先发现脚本启动丢失包上下文，随后发现独立环境没有应用侧 Pydantic。入口现显式加入包根；适配器内部的对照 DTO 改为仅用标准库，worker 无需安装应用依赖。readiness 直接启动真实 worker 的离线 probe，而非只探测 `import whisperx`。隔离 `-S` Python 回归与本机实际 WhisperX venv probe 均返回成功；浏览器复测仍待操作者完成。 |
+| 独立 WhisperX Python | 通过（运行与浏览器冒烟） | 浏览器人工检查先发现脚本启动丢失包上下文，随后发现独立环境没有应用侧 Pydantic。入口现显式加入包根；适配器内部的对照 DTO 改为仅用标准库，worker 无需安装应用依赖。readiness 直接启动真实 worker 的离线 probe，而非只探测 `import whisperx`。隔离 `-S` Python 回归、本机实际 WhisperX venv probe 和下述浏览器冒烟均成功。 |
 | 计费/授权 | 通过 | 确定性处理动作不伪造 Recipe 计费；创作 Recipe 继续使用预留/结算/待人工复核协议；读需 viewer、写/提交需 editor 且只能在项目 home node。 |
 | 真实语音边界 | **阻塞** | 合格中文/英文人工边界都是 0，P95 未测；模型权重许可证仍为 `unverified-local-cache`。 |
 
@@ -53,6 +53,12 @@
 - ASR：`Systran/faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120`。
 - 对齐：`zh-cn@99ccb2737be22b8bb50dcfcc39ad4d567fb90cfd`；英文缓存 SHA-256 `488fd4f16de84438ffc945334278c1b9fb9b7159a806c1080b16111a958c945d`。
 - 本机合成纯音不是真实语音；P0 报告保持 `blocked`，不会通过改命令行标签被伪造为通过。
+
+## 人工画布冒烟
+
+使用 `scripts/start-remix-speech.sh` 启动后，在空白项目画布上传本机合成的 2 秒蓝色视频和正弦音频，点击 `分析原片`。页面完成 WhisperX 转写/对齐和参考分析，显示转写文本 `you` 与 1 个原片事件；此前的 worker 相对导入、独立环境缺少 Pydantic、语音引擎未配置三类错误均未再出现。
+
+这次冒烟只证明上传 → 独立语音 worker → 原片分析的浏览器链路可运行。正弦音频不是人声，识别出的 `you` 没有语义质量价值，也没有覆盖脚本 → B-roll → 时间轴 → 渲染的完整人工旅程；完整固定媒体链路由自动化矩阵覆盖，真实语音质量仍受人工双语语料阻塞。
 
 ## 精确验证命令
 
@@ -91,3 +97,7 @@ git diff --check
 4. 候选 ASR/对齐权重的非占位版本和许可证，以及目标 Linux/GPU 机器上的冷/热耗时、累计高水位内存和并发数据。
 
 在这些证据到位前，可以演示和验收固定媒体画布流程，不得对真实语音准确率或生产容量做通过声明。
+
+## 操作入口
+
+新项目复现步骤、页面按钮、支持格式和常见恢复路径见[参考视频改编：画布操作与本地运行](../zh/guides/reference-video-remix.md)。本地语音依赖与离线探活细节见[Remix 本地语音引擎试运行](reference-video-remix-speech-setup.md)。

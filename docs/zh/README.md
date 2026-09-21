@@ -18,6 +18,7 @@
 | [产品使用手册](https://neo-flying.feishu.cn/docx/JGNTdsjJuo748TxJkxecoYs2nth) | 全功能 UI 操作手册（飞书） |
 | [自托管手册](guides/self-hosting.md) | 部署 / 升级 / 备份 |
 | [ffmpeg 指南](guides/ffmpeg.md) | 安装 / 定位 / 许可义务 |
+| [参考视频改编](guides/reference-video-remix.md) | 从参考片拆解到画布预览、导出与故障恢复 |
 | [遥测说明](guides/telemetry.md) | 默认不收集数据 / 可选追踪 |
 | [排错](guides/troubleshooting.md) | 常见故障与排查 |
 

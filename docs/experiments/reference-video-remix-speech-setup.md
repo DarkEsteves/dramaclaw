@@ -8,7 +8,7 @@ scripts/start-remix-speech.sh
 
 默认路径是 `$HOME/.local/share/dramaclaw/whisperx-venv/bin/python` 和 `$HOME/.cache/dramaclaw/whisperx-models`。可以通过下面两个同名环境变量覆盖。脚本显式清空控制面、Redis 和 Celery 配置，以单租户 CE 运行；脚本中不保存凭证。模型目录缺失或为空、Python 不可执行、API 未在超时内就绪时，脚本会带原因退出。
 
-探活地址为 `GET /api/v1/projects/local/freezone/remix/speech-readiness`。它先检查 small ASR、中英文对齐缓存的关键文件，再用配置的 Python 在 `HF_HUB_OFFLINE`、`TRANSFORMERS_OFFLINE` 和 `HF_DATASETS_OFFLINE` 模式下导入 WhisperX 并返回版本；它不会加载模型权重或下载文件。返回值包含 `ready`、`python`、`model_cache`、`whisperx_version`、`downloads_allowed: false` 和可操作的 `error`。
+探活地址为 `GET /api/v1/projects/local/freezone/remix/speech-readiness`。它先检查 small ASR、中英文对齐缓存的关键文件，再用配置的 Python 在 `HF_HUB_OFFLINE`、`TRANSFORMERS_OFFLINE` 和 `HF_DATASETS_OFFLINE` 模式下真实启动仓库的 JSON worker，验证包入口和 WhisperX 依赖可导入并返回版本。probe 不加载模型权重，也不下载文件。返回值包含 `ready`、`python`、`model_cache`、`whisperx_version`、`downloads_allowed: false` 和可操作的 `error`。
 
 语音任务默认关闭。只有在目标机器上安装 WhisperX、预先准备好 ASR 与对齐模型权重，并配置以下环境变量后，`transcribe_media` 与 `align_script` 才会接受任务：
 
