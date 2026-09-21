@@ -38,6 +38,54 @@ def test_compile_process_descriptors_binds_typed_edge_roles_without_media_resolu
         }
     ]
 
+
+def test_compile_process_descriptors_covers_every_registered_remix_action() -> None:
+    plan = {
+        "nodes": [
+            {"id": "reference", "node_type": "videoNode", "data": {"semanticOutputRole": "reference_media"}},
+            {"id": "narration", "node_type": "audioNode", "data": {"semanticOutputRole": "narration"}},
+            {"id": "script", "node_type": "scriptNode", "data": {"semanticOutputRole": "script"}},
+            {"id": "words", "node_type": "transcriptNode", "data": {"semanticOutputRole": "aligned_words"}},
+            {"id": "blueprint", "node_type": "videoStoryNode", "data": {"semanticOutputRole": "blueprint"}},
+            {"id": "manifest", "node_type": "videoComposeNode", "data": {"semanticOutputRole": "composition_manifest"}},
+            {"id": "analyze", "node_type": "videoStoryNode", "data": {"processingAction": "analyze_reference_video"}},
+            {"id": "transcribe", "node_type": "transcriptNode", "data": {"processingAction": "transcribe_media"}},
+            {"id": "align", "node_type": "transcriptNode", "data": {"processingAction": "align_script"}},
+            {"id": "timing", "node_type": "semanticTimelineNode", "data": {"processingAction": "compile_semantic_timeline"}},
+            {"id": "render", "node_type": "videoComposeNode", "data": {"processingAction": "render_manifest"}},
+        ],
+        "edges": [
+            {"source": "reference", "target": "analyze", "link_type": "dependency_for"},
+            {"source": "reference", "target": "transcribe", "link_type": "dependency_for"},
+            {"source": "narration", "target": "align", "link_type": "dependency_for"},
+            {"source": "script", "target": "align", "link_type": "dependency_for"},
+            {"source": "narration", "target": "timing", "link_type": "dependency_for"},
+            {"source": "script", "target": "timing", "link_type": "dependency_for"},
+            {"source": "words", "target": "timing", "link_type": "dependency_for"},
+            {"source": "blueprint", "target": "timing", "link_type": "dependency_for"},
+            {"source": "manifest", "target": "render", "link_type": "dependency_for"},
+        ],
+    }
+
+    descriptors = compile_process_descriptors(plan, node_revision=3)
+
+    assert [item["action"] for item in descriptors] == [
+        "analyze_reference_video", "transcribe_media", "align_script",
+        "compile_semantic_timeline", "render_manifest",
+    ]
+    assert descriptors[-1]["typed_inputs"] == {"composition_manifest": {"node_id": "manifest"}}
+
+
+@pytest.mark.parametrize("action", ["run_shell", "unknown_processing_action"])
+def test_compile_process_descriptors_rejects_unregistered_processing_action(action: str) -> None:
+    plan = {
+        "nodes": [{"id": "unsafe", "node_type": "scriptNode", "data": {"processingAction": action, "command": "rm -rf /"}}],
+        "edges": [],
+    }
+
+    with pytest.raises(ValueError, match="unregistered processing action"):
+        compile_process_descriptors(plan, node_revision=1)
+
 _MINIMAL_ECOMMERCE_SKILL = {
     "id": "ecommerce-product",
     "name": "电商产品图",

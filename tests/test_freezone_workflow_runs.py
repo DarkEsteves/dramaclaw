@@ -22,6 +22,7 @@ from novelvideo.freezone.workflow_runs import (
     update_workflow_run,
     workflow_runs_db_path,
     workflow_error_diagnostics,
+    _validate_action_artifact,
 )
 
 
@@ -1164,3 +1165,76 @@ def test_workflow_run_rejects_unknown_action_update(tmp_path: Path) -> None:
                 {"node_id": "other", "action": "generate_image", "status": "completed"}
             ],
         )
+
+
+def test_workflow_run_rejects_unknown_or_shell_actions(tmp_path: Path) -> None:
+    for action in ("totally_unknown", "run_shell"):
+        with pytest.raises(ValueError, match="unsupported workflow action"):
+            create_workflow_run(
+                project_dir=tmp_path,
+                project_id="project-a",
+                canvas_id="default",
+                actions=[{"node_id": "unsafe", "action": action, "command": "echo unsafe"}],
+            )
+
+
+def test_processing_action_completion_requires_durable_remix_artifact(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    artifact = RemixArtifactStore(tmp_path, "project-a").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []},
+        [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+
+    assert _validate_action_artifact(
+        action="analyze_reference_video", task_result={"artifact_ref": ref},
+        history_record=None, project_dir=tmp_path, project_id="project-a",
+    ) == ("valid", None, ref)
+    missing = {"artifact_id": artifact["id"], "revision": 99}
+    status, error, result_ref = _validate_action_artifact(
+        action="analyze_reference_video", task_result={"artifact_ref": missing},
+        history_record=None, project_dir=tmp_path, project_id="project-a",
+    )
+    assert status == "missing"
+    assert "artifact" in error.lower()
+    assert result_ref is None
+
+
+def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    run = create_workflow_run(
+        project_dir=tmp_path, project_id="project-a", canvas_id="default",
+        actions=[{
+            "node_id": "analysis", "action": "analyze_reference_video",
+            "node_revision": 2, "payload": {"media_path": "media/reference.mp4"},
+        }],
+    )
+    update_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        action_updates=[{
+            "node_id": "analysis", "action": "analyze_reference_video",
+            "status": "running", "task_key": "task:analysis",
+        }],
+    )
+    artifact = RemixArtifactStore(tmp_path, "project-a").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []}, [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": 1}
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:analysis": {"status": "completed", "result": {"artifact_ref": ref}}},
+    )
+
+    completed = read_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"]
+    )
+    assert completed["status"] == "completed"
+    assert completed["actions"][0]["artifact_status"] == "valid"
+    assert completed["actions"][0]["result_ref"] == ref

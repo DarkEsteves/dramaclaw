@@ -151,6 +151,11 @@ export interface FreezoneWorkflowRunAction {
   recipe_version?: string | null;
   generation_attempt_id?: string | null;
   product_operation_id?: string | null;
+  processing_operation_id?: string | null;
+  node_revision?: number;
+  payload?: Record<string, unknown>;
+  depends_on?: string[];
+  result_ref?: Record<string, unknown> | null;
   retry_count?: number;
 }
 
@@ -180,6 +185,9 @@ export async function createFreezoneWorkflowRun(
     recipe_id?: string;
     recipe_version?: string;
     generation_attempt_id?: string;
+    node_revision?: number;
+    payload?: Record<string, unknown>;
+    depends_on?: string[];
   }>,
   idempotencyKey?: string,
   runnerId?: string,

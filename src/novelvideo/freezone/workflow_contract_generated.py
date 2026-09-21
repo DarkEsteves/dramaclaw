@@ -1,6 +1,6 @@
 """Generated from schemas/workflow/v1/stable-contract.json; do not edit."""
 
-SOURCE_SHA256 = "f000f4c282b6f23faad87228eb63138ee448487efe9af24db0efaaf5c0303728"
+SOURCE_SHA256 = "ed1c88ee513cca8ce8bfd33e9b8deb57d6a08ae0d079f518323ce17f3356db04"
 WORKFLOW_CONTRACT_SCHEMA_VERSION = "freezone_workflow_contract.v1"
 WORKFLOW_PLAN_SCHEMA_VERSION = "freezone_workflow_plan.v1"
 WORKFLOW_INTENT_SCHEMA_VERSION = "freezone_workflow_intent.v1"
@@ -53,11 +53,19 @@ GENERATION_ACTION_TYPES = [
     "generate_3gs_world",
     "auto_compose_video",
 ]
-PROCESSING_ACTION_TYPES = ["transcribe_media", "align_script", "compile_semantic_timeline"]
+PROCESSING_ACTION_TYPES = [
+    "analyze_reference_video",
+    "transcribe_media",
+    "align_script",
+    "compile_semantic_timeline",
+    "render_manifest",
+]
 PROCESSING_ACTION_INPUT_ROLES = {
+    "analyze_reference_video": ["reference_media"],
     "transcribe_media": ["reference_media"],
     "align_script": ["narration", "script"],
     "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
+    "render_manifest": ["composition_manifest"],
 }
 MODEL_ALIASES_BY_NODE_TYPE = {
     "imageGenNode": {

@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from novelvideo.freezone.paths import CANVAS_ID_RE
-from novelvideo.freezone.workflow_contract_generated import GENERATION_ACTION_TYPES
+from novelvideo.freezone.workflow_contract_generated import (
+    GENERATION_ACTION_TYPES,
+    PROCESSING_ACTION_TYPES,
+)
 from novelvideo.sqlite_pragmas import configure_sqlite_connection
 
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
@@ -45,6 +48,8 @@ TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
 # Mirrors the canvas runner's WORKFLOW_ACTION_MAX_RETRIES (canvasChatCommands.ts).
 WORKFLOW_ACTION_MAX_RETRIES = 2
 GENERATION_ACTIONS = set(GENERATION_ACTION_TYPES)
+PROCESSING_ACTIONS = set(PROCESSING_ACTION_TYPES)
+WORKFLOW_ACTIONS = GENERATION_ACTIONS | PROCESSING_ACTIONS | {"generate_html", "save"}
 NON_RETRYABLE_ERROR_MARKERS = {
     "invalid token",
     "model_not_found",
@@ -122,6 +127,11 @@ CREATE TABLE IF NOT EXISTS workflow_run_actions (
     media_request_fingerprint TEXT,
     media_claimed_at REAL,
     media_claim_retry_count INTEGER,
+    processing_operation_id TEXT,
+    payload_json TEXT,
+    depends_on_json TEXT,
+    result_ref_json TEXT,
+    node_revision INTEGER,
     PRIMARY KEY (run_id, node_id, action),
     FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id) ON DELETE CASCADE
 );
@@ -307,9 +317,33 @@ def _validate_action_artifact(
     task_result: dict[str, Any] | None,
     history_record: dict[str, Any] | None,
     project_dir: Path,
-) -> tuple[str, str | None]:
+    project_id: str = "",
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    if action in PROCESSING_ACTIONS:
+        result = task_result if isinstance(task_result, dict) else {}
+        if action == "render_manifest":
+            relative = result.get("output_path")
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+                return "unverified", "render task has no project-local output", None
+            output = (project_dir / relative).resolve()
+            if not output.is_relative_to(project_dir.resolve()) or not output.is_file() or output.stat().st_size <= 0:
+                return "missing", "render artifact file is missing", None
+            ref = {"project_path": relative}
+            return "valid", None, ref
+        ref = result.get("artifact_ref")
+        if not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"}:
+            return "unverified", "processing task has no exact artifact reference", None
+        try:
+            from novelvideo.freezone.remix.store import RemixArtifactStore
+
+            RemixArtifactStore(project_dir, project_id).read(
+                ref["artifact_id"], ref["revision"]
+            )
+        except (FileNotFoundError, TypeError, ValueError):
+            return "missing", "processing artifact is missing or invalid", None
+        return "valid", None, dict(ref)
     if action not in GENERATION_ACTIONS:
-        return "not_required", None
+        return "not_required", None, None
     sources = [
         task_result if isinstance(task_result, dict) else {},
         (
@@ -325,27 +359,27 @@ def _validate_action_artifact(
     if action in {"generate_text", "generate_story_script"}:
         text_values = [value for key, value in candidates if key in {"content", "text"}]
         if text_values:
-            return "valid", None
+            return "valid", None, {"kind": "text"}
     media_candidates = [
         value for key, value in candidates if _is_output_artifact_key(key)
     ]
     if not media_candidates:
-        return "unverified", "任务已结束但没有可核验的持久化产物。"
+        return "unverified", "任务已结束但没有可核验的持久化产物。", None
     missing_local_paths: list[str] = []
     for value in media_candidates:
         lowered = value.lower()
         if lowered.startswith(
             ("http://", "https://", "blob:", "data:", "/static/", "/api/")
         ):
-            return "valid", None
+            return "valid", None, {"value": value}
         path = Path(value)
         candidate_path = path if path.is_absolute() else project_dir / path
         if candidate_path.is_file() and candidate_path.stat().st_size > 0:
-            return "valid", None
+            return "valid", None, {"project_path": value}
         missing_local_paths.append(value)
     if missing_local_paths:
-        return "missing", f"任务完成但产物文件不存在：{missing_local_paths[0]}"
-    return "unverified", None
+        return "missing", f"任务完成但产物文件不存在：{missing_local_paths[0]}", None
+    return "unverified", None, None
 
 
 def workflow_runs_db_path(project_dir: Path) -> Path:
@@ -381,6 +415,11 @@ def _connect(project_dir: Path):
                     "media_request_fingerprint",
                     "media_claimed_at",
                     "media_claim_retry_count",
+                    "processing_operation_id",
+                    "payload_json",
+                    "depends_on_json",
+                    "result_ref_json",
+                    "node_revision",
                 ):
                     if column not in columns:
                         column_type = {
@@ -440,6 +479,11 @@ def _action_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "product_operation_id": row["product_operation_id"],
         "media_request_fingerprint": row["media_request_fingerprint"],
         "media_claimed_at": row["media_claimed_at"],
+        "processing_operation_id": row["processing_operation_id"],
+        "payload": json.loads(row["payload_json"] or "{}"),
+        "depends_on": json.loads(row["depends_on_json"] or "[]"),
+        "result_ref": json.loads(row["result_ref_json"] or "null"),
+        "node_revision": int(row["node_revision"] or 0),
     }
     for field in (
         "error_category",
@@ -543,8 +587,10 @@ def _write_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
                 error_fingerprint, user_error, task_key, task_type, job_id,
                 retry_count, artifact_status, recipe_id, recipe_version,
                 generation_attempt_id, product_operation_id,
-                media_request_fingerprint, media_claimed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                media_request_fingerprint, media_claimed_at,
+                processing_operation_id, payload_json, depends_on_json,
+                result_ref_json, node_revision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, node_id, action) DO UPDATE SET
                 sequence_no = excluded.sequence_no,
                 status = excluded.status,
@@ -567,6 +613,11 @@ def _write_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
                 ,product_operation_id = excluded.product_operation_id
                 ,media_request_fingerprint = excluded.media_request_fingerprint
                 ,media_claimed_at = excluded.media_claimed_at
+                ,processing_operation_id = excluded.processing_operation_id
+                ,payload_json = excluded.payload_json
+                ,depends_on_json = excluded.depends_on_json
+                ,result_ref_json = excluded.result_ref_json
+                ,node_revision = excluded.node_revision
             """,
             (
                 payload["run_id"],
@@ -597,6 +648,11 @@ def _write_run(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
                 item.get("product_operation_id"),
                 item.get("media_request_fingerprint"),
                 item.get("media_claimed_at"),
+                item.get("processing_operation_id"),
+                json.dumps(item.get("payload") or {}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(item.get("depends_on") or [], ensure_ascii=False, separators=(",", ":")),
+                json.dumps(item.get("result_ref"), ensure_ascii=False, separators=(",", ":")),
+                int(item.get("node_revision") or 0),
             ),
         )
 
@@ -637,6 +693,23 @@ def _normalize_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         action = str(item.get("action") or "").strip()
         if not node_id or not action:
             raise ValueError("each workflow action requires node_id and action")
+        if action not in WORKFLOW_ACTIONS:
+            raise ValueError(f"unsupported workflow action: {action}")
+        payload = item.get("payload")
+        if action in PROCESSING_ACTIONS and not isinstance(payload, dict):
+            raise ValueError(f"processing workflow action {action} requires payload")
+        depends_on = item.get("depends_on", [])
+        if not isinstance(depends_on, list) or not all(
+            isinstance(value, str) and value.strip() for value in depends_on
+        ):
+            raise ValueError("workflow action depends_on must be an array of node ids")
+        node_revision = item.get("node_revision", 0)
+        if action in PROCESSING_ACTIONS and (
+            isinstance(node_revision, bool)
+            or not isinstance(node_revision, int)
+            or node_revision < 1
+        ):
+            raise ValueError(f"processing workflow action {action} requires node_revision")
         recipe_id = str(item.get("recipe_id") or "").strip()
         key = (node_id, action)
         if key in seen:
@@ -660,10 +733,41 @@ def _normalize_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     str(item.get("generation_attempt_id") or "").strip() or None
                 ),
                 "product_operation_id": None,
+                "processing_operation_id": None,
+                "payload": dict(payload or {}),
+                "depends_on": list(dict.fromkeys(depends_on)),
+                "result_ref": None,
+                "node_revision": node_revision,
             }
         )
     if not normalized:
         raise ValueError("workflow run requires at least one action")
+    node_ids = {item["node_id"] for item in normalized}
+    dependencies_by_node: dict[str, set[str]] = {}
+    for item in normalized:
+        dependencies = set(item["depends_on"])
+        if item["node_id"] in dependencies:
+            raise ValueError("workflow action cannot depend on itself")
+        unknown = dependencies - node_ids
+        if unknown:
+            raise ValueError(f"workflow action depends on unknown node: {sorted(unknown)[0]}")
+        dependencies_by_node.setdefault(item["node_id"], set()).update(dependencies)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in visiting:
+            raise ValueError("workflow action dependencies contain a cycle")
+        if node_id in visited:
+            return
+        visiting.add(node_id)
+        for dependency in dependencies_by_node.get(node_id, set()):
+            visit(dependency)
+        visiting.remove(node_id)
+        visited.add(node_id)
+
+    for node_id in node_ids:
+        visit(node_id)
     return normalized
 
 
@@ -680,6 +784,9 @@ def _workflow_request_fingerprint(
                 "recipe_id": item.get("recipe_id"),
                 "recipe_version": item.get("recipe_version"),
                 "generation_attempt_id": item.get("generation_attempt_id"),
+                "payload": item.get("payload") or {},
+                "depends_on": item.get("depends_on") or [],
+                "node_revision": item.get("node_revision") or 0,
             }
             for item in actions
         ],
@@ -993,6 +1100,43 @@ def reclaim_failed_workflow_media_action(
             "created": True,
             "run_id": run_id,
         }
+
+def bind_workflow_action_processing_operation(
+    *,
+    project_dir: Path,
+    canvas_id: str,
+    run_id: str,
+    node_id: str,
+    action: str,
+    operation_id: str,
+) -> dict[str, Any]:
+    """Bind a remix operation without entering Recipe billing settlement."""
+    _validate_scope(canvas_id, run_id)
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            """
+            SELECT processing_operation_id FROM workflow_run_actions
+             WHERE run_id = ? AND node_id = ? AND action = ?
+            """,
+            (run_id, node_id, action),
+        ).fetchone()
+        if current is None:
+            raise ValueError("workflow action not found")
+        existing = str(current["processing_operation_id"] or "")
+        if existing and existing != operation_id:
+            raise ValueError("workflow action is bound to another processing operation")
+        conn.execute(
+            """
+            UPDATE workflow_run_actions SET processing_operation_id = ?
+             WHERE run_id = ? AND node_id = ? AND action = ?
+            """,
+            (operation_id, run_id, node_id, action),
+        )
+        payload = _read_run(conn, canvas_id=canvas_id, run_id=run_id)
+    if payload is None:
+        raise ValueError("workflow run not found")
+    return payload
 
 
 def create_workflow_run(
@@ -1572,6 +1716,7 @@ def reconcile_workflow_runs_with_tasks(
     canvas_id: str,
     tasks_by_key: dict[str, dict[str, Any]],
     generation_history: list[dict[str, Any]] | None = None,
+    artifact_project_dir: Path | None = None,
 ) -> list[str]:
     """Reconcile persisted workflow actions with durable project task state."""
     _validate_scope(canvas_id)
@@ -1629,7 +1774,7 @@ def reconcile_workflow_runs_with_tasks(
                         **workflow_error_diagnostics(error),
                     }
                 else:
-                    artifact_status, artifact_error = _validate_action_artifact(
+                    artifact_status, artifact_error, result_ref = _validate_action_artifact(
                         action=str(item.get("action") or ""),
                         task_result=(
                             task.get("result")
@@ -1639,7 +1784,8 @@ def reconcile_workflow_runs_with_tasks(
                         history_record=history_by_task_node.get(
                             (task_key, str(item.get("node_id") or ""))
                         ),
-                        project_dir=project_dir,
+                        project_dir=artifact_project_dir or project_dir,
+                        project_id=str(payload.get("project_id") or ""),
                     )
                     if artifact_status != "valid":
                         updates = {
@@ -1653,6 +1799,7 @@ def reconcile_workflow_runs_with_tasks(
                             "status": "completed",
                             "error": None,
                             "artifact_status": artifact_status,
+                            "result_ref": result_ref,
                         }
                 if any(item.get(key) != value for key, value in updates.items()):
                     item.update(updates)

@@ -118,6 +118,8 @@ def compile_process_descriptors(plan: dict[str, Any], *, node_revision: int) -> 
             continue
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
         action = data.get("processingAction")
+        if action is not None and action not in PROCESSING_ACTION_INPUT_ROLES:
+            raise ValueError(f"process node {node.get('id')} has unregistered processing action: {action}")
         if action not in PROCESSING_ACTION_INPUT_ROLES:
             continue
         node_id = node.get("id")

@@ -41,15 +41,18 @@
     },
     "processing_action": {
       "enum": [
+        "analyze_reference_video",
         "transcribe_media",
         "align_script",
-        "compile_semantic_timeline"
+        "compile_semantic_timeline",
+        "render_manifest"
       ]
     },
     "processing_input_role": {
       "enum": [
         "aligned_words",
         "blueprint",
+        "composition_manifest",
         "narration",
         "reference_media",
         "script"
@@ -61,5 +64,5 @@
   },
   "title": "DramaClaw Workflow stable MCP contract",
   "type": "object",
-  "x-source-sha256": "f000f4c282b6f23faad87228eb63138ee448487efe9af24db0efaaf5c0303728"
+  "x-source-sha256": "ed1c88ee513cca8ce8bfd33e9b8deb57d6a08ae0d079f518323ce17f3356db04"
 }

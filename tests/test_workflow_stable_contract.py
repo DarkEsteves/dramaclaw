@@ -40,14 +40,20 @@ def test_stable_contract_registers_remix_nodes_and_typed_processing_actions() ->
         WORKFLOW_NODE_TYPES
     )
     assert PROCESSING_ACTION_TYPES == [
+        "analyze_reference_video",
         "transcribe_media",
         "align_script",
         "compile_semantic_timeline",
+        "render_manifest",
     ]
+    assert PROCESSING_ACTION_INPUT_ROLES["analyze_reference_video"] == ["reference_media"]
+    assert PROCESSING_ACTION_INPUT_ROLES["render_manifest"] == ["composition_manifest"]
     assert PROCESSING_ACTION_INPUT_ROLES == {
+        "analyze_reference_video": ["reference_media"],
         "transcribe_media": ["reference_media"],
         "align_script": ["narration", "script"],
         "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
+        "render_manifest": ["composition_manifest"],
     }
     assert DEFAULT_OUTPUT_ROLES["videoStoryNode"] == "blueprint"
     assert DEFAULT_OUTPUT_ROLES["transcriptNode"] == "aligned_words"

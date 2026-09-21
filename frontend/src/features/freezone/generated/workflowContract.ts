@@ -1,5 +1,5 @@
 // Generated from schemas/workflow/v1/stable-contract.json; do not edit.
-export const WORKFLOW_CONTRACT_SOURCE_SHA256 = "f000f4c282b6f23faad87228eb63138ee448487efe9af24db0efaaf5c0303728";
+export const WORKFLOW_CONTRACT_SOURCE_SHA256 = "ed1c88ee513cca8ce8bfd33e9b8deb57d6a08ae0d079f518323ce17f3356db04";
 export const WORKFLOW_STABLE_CONTRACT = {
   "schema_version": "freezone_workflow_contract.v1",
   "workflow_plan_schema_version": "freezone_workflow_plan.v1",
@@ -54,11 +54,16 @@ export const WORKFLOW_STABLE_CONTRACT = {
     "auto_compose_video"
   ],
   "processing_action_types": [
+    "analyze_reference_video",
     "transcribe_media",
     "align_script",
-    "compile_semantic_timeline"
+    "compile_semantic_timeline",
+    "render_manifest"
   ],
   "processing_action_input_roles": {
+    "analyze_reference_video": [
+      "reference_media"
+    ],
     "transcribe_media": [
       "reference_media"
     ],
@@ -71,6 +76,9 @@ export const WORKFLOW_STABLE_CONTRACT = {
       "script",
       "aligned_words",
       "blueprint"
+    ],
+    "render_manifest": [
+      "composition_manifest"
     ]
   },
   "model_aliases_by_node_type": {

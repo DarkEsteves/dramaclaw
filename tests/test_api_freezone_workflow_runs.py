@@ -2836,6 +2836,94 @@ def test_workflow_run_api_rejects_empty_actions(
     assert response.status_code == 400
 
 
+def test_workflow_run_dispatches_registered_remix_action_without_recipe(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"reference")
+    monkeypatch.setattr(freezone, "_speech_engine_ready", lambda: True, raising=False)
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+
+    response = workflow_run_client.post(base, json={
+        "idempotency_key": "remix-analysis-run",
+        "actions": [{
+            "node_id": "analysis",
+            "action": "analyze_reference_video",
+            "node_revision": 4,
+            "payload": {"media_path": "media/reference.mp4"},
+        }],
+    })
+
+    assert response.status_code == 200, response.text
+    action = response.json()["data"]["actions"][0]
+    assert action["status"] == "running"
+    assert action["task_type"] == "remix_analyze_reference_video"
+    assert action["task_key"]
+    assert action["processing_operation_id"]
+    assert action["product_operation_id"] is None
+    assert action["recipe_id"] is None
+    assert workflow_run_client.enqueued_tasks[0]["payload"]["media_sha256"]
+
+
+def test_workflow_run_processing_action_requires_exact_registered_payload(
+    workflow_run_client: TestClient,
+) -> None:
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{
+            "node_id": "analysis", "action": "analyze_reference_video", "node_revision": 1,
+            "payload": {"media_path": "media/reference.mp4", "command": "echo unsafe"},
+        }]},
+    )
+
+    assert response.status_code == 400
+    assert "requires exactly" in response.text
+
+
+def test_workflow_run_advances_registered_actions_in_dependency_order(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir(exist_ok=True)
+    media.write_bytes(b"reference")
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(base, json={"actions": [
+        {"node_id": "first", "action": "analyze_reference_video", "node_revision": 1,
+         "payload": {"media_path": "media/reference.mp4"}},
+        {"node_id": "second", "action": "analyze_reference_video", "node_revision": 1,
+         "depends_on": ["first"], "payload": {"media_path": "media/reference.mp4"}},
+    ]}).json()["data"]
+    assert len(workflow_run_client.enqueued_tasks) == 1
+    first = created["actions"][0]
+    artifact = RemixArtifactStore(workflow_run_client.state_dir, "proj_demo").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []}, [],
+    )
+    task = SimpleNamespace(
+        task_type=first["task_type"], status="completed", progress=1.0,
+        current_task="completed", episode=0, beat_num=None, scope=first["job_id"],
+        result={"artifact_ref": {"artifact_id": artifact["id"], "revision": 1}}, error=None,
+    )
+    monkeypatch.setattr(
+        freezone, "get_task_manager",
+        lambda: SimpleNamespace(list_tasks_for_project=lambda _ctx: [task]),
+    )
+
+    advanced = workflow_run_client.get(base).json()["data"]["runs"][0]
+
+    assert len(workflow_run_client.enqueued_tasks) == 2
+    assert advanced["actions"][0]["status"] == "completed"
+    assert advanced["actions"][0]["result_ref"]["artifact_id"] == artifact["id"]
+    assert advanced["actions"][1]["status"] == "running"
+
+
 def test_workflow_run_api_reuses_idempotent_creation(
     workflow_run_client: TestClient,
 ) -> None:

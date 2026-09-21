@@ -52,14 +52,18 @@
     "auto_compose_video"
   ],
   "processing_action_types": [
+    "analyze_reference_video",
     "transcribe_media",
     "align_script",
-    "compile_semantic_timeline"
+    "compile_semantic_timeline",
+    "render_manifest"
   ],
   "processing_action_input_roles": {
+    "analyze_reference_video": ["reference_media"],
     "transcribe_media": ["reference_media"],
     "align_script": ["narration", "script"],
-    "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"]
+    "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
+    "render_manifest": ["composition_manifest"]
   },
   "model_aliases_by_node_type": {
     "imageGenNode": {

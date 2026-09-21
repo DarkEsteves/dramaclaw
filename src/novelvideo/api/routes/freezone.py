@@ -217,6 +217,7 @@ from novelvideo.freezone.workflow_runs import (
     bind_workflow_action_product_operation,
     bind_workflow_media_task,
     claim_workflow_media_action,
+    bind_workflow_action_processing_operation,
     create_workflow_run,
     interrupt_stale_workflow_runs,
     list_workflow_runs,
@@ -5083,6 +5084,115 @@ async def freezone_skills(user: dict = Depends(get_api_user)):
         "ok": True,
         "data": [skill.model_dump(mode="json") for skill in list_skills()],
     }
+
+
+async def _dispatch_ready_remix_workflow_actions(
+    *, ctx: Any, state_dir: Path, output_dir: Path, run: dict[str, Any]
+) -> dict[str, Any]:
+    """Dispatch dependency-ready deterministic remix steps from one approved run."""
+    from novelvideo.api.routes.remix import prepare_registered_action
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.freezone.workflow_contract_generated import PROCESSING_ACTION_TYPES
+
+    registered = set(PROCESSING_ACTION_TYPES)
+    actions = run.get("actions") if isinstance(run.get("actions"), list) else []
+    action_statuses_by_node: dict[str, list[str]] = {}
+    for action_item in actions:
+        if isinstance(action_item, dict):
+            action_statuses_by_node.setdefault(
+                str(action_item.get("node_id") or ""), []
+            ).append(str(action_item.get("status") or ""))
+    completed_nodes = {
+        node_id
+        for node_id, statuses in action_statuses_by_node.items()
+        if statuses and all(status in {"completed", "skipped"} for status in statuses)
+    }
+    store = RemixArtifactStore(output_dir, ctx.project_id)
+    operations = RemixOperationStore(output_dir, ctx.project_id)
+    for item in actions:
+        if (
+            not isinstance(item, dict)
+            or item.get("action") not in registered
+            or item.get("status") != "pending"
+        ):
+            continue
+        dependencies = item.get("depends_on") or []
+        if any(dependency not in completed_nodes for dependency in dependencies):
+            continue
+        action_name = str(item["action"])
+        node_id = str(item["node_id"])
+        node_revision = int(item.get("node_revision") or 0)
+        idempotency_key = f"workflow:{run['run_id']}:{node_id}:{action_name}"
+        prepared = await asyncio.to_thread(
+            prepare_registered_action,
+            store,
+            action_name,
+            item.get("payload") or {},
+            idempotency_key=idempotency_key,
+            node_revision=node_revision,
+        )
+        operation = await asyncio.to_thread(
+            operations.start,
+            idempotency_key=idempotency_key,
+            input_refs=prepared["input_refs"],
+            producer_version=prepared["producer_version"],
+            normalized_parameters=prepared["normalized_parameters"],
+            node_revision=node_revision,
+            canvas_id=run["canvas_id"],
+            node_id=node_id,
+        )
+        scope = prepared["scope"] or operation["operation_id"]
+        task_key = project_task_state_key(
+            prepared["task_type"], ctx.project_id, 0, scope=scope
+        )
+        if not operation.get("task_id") and operation.get("status") != "needs_confirmation":
+            queued = await get_task_backend().enqueue_project_task(
+                ctx,
+                product_surface="freezone",
+                task_type=prepared["task_type"],
+                queue_kind=prepared["queue_kind"],
+                episode=0,
+                scope=scope,
+                payload={
+                    **prepared["task_payload"],
+                    "operation_id": operation["operation_id"],
+                    "workflow_run_id": run["run_id"],
+                    "workflow_node_id": node_id,
+                },
+            )
+            operation = await asyncio.to_thread(
+                operations.bind_task,
+                operation["operation_id"],
+                task_id=queued.task_state.task_id,
+            )
+        run = await asyncio.to_thread(
+            bind_workflow_action_processing_operation,
+            project_dir=state_dir,
+            canvas_id=run["canvas_id"],
+            run_id=run["run_id"],
+            node_id=node_id,
+            action=action_name,
+            operation_id=operation["operation_id"],
+        )
+        run = await asyncio.to_thread(
+            update_workflow_run,
+            project_dir=state_dir,
+            canvas_id=run["canvas_id"],
+            run_id=run["run_id"],
+            action_updates=[{
+                "node_id": node_id,
+                "action": action_name,
+                "status": "running",
+                "phase": "generating",
+                "task_key": task_key,
+                "task_type": prepared["task_type"],
+                "job_id": scope,
+            }],
+        )
+        # Dispatch only the currently-ready frontier. Later polling/reconciliation
+        # advances dependent steps using durable task and artifact proof.
+    return run
 
 
 @router.post(
@@ -16349,11 +16459,46 @@ async def create_canvas_workflow_run(
 ):
     if not CANVAS_ID_RE.match(canvas_id):
         raise HTTPException(400, "invalid canvas_id")
-    ctx, _username, _project_name, project_dir, _output_dir = (
+    ctx, _username, _project_name, project_dir, output_dir = (
         await _resolve_freezone_project(project, user)
     )
     state_dir = _canvas_state_project_dir(ctx, project_dir)
     actions = body.get("actions") if isinstance(body.get("actions"), list) else []
+    from novelvideo.api.routes.remix import (
+        _speech_engine_ready,
+        prepare_registered_action,
+    )
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.freezone.workflow_contract_generated import PROCESSING_ACTION_TYPES
+
+    processing_actions = set(PROCESSING_ACTION_TYPES)
+    remix_store = RemixArtifactStore(Path(output_dir), ctx.project_id)
+    # Preflight the entire approved run before persisting or dispatching any task.
+    # This prevents a malformed later step from leaving a half-admitted workflow.
+    try:
+        for item in actions:
+            if not isinstance(item, dict) or item.get("action") not in processing_actions:
+                continue
+            action_name = str(item["action"])
+            node_revision = item.get("node_revision")
+            if isinstance(node_revision, bool) or not isinstance(node_revision, int) or node_revision < 1:
+                raise ValueError(f"processing workflow action {action_name} requires node_revision")
+            if not isinstance(item.get("payload"), dict):
+                raise ValueError(f"processing workflow action {action_name} requires payload")
+            if action_name in {"transcribe_media", "align_script"} and not await asyncio.to_thread(
+                _speech_engine_ready
+            ):
+                raise ValueError("Speech alignment engine is not configured")
+            await asyncio.to_thread(
+                prepare_registered_action,
+                remix_store,
+                action_name,
+                item.get("payload"),
+                idempotency_key=f"workflow-preflight:{canvas_id}:{item.get('node_id')}",
+                node_revision=node_revision,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     metered_runtime = not isinstance(get_usage_meter(), NoOpUsageMeter)
     if metered_runtime:
         for action in actions:
@@ -16410,6 +16555,12 @@ async def create_canvas_workflow_run(
         raise HTTPException(
             400 if isinstance(exc, ValueError) else 503, str(exc)
         ) from exc
+    run = await _dispatch_ready_remix_workflow_actions(
+        ctx=ctx,
+        state_dir=state_dir,
+        output_dir=Path(output_dir),
+        run=run,
+    )
     if not metered_runtime:
         return {"ok": True, "data": run}
     admitted_operations: list[dict[str, Any]] = []
@@ -16523,7 +16674,7 @@ async def get_canvas_workflow_runs(
 ):
     if not CANVAS_ID_RE.match(canvas_id):
         raise HTTPException(400, "invalid canvas_id")
-    ctx, _username, _project_name, project_dir, _output_dir = (
+    ctx, _username, _project_name, project_dir, output_dir = (
         await _resolve_freezone_project(project, user, required_role="viewer")
     )
     canvas_project_dir = _canvas_state_project_dir(ctx, project_dir)
@@ -16608,6 +16759,7 @@ async def get_canvas_workflow_runs(
             canvas_id=canvas_id,
             tasks_by_key=tasks_by_key,
             generation_history=generation_history,
+            artifact_project_dir=Path(output_dir),
         )
     except Exception as exc:
         # Task reconciliation is best-effort and must not block canvas loading.
@@ -16633,6 +16785,22 @@ async def get_canvas_workflow_runs(
         canvas_id=canvas_id,
         limit=limit,
     )
+    advanced_runs: list[dict[str, Any]] = []
+    for workflow_run in runs:
+        if workflow_run.get("status") != "running":
+            advanced_runs.append(workflow_run)
+            continue
+        try:
+            workflow_run = await _dispatch_ready_remix_workflow_actions(
+                ctx=ctx,
+                state_dir=canvas_project_dir,
+                output_dir=Path(output_dir),
+                run=workflow_run,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning("workflow processing dispatch paused: %s", exc)
+        advanced_runs.append(workflow_run)
+    runs = advanced_runs
     history_by_task_node: dict[tuple[str, str], dict[str, Any]] = {}
     history_by_operation_attempt: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for record in generation_history:
@@ -16690,7 +16858,7 @@ async def get_canvas_workflow_runs(
                 # A cancelled run is deliberately not rewritten by the workflow
                 # reconciler. Its media task can nevertheless finish late, and
                 # that durable result must settle the separate Recipe operation.
-                artifact_status, _artifact_error = await asyncio.to_thread(
+                artifact_status, _artifact_error, _result_ref = await asyncio.to_thread(
                     _validate_action_artifact,
                     action=str(action.get("action") or ""),
                     task_result=task.get("result") if isinstance(task.get("result"), dict) else None,
@@ -16698,6 +16866,7 @@ async def get_canvas_workflow_runs(
                         (task_key, str(action.get("node_id") or ""))
                     ),
                     project_dir=canvas_project_dir,
+                    project_id=ctx.project_id,
                 )
             operation = await asyncio.to_thread(
                 read_agent_product_operation,

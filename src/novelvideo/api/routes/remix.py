@@ -56,7 +56,10 @@ class ConfirmOperationBody(BaseModel):
 
 
 class ProcessActionBody(BaseModel):
-    action: Literal["transcribe_media", "align_script", "compile_semantic_timeline", "analyze_reference_video"]
+    action: Literal[
+        "transcribe_media", "align_script", "compile_semantic_timeline",
+        "analyze_reference_video", "render_manifest",
+    ]
     payload: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
     node_revision: int = Field(ge=1, strict=True)
@@ -72,6 +75,7 @@ _PROCESS_TASK_TYPES = {
     "align_script": "remix_align_script",
     "compile_semantic_timeline": "remix_compile_semantic_timeline",
     "analyze_reference_video": "remix_analyze_reference_video",
+    "render_manifest": "remix_render",
 }
 
 
@@ -289,6 +293,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "align_script": ({"media_path", "script_ref"}, set()),
         "compile_semantic_timeline": ({"script_ref", "word_timeline_ref", "edit_map", "overrides", "fps"}, set()),
         "analyze_reference_video": ({"media_path"}, set()),
+        "render_manifest": ({"manifest_ref"}, set()),
     }
     required, optional = expected[action]
     if set(payload) != required | optional:
@@ -309,7 +314,11 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         media_hash = digest.hexdigest()
     if action == "transcribe_media" and (not isinstance(payload["language"], str) or not payload["language"]):
         raise ValueError("language is required")
-    schema_by_ref = {"script_ref": "remix_script.v1", "word_timeline_ref": "word_timeline.v1"}
+    schema_by_ref = {
+        "script_ref": "remix_script.v1",
+        "word_timeline_ref": "word_timeline.v1",
+        "manifest_ref": "composition_manifest.v1",
+    }
     for key, schema in schema_by_ref.items():
         if key not in payload:
             continue
@@ -329,6 +338,49 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     return refs, parameters
 
 
+def prepare_registered_action(
+    store: RemixArtifactStore,
+    action: str,
+    payload: dict[str, Any],
+    *,
+    idempotency_key: str,
+    node_revision: int,
+) -> dict[str, Any]:
+    """Validate one registered deterministic action and build its task envelope."""
+    if action not in _PROCESS_TASK_TYPES:
+        raise ValueError(f"unsupported registered processing action: {action}")
+    refs, parameters = _action_inputs(store, action, payload)
+    task_type = _PROCESS_TASK_TYPES[action]
+    task_payload = dict(payload)
+    if "media_sha256" in parameters:
+        task_payload["media_sha256"] = parameters["media_sha256"]
+    if action == "render_manifest":
+        ref = payload["manifest_ref"]
+        job_id = hashlib.sha256(
+            f"{store.project_id}\0{ref['artifact_id']}\0{ref['revision']}\0{idempotency_key}".encode()
+        ).hexdigest()
+        task_payload["job_id"] = job_id
+        task_payload["project_dir"] = str(store.project_dir)
+        scope = job_id
+        queue_kind = "ffmpeg"
+        producer_version = "remix-render.v1"
+        parameters = {"job_id": job_id, "action": action, "payload": payload}
+    else:
+        scope = ""
+        queue_kind = "default"
+        producer_version = "remix-process.v1"
+    task_payload["node_revision"] = node_revision
+    return {
+        "input_refs": refs,
+        "normalized_parameters": parameters,
+        "task_type": task_type,
+        "task_payload": task_payload,
+        "scope": scope,
+        "queue_kind": queue_kind,
+        "producer_version": producer_version,
+    }
+
+
 @router.post("/actions")
 async def enqueue_process_action(project: str, body: ProcessActionBody, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "editor")
@@ -337,7 +389,11 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
     ):
         raise HTTPException(503, "Speech alignment engine is not configured")
     try:
-        refs, parameters = await run_in_threadpool(_action_inputs, store, body.action, body.payload)
+        prepared = await run_in_threadpool(
+            prepare_registered_action, store, body.action, body.payload,
+            idempotency_key=body.idempotency_key, node_revision=body.node_revision,
+        )
+        refs, parameters = prepared["input_refs"], prepared["normalized_parameters"]
     except FileNotFoundError as exc:
         raise HTTPException(404, "Artifact or revision not found") from exc
     except ValueError as exc:
@@ -349,24 +405,25 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             operations.start,
             idempotency_key=body.idempotency_key,
             input_refs=refs,
-            producer_version="remix-process.v1",
+            producer_version=prepared["producer_version"],
             normalized_parameters=parameters,
             node_revision=body.node_revision,
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    task_type = _PROCESS_TASK_TYPES[body.action]
-    task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=operation["operation_id"])
+    task_type = prepared["task_type"]
+    scope = prepared["scope"] or operation["operation_id"]
+    task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=scope)
     if operation["task_id"] or operation["status"] == "needs_confirmation":
         return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
     queued = await get_task_backend().enqueue_project_task(
         ctx,
         product_surface="freezone",
         task_type=task_type,
-        queue_kind="default",
+        queue_kind=prepared["queue_kind"],
         episode=0,
-        scope=operation["operation_id"],
-        payload={**body.payload, **({"media_sha256": parameters["media_sha256"]} if "media_sha256" in parameters else {}), "operation_id": operation["operation_id"], "node_revision": body.node_revision},
+        scope=scope,
+        payload={**prepared["task_payload"], "operation_id": operation["operation_id"]},
     )
     await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
     return _data({"action": body.action, "task_type": task_type, "task_id": queued.task_state.task_id, "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": "pending"})
