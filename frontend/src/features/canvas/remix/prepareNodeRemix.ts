@@ -73,7 +73,8 @@ export interface PreparedNodeRemix {
 
 export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string, previousManifestRef?: RemixArtifactRef | null): Promise<PreparedNodeRemix> {
   const upstream = ancestors(nodes, edges, composeId);
-  const reference = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia), '参考视频').data.remixMedia as UploadedRemixMedia;
+  const referenceNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia), '参考视频');
+  const reference = referenceNode.data.remixMedia as UploadedRemixMedia;
   const narrationNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration');
   if (narrationNodes.length > 1) throw new Error('旁白必须且只能有一个');
   if (narrationNodes.length === 1 && (typeof narrationNodes[0].data.audioUrl !== 'string' || !narrationNodes[0].data.audioUrl)) {
@@ -109,7 +110,8 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const transcriptMediaHash = transcriptArtifact.payload.media_hash;
   if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visualTypes = new Set<string>([CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit, CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage]);
-  const backgroundNode = one(upstream.filter((node) => visualTypes.has(node.type) && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') && node.data.remixMedia), '成片背景');
+  const explicitBackgrounds = upstream.filter((node) => visualTypes.has(node.type) && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') && node.data.remixMedia);
+  const backgroundNode = explicitBackgrounds.length ? one(explicitBackgrounds, '成片背景') : referenceNode;
   const background = backgroundNode.data.remixMedia as UploadedRemixMedia;
   const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual').map((node) => [node.id, boundBrollVisualMedia(project, node)]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)

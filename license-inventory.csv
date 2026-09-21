@@ -2000,6 +2000,7 @@ frontend/src/features/canvas/remix/remixJourney.test.ts,Elastic-2.0,2026 SuperTa
 frontend/src/features/canvas/remix/remixJourney.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/features/canvas/remix/remixJourneyActions.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/features/canvas/remix/remixJourneyBrowser.test.tsx,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
+frontend/src/features/canvas/remix/remixJourneyCanvas.integration.test.tsx,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/features/canvas/remix/selection.test.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/features/canvas/remix/selection.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/features/canvas/remix/workbenchCanvasMerge.test.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation

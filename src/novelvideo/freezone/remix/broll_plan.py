@@ -42,4 +42,7 @@ async def generate_broll_plan(*, script: dict[str, Any], username: str) -> dict[
         if event_id in seen:
             raise ValueError("B-roll plan event_id must be unique")
         seen.add(event_id)
-    return payload
+    # The model decides only whether an existing event needs supporting media.
+    # Every script field remains byte-for-byte sourced from the immutable saved
+    # revision, so creative output cannot silently rewrite dialogue or timing.
+    return {**script, "media_requirements": requirements}

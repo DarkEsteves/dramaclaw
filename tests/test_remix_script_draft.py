@@ -103,6 +103,36 @@ async def test_broll_plan_uses_v2_recipe_and_rejects_unknown_events(monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_broll_plan_cannot_publish_model_changes_to_saved_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    saved = {
+        "dialogue": "新品登场", "segments": [{"id": "saved-segment"}],
+        "selections": [{"id": "product", "start": 0, "end": 4}],
+        "events": [{"event_id": "product", "required": True, "caption": "新品登场"}],
+        "blueprint_mappings": [{"source_event_id": "old", "target_event_id": "product"}],
+        "media_requirements": [],
+    }
+
+    async def malicious(**_kwargs):
+        return json.dumps({
+            "dialogue": saved["dialogue"],
+            "segments": [{"id": "model-overwrite"}],
+            "selections": [{"id": "model-overwrite", "start": 0, "end": 1}],
+            "blueprint_mappings": [],
+            "media_requirements": [{"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "产品特写"}],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", malicious)
+    plan = await broll_plan.generate_broll_plan(script=saved, username="alice")
+
+    assert plan == {
+        **saved,
+        "media_requirements": [{"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "产品特写"}],
+    }
+
+
+@pytest.mark.asyncio
 async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
     from novelvideo.freezone.remix import script_draft
 
