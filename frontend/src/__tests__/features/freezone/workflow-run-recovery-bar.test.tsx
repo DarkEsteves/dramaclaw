@@ -413,4 +413,38 @@ describe("WorkflowRunRecoveryBar", () => {
       expect(updateFreezoneWorkflowRun).not.toHaveBeenCalled();
     });
   });
+
+  it("shows stale blocked output and only regenerates it after an explicit click", async () => {
+    const staleRun: FreezoneWorkflowRun = {
+      ...failedRun,
+      status: "running",
+      actions: [{
+        node_id: "compose-1",
+        action: "render_manifest",
+        status: "blocked",
+        artifact_status: "stale",
+        error: "input_media_changed",
+        processing_operation_id: "operation-old",
+      }],
+    };
+    vi.mocked(listFreezoneWorkflowRuns).mockResolvedValue({ runs: [staleRun] });
+
+    render(<WorkflowRunRecoveryBar projectId="project-a" canvasId="canvas-a" />);
+
+    expect(await screen.findByText("产物已过期，需要重新生成")).toBeInTheDocument();
+    expect(applyCanvasChatCommandsAsync).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新生成过期结果" }));
+
+    await waitFor(() => expect(applyCanvasChatCommandsAsync).toHaveBeenCalledWith(
+      [expect.objectContaining({
+        commands: [{
+          type: "run_workflow",
+          node_ids: ["compose-1"],
+          direction: "node",
+          regenerate: true,
+        }],
+      })],
+      { projectId: "project-a", canvasId: "canvas-a" },
+    ));
+  });
 });

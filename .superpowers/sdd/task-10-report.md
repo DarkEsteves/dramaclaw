@@ -194,3 +194,20 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   explicit workflow regenerate action; no successor is submitted automatically.
 - Final direct-render/workflow-state verification: 267 Python recovery/workflow tests
   passed; TypeScript, Ruff, and diff checks passed.
+
+## Confirmation-time media fencing
+
+- Canvas result confirmation now resolves and hashes every exact manifest binding while
+  holding the canvas write boundary immediately before backfill. Media replaced after
+  render makes the operation stale history and leaves the canvas untouched.
+- Workflow completion proof performs the same current-byte verification before marking
+  a render action complete or releasing dependents. A mismatch persists the operation
+  and action as stale/blocked with the historical output reference.
+- Video compose treats `stale` as terminal: normal submission and polling stop, while a
+  visible force-regenerate action creates a successor only after an explicit click.
+  Workflow recovery and chat status surfaces likewise expose blocked/stale actions as
+  “重新生成过期结果”, exclude them from ordinary continuation, and submit an explicit
+  node-scoped `regenerate:true` command.
+- Final confirmation/recovery verification: 269 Python recovery/workflow tests passed;
+  focused frontend recovery suites passed 288 tests across 36 files; TypeScript, Ruff,
+  and diff checks passed.

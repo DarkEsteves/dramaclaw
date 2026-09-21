@@ -66,8 +66,27 @@ function unresolvedWorkflowActions(
   return run.actions.filter((action) =>
     RESUMABLE_ACTION_STATUSES.has(action.status) &&
     existingNodeIds.has(action.node_id) &&
-    !hasGeneratedResult(action.node_id, action.action)
+    (isStaleWorkflowAction(action) || !hasGeneratedResult(action.node_id, action.action))
   );
+}
+
+function isStaleWorkflowAction(action: FreezoneWorkflowRun["actions"][number]): boolean {
+  return action.status === "blocked" && action.artifact_status === "stale";
+}
+
+export function staleWorkflowNodeIds(
+  run: FreezoneWorkflowRun,
+  existingNodeIds: ReadonlySet<string>,
+): string[] {
+  return [...new Set(
+    run.actions
+      .filter((action) => isStaleWorkflowAction(action) && existingNodeIds.has(action.node_id))
+      .map((action) => action.node_id),
+  )];
+}
+
+export function hasStaleWorkflowActions(run: FreezoneWorkflowRun | null): boolean {
+  return Boolean(run?.actions.some(isStaleWorkflowAction));
 }
 
 function recoverableWorkflowActions(
@@ -102,7 +121,7 @@ function latestResumableRun(
 ): FreezoneWorkflowRun | null {
   return runs.find((run) =>
     run.resumable &&
-    ["failed", "interrupted"].includes(run.status) &&
+    (["failed", "interrupted"].includes(run.status) || hasStaleWorkflowActions(run)) &&
     recoverableWorkflowActions(run, existingNodeIds).length > 0
   ) ?? null;
 }
@@ -227,6 +246,14 @@ export function WorkflowRunRecoveryBar({
       : [],
     [canvasNodes, existingNodeIds, run],
   );
+  const staleNodeIds = useMemo(
+    () => run ? staleWorkflowNodeIds(run, existingNodeIds) : [],
+    [existingNodeIds, run],
+  );
+  const resumeNodeIds = useMemo(
+    () => nodeIds.filter((nodeId) => !staleNodeIds.includes(nodeId)),
+    [nodeIds, staleNodeIds],
+  );
   const safetyNodeIds = useMemo(
     () => run
       ? [...new Set(
@@ -255,7 +282,7 @@ export function WorkflowRunRecoveryBar({
           canvas_id: canvasId,
           commands: [{
             type: "run_workflow",
-            node_ids: nodeIds,
+            node_ids: resumeNodeIds,
             direction: "downstream",
             regenerate: false,
           }],
@@ -268,6 +295,34 @@ export function WorkflowRunRecoveryBar({
       await refresh();
     } catch (resumeError) {
       setError(resumeError instanceof Error ? resumeError.message : String(resumeError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRegenerateStale = async () => {
+    if (busy || staleNodeIds.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await applyCanvasChatCommandsAsync(
+        [{
+          schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+          project_id: projectId,
+          canvas_id: canvasId,
+          commands: [{
+            type: "run_workflow",
+            node_ids: staleNodeIds,
+            direction: "node",
+            regenerate: true,
+          }],
+        }],
+        { projectId, canvasId },
+      );
+      if (result.errors.length > 0) setError(result.errors[0] ?? "过期结果重新生成失败");
+      await refresh();
+    } catch (regenerateError) {
+      setError(regenerateError instanceof Error ? regenerateError.message : String(regenerateError));
     } finally {
       setBusy(false);
     }
@@ -341,7 +396,9 @@ export function WorkflowRunRecoveryBar({
       <div className="min-w-0 text-sm">
         <div className="truncate font-medium">发现未完成的工作流</div>
         <div className="truncate text-xs text-muted-foreground">
-          已完成 {completedCount}/{run.actions.length}，剩余 {nodeIds.length} 个节点
+          {staleNodeIds.length > 0
+            ? "产物已过期，需要重新生成"
+            : `已完成 ${completedCount}/${run.actions.length}，剩余 ${nodeIds.length} 个节点`}
         </div>
         {error && <div className="mt-1 max-w-[420px] truncate text-xs text-destructive">{error}</div>}
       </div>
@@ -373,10 +430,16 @@ export function WorkflowRunRecoveryBar({
           仅重试失败
         </Button>
       )}
-      <Button type="button" size="sm" onClick={() => void handleResume()} disabled={busy}>
+      {staleNodeIds.length > 0 && (
+        <Button type="button" variant="outline" size="sm" onClick={() => void handleRegenerateStale()} disabled={busy}>
+          <RotateCcw className="size-4" />
+          重新生成过期结果
+        </Button>
+      )}
+      {resumeNodeIds.length > 0 && <Button type="button" size="sm" onClick={() => void handleResume()} disabled={busy}>
         {busy ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
         继续下游
-      </Button>
+      </Button>}
       <Button
         type="button"
         variant="ghost"

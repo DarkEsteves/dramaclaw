@@ -61,6 +61,33 @@ describe('VideoComposeNode automatic preparation', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新检查任务' }));
     await waitFor(() => expect(reconcileRemixOperation).toHaveBeenCalledWith('demo', 'op-1'));
   });
+
+  it('stops polling a stale render and only creates a successor after explicit regeneration', async () => {
+    let pollAgain: (() => void) | undefined;
+    const interval = vi.spyOn(window, 'setInterval').mockImplementation(((callback: TimerHandler) => {
+      pollAgain = callback as () => void;
+      return 42;
+    }) as typeof window.setInterval);
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
+    fetchRemixOperation.mockResolvedValue({ operation_id: 'op-stale', status: 'stale', task_id: 'task-old', output_refs: [] });
+    renderRemixManifest.mockResolvedValue({ operation_id: 'op-successor', task_key: 'render-successor', task_type: 'remix_render', task_id: 'task-new', job_id: 'job-new' });
+
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixInputsCurrent: true, remixNodeRevision: 2, remixOperationId: 'op-stale', unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+
+    expect(await screen.findByText('导出结果已过期，请明确重新导出。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
+    expect(fetchRemixOperation).toHaveBeenCalledTimes(1);
+    await act(async () => { pollAgain?.(); pollAgain?.(); });
+    expect(fetchRemixOperation).toHaveBeenCalledTimes(1);
+    expect(renderRemixManifest).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '强制重新导出' }));
+    await waitFor(() => expect(renderRemixManifest).toHaveBeenCalledWith('demo', expect.objectContaining({ regenerate: true })));
+    expect(canvasActions.updateNodeData).toHaveBeenCalledWith('compose', { remixOperationId: 'op-successor' });
+    interval.mockRestore();
+  });
   it('publishes one manifest under StrictMode while preparation is pending', async () => {
     let release!: (value: { manifestRef: { artifactId: string; revision: number }; events: []; selections: []; unresolvedRequiredEvents: [] }) => void;
     prepareNodeRemix.mockImplementation(() => new Promise((resolve) => { release = resolve; }));

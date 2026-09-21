@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -26,8 +27,8 @@ def _manifest() -> dict:
     return {
         "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 30},
         "media_bindings": [
-            {"media_id": "background", "kind": "image", "project_path": "media/background.png", "media_hash": "sha256:" + "a" * 64},
-            {"media_id": "narration", "kind": "audio", "project_path": "media/narration.wav", "media_hash": "sha256:" + "b" * 64},
+            {"media_id": "background", "kind": "image", "project_path": "media/background.png", "media_hash": "sha256:" + hashlib.sha256(b"background").hexdigest()},
+            {"media_id": "narration", "kind": "audio", "project_path": "media/narration.wav", "media_hash": "sha256:" + hashlib.sha256(b"narration").hexdigest()},
         ],
         "layers": [{"media_id": "background", "start_frame": 0, "end_frame": 30, "z_order": 0}], "subtitle_events": [],
         "audio_events": [{"media_id": "narration", "role": "narration", "start_frame": 0, "end_frame": 30}],
@@ -53,13 +54,17 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
 
 
 def _published(tmp_path: Path, *, node_revision: int = 3) -> tuple[dict, dict]:
+    for relative, content in (("media/background.png", b"background"), ("media/narration.wav", b"narration")):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
     artifact = RemixArtifactStore(tmp_path, "demo").create("composition_manifest.v1", _manifest(), [])
     operation_store = RemixOperationStore(tmp_path, "demo")
     operation = operation_store.start(
         idempotency_key="render-one", input_refs=[{"artifact_id": artifact["id"], "revision": 1}],
-        producer_version="remix-render.v1", normalized_parameters={"job_id": "a" * 64, "input_fingerprint": "fingerprint-1"},
+        producer_version="remix-render.v1", normalized_parameters={"job_id": "a" * 64, "input_fingerprint": "fingerprint-1", "manifest_media_bindings": _manifest()["media_bindings"]},
         node_revision=node_revision, canvas_id="default", node_id="compose-1",
-        input_media_hashes=["sha256:" + "a" * 64, "sha256:" + "b" * 64],
+        input_media_hashes=[item["media_hash"] for item in _manifest()["media_bindings"]],
     )
     output = tmp_path / "freezone" / "remix_renders" / artifact["id"] / "1" / f"{'a' * 64}.mp4"
     output.parent.mkdir(parents=True)
@@ -111,6 +116,24 @@ def test_confirm_applies_render_only_to_unchanged_canvas_node(api: TestClient, t
     assert saved["revision"] == 3
     assert saved["nodes"][0]["data"]["remixRenderOperationId"] == operation["operation_id"]
     assert saved["nodes"][0]["data"]["resultVideoUrl"].endswith(".mp4")
+
+
+def test_confirm_keeps_post_render_media_mutation_as_stale_history(api: TestClient, tmp_path: Path) -> None:
+    artifact, operation = _published(tmp_path)
+    canvas = _canvas(tmp_path, artifact)
+    original = canvas.read_bytes()
+    (tmp_path / "media/background.png").write_bytes(b"changed-after-render")
+
+    response = api.post(
+        f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm",
+        json={"canvas_id": "default", "node_id": "compose-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "stale"
+    assert response.json()["data"]["stale_reason"] == "input_media_changed"
+    assert response.json()["data"]["output_refs"]
+    assert canvas.read_bytes() == original
 
 
 def test_confirm_preserves_result_as_stale_when_node_changed(api: TestClient, tmp_path: Path) -> None:

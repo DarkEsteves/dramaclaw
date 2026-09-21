@@ -3122,6 +3122,77 @@ def test_workflow_render_manifest_same_key_does_not_reuse_after_media_replacemen
         assert len(workflow_run_client.enqueued_tasks) == 1
 
 
+def test_workflow_render_does_not_release_result_when_media_changes_after_render(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    import hashlib
+
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    for path in (
+        workflow_run_client.state_dir / "media/background.png",
+        workflow_run_client.state_dir / "media/narration.wav",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    media_hash = "sha256:" + hashlib.sha256(b"media").hexdigest()
+    manifest = RemixArtifactStore(workflow_run_client.state_dir, "proj_demo").create(
+        "composition_manifest.v1",
+        {
+            "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 30},
+            "media_bindings": [
+                {"media_id": "background", "kind": "image", "project_path": "media/background.png", "media_hash": media_hash},
+                {"media_id": "narration", "kind": "audio", "project_path": "media/narration.wav", "media_hash": media_hash},
+            ],
+            "layers": [{"media_id": "background", "start_frame": 0, "end_frame": 30, "z_order": 0}],
+            "subtitle_events": [],
+            "audio_events": [{"media_id": "narration", "role": "narration", "start_frame": 0, "end_frame": 30}],
+            "manual_overrides": [], "source_versions": [],
+        },
+        [],
+    )
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(base, json={"actions": [{
+        "node_id": "render", "action": "render_manifest", "node_revision": 3,
+        "payload": {"manifest_ref": {"artifact_id": manifest["id"], "revision": 1}},
+    }]}).json()["data"]
+    action = created["actions"][0]
+    operations = RemixOperationStore(workflow_run_client.state_dir, "proj_demo")
+    operation = operations.get(action["processing_operation_id"])
+    relative = "freezone/remix_renders/post-render-mutation.mp4"
+    output = workflow_run_client.state_dir / relative
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"render")
+    operations.publish_result_unverified(
+        operation["operation_id"], output_refs=[{"project_path": relative}]
+    )
+    task = SimpleNamespace(
+        task_id=operation["task_id"], task_type="remix_render", status="completed",
+        progress=1.0, current_task="completed", episode=0, beat_num=None,
+        scope=action["job_id"], result={"output_path": relative}, error=None,
+    )
+    monkeypatch.setattr(
+        freezone, "get_task_manager",
+        lambda: SimpleNamespace(list_tasks_for_project=lambda _ctx: [task]),
+    )
+    (workflow_run_client.state_dir / "media/background.png").write_bytes(
+        b"changed-after-render"
+    )
+
+    polled = workflow_run_client.get(base).json()["data"]["runs"][0]
+
+    assert polled["actions"][0]["status"] == "blocked"
+    assert polled["actions"][0]["artifact_status"] == "stale"
+    assert polled["actions"][0]["error"] == "input_media_changed"
+    assert polled["actions"][0]["result_ref"] == {"project_path": relative}
+    durable = operations.get(operation["operation_id"])
+    assert durable["status"] == "stale"
+    assert durable["output_refs"] == [{"project_path": relative}]
+    assert len(workflow_run_client.enqueued_tasks) == 1
+
+
 def test_workflow_run_processing_action_requires_exact_registered_payload(
     workflow_run_client: TestClient,
 ) -> None:

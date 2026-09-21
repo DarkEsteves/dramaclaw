@@ -36,7 +36,11 @@ import {
   taskBatchId,
   taskBatchSize,
 } from "@/features/superchat/task-notification-batch";
-import { recoverableWorkflowNodeIds } from "@/features/freezone/WorkflowRunRecoveryBar";
+import {
+  hasStaleWorkflowActions,
+  recoverableWorkflowNodeIds,
+  staleWorkflowNodeIds,
+} from "@/features/freezone/WorkflowRunRecoveryBar";
 import { cn } from "@/lib/utils";
 import { confirmDialog } from "@/components/confirm-dialog-host";
 import { useCancelTask } from "@/lib/queries/tasks";
@@ -211,7 +215,7 @@ export function workflowRunStatusPollMs(
   runs: readonly FreezoneWorkflowRun[],
   resuming = false,
 ): number {
-  return resuming || runs.some((run) => run.status === "running")
+  return resuming || runs.some((run) => run.status === "running" && !hasStaleWorkflowActions(run))
     ? WORKFLOW_RUN_ACTIVE_POLL_MS
     : WORKFLOW_RUN_IDLE_POLL_MS;
 }
@@ -221,7 +225,7 @@ export function isStatusBarWorkflowContinuable(
 ): boolean {
   return Boolean(
     run?.resumable &&
-    (run.status === "failed" || run.status === "interrupted"),
+    (run.status === "failed" || run.status === "interrupted" || hasStaleWorkflowActions(run)),
   );
 }
 
@@ -230,6 +234,7 @@ export function workflowRunDisplayStatus(
   resuming: boolean,
 ): FreezoneWorkflowRun["status"] | null {
   if (resuming && isStatusBarWorkflowContinuable(run)) return "running";
+  if (hasStaleWorkflowActions(run)) return "failed";
   return run?.status ?? null;
 }
 
@@ -239,6 +244,7 @@ export function shouldShowCancelAll(
   resuming: boolean,
 ): boolean {
   if (resuming && run?.status !== "running") return false;
+  if (hasStaleWorkflowActions(run)) return activeStandaloneTaskCount > 0;
   return activeStandaloneTaskCount > 0 || run?.status === "running";
 }
 
@@ -570,6 +576,10 @@ export function ChatTaskStatusBar({
         : [],
     [existingNodeIds, workflowRun],
   );
+  const staleNodeIds = useMemo(
+    () => workflowRun ? staleWorkflowNodeIds(workflowRun, existingNodeIds) : [],
+    [existingNodeIds, workflowRun],
+  );
   const workflowTasksByKey = useMemo(() => {
     const linked = new Map<string, TaskState>();
     for (const action of workflowRun?.actions ?? []) {
@@ -878,9 +888,9 @@ export function ChatTaskStatusBar({
           canvas_id: canvasId,
           commands: [{
             type: "run_workflow",
-            node_ids: resumeNodeIds,
-            direction: "downstream",
-            regenerate: false,
+            node_ids: staleNodeIds.length > 0 ? staleNodeIds : resumeNodeIds,
+            direction: staleNodeIds.length > 0 ? "node" : "downstream",
+            regenerate: staleNodeIds.length > 0,
           }],
         }],
         { projectId, canvasId },
@@ -987,6 +997,8 @@ export function ChatTaskStatusBar({
               )}
               {resuming
                 ? t("taskCenter.chatStatus.resuming")
+                : staleNodeIds.length > 0
+                  ? "重新生成过期结果"
                 : workflowRun.status === "failed"
                   ? t("taskCenter.chatStatus.continueDownstream")
                   : t("taskCenter.chatStatus.resume")}

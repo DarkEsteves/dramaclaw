@@ -1798,13 +1798,39 @@ def _processing_operation_proof(
     try:
         from novelvideo.freezone.remix.operations import RemixOperationStore
 
-        operation = RemixOperationStore(project_dir, project_id).get(operation_id)
+        operation_store = RemixOperationStore(project_dir, project_id)
+        operation = operation_store.get(operation_id)
     except (FileNotFoundError, ValueError):
         return "invalid", "bound processing operation is unavailable", None
     if operation.get("status") == "stale":
         outputs = operation.get("output_refs")
         result_ref = outputs[0] if isinstance(outputs, list) and len(outputs) == 1 and isinstance(outputs[0], dict) else None
         return "stale", str(operation.get("stale_reason") or "processing_result_stale"), result_ref
+    if item.get("action") == "render_manifest" and operation.get("status") == "needs_confirmation":
+        refs = operation.get("input_refs")
+        ref = refs[0] if isinstance(refs, list) and len(refs) == 1 and isinstance(refs[0], dict) else None
+        try:
+            from novelvideo.freezone.remix.store import RemixArtifactStore
+
+            manifest = RemixArtifactStore(project_dir, project_id).read(
+                ref["artifact_id"], ref["revision"]
+            ) if ref is not None else None
+        except (FileNotFoundError, KeyError, ValueError):
+            manifest = None
+        bindings = manifest["payload"].get("media_bindings") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema") != "composition_manifest.v1"
+            or not operation_store.media_bindings_unchanged(
+                bindings, operation.get("input_media_hashes")
+            )
+        ):
+            operation = operation_store.mark_stale(
+                operation_id, reason="input_media_changed"
+            )
+            outputs = operation.get("output_refs")
+            result_ref = outputs[0] if isinstance(outputs, list) and len(outputs) == 1 and isinstance(outputs[0], dict) else None
+            return "stale", "input_media_changed", result_ref
     if operation.get("status") != "needs_confirmation":
         return "waiting", None, None
     if (

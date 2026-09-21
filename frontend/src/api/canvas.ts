@@ -146,7 +146,7 @@ export interface FreezoneWorkflowRunAction {
   error_fingerprint?: string | null;
   user_error?: string | null;
   retryable?: boolean | null;
-  artifact_status?: "valid" | "missing" | "unverified" | "not_required" | null;
+  artifact_status?: "valid" | "missing" | "unverified" | "not_required" | "stale" | null;
   recipe_id?: string | null;
   recipe_version?: string | null;
   generation_attempt_id?: string | null;

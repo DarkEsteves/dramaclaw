@@ -19,6 +19,7 @@ import {
   workflowSettledCount,
   workflowStatusCounts,
 } from "@/features/superchat/chat-task-status-bar";
+import { staleWorkflowNodeIds } from "@/features/freezone/WorkflowRunRecoveryBar";
 import type { FreezoneWorkflowRun } from "@/api/canvas";
 import {
   CANVAS_NODE_TYPES,
@@ -525,6 +526,25 @@ describe("applyOptimisticWorkflowRunUpdate", () => {
 });
 
 describe("workflowStatusCounts", () => {
+  it("treats a blocked stale workflow action as an explicit regeneration target", () => {
+    const stale = workflowRun({
+      status: "running",
+      actions: [{
+        node_id: "compose",
+        action: "render_manifest",
+        status: "blocked",
+        artifact_status: "stale",
+        error: "input_media_changed",
+      }],
+    });
+
+    expect(staleWorkflowNodeIds(stale, new Set(["compose"]))).toEqual(["compose"]);
+    expect(isStatusBarWorkflowContinuable(stale)).toBe(true);
+    expect(workflowRunDisplayStatus(stale, false)).toBe("failed");
+    expect(workflowRunStatusPollMs([stale], false)).toBe(60_000);
+    expect(shouldShowCancelAll(0, stale, false)).toBe(false);
+  });
+
   it("separates active, waiting and failed actions without counting skipped as completed", () => {
     const actions: FreezoneWorkflowRun["actions"] = [
       { node_id: "done", action: "generate_text", status: "completed" },

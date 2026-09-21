@@ -78,7 +78,14 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         except (FileNotFoundError, ValueError):
             return False
         hashes = sorted({str(item.get("media_hash")).lower() for item in manifest["payload"].get("media_bindings", []) if isinstance(item, dict) and isinstance(item.get("media_hash"), str)})
-        return hashes == record.get("input_media_hashes", [])
+        if hashes != record.get("input_media_hashes", []):
+            return False
+        if not operations.media_bindings_unchanged(
+            manifest["payload"].get("media_bindings"),
+            record.get("input_media_hashes"),
+        ):
+            raise _StaleNode("input_media_changed")
+        return True
 
     # The node check and write share the canvas mutex. A concurrent edit either
     # lands before this check (stale) or after our versioned save.
@@ -86,7 +93,7 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         node = _node(existing, node_id)
         expected = record["input_refs"]
         if not exact_inputs(node):
-            raise _StaleNode()
+            raise _StaleNode("exact_inputs_changed")
         updated = deepcopy(existing)
         target = _node(updated, node_id)
         assert target is not None
@@ -106,8 +113,8 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
             build_payload=build, enforce_revision=False,
             save_source="remix_result_confirmation",
         )
-    except _StaleNode:
-        return operations.mark_stale(operation_id, reason="exact_inputs_changed")
+    except _StaleNode as exc:
+        return operations.mark_stale(operation_id, reason=str(exc) or "exact_inputs_changed")
     except Exception:
         operations.release_confirmation(operation_id)
         raise

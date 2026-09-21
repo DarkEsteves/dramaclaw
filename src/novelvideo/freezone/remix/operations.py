@@ -121,12 +121,10 @@ class RemixOperationStore:
                 return False
         return True
 
-    def _bound_media_unchanged(self, record: dict[str, Any]) -> bool:
-        parameters = record.get("normalized_parameters")
-        parameters = parameters if isinstance(parameters, dict) else {}
-        bindings = parameters.get("manifest_media_bindings")
-        if bindings is None:
-            return True
+    def media_bindings_unchanged(
+        self, bindings: Any, expected_hashes: list[str] | None
+    ) -> bool:
+        """Rehash exact project-local manifest bindings against a durable snapshot."""
         if not isinstance(bindings, list) or not bindings:
             return False
         declared: list[str] = []
@@ -155,7 +153,15 @@ class RemixOperationStore:
             if f"sha256:{digest.hexdigest()}" != expected:
                 return False
             declared.append(expected)
-        return self._media_hashes(declared) == record.get("input_media_hashes", [])
+        return self._media_hashes(declared) == self._media_hashes(expected_hashes)
+
+    def _bound_media_unchanged(self, record: dict[str, Any]) -> bool:
+        parameters = record.get("normalized_parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        bindings = parameters.get("manifest_media_bindings")
+        if bindings is None:
+            return True
+        return self.media_bindings_unchanged(bindings, record.get("input_media_hashes"))
 
     def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False, canvas_id: str = "", node_id: str = "", input_media_hashes: list[str] | None = None) -> dict[str, Any]:
         if not isinstance(idempotency_key, str) or not idempotency_key or not isinstance(producer_version, str) or not producer_version or type(node_revision) is not int or node_revision < 1 or not isinstance(normalized_parameters, dict):
