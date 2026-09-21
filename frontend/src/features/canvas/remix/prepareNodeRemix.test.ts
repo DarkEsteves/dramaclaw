@@ -19,7 +19,7 @@ describe('prepareNodeRemix', () => {
     const blueprintRef = { artifactId: 'blueprint-1', revision: 1 };
     const nodes = [
       node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
-      node('audio', 'audioNode', { remixRole: 'narration', remixMedia: media('audio', 'b') }),
+      node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/audio', remixMedia: media('audio', 'b') }),
       node('script', 'scriptNode', { remixScriptRef: scriptRef }),
       node('story', 'videoStoryNode', { referenceBlueprintRef: blueprintRef }),
       node('words', 'transcriptNode', { artifactRef: transcriptRef }),
@@ -50,6 +50,33 @@ describe('prepareNodeRemix', () => {
     const first = remixGraphFingerprint(nodes, [edge('a', 'b'), edge('b', 'compose')], 'compose');
     const rewired = remixGraphFingerprint(nodes, [edge('b', 'a'), edge('a', 'compose')], 'compose');
     expect(first).not.toBe(rewired);
+  });
+
+  it('changes the fingerprint when narration is cleared or replaced without clearing old media', () => {
+    const old = node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/take-a.wav', remixMedia: media('audio', 'b') });
+    const compose = node('compose', 'videoComposeNode', {});
+    const edges = [edge('audio', 'compose')];
+    const before = remixGraphFingerprint([old, compose], edges, 'compose');
+    const cleared = remixGraphFingerprint([node('audio', 'audioNode', { ...old.data, audioUrl: null }), compose], edges, 'compose');
+    const replaced = remixGraphFingerprint([node('audio', 'audioNode', { ...old.data, audioUrl: '/take-b.wav' }), compose], edges, 'compose');
+    expect(cleared).not.toBe(before);
+    expect(replaced).not.toBe(before);
+  });
+
+  it('refuses to prepare an existing compose after narration audio was cleared', async () => {
+    const nodes = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
+      node('audio', 'audioNode', { remixRole: 'narration', audioUrl: null, remixMedia: media('audio', 'b') }),
+      node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 1 } }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: { artifactId: 'blueprint', revision: 1 } }),
+      node('words', 'transcriptNode', { artifactRef: { artifactId: 'words', revision: 1 } }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: { artifactId: 'timing', revision: 1 } }),
+      node('compose', 'videoComposeNode', { remixManifestRef: { artifactId: 'old-manifest', revision: 1 } }),
+    ];
+    const edges = [edge('video', 'timeline'), edge('audio', 'timeline'), edge('story', 'script'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose')];
+    await expect(prepareNodeRemix('demo', nodes, edges, 'compose')).rejects.toThrow('当前配音没有音频');
+    expect(api.fetchRemixArtifact).not.toHaveBeenCalled();
+    expect(api.createRemixArtifact).not.toHaveBeenCalled();
   });
 
   it('refuses timing compiled against a different narration file', async () => {

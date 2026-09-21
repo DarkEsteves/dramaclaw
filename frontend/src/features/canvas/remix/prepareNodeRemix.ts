@@ -29,6 +29,7 @@ export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], 
     id: node.id,
     type: node.type,
     mediaHash: 'remixMedia' in node.data ? (node.data.remixMedia as UploadedRemixMedia | undefined)?.media_hash : undefined,
+    audioUrl: node.type === CANVAS_NODE_TYPES.audio ? node.data.audioUrl ?? null : undefined,
     role: 'remixRole' in node.data ? node.data.remixRole : undefined,
     scriptRef: 'remixScriptRef' in node.data ? node.data.remixScriptRef : undefined,
     artifactRef: 'artifactRef' in node.data ? node.data.artifactRef : undefined,
@@ -52,8 +53,15 @@ export interface PreparedNodeRemix {
 export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string): Promise<PreparedNodeRemix> {
   const upstream = ancestors(nodes, edges, composeId);
   const reference = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia), '参考视频').data.remixMedia as UploadedRemixMedia;
-  const narrationNode = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration' && node.data.remixMedia);
-  const narration = narrationNode.length ? one(narrationNode, '旁白').data.remixMedia as UploadedRemixMedia : reference.has_audio ? reference : null;
+  const narrationNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration');
+  if (narrationNodes.length > 1) throw new Error('旁白必须且只能有一个');
+  if (narrationNodes.length === 1 && (typeof narrationNodes[0].data.audioUrl !== 'string' || !narrationNodes[0].data.audioUrl)) {
+    throw new Error('当前配音没有音频，请先生成或上传配音');
+  }
+  const narrationMedia = narrationNodes[0]?.data.remixMedia as UploadedRemixMedia | undefined;
+  if (narrationNodes.length === 1 && !narrationMedia) throw new Error('当前配音尚未附着媒体，请重新按脚本对齐');
+  if (narrationMedia?.url && narrationNodes[0].data.audioUrl !== narrationMedia.url) throw new Error('当前配音音频已变化，请重新按脚本对齐');
+  const narration = narrationMedia ?? (reference.has_audio ? reference : null);
   if (!narration) throw new Error('缺少实际旁白音轨');
   const timingNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline && node.data.artifactRef && edges.some((edge) => edge.source === node.id && edge.target === composeId)), '语义时间轴');
   const scriptNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixScriptRef && edges.some((edge) => edge.source === node.id && edge.target === timingNode.id)), '改编脚本');
