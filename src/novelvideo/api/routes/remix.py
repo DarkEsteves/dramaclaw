@@ -384,6 +384,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         raise ValueError(f"{action} requires exactly {', '.join(sorted(required))}")
     refs: list[dict[str, Any]] = []
     media_hash = None
+    manifest_media_bindings: list[dict[str, Any]] | None = None
     if "media_path" in payload:
         relative = payload["media_path"]
         if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
@@ -413,6 +414,11 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         artifact = store.read(ref["artifact_id"], ref["revision"])
         if artifact["schema"] != schema:
             raise ValueError(f"{key} must reference {schema}")
+        if key == "manifest_ref":
+            bindings = artifact["payload"].get("media_bindings")
+            if not isinstance(bindings, list) or not all(isinstance(item, dict) for item in bindings):
+                raise ValueError("composition manifest media bindings are invalid")
+            manifest_media_bindings = [dict(item) for item in bindings]
         refs.append(ref)
     if action == "compile_semantic_timeline":
         if not isinstance(payload["edit_map"], list) or not isinstance(payload["overrides"], list) or type(payload["fps"]) is not int or payload["fps"] <= 0:
@@ -420,6 +426,8 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     parameters = {"action": action, "payload": payload}
     if media_hash is not None:
         parameters["media_sha256"] = media_hash
+    if manifest_media_bindings is not None:
+        parameters["manifest_media_bindings"] = manifest_media_bindings
     return refs, parameters
 
 
@@ -449,7 +457,12 @@ def prepare_registered_action(
         scope = job_id
         queue_kind = "ffmpeg"
         producer_version = "remix-render.v1"
-        parameters = {"job_id": job_id, "action": action, "payload": payload}
+        parameters = {
+            "job_id": job_id,
+            "action": action,
+            "payload": payload,
+            "manifest_media_bindings": parameters["manifest_media_bindings"],
+        }
     else:
         scope = ""
         queue_kind = "default"
@@ -463,6 +476,7 @@ def prepare_registered_action(
         "scope": scope,
         "queue_kind": queue_kind,
         "producer_version": producer_version,
+        "input_media_hashes": _input_media_hashes(parameters),
     }
 
 
@@ -493,7 +507,7 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             producer_version=prepared["producer_version"],
             normalized_parameters=parameters,
             node_revision=body.node_revision,
-            input_media_hashes=_input_media_hashes(parameters),
+            input_media_hashes=prepared["input_media_hashes"],
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

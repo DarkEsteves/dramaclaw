@@ -5141,6 +5141,7 @@ async def _dispatch_ready_remix_workflow_actions(
             node_revision=node_revision,
             canvas_id=run["canvas_id"],
             node_id=node_id,
+            input_media_hashes=prepared["input_media_hashes"],
         )
         scope = prepared["scope"] or operation["operation_id"]
         task_key = project_task_state_key(

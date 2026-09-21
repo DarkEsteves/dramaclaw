@@ -392,6 +392,51 @@ def test_processing_action_transport_error_is_reconciled_without_resubmission(cl
     assert queued == []
 
 
+def test_render_manifest_action_marks_completed_result_stale_after_bound_media_replacement(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    for path in (tmp_path / "media/background.png", tmp_path / "media/narration.wav"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    created = api.post(
+        BASE,
+        json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []},
+    ).json()["data"]
+    body = {
+        "action": "render_manifest",
+        "payload": {"manifest_ref": {"artifact_id": created["id"], "revision": 1}},
+        "idempotency_key": "render-action-reuse",
+        "node_revision": 2,
+    }
+    first = api.post("/api/v1/projects/demo/freezone/remix/actions", json=body)
+    operation_id = first.json()["data"]["operation_id"]
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.get(operation_id)
+    output = tmp_path / "freezone/remix_renders/reused.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"render")
+    operations.complete(
+        operation_id,
+        output_refs=[{"project_path": output.relative_to(tmp_path).as_posix()}],
+        current_input_refs=operation["input_refs"],
+        current_node_revision=2,
+    )
+
+    (tmp_path / "media/background.png").write_bytes(b"replacement")
+    repeated = api.post("/api/v1/projects/demo/freezone/remix/actions", json=body)
+
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_id"] == operation_id
+    assert repeated.json()["data"]["operation_status"] == "stale"
+    durable = operations.get(operation_id)
+    assert durable["stale_reason"] == "input_media_changed"
+    assert durable["output_reusable"] is False
+    assert durable["input_media_hashes"] == ["sha256:" + hashlib.sha256(b"media").hexdigest()]
+    assert durable["normalized_parameters"]["manifest_media_bindings"] == manifest()["media_bindings"]
+    assert len(queued) == 1
+
+
 def test_processing_action_rejects_unsafe_media_and_unknown_action(client):
     api, queued = client
     base = "/api/v1/projects/demo/freezone/remix/actions"

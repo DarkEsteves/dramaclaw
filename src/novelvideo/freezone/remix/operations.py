@@ -121,6 +121,42 @@ class RemixOperationStore:
                 return False
         return True
 
+    def _bound_media_unchanged(self, record: dict[str, Any]) -> bool:
+        parameters = record.get("normalized_parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        bindings = parameters.get("manifest_media_bindings")
+        if bindings is None:
+            return True
+        if not isinstance(bindings, list) or not bindings:
+            return False
+        declared: list[str] = []
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                return False
+            relative = binding.get("project_path")
+            expected = binding.get("media_hash")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or Path(relative).is_absolute()
+                or not isinstance(expected, str)
+            ):
+                return False
+            expected = expected.strip().lower()
+            if not re.fullmatch(r"sha256:[a-f0-9]{64}", expected):
+                return False
+            path = (self.project_dir / relative).resolve()
+            if not path.is_relative_to(self.project_dir) or not path.is_file():
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1_048_576), b""):
+                    digest.update(chunk)
+            if f"sha256:{digest.hexdigest()}" != expected:
+                return False
+            declared.append(expected)
+        return self._media_hashes(declared) == record.get("input_media_hashes", [])
+
     def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False, canvas_id: str = "", node_id: str = "", input_media_hashes: list[str] | None = None) -> dict[str, Any]:
         if not isinstance(idempotency_key, str) or not idempotency_key or not isinstance(producer_version, str) or not producer_version or type(node_revision) is not int or node_revision < 1 or not isinstance(normalized_parameters, dict):
             raise ValueError("invalid operation request")
@@ -140,6 +176,16 @@ class RemixOperationStore:
                     or old["node_revision"] != node_revision
                     or old.get("canvas_id", "") != canvas_id or old.get("node_id", "") != node_id):
                     raise ValueError("Idempotency key reused for a different request")
+                if old["status"] in {"completed", "needs_confirmation"} and not self._bound_media_unchanged(old):
+                    old = self._update(
+                        old_id,
+                        guard,
+                        status="stale",
+                        stale_reason="input_media_changed",
+                        result_available=False,
+                        output_reusable=False,
+                    )
+                    return {**old, "created": False}
                 if old["status"] not in {"completed", "needs_confirmation"} or self._outputs_exist(old.get("output_refs", [])):
                     return {**old, "created": False}
                 old = self._update(

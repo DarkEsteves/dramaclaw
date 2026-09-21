@@ -168,3 +168,17 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   invalidates reachable compose output, and rejects late success or error callbacks.
 - Final absolute-review verification: 264 Python recovery/workflow tests and 83 focused
   frontend recovery/store tests passed; TypeScript, Ruff, and diff checks passed.
+
+## Render action media reuse closure
+
+- Registered `render_manifest` actions now copy the exact manifest media bindings into
+  normalized operation parameters and snapshot their declared SHA-256 hashes for both
+  direct actions and workflow dispatch.
+- Before returning a completed or confirmable same-key result, operation reuse resolves
+  every project-local binding and hashes the current bytes. A missing or replaced file
+  marks the old result `stale` with `input_media_changed`, `result_available=false`, and
+  `output_reusable=false`; it never queues a replacement implicitly.
+- Direct `/remix/actions` and workflow same-key regressions cover in-place replacement
+  after a completed render operation.
+- Final media-reuse verification: 266 Python recovery/workflow tests passed;
+  TypeScript, Ruff, and diff checks passed.

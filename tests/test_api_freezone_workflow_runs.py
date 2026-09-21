@@ -3034,6 +3034,78 @@ def test_workflow_processing_recovers_task_after_crash_and_submission_lease_expi
     assert durable["submission_bound_fence"] == operation["submission_fence"]
 
 
+def test_workflow_render_manifest_same_key_does_not_reuse_after_media_replacement(
+    workflow_run_client: TestClient,
+) -> None:
+    import hashlib
+
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.freezone.workflow_runs import update_workflow_run
+
+    for path in (
+        workflow_run_client.state_dir / "media/background.png",
+        workflow_run_client.state_dir / "media/narration.wav",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    media_hash = "sha256:" + hashlib.sha256(b"media").hexdigest()
+    manifest = RemixArtifactStore(workflow_run_client.state_dir, "proj_demo").create(
+        "composition_manifest.v1",
+        {
+            "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 30},
+            "media_bindings": [
+                {"media_id": "background", "kind": "image", "project_path": "media/background.png", "media_hash": media_hash},
+                {"media_id": "narration", "kind": "audio", "project_path": "media/narration.wav", "media_hash": media_hash},
+            ],
+            "layers": [{"media_id": "background", "start_frame": 0, "end_frame": 30, "z_order": 0}],
+            "subtitle_events": [],
+            "audio_events": [{"media_id": "narration", "role": "narration", "start_frame": 0, "end_frame": 30}],
+            "manual_overrides": [],
+            "source_versions": [],
+        },
+        [],
+    )
+    body = {
+        "idempotency_key": "workflow-render-reuse",
+        "actions": [{
+            "node_id": "render", "action": "render_manifest", "node_revision": 3,
+            "payload": {"manifest_ref": {"artifact_id": manifest["id"], "revision": 1}},
+        }],
+    }
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    first = workflow_run_client.post(base, json=body).json()["data"]
+    action = first["actions"][0]
+    operations = RemixOperationStore(workflow_run_client.state_dir, "proj_demo")
+    operation = operations.get(action["processing_operation_id"])
+    output = workflow_run_client.state_dir / "freezone/remix_renders/workflow-reused.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"render")
+    operations.complete(
+        operation["operation_id"],
+        output_refs=[{"project_path": output.relative_to(workflow_run_client.state_dir).as_posix()}],
+        current_input_refs=operation["input_refs"],
+        current_node_revision=3,
+    )
+    update_workflow_run(
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        run_id=first["run_id"],
+        action_updates=[{"node_id": "render", "action": "render_manifest", "status": "pending"}],
+    )
+
+    (workflow_run_client.state_dir / "media/narration.wav").write_bytes(b"replacement")
+    repeated = workflow_run_client.post(base, json=body)
+
+    assert repeated.status_code == 200
+    durable = operations.get(operation["operation_id"])
+    assert durable["status"] == "stale"
+    assert durable["stale_reason"] == "input_media_changed"
+    assert durable["output_reusable"] is False
+    assert durable["input_media_hashes"] == [media_hash]
+    assert len(workflow_run_client.enqueued_tasks) == 1
+
+
 def test_workflow_run_processing_action_requires_exact_registered_payload(
     workflow_run_client: TestClient,
 ) -> None:
