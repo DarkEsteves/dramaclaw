@@ -49,6 +49,12 @@ TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
 WORKFLOW_ACTION_MAX_RETRIES = 2
 GENERATION_ACTIONS = set(GENERATION_ACTION_TYPES)
 PROCESSING_ACTIONS = set(PROCESSING_ACTION_TYPES)
+PROCESSING_ACTION_ARTIFACT_SCHEMAS = {
+    "analyze_reference_video": "reference_evidence.v1",
+    "transcribe_media": "word_timeline.v1",
+    "align_script": "word_timeline.v1",
+    "compile_semantic_timeline": "performance_timing.v1",
+}
 WORKFLOW_ACTIONS = GENERATION_ACTIONS | PROCESSING_ACTIONS | {"generate_html", "save"}
 NON_RETRYABLE_ERROR_MARKERS = {
     "invalid token",
@@ -336,11 +342,14 @@ def _validate_action_artifact(
         try:
             from novelvideo.freezone.remix.store import RemixArtifactStore
 
-            RemixArtifactStore(project_dir, project_id).read(
+            artifact = RemixArtifactStore(project_dir, project_id).read(
                 ref["artifact_id"], ref["revision"]
             )
         except (FileNotFoundError, TypeError, ValueError):
             return "missing", "processing artifact is missing or invalid", None
+        expected_schema = PROCESSING_ACTION_ARTIFACT_SCHEMAS.get(action)
+        if artifact.get("schema") != expected_schema:
+            return "invalid_schema", f"processing artifact must be {expected_schema}", None
         return "valid", None, dict(ref)
     if action not in GENERATION_ACTIONS:
         return "not_required", None, None
@@ -1709,6 +1718,59 @@ def workflow_media_failure_awaits_retry(
         ).fetchone()
     return claim is not None and claim["media_claim_retry_count"] == retry_count - 1
 
+def _processing_operation_proof(
+    *,
+    item: dict[str, Any],
+    task_id: str,
+    task_result: dict[str, Any],
+    project_dir: Path,
+    project_id: str,
+) -> tuple[str, str | None]:
+    """Verify task output against the immutable remix operation envelope."""
+    operation_id = str(item.get("processing_operation_id") or "")
+    if not operation_id:
+        return "invalid", "processing workflow action has no bound operation"
+    try:
+        from novelvideo.freezone.remix.operations import RemixOperationStore
+
+        operation = RemixOperationStore(project_dir, project_id).get(operation_id)
+    except (FileNotFoundError, ValueError):
+        return "invalid", "bound processing operation is unavailable"
+    if operation.get("status") != "needs_confirmation":
+        return "waiting", None
+    if (
+        operation.get("node_revision") != item.get("node_revision")
+        or operation.get("node_id") != item.get("node_id")
+        or not task_id
+        or operation.get("task_id") != task_id
+    ):
+        return "invalid", "processing operation identity does not match workflow action"
+    parameters = operation.get("normalized_parameters")
+    if not isinstance(parameters, dict) or (
+        parameters.get("action") != item.get("action")
+        or parameters.get("payload") != (item.get("payload") or {})
+    ):
+        return "invalid", "processing operation inputs do not match workflow action"
+    expected_inputs = []
+    for key in ("script_ref", "word_timeline_ref", "blueprint_ref", "manifest_ref"):
+        ref = (item.get("payload") or {}).get(key)
+        if isinstance(ref, dict):
+            expected_inputs.append({
+                "artifact_id": ref.get("artifact_id"),
+                "revision": ref.get("revision"),
+                "project_id": project_id,
+            })
+    if operation.get("input_refs") != expected_inputs:
+        return "invalid", "processing operation artifact inputs do not match workflow action"
+    if item.get("action") == "render_manifest":
+        relative = task_result.get("output_path")
+        task_output = {"project_path": relative} if isinstance(relative, str) else None
+    else:
+        task_output = task_result.get("artifact_ref")
+    if not isinstance(task_output, dict) or operation.get("output_refs") != [task_output]:
+        return "invalid", "processing operation output does not match task result"
+    return "valid", None
+
 
 def reconcile_workflow_runs_with_tasks(
     *,
@@ -1774,13 +1836,51 @@ def reconcile_workflow_runs_with_tasks(
                         **workflow_error_diagnostics(error),
                     }
                 else:
+                    task_result = (
+                        task.get("result")
+                        if isinstance(task.get("result"), dict)
+                        else {}
+                    )
+                    action_name = str(item.get("action") or "")
+                    if (
+                        action_name in PROCESSING_ACTIONS
+                        and task_result.get("status") == "needs_review"
+                    ):
+                        updates = {
+                            "status": "blocked",
+                            "error": "processing result requires review",
+                            "artifact_status": "needs_review",
+                        }
+                        if any(item.get(key) != value for key, value in updates.items()):
+                            item.update(updates)
+                            item["updated_at"] = timestamp
+                            changed = True
+                        continue
+                    if action_name in PROCESSING_ACTIONS:
+                        proof_status, proof_error = _processing_operation_proof(
+                            item=item,
+                            task_id=str(task.get("task_id") or ""),
+                            task_result=task_result,
+                            project_dir=artifact_project_dir or project_dir,
+                            project_id=str(payload.get("project_id") or ""),
+                        )
+                        if proof_status == "waiting":
+                            continue
+                        if proof_status != "valid":
+                            updates = {
+                                "status": "failed",
+                                "error": proof_error,
+                                **workflow_error_diagnostics(proof_error),
+                                "artifact_status": "operation_mismatch",
+                            }
+                            if any(item.get(key) != value for key, value in updates.items()):
+                                item.update(updates)
+                                item["updated_at"] = timestamp
+                                changed = True
+                            continue
                     artifact_status, artifact_error, result_ref = _validate_action_artifact(
-                        action=str(item.get("action") or ""),
-                        task_result=(
-                            task.get("result")
-                            if isinstance(task.get("result"), dict)
-                            else None
-                        ),
+                        action=action_name,
+                        task_result=task_result,
                         history_record=history_by_task_node.get(
                             (task_key, str(item.get("node_id") or ""))
                         ),

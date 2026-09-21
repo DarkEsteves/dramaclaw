@@ -16,9 +16,9 @@ export interface TimelineEvent {
 interface ExactRef { artifactId: string; revision: number }
 interface OperationInputs { node_revision?: number; input_refs?: Array<{ artifact_id: string; revision: number }> }
 
-export function operationMatchesTimelineInputs(operation: OperationInputs, scriptRef: ExactRef | null, wordRef: ExactRef | null, nodeRevision: number): boolean {
-  if (!scriptRef || !wordRef || operation.node_revision !== nodeRevision || operation.input_refs?.length !== 2) return false;
-  return [scriptRef, wordRef].every((ref) => operation.input_refs?.some((item) => item.artifact_id === ref.artifactId && item.revision === ref.revision));
+export function operationMatchesTimelineInputs(operation: OperationInputs, scriptRef: ExactRef | null, wordRef: ExactRef | null, blueprintRef: ExactRef | null, nodeRevision: number): boolean {
+  if (!scriptRef || !wordRef || !blueprintRef || operation.node_revision !== nodeRevision || operation.input_refs?.length !== 3) return false;
+  return [scriptRef, wordRef, blueprintRef].every((ref) => operation.input_refs?.some((item) => item.artifact_id === ref.artifactId && item.revision === ref.revision));
 }
 
 type AlignedWord = { start_us?: unknown; end_us?: unknown };

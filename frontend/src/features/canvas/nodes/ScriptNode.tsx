@@ -829,7 +829,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef })}
-            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref }); setRemixScriptOpen(false); }}
+            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, remixBlueprintRef: blueprintRef }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

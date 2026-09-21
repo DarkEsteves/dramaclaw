@@ -291,7 +291,10 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     expected = {
         "transcribe_media": ({"media_path", "language"}, set()),
         "align_script": ({"media_path", "script_ref"}, set()),
-        "compile_semantic_timeline": ({"script_ref", "word_timeline_ref", "edit_map", "overrides", "fps"}, set()),
+        "compile_semantic_timeline": (
+            {"media_path", "script_ref", "word_timeline_ref", "blueprint_ref", "edit_map", "overrides", "fps"},
+            set(),
+        ),
         "analyze_reference_video": ({"media_path"}, set()),
         "render_manifest": ({"manifest_ref"}, set()),
     }
@@ -318,6 +321,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "script_ref": "remix_script.v1",
         "word_timeline_ref": "word_timeline.v1",
         "manifest_ref": "composition_manifest.v1",
+        "blueprint_ref": "reference_blueprint.v1",
     }
     for key, schema in schema_by_ref.items():
         if key not in payload:

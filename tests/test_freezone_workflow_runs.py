@@ -23,6 +23,7 @@ from novelvideo.freezone.workflow_runs import (
     workflow_runs_db_path,
     workflow_error_diagnostics,
     _validate_action_artifact,
+    bind_workflow_action_processing_operation,
 )
 
 
@@ -1204,6 +1205,7 @@ def test_processing_action_completion_requires_durable_remix_artifact(tmp_path: 
 
 
 def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.operations import RemixOperationStore
     from novelvideo.freezone.remix.store import RemixArtifactStore
 
     run = create_workflow_run(
@@ -1212,6 +1214,17 @@ def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) 
             "node_id": "analysis", "action": "analyze_reference_video",
             "node_revision": 2, "payload": {"media_path": "media/reference.mp4"},
         }],
+    )
+    operations = RemixOperationStore(tmp_path, "project-a")
+    operation = operations.start(
+        idempotency_key="analysis-proof", input_refs=[], producer_version="remix-process.v1",
+        normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
+        node_revision=2, canvas_id="default", node_id="analysis",
+    )
+    operations.bind_task(operation["operation_id"], task_id="task-one")
+    bind_workflow_action_processing_operation(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
     )
     update_workflow_run(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
@@ -1226,10 +1239,11 @@ def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) 
          "cuts": [], "representative_frames": []}, [],
     )
     ref = {"artifact_id": artifact["id"], "revision": 1}
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[ref])
 
     reconcile_workflow_runs_with_tasks(
         project_dir=tmp_path, canvas_id="default",
-        tasks_by_key={"task:analysis": {"status": "completed", "result": {"artifact_ref": ref}}},
+        tasks_by_key={"task:analysis": {"task_id": "task-one", "status": "completed", "result": {"artifact_ref": ref}}},
     )
 
     completed = read_workflow_run(
@@ -1238,3 +1252,164 @@ def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) 
     assert completed["status"] == "completed"
     assert completed["actions"][0]["artifact_status"] == "valid"
     assert completed["actions"][0]["result_ref"] == ref
+
+
+def test_processing_reconciliation_requires_matching_operation_and_schema(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    run = create_workflow_run(
+        project_dir=tmp_path, project_id="project-a", canvas_id="default",
+        actions=[{"node_id": "analysis", "action": "analyze_reference_video",
+                  "node_revision": 2, "payload": {"media_path": "media/reference.mp4"}}],
+    )
+    operations = RemixOperationStore(tmp_path, "project-a")
+    operation = operations.start(
+        idempotency_key="analysis", input_refs=[], producer_version="remix-process.v1",
+        normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
+        node_revision=2, canvas_id="default", node_id="analysis",
+    )
+    operations.bind_task(operation["operation_id"], task_id="task-one")
+    bind_workflow_action_processing_operation(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
+    )
+    update_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        action_updates=[{"node_id": "analysis", "action": "analyze_reference_video",
+                         "status": "running", "task_key": "task:analysis"}],
+    )
+    wrong = RemixArtifactStore(tmp_path, "project-a").create(
+        "reference_blueprint.v1",
+        {"narrative_role": "hook", "events": [], "preserve_replace_rules": [],
+         "observations": [], "inferences": [], "user_choices": []}, [],
+    )
+    wrong_ref = {"artifact_id": wrong["id"], "revision": 1}
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[wrong_ref])
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:analysis": {"task_id": "task-one", "status": "completed", "result": {"artifact_ref": wrong_ref}}},
+    )
+
+    checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert checked["actions"][0]["status"] == "failed"
+    assert checked["actions"][0]["artifact_status"] == "invalid_schema"
+
+
+def test_processing_reconciliation_waits_for_operation_needs_confirmation(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    run = create_workflow_run(
+        project_dir=tmp_path, project_id="project-a", canvas_id="default",
+        actions=[{"node_id": "analysis", "action": "analyze_reference_video",
+                  "node_revision": 2, "payload": {"media_path": "media/reference.mp4"}}],
+    )
+    operations = RemixOperationStore(tmp_path, "project-a")
+    operation = operations.start(
+        idempotency_key="analysis", input_refs=[], producer_version="remix-process.v1",
+        normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
+        node_revision=2, canvas_id="default", node_id="analysis",
+    )
+    operations.bind_task(operation["operation_id"], task_id="task-one")
+    bind_workflow_action_processing_operation(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
+    )
+    update_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        action_updates=[{"node_id": "analysis", "action": "analyze_reference_video",
+                         "status": "running", "task_key": "task:analysis"}],
+    )
+    artifact = RemixArtifactStore(tmp_path, "project-a").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []}, [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": 1}
+    task = {"task_id": "task-one", "status": "completed", "result": {"status": "completed", "artifact_ref": ref}}
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default", tasks_by_key={"task:analysis": task}
+    )
+    waiting = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert waiting["actions"][0]["status"] == "running"
+
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[ref])
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default", tasks_by_key={"task:analysis": task}
+    )
+    completed = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert completed["actions"][0]["status"] == "completed"
+
+
+def test_processing_reconciliation_rejects_a_result_from_another_task(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    run = create_workflow_run(
+        project_dir=tmp_path, project_id="project-a", canvas_id="default",
+        actions=[{"node_id": "analysis", "action": "analyze_reference_video",
+                  "node_revision": 2, "payload": {"media_path": "media/reference.mp4"}}],
+    )
+    operations = RemixOperationStore(tmp_path, "project-a")
+    operation = operations.start(
+        idempotency_key="analysis-task", input_refs=[], producer_version="remix-process.v1",
+        normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
+        node_revision=2, canvas_id="default", node_id="analysis",
+    )
+    operations.bind_task(operation["operation_id"], task_id="task-one")
+    bind_workflow_action_processing_operation(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
+    )
+    update_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        action_updates=[{"node_id": "analysis", "action": "analyze_reference_video",
+                         "status": "running", "task_key": "task:analysis"}],
+    )
+    artifact = RemixArtifactStore(tmp_path, "project-a").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []}, [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": 1}
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[ref])
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:analysis": {"task_id": "task-two", "status": "completed",
+                                        "result": {"status": "completed", "artifact_ref": ref}}},
+    )
+
+    checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert checked["actions"][0]["status"] == "failed"
+    assert checked["actions"][0]["artifact_status"] == "operation_mismatch"
+
+
+def test_processing_needs_review_blocks_dependents(tmp_path: Path) -> None:
+    run = create_workflow_run(
+        project_dir=tmp_path, project_id="project-a", canvas_id="default",
+        actions=[
+            {"node_id": "timing", "action": "compile_semantic_timeline", "node_revision": 1,
+             "payload": {"media_path": "voice.wav", "script_ref": {}, "word_timeline_ref": {},
+                         "blueprint_ref": {}, "edit_map": [], "overrides": [], "fps": 30}},
+            {"node_id": "render", "action": "render_manifest", "node_revision": 1,
+             "depends_on": ["timing"], "payload": {"manifest_ref": {}}},
+        ],
+    )
+    update_workflow_run(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
+        action_updates=[{"node_id": "timing", "action": "compile_semantic_timeline",
+                         "status": "running", "task_key": "task:timing"}],
+    )
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:timing": {"status": "completed", "result": {"status": "needs_review"}}},
+    )
+
+    checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert checked["actions"][0]["status"] == "blocked"
+    assert checked["actions"][1]["status"] == "pending"

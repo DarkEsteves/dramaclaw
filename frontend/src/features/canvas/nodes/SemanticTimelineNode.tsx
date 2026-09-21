@@ -38,19 +38,23 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const upstreamNodes = useUpstreamNodes(id);
-  const scriptRef = upstreamNodes.find((node) => node.type === 'scriptNode')?.data?.remixScriptRef;
-  const wordRef = upstreamNodes.find((node) => node.type === 'transcriptNode')?.data?.artifactRef;
+  const scriptNode = upstreamNodes.find((node) => node.type === 'scriptNode');
+  const transcriptNode = upstreamNodes.find((node) => node.type === 'transcriptNode');
+  const scriptRef = scriptNode?.data?.remixScriptRef;
+  const wordRef = transcriptNode?.data?.artifactRef;
+  const blueprintRef = scriptNode?.data?.remixBlueprintRef;
+  const narrationPath = typeof transcriptNode?.data?.sourceMediaPath === 'string' ? transcriptNode.data.sourceMediaPath : null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, TimelineEventOverride>>(data.eventOverrides ?? {});
   const project = readUrl().project;
   const currentOperationRef = useRef(data.compileOperationId ?? null);
-  const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? 0 });
+  const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? 0 });
   const watchingRef = useRef<string | null>(null);
   const compileClaimRef = useRef(false);
   const mountedRef = useRef(true);
   currentOperationRef.current = data.compileOperationId ?? currentOperationRef.current;
-  currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), revision: data.nodeRevision ?? currentInputsRef.current.revision };
+  currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? currentInputsRef.current.revision };
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -80,7 +84,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
         const operation = await fetchRemixOperation(project, operationId);
         if (!mountedRef.current || currentOperationRef.current !== operationId) return;
         const inputs = currentInputsRef.current;
-        if (!operationMatchesTimelineInputs(operation, inputs.script, inputs.words, inputs.revision)) {
+        if (!operationMatchesTimelineInputs(operation, inputs.script, inputs.words, inputs.blueprint, inputs.revision)) {
           currentOperationRef.current = null;
           updateNodeData(id, { artifactRef: null, compileOperationId: null, compileError: '上游脚本或语音版本已变化，请重新编译。' });
           setError('上游脚本或语音版本已变化，请重新编译。');
@@ -93,7 +97,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           const timing = await fetchRemixArtifact(project, artifactRef);
           if (timing.schema !== 'performance_timing.v1') throw new Error('时间轴产物格式不正确。');
           const current = currentInputsRef.current;
-          if (!mountedRef.current || currentOperationRef.current !== operationId || !operationMatchesTimelineInputs(operation, current.script, current.words, current.revision)) return;
+          if (!mountedRef.current || currentOperationRef.current !== operationId || !operationMatchesTimelineInputs(operation, current.script, current.words, current.blueprint, current.revision)) return;
           currentOperationRef.current = null;
           updateNodeData(id, {
             artifactRef,
@@ -145,8 +149,9 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     if (currentOperationRef.current) { void watchOperation(currentOperationRef.current); return; }
     const exactScriptRef = asRef(scriptRef);
     const exactWordRef = asRef(wordRef);
-    if (!exactScriptRef || !exactWordRef) {
-      setError('请先连接脚本节点和已对齐语音的转写节点。');
+    const exactBlueprintRef = asRef(blueprintRef);
+    if (!exactScriptRef || !exactWordRef || !exactBlueprintRef || !narrationPath) {
+      setError('请先连接脚本、参考蓝图和已对齐旁白的转写节点。');
       return;
     }
     compileClaimRef.current = true;
@@ -160,7 +165,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       if (!editMap.length) throw new Error('对齐结果没有有效语音时间。');
       const nodeRevision = currentInputsRef.current.revision + 1;
       const task = await submitRemixProcessAction(project, {
-        action: 'compile_semantic_timeline', scriptRef: exactScriptRef, wordTimelineRef: exactWordRef,
+        action: 'compile_semantic_timeline', mediaPath: narrationPath, scriptRef: exactScriptRef, wordTimelineRef: exactWordRef, blueprintRef: exactBlueprintRef,
         editMap, overrides: compiledOverrides, fps: data.fps ?? 30,
         idempotencyKey: crypto.randomUUID(), nodeRevision,
       });

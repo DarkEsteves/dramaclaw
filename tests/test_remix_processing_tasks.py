@@ -129,6 +129,14 @@ def test_compile_runner_uses_aligned_media_hash_and_exact_script_link(tmp_path):
     from novelvideo.task_backend.runners.remix import run_remix_compile_semantic_timeline
 
     store = RemixArtifactStore(tmp_path, "demo")
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    media_hash = "sha256:" + hashlib.sha256(b"voice").hexdigest()
+    blueprint = store.create("reference_blueprint.v1", {
+        "narrative_role": "hook", "events": [], "preserve_replace_rules": [],
+        "observations": [], "inferences": [], "user_choices": [],
+    }, [])
     script = store.create("remix_script.v1", {
         "dialogue": "咖啡", "segments": [],
         "selections": [{"selection_id": "product", "start_char": 0, "end_char": 2, "script_revision": 1}],
@@ -137,22 +145,27 @@ def test_compile_runner_uses_aligned_media_hash_and_exact_script_link(tmp_path):
     }, [])
     script_ref = {"artifact_id": script["id"], "revision": 1}
     words = store.create("word_timeline.v1", {
-        "media_hash": "sha256:voice", "script_revision": 1, "language": "zh", "status": "completed",
+        "media_hash": media_hash, "script_revision": 1, "language": "zh", "status": "completed",
         "words": [{"text": "咖啡", "start_char": 0, "end_char": 2, "start_us": 100_000, "end_us": 500_000}],
     }, [script_ref])
 
     result = run_remix_compile_semantic_timeline({"payload": {
         "script_ref": script_ref, "word_timeline_ref": {"artifact_id": words["id"], "revision": 1},
+        "blueprint_ref": {"artifact_id": blueprint["id"], "revision": 1},
+        "media_path": "media/voice.wav", "media_sha256": hashlib.sha256(b"voice").hexdigest(),
         "edit_map": [{"source_start_us": 0, "source_end_us": 1_000_000, "timeline_start_us": 0}],
         "overrides": [], "fps": 30,
     }}, SimpleNamespace(output_dir=str(tmp_path), project_id="demo"))
 
     assert result["status"] == "completed"
     compiled = store.read(**result["artifact_ref"])
-    assert compiled["payload"]["media_hash"] == "sha256:voice"
+    assert compiled["payload"]["media_hash"] == media_hash
     assert compiled["payload"]["script_revision"] == script["revision"]
     assert compiled["payload"]["alignment_revision"] == words["revision"]
     assert compiled["payload"]["events"] == [{"event_id": "product", "start_frame": 3, "end_frame": 15}]
+    assert {ref["artifact_id"] for ref in compiled["upstream_refs"]} == {
+        script["id"], words["id"], blueprint["id"],
+    }
 
 
 def test_compile_runner_rejects_unlinked_word_timeline(tmp_path):
@@ -160,6 +173,13 @@ def test_compile_runner_rejects_unlinked_word_timeline(tmp_path):
     from novelvideo.task_backend.runners.remix import run_remix_compile_semantic_timeline
 
     store = RemixArtifactStore(tmp_path, "demo")
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    blueprint = store.create("reference_blueprint.v1", {
+        "narrative_role": "hook", "events": [], "preserve_replace_rules": [],
+        "observations": [], "inferences": [], "user_choices": [],
+    }, [])
     script = store.create("remix_script.v1", {
         "dialogue": "hello", "segments": [], "selections": [],
         "blueprint_mappings": [], "media_requirements": [],
@@ -173,5 +193,7 @@ def test_compile_runner_rejects_unlinked_word_timeline(tmp_path):
         run_remix_compile_semantic_timeline({"payload": {
             "script_ref": {"artifact_id": script["id"], "revision": 1},
             "word_timeline_ref": {"artifact_id": words["id"], "revision": 1},
+            "blueprint_ref": {"artifact_id": blueprint["id"], "revision": 1},
+            "media_path": "media/voice.wav", "media_sha256": hashlib.sha256(b"voice").hexdigest(),
             "edit_map": [], "overrides": [], "fps": 30,
         }}, SimpleNamespace(output_dir=str(tmp_path), project_id="demo"))

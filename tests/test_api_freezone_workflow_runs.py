@@ -2887,6 +2887,7 @@ def test_workflow_run_advances_registered_actions_in_dependency_order(
     workflow_run_client: TestClient, monkeypatch
 ) -> None:
     from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
     from novelvideo.freezone.remix.store import RemixArtifactStore
 
     media = workflow_run_client.state_dir / "media" / "reference.mp4"
@@ -2906,7 +2907,14 @@ def test_workflow_run_advances_registered_actions_in_dependency_order(
         {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
          "cuts": [], "representative_frames": []}, [],
     )
+    RemixOperationStore(workflow_run_client.state_dir, "proj_demo").publish_result_unverified(
+        first["processing_operation_id"],
+        output_refs=[{"artifact_id": artifact["id"], "revision": 1}],
+    )
     task = SimpleNamespace(
+        task_id=RemixOperationStore(workflow_run_client.state_dir, "proj_demo").get(
+            first["processing_operation_id"]
+        )["task_id"],
         task_type=first["task_type"], status="completed", progress=1.0,
         current_task="completed", episode=0, beat_num=None, scope=first["job_id"],
         result={"artifact_ref": {"artifact_id": artifact["id"], "revision": 1}}, error=None,
@@ -2922,6 +2930,34 @@ def test_workflow_run_advances_registered_actions_in_dependency_order(
     assert advanced["actions"][0]["status"] == "completed"
     assert advanced["actions"][0]["result_ref"]["artifact_id"] == artifact["id"]
     assert advanced["actions"][1]["status"] == "running"
+
+
+def test_metered_recipe_admission_failure_submits_no_processing_task(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir(exist_ok=True)
+    media.write_bytes(b"reference")
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    monkeypatch.setattr(
+        freezone, "create_agent_product_operation",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("admission failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="admission failed"):
+        workflow_run_client.post(
+            "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+            json={"actions": [
+                {"node_id": "analysis", "action": "analyze_reference_video", "node_revision": 1,
+                 "payload": {"media_path": "media/reference.mp4"}},
+                {"node_id": "image", "action": "generate_image", "recipe_id": "product-image",
+                 "recipe_version": "1", "generation_attempt_id": "attempt-1"},
+            ]},
+        )
+
+    assert workflow_run_client.enqueued_tasks == []
 
 
 def test_workflow_run_api_reuses_idempotent_creation(

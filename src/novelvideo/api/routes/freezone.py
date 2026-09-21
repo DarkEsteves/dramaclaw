@@ -16555,13 +16555,13 @@ async def create_canvas_workflow_run(
         raise HTTPException(
             400 if isinstance(exc, ValueError) else 503, str(exc)
         ) from exc
-    run = await _dispatch_ready_remix_workflow_actions(
-        ctx=ctx,
-        state_dir=state_dir,
-        output_dir=Path(output_dir),
-        run=run,
-    )
     if not metered_runtime:
+        run = await _dispatch_ready_remix_workflow_actions(
+            ctx=ctx,
+            state_dir=state_dir,
+            output_dir=Path(output_dir),
+            run=run,
+        )
         return {"ok": True, "data": run}
     admitted_operations: list[dict[str, Any]] = []
     try:
@@ -16659,6 +16659,12 @@ async def create_canvas_workflow_run(
             status="failed",
         )
         raise
+    run = await _dispatch_ready_remix_workflow_actions(
+        ctx=ctx,
+        state_dir=state_dir,
+        output_dir=Path(output_dir),
+        run=run,
+    )
     return {"ok": True, "data": run}
 
 
@@ -16743,6 +16749,7 @@ async def get_canvas_workflow_runs(
                 scope=task.scope,
             )
             tasks_by_key[task_key] = {
+                "task_id": str(getattr(task, "task_id", "") or ""),
                 "status": task_status,
                 "result": task.result,
                 "error": task.error,

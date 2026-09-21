@@ -37,9 +37,9 @@ describe('semantic timeline inputs', () => {
   });
 
   it('rejects an operation from a different exact script or alignment revision', () => {
-    const operation = { node_revision: 3, input_refs: [{ artifact_id: 'script', revision: 2 }, { artifact_id: 'words', revision: 1 }] };
-    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 2 }, { artifactId: 'words', revision: 1 }, 3)).toBe(true);
-    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 3 }, { artifactId: 'words', revision: 1 }, 3)).toBe(false);
-    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 2 }, { artifactId: 'words', revision: 1 }, 4)).toBe(false);
+    const operation = { node_revision: 3, input_refs: [{ artifact_id: 'script', revision: 2 }, { artifact_id: 'words', revision: 1 }, { artifact_id: 'blueprint', revision: 4 }] };
+    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 2 }, { artifactId: 'words', revision: 1 }, { artifactId: 'blueprint', revision: 4 }, 3)).toBe(true);
+    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 3 }, { artifactId: 'words', revision: 1 }, { artifactId: 'blueprint', revision: 4 }, 3)).toBe(false);
+    expect(operationMatchesTimelineInputs(operation, { artifactId: 'script', revision: 2 }, { artifactId: 'words', revision: 1 }, { artifactId: 'blueprint', revision: 4 }, 4)).toBe(false);
   });
 });

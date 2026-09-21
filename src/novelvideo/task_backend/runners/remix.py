@@ -104,7 +104,9 @@ def run_remix_align_script(envelope: dict[str, Any], ctx: ProjectContext) -> dic
 def run_remix_compile_semantic_timeline(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
     """Compile exact script and completed alignment revisions into timing evidence."""
     payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-    store = RemixArtifactStore(Path(ctx.output_dir).resolve(), ctx.project_id)
+    project_dir = Path(ctx.output_dir).resolve()
+    store = RemixArtifactStore(project_dir, ctx.project_id)
+    _verified_project_media_path(project_dir, payload)
     def read_ref(name: str, schema: str) -> dict[str, Any]:
         ref = payload.get(name) if isinstance(payload.get(name), dict) else {}
         artifact_id, revision = ref.get("artifact_id"), ref.get("revision")
@@ -116,6 +118,7 @@ def run_remix_compile_semantic_timeline(envelope: dict[str, Any], ctx: ProjectCo
         return artifact
     script_artifact = read_ref("script_ref", "remix_script.v1")
     words_artifact = read_ref("word_timeline_ref", "word_timeline.v1")
+    blueprint_artifact = read_ref("blueprint_ref", "reference_blueprint.v1")
     words = {**words_artifact["payload"], "artifact_revision": words_artifact["revision"]}
     if words.get("status") != "completed":
         raise ValueError("semantic timing requires completed alignment")
@@ -126,13 +129,24 @@ def run_remix_compile_semantic_timeline(envelope: dict[str, Any], ctx: ProjectCo
     )
     if not linked or words.get("script_revision") != script_artifact["revision"]:
         raise ValueError("word timeline does not belong to the exact script revision")
+    narration_hash = "sha256:" + str(payload["media_sha256"])
+    if words.get("media_hash") != narration_hash:
+        raise ValueError("word timeline does not belong to the exact narration media")
     script = {
         **script_artifact["payload"],
         "revision": script_artifact["revision"],
         "media_hash": words["media_hash"],
     }
     timing = compile_timing(script, words, payload.get("edit_map", []), payload.get("overrides", []), payload.get("fps"))
-    artifact = store.create("performance_timing.v1", timing, [{"artifact_id": script_artifact["id"], "revision": script_artifact["revision"]}, {"artifact_id": words_artifact["id"], "revision": words_artifact["revision"]}])
+    artifact = store.create(
+        "performance_timing.v1",
+        timing,
+        [
+            {"artifact_id": script_artifact["id"], "revision": script_artifact["revision"]},
+            {"artifact_id": words_artifact["id"], "revision": words_artifact["revision"]},
+            {"artifact_id": blueprint_artifact["id"], "revision": blueprint_artifact["revision"]},
+        ],
+    )
     _publish_operation_result(payload, ctx, {"artifact_id": artifact["id"], "revision": artifact["revision"]})
     status = "needs_review" if timing["unresolved_required_events"] else "completed"
     return {"status": status, "artifact_ref": {"artifact_id": artifact["id"], "revision": artifact["revision"]}, "unresolved_required_events": timing["unresolved_required_events"]}
