@@ -25,6 +25,7 @@
 - Release render probe:
   `uv run pytest -q tests/test_remix_render.py::test_v2_fixed_media_gate_renders_vertical_hd_broll_voice_and_subtitles --basetemp=/tmp/remix-release-probe-task11`
   — 1 passed; output SHA-256 `2f5db2ee14115f8e2ac003cba104bcd55ffbe6d0ed73eba544612a4945c402fe`; H.264 1080×1920 30/1, AAC 44.1 kHz mono, 15.000000 seconds. The task-only temporary directory was removed afterward.
+- Complete manual browser journey — passed from an 18.1-second 720×1280 audible reference video through WhisperX source transcription, review of all 9 decomposed events, `remix_script.v1` r5 with 5 English semantic selections, one genuinely generated coffee image reused across 4 B-roll intervals, uploaded script-exact 15.000-second single-speaker narration, WhisperX forced alignment, `performance_timing.v1` r1, an independent 1080×1920 background, `composition_manifest.v1` r1, and an actual render. The page reported `预览与导出一致`. The exported MP4 SHA-256 is `0736f9a9f5a6897fd1c23b2bf4100d45702bfd04233cb18be4f0f91073cba4db`; FFprobe reported H.264 1080×1920 at 30/1 fps, AAC 16 kHz mono, and 15.000000 seconds.
 - Frontend Remix journey/recovery matrix:
   `pnpm exec vitest run src/features/canvas/remix src/api/remix.test.ts src/__tests__/features/canvas/remix-nodes.test.tsx src/__tests__/features/freezone/workflow-run-recovery-bar.test.tsx src/__tests__/features/superchat/chat-task-status-bar.test.ts`
   — 38 files, 297 passed.
@@ -53,12 +54,12 @@ The native fixed-media canvas journey is **demo-ready**. It is **not production 
 - WhisperX transcription and forced alignment now use a dedicated `speech` lane. Its CE global concurrency, project concurrency and project-user concurrency all default to 1; the global pending bound is 64. Reference-frame evidence analysis remains on `default` because it does not load WhisperX.
 - A process-wide bounded semaphore also wraps the actual adapter call, so accidental direct calls cannot load two speech engines inside one API/worker process.
 - The concurrency regression starts speech work for two different projects/users, proves only one enters while an unrelated default-lane task completes, then cancels the queued speech task and proves it never starts.
-- Focused queue, limit, registry, alignment, action-routing, task-state and inline-backend verification passed 379 tests. Manual browser verification was deliberately not claimed in this report; use the two-terminal steps below.
+- Focused queue, limit, registry, alignment, action-routing, task-state and inline-backend verification passed 379 tests. The complete manual browser verification recorded below also passed.
 - The operator's first browser run exposed a real external-worker packaging failure: launching `whisperx_worker.py` by path imported its sibling outside the `novelvideo` package, so that sibling's relative contract import failed. After that fix, the next run exposed a second boundary error: the isolated WhisperX environment correctly had no application-side Pydantic. The worker now adds its package root, while the adapter's internal speech-comparison DTOs use only the standard library. The external environment therefore needs WhisperX and its own dependencies only.
-- A real subprocess regression runs the configured external-Python path through an isolated `python -S` wrapper with no application site-packages and without mocking `subprocess.run`. Readiness now starts the actual worker in offline `probe` mode, so package/runtime dependency failures are rejected before a job is accepted. The actual local `~/.local/share/dramaclaw/whisperx-venv/bin/python` probe returned code 0 and valid JSON. The operator still needs to repeat the browser journey after the API restart, so this is recorded as found and fixed rather than as a manual pass.
+- A real subprocess regression runs the configured external-Python path through an isolated `python -S` wrapper with no application site-packages and without mocking `subprocess.run`. Readiness now starts the actual worker in offline `probe` mode, so package/runtime dependency failures are rejected before a job is accepted. The actual local `~/.local/share/dramaclaw/whisperx-venv/bin/python` probe returned code 0 and valid JSON. The operator repeated the complete browser journey after the API restart; it passed through render and preview/export parity.
 - Repository-wide backend after the speech-lane and initial worker packaging fix: 6,639 passed, 19 skipped, 3 deselected. After removing the worker's application dependency and changing readiness to probe the worker itself, the complete affected speech/task subset passed 102 tests. Ruff, stable workflow contract, license-inventory coverage, `git diff --check`, and full-tree gitleaks all passed.
 
-### Local manual browser journey
+### Recorded local manual browser journey
 
 Terminal 1, from this worktree:
 
@@ -73,4 +74,10 @@ cd frontend
 pnpm dev --host 127.0.0.1 --port 5173
 ```
 
-Open `http://127.0.0.1:5173`, create/open a project and Freezone canvas, add a reference video, run transcription, then submit an alignment while the first speech task is active. In the task center, check that the second speech task waits or is rejected by the per-user admission gate, ordinary canvas actions still run, and a queued speech task can be cancelled. Continue through blueprint, script, B-roll, narration, timing and compose export. This is an operator checklist, not a recorded manual pass.
+The recorded pass used an 18.1-second, 720×1280 reference video with speech. WhisperX transcribed the source; reference analysis produced 9 events, and the operator reviewed all of them. The saved English script was `remix_script.v1` r5 with 5 semantic selections. One real generated coffee image was reused across 4 B-roll intervals.
+
+The vendor TTS job stalled at 10% and was cancelled, so this run does not establish a successful vendor TTS path. The operator instead uploaded a 15.000-second single-speaker WAV whose spoken text matched the final script exactly. WhisperX forced alignment completed with a 163-character token. `performance_timing.v1` r1 assigned the five events to frames `0–19`, `28–98`, `109–180`, `189–254`, and `265–392`. An independent 1080×1920 background was uploaded, `composition_manifest.v1` r1 was prepared, and the actual render completed. The page showed `预览与导出一致`.
+
+The run exposed two product defects that were fixed before the successful pass: English whitespace caused a false selection-alignment rejection (`ad2546af`), and a long raw render fingerprint exceeded the backend's 256-character field limit (`dae22cd5`), followed by a defensive length cap (`93c9cb12`). The resulting MP4 SHA-256 is `0736f9a9f5a6897fd1c23b2bf4100d45702bfd04233cb18be4f0f91073cba4db`; it is H.264 1080×1920 at 30 fps with AAC 16 kHz mono audio and a 15.000-second duration.
+
+This manual pass closes the fixed-media browser journey. It does not make the branch production speech-ready: the required 100 human-reviewed Chinese boundaries and 100 human-reviewed English boundaries, license/provenance evidence, and target-machine measurements are still absent.
