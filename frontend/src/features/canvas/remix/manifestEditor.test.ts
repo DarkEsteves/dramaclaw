@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyManifestEdit, canExportManifest, manifestToSrt, previewStatus, projectManifestTimeline, reapplyManifestOverrides } from './manifestEditor';
+import { applyManifestEdit, canExportManifest, manifestToSrt, previewStatus, projectManifestTimeline, reapplyManifestOverrides, resolveManifestOverrideConflict } from './manifestEditor';
 
 const manifest = () => ({
   output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 90 },
@@ -44,8 +44,24 @@ describe('remix manifest editor', () => {
     const compiled = manifest();
     compiled.subtitle_events[0].text = '模型重写';
     const result = reapplyManifestOverrides(compiled, edited.manual_overrides);
-    expect(result.conflicts).toEqual([expect.stringContaining('subtitle_events')]);
+    expect(result.conflicts).toEqual([expect.objectContaining({ message: expect.stringContaining('subtitle_events'), canRebase: true })]);
     expect(result.payload.subtitle_events[0].text).toBe('模型重写');
+  });
+
+  it('resolves one conflict by safely rebasing its manual value or accepting upstream', () => {
+    const edited = applyManifestEdit(manifest(), { collection: 'subtitle_events', index: 0, field: 'text', value: '新品登场' });
+    const compiled = manifest();
+    compiled.subtitle_events[0].text = '模型重写';
+    const replay = reapplyManifestOverrides(compiled, edited.manual_overrides);
+    const kept = resolveManifestOverrideConflict(replay.payload, replay.conflicts, replay.conflicts[0].key, 'keep_override');
+    expect(kept.conflicts).toEqual([]);
+    expect(kept.payload.subtitle_events[0].text).toBe('新品登场');
+    expect(kept.payload.manual_overrides[0]).toMatchObject({ base_value: '模型重写', value: '新品登场' });
+
+    const upstream = resolveManifestOverrideConflict(replay.payload, replay.conflicts, replay.conflicts[0].key, 'accept_upstream');
+    expect(upstream.conflicts).toEqual([]);
+    expect(upstream.payload.subtitle_events[0].text).toBe('模型重写');
+    expect(upstream.payload.manual_overrides).toEqual([]);
   });
 
   it('refuses to replay an ambiguous legacy override onto repeated rows', () => {
@@ -57,7 +73,7 @@ describe('remix manifest editor', () => {
     const result = reapplyManifestOverrides(compiled, [{
       target: 'layers', identity: { media_id: 'product', z_order: 1 }, field: 'end_frame', base_value: 20, value: 25,
     }]);
-    expect(result.conflicts).toEqual([expect.stringContaining('ambiguous')]);
+    expect(result.conflicts).toEqual([expect.objectContaining({ message: expect.stringContaining('ambiguous'), canRebase: false })]);
     expect(result.payload.layers.map((row) => row.end_frame)).toEqual([20, 50]);
   });
 

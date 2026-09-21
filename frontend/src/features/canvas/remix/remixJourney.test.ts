@@ -150,12 +150,14 @@ describe('reference video remix canvas journey', () => {
     compose.data.remixManifestDirty = true;
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'save_manifest', label: '保存合成清单修改' });
     compose.data.remixManifestDirty = false; compose.data.remixManifestConflicts = ['字幕冲突'];
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', label: '处理清单冲突' });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'action', action: 'resolve_manifest_conflicts', label: '处理清单冲突' });
     compose.data.remixManifestConflicts = []; compose.data.unresolvedRequiredEvents = ['product'];
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', targetNodeId: 'timeline', label: '修正未解析事件' });
     compose.data.unresolvedRequiredEvents = []; compose.data.remixInputsCurrent = false;
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'prepare_manifest', label: '上游已变化，更新清单' });
     compose.data.remixInputsCurrent = true; compose.data.remixManifestLoadState = 'failed';
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ kind: 'input', label: '合成清单加载失败', inputHint: expect.stringContaining('重新生成') });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({
+      kind: 'action', action: 'prepare_manifest', label: '重新生成合成清单', targetNodeId: 'compose',
+    });
   });
 });

@@ -8,6 +8,7 @@ export type RemixPublishedAction =
   | 'create_compose'
   | 'prepare_compose'
   | 'save_manifest'
+  | 'resolve_manifest_conflicts'
   | 'render_export';
 
 export interface RemixJourneyActionPorts {
@@ -47,6 +48,7 @@ export async function advanceRemixJourneyStep(
     case 'create_compose': ports.createCompose(step.targetNodeId); return;
     case 'prepare_manifest': ports.publish(step.targetNodeId, 'prepare_compose'); return;
     case 'save_manifest': ports.publish(step.targetNodeId, 'save_manifest'); return;
+    case 'resolve_manifest_conflicts': ports.publish(step.targetNodeId, 'resolve_manifest_conflicts'); return;
     case 'render_export': ports.publish(step.targetNodeId, 'render_export'); return;
   }
 }

@@ -382,7 +382,7 @@ export interface VideoComposeNodeData extends NodeDisplayData {
   remixEvents?: Array<{ selectionId: string; startFrame?: number; endFrame?: number }>;
   remixSelections?: Array<{ id: string; label: string; start: number; end: number; invalidReason?: string }>;
   unresolvedRequiredEvents?: string[];
-  remixManifestConflicts?: string[];
+  remixManifestConflicts?: Array<string | import('@/features/canvas/remix/manifestEditor').ManifestOverrideConflict>;
   remixRenderManifestRef?: { artifactId: string; revision: number } | null;
   /** 最近一次合成导出的视频 url。 */
   resultVideoUrl?: string | null;

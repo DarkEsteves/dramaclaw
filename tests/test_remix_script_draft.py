@@ -133,6 +133,61 @@ async def test_broll_plan_cannot_publish_model_changes_to_saved_script(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requirements, message",
+    [
+        ([], "every saved script event"),
+        ([{"event_id": "hook", "required": True, "purpose": "开场", "suggested_query": "清晨"}], "every saved script event"),
+        ([{"event_id": "hook", "required": True, "purpose": "开场", "suggested_query": "清晨"}, {"event_id": "hook", "required": False, "purpose": "开场", "suggested_query": "清晨"}], "unique"),
+        ([{"event_id": "hook", "required": True, "purpose": "开场", "suggested_query": "清晨"}, {"event_id": "product", "purpose": "产品", "suggested_query": "咖啡"}], "output_schema"),
+    ],
+)
+async def test_broll_plan_requires_one_explicit_decision_for_every_saved_event(
+    monkeypatch: pytest.MonkeyPatch,
+    requirements: list[dict[str, object]],
+    message: str,
+) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    script = {
+        "dialogue": "起床，喝咖啡。",
+        "segments": [],
+        "selections": [],
+        "events": [{"event_id": "hook"}, {"event_id": "product"}],
+        "blueprint_mappings": [],
+        "media_requirements": [],
+    }
+
+    async def generate(**_kwargs):
+        return json.dumps({key: value for key, value in script.items() if key != "events"} | {"media_requirements": requirements}, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    with pytest.raises(ValueError, match=message):
+        await broll_plan.generate_broll_plan(script=script, username="alice")
+
+
+@pytest.mark.asyncio
+async def test_broll_plan_records_optional_events_as_required_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    script = {
+        "dialogue": "起床，喝咖啡。", "segments": [], "selections": [],
+        "events": [{"event_id": "hook"}, {"event_id": "product"}],
+        "blueprint_mappings": [], "media_requirements": [],
+    }
+
+    async def generate(**_kwargs):
+        return json.dumps({key: value for key, value in script.items() if key != "events"} | {"media_requirements": [
+            {"event_id": "hook", "required": False, "purpose": "保留人物", "suggested_query": "无需素材"},
+            {"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "咖啡特写"},
+        ]}, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    plan = await broll_plan.generate_broll_plan(script=script, username="alice")
+    assert plan["media_requirements"][0]["required"] is False
+
+
+@pytest.mark.asyncio
 async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
     from novelvideo.freezone.remix import script_draft
 

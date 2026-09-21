@@ -4,7 +4,7 @@ import { createRemixArtifact, fetchRemixArtifact, type RemixArtifactRef } from '
 import { buildNodeRemixManifest, type CompiledTiming } from './nodeRemixManifest';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { boundBrollVisualMedia } from './brollCanvasBinding';
-import { reapplyManifestOverrides, type ManifestOverride, type ManifestPayload } from './manifestEditor';
+import { reapplyManifestOverrides, type ManifestOverride, type ManifestOverrideConflict, type ManifestPayload } from './manifestEditor';
 
 function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): CanvasNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -68,7 +68,7 @@ export interface PreparedNodeRemix {
   events: Array<{ selectionId: string; startFrame: number; endFrame: number }>;
   selections: Array<{ id: string; label: string; start: number; end: number }>;
   unresolvedRequiredEvents: string[];
-  conflicts?: string[];
+  conflicts?: ManifestOverrideConflict[];
 }
 
 export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string, previousManifestRef?: RemixArtifactRef | null): Promise<PreparedNodeRemix> {
@@ -109,8 +109,10 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const transcriptMediaHash = transcriptArtifact.payload.media_hash;
   if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visualTypes = new Set<string>([CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit, CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage]);
-  const backgroundNode = one(upstream.filter((node) => visualTypes.has(node.type) && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') && node.data.remixMedia), '成片背景');
-  const background = backgroundNode.data.remixMedia as UploadedRemixMedia;
+  const backgroundNode = one(upstream.filter((node) => visualTypes.has(node.type)
+    && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll')
+    && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)), '成片背景');
+  const background = boundBrollVisualMedia(project, backgroundNode);
   const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual').map((node) => [node.id, boundBrollVisualMedia(project, node)]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)
     .map((node) => ({ id: node.id, role: node.data.remixRole as 'bgm' | 'sfx', media: node.data.remixMedia as UploadedRemixMedia }));
@@ -121,7 +123,7 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
     wordTimeline: transcriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['wordTimeline'],
   });
   let effectivePayload = payload as ManifestPayload;
-  let conflicts: string[] = [];
+  let conflicts: ManifestOverrideConflict[] = [];
   if (previousManifestRef) {
     const previous = await fetchRemixArtifact(project, previousManifestRef);
     if (previous.schema === 'composition_manifest.v1') {

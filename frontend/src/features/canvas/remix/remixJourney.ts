@@ -5,7 +5,7 @@ export type RemixJourneyAction =
   | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
   | 'plan_broll' | 'align_narration' | 'create_timeline' | 'compile_timeline'
   | 'create_background' | 'bind_background' | 'create_compose' | 'prepare_manifest'
-  | 'save_manifest' | 'render_export';
+  | 'save_manifest' | 'resolve_manifest_conflicts' | 'render_export';
 
 export type RemixJourneyStep = {
   kind: 'action' | 'input' | 'wait' | 'complete';
@@ -142,12 +142,12 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
   if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };
   if (!ref(compose.data.remixManifestRef)) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '生成合成清单' };
-  if (compose.data.remixManifestLoadState === 'failed') return { kind: 'input', targetNodeId: compose.id, label: '合成清单加载失败', inputHint: '打开合成节点查看错误，并重新生成合成清单。' };
+  if (compose.data.remixManifestLoadState === 'failed') return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '重新生成合成清单', inputHint: '旧清单加载失败；将使用当前画布上游重新生成。' };
   if (compose.data.remixManifestLoadState !== 'ready' || !sameRef(compose.data.remixManifestLoadedRef, compose.data.remixManifestRef)) return { kind: 'wait', targetNodeId: compose.id, label: '加载合成清单', inputHint: '清单加载完成后才能检查并导出。' };
   if (compose.data.remixManifestDirty === true) return { kind: 'action', action: 'save_manifest', targetNodeId: compose.id, label: '保存合成清单修改' };
   if (compose.data.remixManifestDirty !== false) return { kind: 'input', targetNodeId: compose.id, label: '确认合成清单状态', inputHint: '打开合成节点，等待清单状态同步后再导出。' };
   const conflicts = Array.isArray(compose.data.remixManifestConflicts) ? compose.data.remixManifestConflicts : [];
-  if (conflicts.length) return { kind: 'input', targetNodeId: compose.id, label: '处理清单冲突', inputHint: String(conflicts.join('；')) };
+  if (conflicts.length) return { kind: 'action', action: 'resolve_manifest_conflicts', targetNodeId: compose.id, label: '处理清单冲突', inputHint: '逐项选择保留手工值或采用上游值。' };
   const unresolved = Array.isArray(compose.data.unresolvedRequiredEvents) ? compose.data.unresolvedRequiredEvents : [];
   if (unresolved.length) return { kind: 'input', targetNodeId: timeline.id, label: '修正未解析事件', inputHint: `仍需修正：${unresolved.join('、')}` };
   if (typeof compose.data.remixInputFingerprint !== 'string' || !compose.data.remixInputFingerprint || compose.data.remixInputsCurrent !== true) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '上游已变化，更新清单' };

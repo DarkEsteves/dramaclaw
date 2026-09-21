@@ -58,7 +58,8 @@ export function boundBrollVisualMedia(project: string, visual: CanvasNode): Remi
   const currentPath = currentVisualProjectPath(project, visual);
   const sourceUrl = visualSourceUrl(visual);
   const exactUrl = Boolean(media?.url && sourceUrl && media.url === sourceUrl);
-  if (!media || (!exactUrl && (!currentPath || media.media_path !== currentPath))
+  if (!media || typeof media.media_hash !== 'string' || !/^[a-f0-9]{64}$/u.test(media.media_hash)
+    || (!exactUrl && (!currentPath || media.media_path !== currentPath))
     || (media.media_kind !== 'image' && media.media_kind !== 'video')) {
     throw new Error(`画面素材 ${visual.id} 已变化，请重新选择`);
   }

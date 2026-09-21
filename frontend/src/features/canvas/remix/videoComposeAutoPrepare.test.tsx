@@ -108,6 +108,20 @@ describe('VideoComposeNode automatic preparation', () => {
     resolveNext({ id: 'new', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [] } });
   });
 
+  it('regenerates from graph inputs after the saved manifest fails to load', async () => {
+    fetchRemixArtifact.mockRejectedValue(new Error('artifact missing'));
+    prepareNodeRemix.mockResolvedValue({ manifestRef: { artifactId: 'replacement', revision: 1 }, events: [], selections: [], unresolvedRequiredEvents: [] });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{
+      displayName: 'Compose', remixManifestRef: { artifactId: 'missing', revision: 3 },
+      remixManifestLoadState: 'failed', remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 3,
+      unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [],
+    }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    const regenerate = await screen.findByRole('button', { name: '重新生成合成清单' });
+    expect(regenerate).toBeEnabled();
+    fireEvent.click(regenerate);
+    await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalledWith('demo', graphState.nodes, graphState.edges, 'compose', null));
+  });
+
   it('does not let an unrelated edit dismiss unresolved override conflicts', async () => {
     fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
       output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '当前字幕', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [], source_versions: [],
@@ -118,6 +132,21 @@ describe('VideoComposeNode automatic preparation', () => {
     expect(screen.getByRole('button', { name: 'videoCompose.node.remixSubmit' })).toBeDisabled();
     expect(screen.getByText(/旧画面覆盖与新时间轴冲突/)).toBeTruthy();
     expect(reviseRemixArtifact).not.toHaveBeenCalled();
+  });
+
+  it('offers per-conflict safe rebase and bulk accept-upstream controls', async () => {
+    const override = { target: 'subtitle_events' as const, identity: { start_frame: 0, end_frame: 30 }, field: 'text', base_value: '旧字幕', value: '手工字幕' };
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [{ text: '新上游字幕', start_frame: 0, end_frame: 30 }], audio_events: [], manual_overrides: [override], source_versions: [],
+    } });
+    const conflict = { key: 'subtitle_events:text:{"start_frame":0,"end_frame":30}', message: 'subtitle_events.text 的上游值已变化', override, canRebase: true };
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixManifestConflicts: [conflict], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(await screen.findByRole('button', { name: '保留手工值' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '采用上游值' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '全部采用上游' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '保留手工值' }));
+    expect(await screen.findByDisplayValue('手工字幕')).toBeTruthy();
+    expect(canvasActions.updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ remixManifestConflicts: [], remixManifestDirty: true }));
   });
 
   it('blocks recompile while manifest overrides are unsaved', async () => {
