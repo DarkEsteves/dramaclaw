@@ -142,6 +142,11 @@ class RemixOperationStore:
                     raise ValueError("Idempotency key reused for a different request")
                 if old["status"] not in {"completed", "needs_confirmation"} or self._outputs_exist(old.get("output_refs", [])):
                     return {**old, "created": False}
+                old = self._update(
+                    old_id, guard, status="stale", stale_reason="output_unavailable",
+                    result_available=False, output_reusable=False,
+                )
+                return {**old, "created": False}
             operation_id = uuid.uuid4().hex
             record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "input_media_hashes": media_hashes, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": [], "supersedes": old_id or "", "superseded_by": ""}
             self._atomic(self._path(operation_id), record, guard)
@@ -221,9 +226,11 @@ class RemixOperationStore:
                 raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="cancelled", cancel_reason=reason.strip())
 
-    def claim_cancellation(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+    def claim_cancellation(self, operation_id: str, *, reason: str, owner: str) -> dict[str, Any]:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("cancellation reason is required")
+        if not isinstance(owner, str) or not owner:
+            raise ValueError("cancellation owner is required")
         with self._locked() as guard:
             record = self._read(operation_id)
             if record["status"] == "cancelled":
@@ -234,7 +241,8 @@ class RemixOperationStore:
                 raise ValueError("illegal operation state transition")
             return self._update(
                 operation_id, guard, status="cancelling", cancel_reason=reason.strip(),
-                cancellation_previous_status=record["status"], cancellation_claimed_at=time.time(),
+                cancellation_previous_status=record["status"], cancellation_owner=owner,
+                cancellation_claimed_at=time.time(),
             )
 
     def cancellation_outcome_unknown(self, operation_id: str, *, reason: str) -> dict[str, Any]:
@@ -248,7 +256,7 @@ class RemixOperationStore:
                 raise ValueError("operation cancellation is not in progress")
             return self._update(
                 operation_id, guard, status="pending_reconciliation",
-                reconciliation_reason=reason.strip(), reconciliation_owner="", reconciliation_claimed_at=0,
+                reconciliation_reason=reason.strip(), cancellation_owner="", cancellation_claimed_at=0,
             )
 
     def claim_cancellation_reconciliation(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> bool:
@@ -258,18 +266,18 @@ class RemixOperationStore:
             record = self._read(operation_id)
             if record["status"] not in {"cancelling", "pending_reconciliation"} or not record.get("cancel_reason"):
                 return False
-            claimed_at = float(record.get("reconciliation_claimed_at") or 0)
-            active = bool(record.get("reconciliation_owner")) and time.time() - claimed_at < lease_seconds
+            claimed_at = float(record.get("cancellation_claimed_at") or 0)
+            active = bool(record.get("cancellation_owner")) and time.time() - claimed_at < lease_seconds
             if active:
                 return False
-            self._update(operation_id, guard, reconciliation_owner=owner, reconciliation_claimed_at=time.time())
+            self._update(operation_id, guard, cancellation_owner=owner, cancellation_claimed_at=time.time())
             return True
 
     def release_cancellation_reconciliation(self, operation_id: str, *, owner: str) -> None:
         with self._locked() as guard:
             record = self._read(operation_id)
-            if record.get("reconciliation_owner") == owner:
-                self._update(operation_id, guard, reconciliation_owner="", reconciliation_claimed_at=0)
+            if record.get("cancellation_owner") == owner:
+                self._update(operation_id, guard, cancellation_owner="", cancellation_claimed_at=0)
 
     def finish_cancellation(self, operation_id: str) -> dict[str, Any]:
         with self._locked() as guard:
@@ -301,6 +309,8 @@ class RemixOperationStore:
                 raise ValueError("operation belongs to a different canvas node")
             if record["status"] == "completed":
                 return record
+            if record.get("cancel_reason"):
+                raise ValueError("operation result is not available for confirmation")
             if record["status"] != "needs_confirmation" or not self._outputs_exist(record.get("output_refs", [])):
                 raise ValueError("operation result is not available for confirmation")
             return self._update(operation_id, guard, status="confirming", confirmation_claimed_at=time.time())
@@ -347,9 +357,7 @@ class RemixOperationStore:
                 return record
             if record.get("superseded_by"):
                 return self._update(operation_id, guard, status="stale", stale_reason="superseded", output_refs=output_refs)
-            if record["status"] == "cancelled":
-                return self._update(operation_id, guard, status="stale", stale_reason="cancelled", output_refs=output_refs)
-            if record["status"] == "cancelling":
+            if record.get("cancel_reason") or record["status"] in {"cancelled", "cancelling"}:
                 return self._update(operation_id, guard, status="stale", stale_reason="cancelled", output_refs=output_refs)
             if record["status"] not in {"pending", "pending_reconciliation"}:
                 raise ValueError("operation cannot publish result in its current state")

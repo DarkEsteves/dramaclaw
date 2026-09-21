@@ -489,9 +489,9 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
       y: self.position.y,
     };
     const newNodeId = addNodeAction(CANVAS_NODE_TYPES.imageGen, position);
-    if (addEdgeAction(newNodeId, id)) mutateGenerationRequest({});
+    addEdgeAction(newNodeId, id);
     setSelectedNode(newNodeId);
-  }, [addEdgeAction, addNodeAction, id, mutateGenerationRequest, setSelectedNode]);
+  }, [addEdgeAction, addNodeAction, id, setSelectedNode]);
 
   useEffect(() => {
     updateNodeInternals(id);

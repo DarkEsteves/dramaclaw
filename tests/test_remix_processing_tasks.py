@@ -218,7 +218,7 @@ def test_runner_timeout_during_cancel_preserves_unknown_cancellation_for_reconci
     from novelvideo.task_backend.runners.remix import _with_operation_failure_transition
     operations = RemixOperationStore(tmp_path, "demo")
     operation = operations.start(idempotency_key="cancel-timeout", input_refs=[], producer_version="remix-process.v1", normalized_parameters={}, node_revision=1)
-    operations.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    operations.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="test-request")
     def timing_out(_envelope, _ctx):
         raise TimeoutError("unknown")
     guarded = _with_operation_failure_transition(timing_out)

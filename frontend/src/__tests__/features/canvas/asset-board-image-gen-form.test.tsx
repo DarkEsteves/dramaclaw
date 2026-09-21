@@ -113,6 +113,35 @@ describe('故事板详情 · 图片生成表单', () => {
     });
   });
 
+  it('a generic reference edge added during generation rejects the old late result', async () => {
+    let resolveTask!: (value: unknown) => void;
+    vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }) as never);
+    seed([
+      emptyImageGenNode({ prompt: '旧请求' }),
+      {
+        id: 'new-reference',
+        type: CANVAS_NODE_TYPES.upload,
+        position: { x: -300, y: 0 },
+        data: { imageUrl: '/new-reference.png' },
+      },
+    ]);
+    openDetail('图片节点 3');
+    fireEvent.click(within(detailPanel()).getByRole('button', { name: '生成' }));
+    await waitFor(() => expect(submitFreezoneGen).toHaveBeenCalled());
+
+    useCanvasStore.getState().addEdge('new-reference', 'gen-1');
+    resolveTask({ result: { output_url: '/late-old-request.png' } });
+
+    await waitFor(() => {
+      const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
+      expect(data.remixVisualRequestRevision).toBe(2);
+      expect(data.isGenerating).toBe(false);
+      expect(data.generationTaskKey).toBeNull();
+      expect(data.imageUrl).toBeNull();
+      expect(data.generationError).toBeFalsy();
+    });
+  });
+
   it('空 imageGen 节点：媒体区显示「待确认后生成」占位，下方挂完整生成表单', () => {
     seed([emptyImageGenNode()]);
     openDetail('图片节点 3');

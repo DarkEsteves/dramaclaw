@@ -96,3 +96,21 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   before any repeated backend cancellation.
 - Final crash-recovery verification: 251 Python recovery/workflow tests and 69 focused
   frontend tests passed; TypeScript, Ruff, and diff checks passed.
+
+## Final acceptance fixes
+
+- Initial cancellation and restart reconciliation now use the same expiring owner
+  lease. A durable cancellation intent serializes cancel/reconcile/publish/confirm;
+  any late provider output is retained only as stale history and cannot become a
+  confirmable current result.
+- Image generation input invalidation is shared by forms and graph mutations. Style
+  node selection, asset-library references, programmatic edge changes, manual connect,
+  and manual edge removal all bump the durable visual request revision, clear the old
+  task handle, and invalidate only reachable compose output. Late output and error from
+  the prior revision are ignored.
+- A repeated idempotency key whose prior output disappeared returns that original
+  operation as `stale` with `output_unavailable`, `result_available=false`, and
+  `output_reusable=false`. It never creates or enqueues replacement paid work; only the
+  explicit regenerate path creates a linked successor.
+- Final acceptance verification: 253 Python recovery/workflow tests and 78 focused
+  frontend tests passed; TypeScript, Ruff, and diff checks passed.

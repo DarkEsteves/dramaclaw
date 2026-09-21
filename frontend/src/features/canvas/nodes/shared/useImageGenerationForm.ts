@@ -427,9 +427,8 @@ export function useImageGenerationForm(
         .getState()
         .edges.filter((edge) => edge.source === sourceNodeId && edge.target === id)
         .forEach((edge) => deleteEdge(edge.id));
-      mutateGenerationRequest({});
     },
-    [id, deleteEdge, mutateGenerationRequest],
+    [id, deleteEdge],
   );
 
   const handleTranslatePrompt = useCallback(async () => {

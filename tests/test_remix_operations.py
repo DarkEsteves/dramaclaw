@@ -65,7 +65,7 @@ def test_late_result_with_stale_input_or_node_is_not_applied(tmp_path: Path) -> 
     assert store.complete(operation["operation_id"], output_refs=[], current_input_refs=refs(), current_node_revision=3)["status"] == "stale"
 
 
-def test_missing_output_file_invalidates_completed_reuse(tmp_path: Path) -> None:
+def test_missing_output_file_requires_explicit_regenerate_without_new_paid_operation(tmp_path: Path) -> None:
     store = RemixOperationStore(tmp_path, "demo")
     output = tmp_path / "output.mp4"
     output.write_bytes(b"video")
@@ -75,7 +75,15 @@ def test_missing_output_file_invalidates_completed_reuse(tmp_path: Path) -> None
 
     retried = store.start(idempotency_key="generate-a", input_refs=refs(), producer_version="recipe.v1", normalized_parameters={}, node_revision=1)
 
-    assert retried["operation_id"] != operation["operation_id"]
+    assert retried["operation_id"] == operation["operation_id"]
+    assert retried["created"] is False
+    assert retried["status"] == "stale"
+    assert retried["stale_reason"] == "output_unavailable"
+    assert retried["result_available"] is False
+    assert retried["output_reusable"] is False
+    regenerated = store.start(idempotency_key="generate-a", input_refs=refs(), producer_version="recipe.v1", normalized_parameters={}, node_revision=1, regenerate=True)
+    assert regenerated["operation_id"] != operation["operation_id"]
+    assert regenerated["created"] is True
 
 
 def test_cross_project_references_are_rejected(tmp_path: Path) -> None:
@@ -209,7 +217,7 @@ def test_cancellation_claim_blocks_confirmation_and_late_output_stays_stale(tmp_
     store = RemixOperationStore(tmp_path, "demo")
     (tmp_path / "late.mp4").write_bytes(b"video")
     operation = store.start(idempotency_key="cancel-claim", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
-    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="test-request")
     with pytest.raises(ValueError, match="not available"):
         store.claim_confirmation(operation["operation_id"], canvas_id="", node_id="")
     late = store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "late.mp4"}])
@@ -237,7 +245,7 @@ def test_restart_recovers_confirmation_claim_from_canvas_or_expired_lease(tmp_pa
 def test_cancel_uncertain_never_releases_to_prior_state(tmp_path: Path) -> None:
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="cancel-unknown", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
-    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="test-request")
     unknown = store.cancellation_outcome_unknown(operation["operation_id"], reason="backend timeout")
     assert unknown["status"] == "pending_reconciliation"
     assert unknown["reconciliation_reason"] == "backend timeout"
@@ -247,9 +255,24 @@ def test_cancel_restart_reconciliation_has_an_expiring_single_owner_lease(tmp_pa
     import novelvideo.freezone.remix.operations as module
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="cancel-lease", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
-    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
     monkeypatch.setattr(module.time, "time", lambda: 100.0)
-    assert store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-a", lease_seconds=60)
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="worker-a")
     assert not store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-b", lease_seconds=60)
     monkeypatch.setattr(module.time, "time", lambda: 161.0)
     assert store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-b", lease_seconds=60)
+
+
+def test_late_result_after_uncertain_cancel_is_retained_only_as_stale_history(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "late-after-timeout.mp4").write_bytes(b"video")
+    operation = store.start(idempotency_key="cancel-timeout-late", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="request-a")
+    store.cancellation_outcome_unknown(operation["operation_id"], reason="backend timeout")
+
+    late = store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "late-after-timeout.mp4"}])
+
+    assert late["status"] == "stale"
+    assert late["stale_reason"] == "cancelled"
+    assert late["output_refs"] == [{"project_path": "late-after-timeout.mp4"}]
+    with pytest.raises(ValueError, match="not available"):
+        store.claim_confirmation(operation["operation_id"], canvas_id="", node_id="")

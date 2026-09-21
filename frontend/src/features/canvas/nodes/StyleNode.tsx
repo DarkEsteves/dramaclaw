@@ -30,6 +30,7 @@ import {
   canvasNodeFrameClass,
 } from '@/features/canvas/ui/nodeFrameStyles';
 import { useFreezoneStyleTemplates } from '@/features/canvas/hooks/useFreezoneStyleTemplates';
+import { mutateVisualGenerationRequest } from '@/features/canvas/remix/spawnRemixDownstream';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -116,11 +117,11 @@ export const StyleNode = memo(({ id, data, selected }: StyleNodeProps) => {
   const handleSelectStyle = useCallback(
     (nextId: string | null) => {
       downstreamImageNodeIds.forEach((imageNodeId) => {
-        updateNodeData(imageNodeId, { styleTemplateId: nextId });
+        mutateVisualGenerationRequest(imageNodeId, { styleTemplateId: nextId });
       });
       setGalleryOpen(false);
     },
-    [downstreamImageNodeIds, updateNodeData],
+    [downstreamImageNodeIds],
   );
 
   return (

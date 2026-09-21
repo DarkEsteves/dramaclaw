@@ -667,7 +667,11 @@ async def transition_operation(project: str, operation_id: str, body: OperationT
             result = await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=body.provider_task_id)
         elif body.outcome == "cancelled":
             reason = body.reason or "user_cancelled"
-            record = await _call(operations.claim_cancellation, operation_id, reason=reason)
+            cancellation_owner = uuid.uuid4().hex
+            record = await _call(
+                operations.claim_cancellation, operation_id,
+                reason=reason, owner=cancellation_owner,
+            )
             if record["status"] == "cancelled":
                 return _data(_operation_view(record))
             if record.get("task_id"):

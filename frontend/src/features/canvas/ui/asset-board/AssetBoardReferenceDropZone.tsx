@@ -36,11 +36,9 @@ export const REFERENCE_DROP_HINT_TEXT = '可将资产、图片、视频拖拽到
 export function AssetBoardReferenceDropZone({
   nodeId,
   children,
-  onReferenceChange,
 }: {
   nodeId: string;
   children: ReactNode;
-  onReferenceChange?: () => void;
 }): ReactElement {
   const [isDragActive, setIsDragActive] = useState(false);
   // 嵌套子元素会各自冒泡 dragenter/dragleave，用进出计数消抖，避免划过内部元素时闪烁。
@@ -78,9 +76,9 @@ export function AssetBoardReferenceDropZone({
       if (payload.nodeId === nodeId) return;
       // 复用工作流那份建边规则：addEdge 内部做节点存在性 / 连接类型校验，并按确定性
       // id `e-source-target` 去重——重复拖同一节点不会产生第二条边（幂等）。
-      if (useCanvasStore.getState().addEdge(payload.nodeId, nodeId)) onReferenceChange?.();
+      useCanvasStore.getState().addEdge(payload.nodeId, nodeId);
     },
-    [nodeId, onReferenceChange],
+    [nodeId],
   );
 
   return (

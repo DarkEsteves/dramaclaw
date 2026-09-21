@@ -43,8 +43,13 @@ import {
   isStoryboardGroupNode,
   isStoryboardSplitNode,
   isStyleNode,
+  isImageGenNode,
   STORY_CHOICE_EDGE_TYPE,
 } from '@/features/canvas/domain/canvasNodes';
+import {
+  applyVisualGenerationRequestPatches,
+  visualGenerationRequestMutationPatches,
+} from '@/features/canvas/remix/visualGenerationRequest';
 import {
   DEFAULT_STORYBOARD_ASPECT,
   computeStoryboardBoardLayout,
@@ -1960,7 +1965,22 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         return { edges: nextEdges };
       }
 
+      const removedImageTargets = new Set(
+        state.edges
+          .filter((edge) => !nextEdges.some((candidate) => candidate.id === edge.id))
+          .map((edge) => edge.target)
+          .filter((target) => {
+            const node = state.nodes.find((candidate) => candidate.id === target);
+            return Boolean(node && isImageGenNode(node));
+          }),
+      );
+      let nextNodes = state.nodes;
+      for (const target of removedImageTargets) {
+        const patches = visualGenerationRequestMutationPatches(nextNodes, nextEdges, target, {});
+        nextNodes = applyVisualGenerationRequestPatches(nextNodes, patches);
+      }
       return {
+        nodes: nextNodes,
         edges: nextEdges,
         history: {
           past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),
@@ -2061,11 +2081,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       ) {
         return {};
       }
-      return {
-        edges: addEdge<CanvasEdge>(
+      const nextEdges = addEdge<CanvasEdge>(
           { ...connection, sourceHandle, targetHandle, type: 'disconnectableEdge' },
           state.edges
-        ),
+        );
+      const requestPatches = targetNode && isImageGenNode(targetNode) && nextEdges.length > state.edges.length
+        ? visualGenerationRequestMutationPatches(state.nodes, nextEdges, targetNode.id, {})
+        : new Map();
+      return {
+        nodes: applyVisualGenerationRequestPatches(state.nodes, requestPatches),
+        edges: nextEdges,
         history: {
           past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),
           future: [],
@@ -2812,8 +2837,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       type: 'disconnectableEdge',
     };
 
+    const nextEdges = [...state.edges, newEdge];
+    const requestPatches = isImageGenNode(targetNode)
+      ? visualGenerationRequestMutationPatches(state.nodes, nextEdges, target, {})
+      : new Map();
     set({
-      edges: [...state.edges, newEdge],
+      nodes: applyVisualGenerationRequestPatches(state.nodes, requestPatches),
+      edges: nextEdges,
       ...trackEdit(state),
     });
 
@@ -2874,8 +2904,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return null;
     }
 
+    const nextEdges = [...state.edges, newEdge];
+    const requestPatches = isImageGenNode(targetNode)
+      ? visualGenerationRequestMutationPatches(state.nodes, nextEdges, target, {})
+      : new Map();
     set({
-      edges: [...state.edges, newEdge],
+      nodes: applyVisualGenerationRequestPatches(state.nodes, requestPatches),
+      edges: nextEdges,
       history: {
         past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),
         future: [],
@@ -4989,8 +5024,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         return {};
       }
 
+      const nextEdges = state.edges.filter((candidate) => candidate.id !== edgeId);
+      const targetNode = state.nodes.find((node) => node.id === edge.target);
+      const requestPatches = targetNode && isImageGenNode(targetNode)
+        ? visualGenerationRequestMutationPatches(state.nodes, nextEdges, edge.target, {})
+        : new Map();
+
       return {
-        edges: state.edges.filter((edge) => edge.id !== edgeId),
+        nodes: applyVisualGenerationRequestPatches(state.nodes, requestPatches),
+        edges: nextEdges,
         history: {
           past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),
           future: [],

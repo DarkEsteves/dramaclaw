@@ -1,5 +1,6 @@
 import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { visualGenerationRequestMutationPatches } from './visualGenerationRequest';
 
 type Ref = { artifactId: string; revision: number };
 
@@ -45,21 +46,10 @@ export function applyRemixInvalidation(sourceId: string, change: RemixChangeKind
 /** One durable mutation gate for every field that changes an image generation request. */
 export function mutateVisualGenerationRequest(sourceId: string, patch: Record<string, unknown>): number {
   const store = useCanvasStore.getState();
-  const source = store.nodes.find((node) => node.id === sourceId);
-  const revision = typeof source?.data.remixVisualRequestRevision === 'number'
-    ? source.data.remixVisualRequestRevision + 1 : 1;
-  store.updateNodeData(sourceId, {
-    ...patch,
-    remixVisualRequestRevision: revision,
-    remixVisualOutputCurrent: false,
-    isGenerating: false,
-    generationStartedAt: null,
-    generationTaskKey: null,
-    generationTaskType: null,
-    generationTaskJobId: null,
-  });
-  applyRemixInvalidation(sourceId, 'visual_prompt');
-  return revision;
+  const patches = visualGenerationRequestMutationPatches(store.nodes, store.edges, sourceId, patch);
+  for (const [nodeId, nodePatch] of patches) store.updateNodeData(nodeId, nodePatch);
+  const revision = patches.get(sourceId)?.remixVisualRequestRevision;
+  return typeof revision === 'number' ? revision : 0;
 }
 
 function ref(value: unknown): Ref | null {

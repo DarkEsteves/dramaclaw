@@ -61,9 +61,8 @@ export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactEle
   const handleAssetLibraryConfirm = useCallback(
     (selections: ReadonlyArray<AssetLibrarySelection>) => {
       spawnAssetLibraryReferences(nodeId, selections);
-      if (selections.length) mutateGenerationRequest({});
     },
-    [mutateGenerationRequest, nodeId],
+    [nodeId],
   );
 
   return (
@@ -75,7 +74,7 @@ export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactEle
       )}
       {/* 参考区放置层：从左列表把节点卡片拖进来 → addEdge 接成当前节点的上游引用，
           回流后经表单既有 upstream 派生显示为参考缩略图 chip（工作流零改动）。 */}
-      <AssetBoardReferenceDropZone nodeId={nodeId} onReferenceChange={() => mutateGenerationRequest({})}>
+      <AssetBoardReferenceDropZone nodeId={nodeId}>
         <div
           className={`flex w-full flex-col rounded-[var(--node-radius)] ${CANVAS_NODE_OPS_PANEL_CLASS}`}
           style={{ height: FORM_HEIGHT_PX }}

@@ -146,6 +146,10 @@ describe("StyleNode", () => {
       (nodes.find((node) => node.id === "style_1")?.data as { styleTemplateId?: string })
         ?.styleTemplateId,
     ).toBe("golden_age");
+    expect(nodes.find((node) => node.id === "image_1")?.data).toMatchObject({
+      remixVisualRequestRevision: 1,
+      remixVisualOutputCurrent: false,
+    });
   });
 
   it("clearing the style in the gallery clears the downstream image node", async () => {

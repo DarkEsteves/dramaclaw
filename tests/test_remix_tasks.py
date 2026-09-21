@@ -147,6 +147,46 @@ def test_render_does_not_requeue_when_result_published_before_task_binding(clien
     assert queued == []
 
 
+def test_render_with_same_key_and_missing_published_output_requires_explicit_regenerate(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
+    key = "missing-render-output"
+    job_id = hashlib.sha256(f"demo\0{created['id']}\0{1}\0{key}".encode()).hexdigest()
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(
+        idempotency_key=key,
+        input_refs=[{"artifact_id": created["id"], "revision": 1}],
+        producer_version="remix-render.v1",
+        normalized_parameters={"job_id": job_id, "input_fingerprint": ""},
+        node_revision=4,
+        input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()],
+    )
+    output = tmp_path / "missing-after-publish.mp4"
+    output.write_bytes(b"video")
+    store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": output.name}])
+    output.unlink()
+
+    repeated = api.post(
+        f"{BASE}/{created['id']}/render",
+        json={"revision": 1, "idempotency_key": key, "node_revision": 4},
+    )
+
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_id"] == operation["operation_id"]
+    assert repeated.json()["data"]["operation_status"] == "stale"
+    assert queued == []
+
+    regenerated = api.post(
+        f"{BASE}/{created['id']}/render",
+        json={"revision": 1, "idempotency_key": key, "node_revision": 4, "regenerate": True},
+    )
+    assert regenerated.status_code == 200
+    assert regenerated.json()["data"]["operation_id"] != operation["operation_id"]
+    assert len(queued) == 1
+
+
 @pytest.mark.parametrize("state", ["pending_reconciliation", "cancelled"])
 def test_render_reconciles_existing_uncertain_or_cancelled_operation_before_requeue(client, tmp_path, state):
     from novelvideo.freezone.remix.operations import RemixOperationStore

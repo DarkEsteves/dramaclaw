@@ -351,7 +351,7 @@ def test_restart_reconcile_finishes_exact_cancelled_task(api: TestClient, tmp_pa
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="cancel-restart", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "e" * 64}, node_revision=1)
     store.bind_task(operation["operation_id"], task_id="task-cancelled")
-    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="test-request")
     task = SimpleNamespace(task_id="task-cancelled", status="cancelled", error=None)
     monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
 
