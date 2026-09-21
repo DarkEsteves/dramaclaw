@@ -15,6 +15,7 @@ from novelvideo.freezone.remix.render import (
     build_manifest,
     manifest_renderer,
     render_manifest,
+    render_preview_frame,
     validate_manifest,
 )
 from novelvideo.freezone.remix.contracts import validate_payload
@@ -594,3 +595,21 @@ def test_render_manifest_respects_position_size_and_opacity(tmp_path: Path) -> N
     inside = _pixel(output, 0.75, x=90, y=100)
     assert outside[2] > outside[0] * 2
     assert inside[0] > 45 and inside[2] > 45
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_preview_frame_is_extracted_from_exact_manifest_render_at_event_boundary(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    product = tmp_path / "product.mp4"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=180x320:r=30:d=1", "-an", str(product))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    paths = {"background": background, "product": product, "voice": voice}
+    manifest = _bind_media_hashes(_manifest(), paths)
+    export = render_manifest(manifest, media_paths=paths, output_path=tmp_path / "export.mp4")
+    preview = render_preview_frame(manifest, media_paths=paths, frame=15, output_path=tmp_path / "preview.png")
+
+    exported_frame = tmp_path / "exported.png"
+    _ffmpeg("-i", str(export), "-vf", "select=eq(n\\,15)", "-vsync", "0", "-frames:v", "1", str(exported_frame))
+    assert hashlib.sha256(preview.read_bytes()).digest() == hashlib.sha256(exported_frame.read_bytes()).digest()

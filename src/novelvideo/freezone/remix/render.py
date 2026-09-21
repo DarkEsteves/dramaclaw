@@ -636,3 +636,22 @@ def render_manifest(
     return _render_manifest_v2(
         manifest, media_paths=media_paths, output_path=output_path
     )
+
+
+def render_preview_frame(
+    manifest: dict[str, Any], *, media_paths: dict[str, Path], frame: int, output_path: Path
+) -> Path:
+    """Extract a frame from an exact manifest render used by export."""
+    validate_manifest(manifest)
+    duration = manifest["output_spec"]["duration_frames"]
+    if type(frame) is not int or not 0 <= frame < duration:
+        raise ValueError("preview frame is outside the manifest duration")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="remix-preview-", dir=output_path.parent) as folder:
+        rendered = render_manifest(manifest, media_paths=media_paths, output_path=Path(folder) / "exact-manifest.mp4")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", str(rendered), "-vf", f"select=eq(n\\,{frame})", "-vsync", "0", "-frames:v", "1", str(output_path)],
+            check=True,
+        )
+    return output_path

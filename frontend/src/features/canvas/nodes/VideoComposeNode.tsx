@@ -54,8 +54,8 @@ import { generationTaskDescriptor } from "@/features/canvas/application/resumeGe
 import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeControlStyles";
-import { canExportManifest } from "@/features/canvas/remix/manifestEditor";
-import { confirmRemixOperation, fetchRemixOperation, listRemixOperations, renderRemixManifest, type RemixTaskRef } from "@/api/remix";
+import { canExportManifest, manifestToSrt, previewStatus, textDownloadUrl, type ManifestPayload } from "@/features/canvas/remix/manifestEditor";
+import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, reviseRemixArtifact, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
 import { prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
 import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
@@ -88,6 +88,10 @@ export const VideoComposeNode = memo(
     const [remixError, setRemixError] = useState<string | null>(null);
     const [isRemixSubmitting, setRemixSubmitting] = useState(false);
     const [isRemixPreparing, setRemixPreparing] = useState(false);
+    const [manifestArtifact, setManifestArtifact] = useState<RemixArtifact | null>(null);
+    const [manifestDraft, setManifestDraft] = useState<ManifestPayload | null>(null);
+    const [manifestDirty, setManifestDirty] = useState(false);
+    const [isManifestSaving, setManifestSaving] = useState(false);
     const prepareClaimRef = useRef(false);
     const [recoveredRemixOperationId, setRecoveredRemixOperationId] = useState<string | null>(null);
 
@@ -115,6 +119,17 @@ export const VideoComposeNode = memo(
 
     const project = readUrl().project;
     const canvasId = readUrl().canvas ?? "default";
+
+    useEffect(() => {
+      if (!project || !data.remixManifestRef) { setManifestArtifact(null); setManifestDraft(null); return; }
+      let cancelled = false;
+      void Promise.resolve(fetchRemixArtifact(project, data.remixManifestRef)).then((artifact) => {
+        if (cancelled) return;
+        if (!artifact) return;
+        setManifestArtifact(artifact); setManifestDraft(artifact.payload as ManifestPayload); setManifestDirty(false);
+      }).catch((error) => { if (!cancelled) setRemixError(error instanceof Error ? error.message : String(error)); });
+      return () => { cancelled = true; };
+    }, [project, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision]);
 
     useEffect(() => {
       if (!project || !data.remixManifestRef || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.remixOperationId) return;
@@ -173,8 +188,8 @@ export const VideoComposeNode = memo(
       setRemixError(null);
       try {
         const state = useCanvasStore.getState();
-        const prepared = await prepareNodeRemix(project, state.nodes, state.edges, id);
-        updateNodeData(id, { remixManifestRef: prepared.manifestRef, remixEvents: prepared.events, remixSelections: prepared.selections, unresolvedRequiredEvents: prepared.unresolvedRequiredEvents, remixInputFingerprint: remixGraphFingerprint(state.nodes, state.edges, id), remixNodeRevision: (data.remixNodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null });
+        const prepared = await prepareNodeRemix(project, state.nodes, state.edges, id, data.remixManifestRef);
+        updateNodeData(id, { remixManifestRef: prepared.manifestRef, remixEvents: prepared.events, remixSelections: prepared.selections, unresolvedRequiredEvents: prepared.unresolvedRequiredEvents, remixManifestConflicts: prepared.conflicts ?? [], remixInputFingerprint: remixGraphFingerprint(state.nodes, state.edges, id), remixNodeRevision: (data.remixNodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null });
         setRecoveredRemixOperationId(null);
         setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
       } catch (caught) {
@@ -325,11 +340,27 @@ export const VideoComposeNode = memo(
     );
 
     if (data.remixManifestRef && (data.remixInputFingerprint || !data.remixWorkbenchDraft)) {
-      const exportable = canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts: [] });
+      const conflicts = data.remixManifestConflicts ?? [];
+      const exportable = canExportManifest({ unresolvedRequiredEvents: data.unresolvedRequiredEvents, conflicts }) && !manifestDirty;
       const nodeRevision = data.remixNodeRevision;
       const blockReason = !Number.isInteger(nodeRevision) || (nodeRevision ?? 0) < 0
         ? t('videoCompose.node.remixRevisionMissing')
         : (data.unresolvedRequiredEvents ?? []).join(', ');
+      const actualFingerprint = remixGraphFingerprint(useCanvasStore.getState().nodes, useCanvasStore.getState().edges, id);
+      const previewState = previewStatus(data.remixManifestRef, data.remixRenderManifestRef, actualFingerprint, data.remixInputFingerprint);
+      const saveManifest = async () => {
+        if (!project || !manifestArtifact || !manifestDraft || !manifestDirty) return;
+        setManifestSaving(true); setRemixError(null);
+        try {
+          const saved = await reviseRemixArtifact(project, data.remixManifestRef!, manifestDraft,
+            (manifestArtifact.upstream_refs ?? []).map((ref) => ({ artifactId: ref.artifact_id, revision: ref.revision })));
+          const ref = { artifactId: saved.id, revision: saved.revision };
+          setManifestArtifact(saved); setManifestDraft(saved.payload as ManifestPayload); setManifestDirty(false);
+          updateNodeData(id, { remixManifestRef: ref, remixNodeRevision: (nodeRevision ?? 0) + 1, remixOperationId: null, resultVideoUrl: null, remixManifestConflicts: [] });
+          setRemixTask(null); setRecoveredRemixOperationId(null); setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
+        } catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
+        finally { setManifestSaving(false); }
+      };
       const submit = async () => {
         if (!project || !exportable || nodeRevision == null) return;
         const current = useCanvasStore.getState();
@@ -353,16 +384,19 @@ export const VideoComposeNode = memo(
         <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
-          <div className="mb-2 text-[12px] text-text-muted">合成清单 · 版本 {data.remixManifestRef.revision}</div>
-          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} />
+          <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={previewState === 'current' ? 'text-green-300' : previewState === 'stale' ? 'text-amber-300' : ''}>{previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
+          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestDraft} onManifestChange={(next) => { setManifestDraft(next); setManifestDirty(true); }} />
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
             <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+            {manifestDirty ? <button type="button" disabled={isManifestSaving} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}
             <button type="button" disabled={isRemixPreparing || !project} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>更新清单</button>
           </div>
-          {(!exportable || nodeRevision == null) ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: blockReason })}</div> : null}
+          {manifestDirty ? <div className="mt-2 text-[12px] text-amber-300">修改尚未保存；保存后才能预览或导出该版本。</div> : null}
+          {conflicts.length ? <div className="mt-2 text-[12px] text-amber-300">手工修改与新清单冲突：{conflicts.join('；')}</div> : null}
+          {(!exportable || nodeRevision == null) && !manifestDirty ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: conflicts.join('；') || blockReason })}</div> : null}
           {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
           {data.remixOperationId && !data.resultVideoUrl ? <div className="mt-2 text-[12px] text-text-muted">合成任务处理中，完成后会回填到本节点。</div> : null}
-          {data.resultVideoUrl ? <a className="mt-2 block text-[12px] text-primary underline" href={data.resultVideoUrl} target="_blank" rel="noreferrer">播放成片</a> : null}
+          {data.resultVideoUrl ? <div className="mt-2 space-y-2"><video className="nodrag aspect-[9/16] max-h-60 w-full rounded-[8px] bg-black" src={data.resultVideoUrl} controls /><div className="flex flex-wrap gap-3 text-[12px] text-primary underline"><a href={data.resultVideoUrl} target="_blank" rel="noreferrer">预览成片</a><a href={data.resultVideoUrl.replace('/media/', '/files/')} download>下载 MP4</a>{manifestArtifact ? <><a href={textDownloadUrl(JSON.stringify(manifestArtifact.payload, null, 2), 'application/json')} download={`manifest-r${manifestArtifact.revision}.json`}>下载 JSON</a><a href={textDownloadUrl(manifestToSrt(manifestArtifact.payload as ManifestPayload), 'application/x-subrip')} download={`subtitles-r${manifestArtifact.revision}.srt`}>下载 SRT</a></> : null}</div></div> : null}
           {remixError ? <div className="mt-2 text-[12px] text-red-300">{remixError}</div> : null}
         </div>
       </div>;

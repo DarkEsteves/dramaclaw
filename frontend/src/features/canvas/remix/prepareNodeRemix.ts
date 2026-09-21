@@ -4,6 +4,7 @@ import { createRemixArtifact, fetchRemixArtifact, type RemixArtifactRef } from '
 import { buildNodeRemixManifest, type CompiledTiming } from './nodeRemixManifest';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { boundBrollVisualMedia } from './brollCanvasBinding';
+import { reapplyManifestOverrides, type ManifestOverride, type ManifestPayload } from './manifestEditor';
 
 function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): CanvasNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -49,9 +50,10 @@ export interface PreparedNodeRemix {
   events: Array<{ selectionId: string; startFrame: number; endFrame: number }>;
   selections: Array<{ id: string; label: string; start: number; end: number }>;
   unresolvedRequiredEvents: string[];
+  conflicts?: string[];
 }
 
-export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string): Promise<PreparedNodeRemix> {
+export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string, previousManifestRef?: RemixArtifactRef | null): Promise<PreparedNodeRemix> {
   const upstream = ancestors(nodes, edges, composeId);
   const reference = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia), '参考视频').data.remixMedia as UploadedRemixMedia;
   const narrationNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration');
@@ -100,8 +102,18 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
     script: scriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['script'],
     wordTimeline: transcriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['wordTimeline'],
   });
+  let effectivePayload = payload as ManifestPayload;
+  let conflicts: string[] = [];
+  if (previousManifestRef) {
+    const previous = await fetchRemixArtifact(project, previousManifestRef);
+    if (previous.schema === 'composition_manifest.v1') {
+      const reapplied = reapplyManifestOverrides(effectivePayload, (previous.payload.manual_overrides as ManifestOverride[] | undefined) ?? []);
+      effectivePayload = reapplied.payload;
+      conflicts = reapplied.conflicts;
+    }
+  }
   const manifest = await createRemixArtifact(project, 'composition_manifest.v1', {
-    ...payload,
+    ...effectivePayload,
     source_versions: [{ artifact_id: timingRef.artifactId, revision: timingRef.revision }, { artifact_id: scriptRef.artifactId, revision: scriptRef.revision }, { artifact_id: blueprintRef.artifactId, revision: blueprintRef.revision }, { artifact_id: transcriptRef.artifactId, revision: transcriptRef.revision }],
   }, [timingRef, scriptRef, blueprintRef, transcriptRef]);
   const timingEvents = (timingArtifact.payload.events as CompiledTiming['events']) ?? [];
@@ -112,5 +124,6 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
     events: timingEvents.map((event) => ({ selectionId: event.event_id, startFrame: event.start_frame, endFrame: event.end_frame })),
     selections: scriptSelections.map((selection) => ({ id: selection.selection_id, label: scriptEvents.find((event) => event.event_id === selection.selection_id)?.caption ?? selection.selection_id, start: selection.start_char, end: selection.end_char })),
     unresolvedRequiredEvents: (timingArtifact.payload.unresolved_required_events as Array<{ event_id: string }> | undefined)?.map((event) => event.event_id) ?? [],
+    ...(conflicts.length ? { conflicts } : {}),
   };
 }
