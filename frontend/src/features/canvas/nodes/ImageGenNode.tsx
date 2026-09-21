@@ -171,6 +171,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
     closeReferenceErrors,
     openReferenceErrors,
     invalidateInFlightGeneration,
+    mutateGenerationRequest,
   } = useImageGenerationForm(id, { onGenerationSettled: refreshHistory });
 
   // 功能节点（工具条「九宫格」下拉点某一项后建出来的那种）：输入框里多一枚可切可删
@@ -459,7 +460,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
         // 只有节点还没有生成结果时它才会顶到主体上——这时旧的失败横幅盖的是新图，得清掉。
         // 已经有生成图时主体不变，失败信息仍然对得上那张图，保留；等用户真正重新提交，
         // handleSubmit 自己会清。
-        updateNodeData(id, {
+        mutateGenerationRequest({
           referenceImageUrl: result.url,
           ...(hasGeneratedResult ? {} : GENERATION_ERROR_CLEARED_PATCH),
         });
@@ -469,12 +470,12 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
         setIsUploading(false);
       }
     },
-    [hasGeneratedResult, id, updateNodeData],
+    [hasGeneratedResult, mutateGenerationRequest],
   );
 
   const handleClearReference = useCallback(() => {
-    updateNodeData(id, { referenceImageUrl: null });
-  }, [id, updateNodeData]);
+    mutateGenerationRequest({ referenceImageUrl: null });
+  }, [mutateGenerationRequest]);
 
   const handleSpawnUpstreamImage = useCallback(() => {
     const self = useCanvasStore.getState().nodes.find((n) => n.id === id);
@@ -488,9 +489,9 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
       y: self.position.y,
     };
     const newNodeId = addNodeAction(CANVAS_NODE_TYPES.imageGen, position);
-    addEdgeAction(newNodeId, id);
+    if (addEdgeAction(newNodeId, id)) mutateGenerationRequest({});
     setSelectedNode(newNodeId);
-  }, [addEdgeAction, addNodeAction, id, setSelectedNode]);
+  }, [addEdgeAction, addNodeAction, id, mutateGenerationRequest, setSelectedNode]);
 
   useEffect(() => {
     updateNodeInternals(id);

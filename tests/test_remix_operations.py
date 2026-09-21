@@ -215,3 +215,41 @@ def test_cancellation_claim_blocks_confirmation_and_late_output_stays_stale(tmp_
     late = store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "late.mp4"}])
     assert late["status"] == "stale" and late["stale_reason"] == "cancelled"
     assert store.finish_cancellation(operation["operation_id"])["status"] == "stale"
+
+
+def test_restart_recovers_confirmation_claim_from_canvas_or_expired_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import novelvideo.freezone.remix.operations as module
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "result.mp4").write_bytes(b"video")
+    operation = store.start(idempotency_key="confirm-restart", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "result.mp4"}])
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    store.claim_confirmation(operation["operation_id"], canvas_id="canvas", node_id="node")
+    assert store.recover_confirmation(operation["operation_id"], applied_to_canvas=True, lease_seconds=60)["status"] == "completed"
+
+    second = store.start(idempotency_key="confirm-expired", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.publish_result_unverified(second["operation_id"], output_refs=[{"project_path": "result.mp4"}])
+    store.claim_confirmation(second["operation_id"], canvas_id="canvas", node_id="node")
+    monkeypatch.setattr(module.time, "time", lambda: 161.0)
+    assert store.recover_confirmation(second["operation_id"], applied_to_canvas=False, lease_seconds=60)["status"] == "needs_confirmation"
+
+
+def test_cancel_uncertain_never_releases_to_prior_state(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="cancel-unknown", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    unknown = store.cancellation_outcome_unknown(operation["operation_id"], reason="backend timeout")
+    assert unknown["status"] == "pending_reconciliation"
+    assert unknown["reconciliation_reason"] == "backend timeout"
+
+
+def test_cancel_restart_reconciliation_has_an_expiring_single_owner_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import novelvideo.freezone.remix.operations as module
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="cancel-lease", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    assert store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-a", lease_seconds=60)
+    assert not store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-b", lease_seconds=60)
+    monkeypatch.setattr(module.time, "time", lambda: 161.0)
+    assert store.claim_cancellation_reconciliation(operation["operation_id"], owner="worker-b", lease_seconds=60)

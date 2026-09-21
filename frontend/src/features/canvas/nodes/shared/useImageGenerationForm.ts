@@ -24,7 +24,7 @@ import { setAlbumPendingTotal } from '@/features/canvas/nodes/shared/albumPendin
 import { resolveImageGenerationCompletionMode } from '@/features/canvas/nodes/imageGenCompletionMode';
 import { compileWorkflowNodePrompt } from '@/features/canvas/application/workflowRecipeRuntime';
 import { useCanvasStore } from '@/stores/canvasStore';
-import { applyRemixInvalidation } from '@/features/canvas/remix/spawnRemixDownstream';
+import { mutateVisualGenerationRequest } from '@/features/canvas/remix/spawnRemixDownstream';
 import {
   fetchFreezoneJobResult,
   submitFreezoneGen,
@@ -137,6 +137,7 @@ export interface UseImageGenerationFormResult {
    * 否则上一批还在飞的请求回来会把刚换上的图盖掉，或糊上一条对不上号的失败横幅。
    */
   invalidateInFlightGeneration: () => void;
+  mutateGenerationRequest: (patch: Record<string, unknown>) => number;
 }
 
 /**
@@ -178,6 +179,17 @@ export function useImageGenerationForm(
   // 在途提交的等待队列：配方运行时可能在同一节点上并发触发 submit，后到的调用
   // 不另起一次生成，而是挂在这里等前一次的产物（与工作流侧语义一致）。
   const submitWaitersRef = useRef<Array<(value: Record<string, unknown> | undefined) => void>>([]);
+  const invalidateInFlightGeneration = useCallback(() => {
+    generationAttemptRef.current += 1;
+    submittingRef.current = false;
+    const waiters = submitWaitersRef.current;
+    submitWaitersRef.current = [];
+    for (const resolve of waiters) resolve(undefined);
+  }, []);
+  const mutateGenerationRequest = useCallback((patch: Record<string, unknown>) => {
+    invalidateInFlightGeneration();
+    return mutateVisualGenerationRequest(id, patch);
+  }, [id, invalidateInFlightGeneration]);
   useEffect(() => {
     if (isComposingRef.current) return;
     setPromptDraft(externalPrompt);
@@ -396,9 +408,9 @@ export function useImageGenerationForm(
   const applyPromptRemap = useCallback(
     (next: string) => {
       setPromptDraft(next);
-      updateNodeData(id, { prompt: next });
+      mutateGenerationRequest({ prompt: next });
     },
-    [id, updateNodeData],
+    [mutateGenerationRequest],
   );
   useReferenceMentionSync(
     prompt,
@@ -415,8 +427,9 @@ export function useImageGenerationForm(
         .getState()
         .edges.filter((edge) => edge.source === sourceNodeId && edge.target === id)
         .forEach((edge) => deleteEdge(edge.id));
+      mutateGenerationRequest({});
     },
-    [id, deleteEdge],
+    [id, deleteEdge, mutateGenerationRequest],
   );
 
   const handleTranslatePrompt = useCallback(async () => {
@@ -437,14 +450,14 @@ export function useImageGenerationForm(
       });
       if (translated) {
         setPromptDraft(translated);
-        updateNodeData(id, { prompt: translated });
+        mutateGenerationRequest({ prompt: translated });
       }
     } catch (error) {
       console.error('[image-gen] translate failed', error);
     } finally {
       setIsTranslatingPrompt(false);
     }
-  }, [id, isGenerating, isTranslatingPrompt, prompt, updateNodeData]);
+  }, [id, isGenerating, isTranslatingPrompt, mutateGenerationRequest, prompt]);
 
   // 「实时读取上游」：用户可以不填 prompt，只要上游连了带 text 的节点
   // (文本/脚本/图片生成 prompt 等) 就能 submit；submit 时拼接上游 text。
@@ -479,10 +492,6 @@ export function useImageGenerationForm(
    * 宿主在「用户主动把节点上的图换成别的」时调用（恢复历史记录、把画册某格设为
    * 主图……）：作废上一批还在飞的请求，它们回来后不再写节点。
    */
-  const invalidateInFlightGeneration = useCallback(() => {
-    generationAttemptRef.current += 1;
-  }, []);
-
   const handleSubmit = useCallback(async (
     options: {
       completionMode?: 'submitted' | 'completed';
@@ -510,6 +519,16 @@ export function useImageGenerationForm(
     if (submitDisabled) return undefined;
     submittingRef.current = true;
     let actionOutput: Record<string, unknown> | undefined;
+    let generationAttempt: number | null = null;
+    let generationVisualRequestRevision: number | null = null;
+    const isCurrentGenerationAttempt = () => generationAttempt !== null
+      && generationAttemptRef.current === generationAttempt;
+    const isCurrentVisualGenerationRequest = () => {
+      if (generationVisualRequestRevision === null) return false;
+      const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data as Record<string, unknown> | undefined;
+      return latest?.remixVisualRequestRevision === generationVisualRequestRevision;
+    };
+    const isCurrentRequest = () => isCurrentGenerationAttempt() && isCurrentVisualGenerationRequest();
     try {
     const projectId = readUrl().project;
     if (!projectId) {
@@ -526,10 +545,9 @@ export function useImageGenerationForm(
       });
       throw new Error(message);
     }
-    const generationAttempt = generationAttemptRef.current + 1;
+    generationAttempt = generationAttemptRef.current + 1;
     generationAttemptRef.current = generationAttempt;
-    const isCurrentGenerationAttempt = () =>
-      generationAttemptRef.current === generationAttempt;
+    generationVisualRequestRevision = mutateVisualGenerationRequest(id, {});
 
     // Recipe 节点在真正提交图片任务前还要先编译提示词。编译可能需要数秒，必须
     // 从点击这一刻就给出反馈；编译失败由下方的窄 catch 恢复按钮并展示错误。
@@ -587,13 +605,16 @@ export function useImageGenerationForm(
           kind: 'image',
           label: `reference-${index + 1}`,
         })),
-        onCompileMetadata: ({ mode, prompt: compiledPrompt, recipeIds }) => updateNodeData(id, {
+        onCompileMetadata: ({ mode, prompt: compiledPrompt, recipeIds }) => {
+        if (!isCurrentGenerationAttempt()) return;
+        updateNodeData(id, {
           workflowRecipeCompileMode: mode,
           workflowRecipeCompiledAt: new Date().toISOString(),
           workflowRecipeCompiledPrompt: compiledPrompt,
           prompt: compiledPrompt,
           workflowRecipeIds: recipeIds,
-        }),
+        });
+        },
       });
     } catch (error) {
       console.error('[image-gen] image Recipe compilation failed', error);
@@ -613,17 +634,15 @@ export function useImageGenerationForm(
       });
       throw error;
     }
+    if (!isCurrentGenerationAttempt()) return undefined;
     const latestBeforeSubmit = (useCanvasStore.getState().nodes.find((node) => node.id === id)?.data ?? {}) as Record<string, unknown>;
-    const generationVisualRequestRevision = (typeof latestBeforeSubmit.remixVisualRequestRevision === 'number'
+    generationVisualRequestRevision = (typeof latestBeforeSubmit.remixVisualRequestRevision === 'number'
       ? latestBeforeSubmit.remixVisualRequestRevision : 0) + 1;
     updateNodeData(id, {
       remixVisualRequestRevision: generationVisualRequestRevision,
       remixVisualOutputCurrent: false,
     });
-    const isCurrentVisualGenerationRequest = () => {
-      const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data as Record<string, unknown> | undefined;
-      return latest?.remixVisualRequestRevision === generationVisualRequestRevision;
-    };
+    if (!isCurrentRequest()) return undefined;
     const genPayload = {
       prompt: effectivePrompt,
       // 后端只接受固定的几个比例；节点上的 aspectRatio 可能是图片自然尺寸约分出的
@@ -679,6 +698,7 @@ export function useImageGenerationForm(
           nodeId: id,
         });
         taskKey = ref.task_key;
+        if (!isCurrentRequest()) return;
         // Persist the task handle so a page refresh can resume polling this
         // job. With N concurrent runs on one node only one handle can persist —
         // keep the first (main-image) run's.
@@ -702,7 +722,7 @@ export function useImageGenerationForm(
             }
           }
           if (url) {
-            if (!isCurrentGenerationAttempt() || !isCurrentVisualGenerationRequest()) return 'ignored';
+            if (!isCurrentRequest()) return 'ignored';
             completedUrls.push(url);
             const isFirstCompleted = completedUrls.length === 1;
             updateNodeData(id, {
@@ -725,7 +745,7 @@ export function useImageGenerationForm(
             }
             return 'completed';
           } else {
-            if (!isCurrentGenerationAttempt()) return 'ignored';
+            if (!isCurrentRequest()) return 'ignored';
             console.warn('[image-gen] generation completed without output url', completed);
             // 只有 run 0（任务句柄的归属者）且尚无任何成功时才终结 loading——
             // 非首个任务先「无 URL 完成」不能把还在跑的整体 loading 提前掐掉。
@@ -739,6 +759,7 @@ export function useImageGenerationForm(
         // 单节点执行时用这个模式，不阻塞整条链路）。
         if (resolvedCompletionMode === 'submitted') {
           void completeTask().catch((error) => {
+            if (!isCurrentRequest()) return;
             console.error('[image-gen] background generation failed', error);
             const rawErrorMessage =
               error instanceof Error && error.message
@@ -758,7 +779,7 @@ export function useImageGenerationForm(
         }
         return await completeTask();
       } catch (error) {
-        if (!isCurrentGenerationAttempt()) return 'ignored';
+        if (!isCurrentRequest()) return 'ignored';
         console.error('[image-gen] generation failed', error);
         // 已有同批其它图完成（主图已落）时不覆盖成功态为错误——部分失败只
         // 影响画册张数。
@@ -851,12 +872,13 @@ export function useImageGenerationForm(
     const settledRuns = await Promise.allSettled(
       Array.from({ length: total }, (_, runIndex) => runOne(runIndex)),
     );
+    if (!isCurrentRequest()) return undefined;
     // 全部尘埃落定后撤掉占位（失败的任务不留空槽，画册按实际完成数收口）。
-    setAlbumPendingTotal(id, 0);
+    if (isCurrentRequest()) setAlbumPendingTotal(id, 0);
     // Backend records each attempt (success or failure); pull the new entries.
     // Failures are surfaced directly on the failing node (request-id banner),
     // set per-target inside runOne's catch — no global modal.
-    onGenerationSettled?.();
+    if (isCurrentRequest()) onGenerationSettled?.();
     if (completedUrls.length > 0) {
       actionOutput = {
         ...(submittedRefs[0] ? {
@@ -903,11 +925,13 @@ export function useImageGenerationForm(
     });
     throw noResultError;
     } finally {
-      submittingRef.current = false;
-      const waiters = submitWaitersRef.current;
-      submitWaitersRef.current = [];
-      for (const resolve of waiters) {
-        resolve(actionOutput);
+      if (generationAttempt === null || isCurrentRequest()) {
+        submittingRef.current = false;
+        const waiters = submitWaitersRef.current;
+        submitWaitersRef.current = [];
+        for (const resolve of waiters) {
+          resolve(actionOutput);
+        }
       }
     }
   }, [
@@ -960,13 +984,13 @@ export function useImageGenerationForm(
       upstreamTextContents,
       upstreamImageContents,
       onDetachUpstream: handleDetachUpstream,
+      onRequestChange: mutateGenerationRequest,
       prompt,
       onPromptChange: (next: string) => {
         hasUserEditedPromptRef.current = hasImageGenPromptOverride(next);
         setPromptDraft(next);
         if (!isComposingRef.current) {
-          updateNodeData(id, { prompt: next });
-          applyRemixInvalidation(id, 'visual_prompt');
+          mutateGenerationRequest({ prompt: next });
         }
       },
       onCompositionStart: () => {
@@ -976,8 +1000,7 @@ export function useImageGenerationForm(
         isComposingRef.current = false;
         hasUserEditedPromptRef.current = hasImageGenPromptOverride(next);
         setPromptDraft(next);
-        updateNodeData(id, { prompt: next });
-        applyRemixInvalidation(id, 'visual_prompt');
+        mutateGenerationRequest({ prompt: next });
       },
       mentionCandidates,
       upstreamTextJoined,
@@ -1019,5 +1042,6 @@ export function useImageGenerationForm(
     closeReferenceErrors: () => setReferenceErrorsOpen(false),
     openReferenceErrors: () => setReferenceErrorsOpen(true),
     invalidateInFlightGeneration,
+    mutateGenerationRequest,
   };
 }

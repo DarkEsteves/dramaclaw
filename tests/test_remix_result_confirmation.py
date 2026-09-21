@@ -304,3 +304,97 @@ def test_reconcile_timeout_reads_bound_task_and_transitions_failure(api: TestCli
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "failed"
     assert store.get(operation["operation_id"])["failure_reason"] == "provider timeout"
+
+
+def test_restart_reconcile_finishes_confirmation_already_written_to_canvas(api: TestClient, tmp_path: Path) -> None:
+    artifact, operation = _published(tmp_path)
+    canvas_path_value = _canvas(tmp_path, artifact)
+    store = RemixOperationStore(tmp_path, "demo")
+    store.claim_confirmation(operation["operation_id"], canvas_id="default", node_id="compose-1")
+    canvas = json.loads(canvas_path_value.read_text())
+    record = store.get(operation["operation_id"])
+    output_path = record["output_refs"][0]["project_path"]
+    canvas["nodes"][0]["data"].update({
+        "remixRenderOperationId": operation["operation_id"],
+        "resultVideoUrl": f"/api/v1/projects/demo/media/{output_path}",
+        "remixRenderManifestRef": {"artifactId": artifact["id"], "revision": 1},
+    })
+    canvas_path_value.write_text(json.dumps(canvas))
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "completed"
+
+
+def test_restart_reconcile_does_not_accept_partial_or_wrong_canvas_evidence(api: TestClient, tmp_path: Path) -> None:
+    artifact, operation = _published(tmp_path)
+    canvas_path_value = _canvas(tmp_path, artifact)
+    store = RemixOperationStore(tmp_path, "demo")
+    store.claim_confirmation(operation["operation_id"], canvas_id="default", node_id="compose-1")
+    canvas = json.loads(canvas_path_value.read_text())
+    canvas["nodes"][0]["data"].update({
+        "remixRenderOperationId": operation["operation_id"],
+        "resultVideoUrl": "/wrong.mp4",
+        "remixRenderManifestRef": {"artifactId": artifact["id"], "revision": 1},
+    })
+    canvas_path_value.write_text(json.dumps(canvas))
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "confirming"
+
+
+def test_restart_reconcile_finishes_exact_cancelled_task(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.api.routes import remix
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="cancel-restart", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "e" * 64}, node_revision=1)
+    store.bind_task(operation["operation_id"], task_id="task-cancelled")
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    task = SimpleNamespace(task_id="task-cancelled", status="cancelled", error=None)
+    monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("backend_result", [
+    {"ok": False},
+    {"ok": True, "requires_confirmation": True},
+])
+def test_unconfirmed_task_cancel_moves_to_reconciliation_instead_of_reopening(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_result: dict) -> None:
+    from novelvideo.api.routes import remix
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key=f"cancel-unconfirmed-{backend_result}", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "f" * 64}, node_revision=1)
+    store.bind_task(operation["operation_id"], task_id="task-running")
+    task = SimpleNamespace(task_id="task-running", status="running", error=None)
+    monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
+    class Backend:
+        async def cancel_project_task(self, *args, **kwargs):
+            return backend_result
+    monkeypatch.setattr(remix, "get_task_backend", lambda: Backend())
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "cancelled", "reason": "user_cancelled"})
+
+    assert response.status_code == 409
+    assert store.get(operation["operation_id"])["status"] == "pending_reconciliation"
+
+
+def test_cancel_backend_exception_is_durable_unknown_not_reopened(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.api.routes import remix
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="cancel-exception", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "1" * 64}, node_revision=1)
+    store.bind_task(operation["operation_id"], task_id="task-running")
+    task = SimpleNamespace(task_id="task-running", status="running", error=None)
+    monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
+    class Backend:
+        async def cancel_project_task(self, *args, **kwargs):
+            raise TimeoutError("backend timeout")
+    monkeypatch.setattr(remix, "get_task_backend", lambda: Backend())
+
+    with pytest.raises(TimeoutError, match="backend timeout"):
+        api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "cancelled", "reason": "user_cancelled"})
+    assert store.get(operation["operation_id"])["status"] == "pending_reconciliation"

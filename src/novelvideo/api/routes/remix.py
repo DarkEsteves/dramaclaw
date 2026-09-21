@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from novelvideo.api.auth import get_api_user
+from novelvideo.freezone import canvas_store
 from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
@@ -677,20 +678,17 @@ async def transition_operation(project: str, operation_id: str, body: OperationT
                     beat_num=None, scope=view["task_scope"],
                 )
                 if task is None or task.task_id != record["task_id"]:
-                    await _call(operations.release_cancellation, operation_id)
-                    previous = record.get("cancellation_previous_status")
-                    if previous == "pending":
-                        await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=record.get("provider_task_id", ""))
+                    await _call(operations.cancellation_outcome_unknown, operation_id, reason="bound task unavailable")
                     raise HTTPException(409, "Task outcome is unknown; reconcile before cancellation")
                 try:
                     cancelled = await get_task_backend().cancel_project_task(
                         ctx, task, force=True, acknowledge_no_refund=True,
                     )
                 except Exception:
-                    await _call(operations.release_cancellation, operation_id)
+                    await _call(operations.cancellation_outcome_unknown, operation_id, reason="task cancellation request failed")
                     raise
                 if not cancelled.get("ok") or cancelled.get("requires_confirmation"):
-                    await _call(operations.release_cancellation, operation_id)
+                    await _call(operations.cancellation_outcome_unknown, operation_id, reason="task cancellation was not confirmed")
                     raise HTTPException(409, "Task cancellation was not confirmed")
             result = await _call(operations.finish_cancellation, operation_id)
         else:
@@ -711,10 +709,30 @@ async def reconcile_operation(project: str, operation_id: str, user: dict = Depe
         record = await _call(operations.get, operation_id)
     except FileNotFoundError as exc:
         raise HTTPException(404, "Operation not found") from exc
-    if record["status"] != "pending_reconciliation":
+    if record["status"] == "confirming":
+        ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+        canvas = await _call(canvas_store.read_canvas, Path(ctx.state_dir), record.get("canvas_id", ""))
+        node = next((item for item in (canvas or {}).get("nodes", []) if item.get("id") == record.get("node_id")), None)
+        data = node.get("data") if isinstance(node, dict) else None
+        output_refs = record.get("output_refs") or []
+        output_path = output_refs[0].get("project_path") if len(output_refs) == 1 and isinstance(output_refs[0], dict) else None
+        expected_url = f"/api/v1/projects/{quote(store.project_id, safe='')}/media/{quote(output_path, safe='/')}" if isinstance(output_path, str) else None
+        input_refs = record.get("input_refs") or []
+        expected_manifest = ({"artifactId": input_refs[0]["artifact_id"], "revision": input_refs[0]["revision"]}
+                             if len(input_refs) == 1 else None)
+        applied = (isinstance(data, dict)
+                   and data.get("remixRenderOperationId") == operation_id
+                   and data.get("resultVideoUrl") == expected_url
+                   and data.get("remixRenderManifestRef") == expected_manifest)
+        record = await _call(operations.recover_confirmation, operation_id, applied_to_canvas=applied)
+        return _data(_operation_view(record))
+    if record["status"] not in {"pending_reconciliation", "cancelling"}:
         return _data(_operation_view(record))
     view = _operation_view(record)
     if not record.get("task_id") or not view.get("task_type") or not view.get("task_scope"):
+        if record["status"] == "cancelling":
+            record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="bound task unavailable")
+            return _data(_operation_view(record))
         return _data(view)
     ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
     task = await run_in_threadpool(
@@ -722,7 +740,49 @@ async def reconcile_operation(project: str, operation_id: str, user: dict = Depe
         beat_num=None, scope=view["task_scope"],
     )
     if task is None or task.task_id != record["task_id"]:
+        if record["status"] == "cancelling":
+            record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="bound task unavailable")
+            return _data(_operation_view(record))
         return _data(view)
+    if record.get("cancel_reason") and record["status"] in {"cancelling", "pending_reconciliation"}:
+        if task.status == "cancelled":
+            if record["status"] == "pending_reconciliation":
+                record = await _call(operations.cancel, operation_id, reason=record["cancel_reason"])
+            else:
+                record = await _call(operations.finish_cancellation, operation_id)
+        elif task.status == "failed":
+            if record["status"] == "cancelling":
+                await _call(operations.cancellation_outcome_unknown, operation_id, reason=task.error or "task_failed")
+            record = await _call(operations.fail, operation_id, reason=task.error or "task_failed")
+        elif task.status == "completed":
+            if record["status"] == "cancelling":
+                record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="task completed while cancellation was pending")
+        else:
+            owner = uuid.uuid4().hex
+            claimed = await _call(operations.claim_cancellation_reconciliation, operation_id, owner=owner)
+            if not claimed:
+                return _data(_operation_view(await _call(operations.get, operation_id)))
+            try:
+                cancelled = await get_task_backend().cancel_project_task(ctx, task, force=True, acknowledge_no_refund=True)
+            except Exception:
+                if record["status"] == "cancelling":
+                    record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="task cancellation request failed")
+                else:
+                    record = await _call(operations.get, operation_id)
+            else:
+                if cancelled.get("ok") and not cancelled.get("requires_confirmation"):
+                    if record["status"] == "cancelling":
+                        record = await _call(operations.finish_cancellation, operation_id)
+                    else:
+                        record = await _call(operations.cancel, operation_id, reason=record["cancel_reason"])
+                else:
+                    if record["status"] == "cancelling":
+                        record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="task cancellation was not confirmed")
+                    else:
+                        record = await _call(operations.get, operation_id)
+            finally:
+                await _call(operations.release_cancellation_reconciliation, operation_id, owner=owner)
+        return _data(_operation_view(record))
     if task.status == "failed":
         record = await _call(operations.fail, operation_id, reason=task.error or "task_failed")
     elif task.status == "cancelled":

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '../domain/canvasNodes';
-import { applyRemixInvalidation, createComposeFromTimeline, createTimelineFromScript, planComposeFromTimeline, planRemixInvalidation, planTimelineFromScript } from './spawnRemixDownstream';
+import { applyRemixInvalidation, createComposeFromTimeline, createTimelineFromScript, mutateVisualGenerationRequest, planComposeFromTimeline, planRemixInvalidation, planTimelineFromScript } from './spawnRemixDownstream';
 
 const graphStore = vi.hoisted(() => ({ getState: vi.fn() }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: graphStore }));
@@ -38,7 +38,25 @@ describe('source-first remix graph plans', () => {
       edges: [edge('visual', 'compose')], updateNodeData,
     });
     expect(applyRemixInvalidation('visual', 'visual_prompt')).toEqual(['generate_visual', 'render']);
-    expect(updateNodeData).toHaveBeenCalledWith('visual', expect.objectContaining({ remixVisualOutputCurrent: false, remixVisualRequestRevision: 1 }));
+    expect(updateNodeData).not.toHaveBeenCalledWith('visual', expect.objectContaining({ remixVisualRequestRevision: expect.anything() }));
+    expect(updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ remixInputsCurrent: false }));
+  });
+  it.each([
+    [{ prompt: 'translated' }], [{ model: 'new-model', modelParams: {} }],
+    [{ styleTemplateId: 'cinematic' }], [{ aspectRatio: '9:16', size: '4K', quality: 'high' }],
+    [{ modelParams: { seed: 2 } }], [{ cameraSelection: { lensId: '50mm' } }],
+    [{ referenceImageUrl: '/new.png' }],
+  ])('centralizes every visual request mutation and clears the obsolete task %#', (patch) => {
+    const updateNodeData = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [node('visual', 'imageGenNode', { remixVisualRequestRevision: 4, remixVisualOutputCurrent: true }), node('compose', 'videoComposeNode', { remixInputsCurrent: true })],
+      edges: [edge('visual', 'compose')], updateNodeData,
+    });
+    expect(mutateVisualGenerationRequest('visual', patch)).toBe(5);
+    expect(updateNodeData).toHaveBeenCalledWith('visual', expect.objectContaining({
+      ...patch, remixVisualRequestRevision: 5, remixVisualOutputCurrent: false,
+      isGenerating: false, generationStartedAt: null, generationTaskKey: null,
+    }));
     expect(updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ remixInputsCurrent: false }));
   });
   it('connects the saved script and its directly aligned transcript to a new timeline', () => {

@@ -19,7 +19,6 @@ import {
   NODE_REFERENCE_MEDIA_CHIP_CLASS,
   NODE_REFERENCE_MEDIA_DETACH_CLASS,
 } from '@/features/canvas/ui/nodeControlStyles';
-import { useCanvasStore } from '@/stores/canvasStore';
 import { readUrl } from '@/lib/url-params';
 
 import { AssetBoardReferenceDropZone } from './AssetBoardReferenceDropZone';
@@ -49,7 +48,7 @@ const FORM_HEIGHT_PX = 184;
  * 同款样式），只在宿主渲染、共用表单零改动。 */
 export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactElement {
   const { t } = useTranslation();
-  const { formProps, isGenerating, referenceImageUrl, referenceErrors, referenceErrorsOpen, closeReferenceErrors, openReferenceErrors } = useImageGenerationForm(nodeId);
+  const { formProps, isGenerating, referenceImageUrl, referenceErrors, referenceErrorsOpen, closeReferenceErrors, openReferenceErrors, mutateGenerationRequest } = useImageGenerationForm(nodeId);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const [isAssetLibraryOpen, setIsAssetLibraryOpen] = useState(false);
 
@@ -62,8 +61,9 @@ export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactEle
   const handleAssetLibraryConfirm = useCallback(
     (selections: ReadonlyArray<AssetLibrarySelection>) => {
       spawnAssetLibraryReferences(nodeId, selections);
+      if (selections.length) mutateGenerationRequest({});
     },
-    [nodeId],
+    [mutateGenerationRequest, nodeId],
   );
 
   return (
@@ -75,7 +75,7 @@ export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactEle
       )}
       {/* 参考区放置层：从左列表把节点卡片拖进来 → addEdge 接成当前节点的上游引用，
           回流后经表单既有 upstream 派生显示为参考缩略图 chip（工作流零改动）。 */}
-      <AssetBoardReferenceDropZone nodeId={nodeId}>
+      <AssetBoardReferenceDropZone nodeId={nodeId} onReferenceChange={() => mutateGenerationRequest({})}>
         <div
           className={`flex w-full flex-col rounded-[var(--node-radius)] ${CANVAS_NODE_OPS_PANEL_CLASS}`}
           style={{ height: FORM_HEIGHT_PX }}
@@ -96,7 +96,7 @@ export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactEle
                   type="button"
                   title="移除参考图"
                   className={NODE_REFERENCE_MEDIA_DETACH_CLASS}
-                  onClick={() => updateNodeData(nodeId, { referenceImageUrl: null })}
+                  onClick={() => mutateGenerationRequest({ referenceImageUrl: null })}
                 >
                   <X className="h-3 w-3" strokeWidth={2.5} />
                 </button>

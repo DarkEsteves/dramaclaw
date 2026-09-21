@@ -26,11 +26,6 @@ export function applyRemixInvalidation(sourceId: string, change: RemixChangeKind
   }
   for (const node of store.nodes) {
     if (!reachable.has(node.id)) continue;
-    if (change === 'visual_prompt' && node.id === sourceId) {
-      const revision = typeof node.data.remixVisualRequestRevision === 'number'
-        ? node.data.remixVisualRequestRevision : 0;
-      store.updateNodeData(node.id, { remixVisualOutputCurrent: false, remixVisualRequestRevision: revision + 1 });
-    }
     if ((change === 'script' || change === 'voice') && node.type === CANVAS_NODE_TYPES.transcript) {
       store.updateNodeData(node.id, { artifactRef: null, operationId: null, alignmentStale: true, status: 'needs_review' });
     }
@@ -45,6 +40,26 @@ export function applyRemixInvalidation(sourceId: string, change: RemixChangeKind
     }
   }
   return planRemixInvalidation(change);
+}
+
+/** One durable mutation gate for every field that changes an image generation request. */
+export function mutateVisualGenerationRequest(sourceId: string, patch: Record<string, unknown>): number {
+  const store = useCanvasStore.getState();
+  const source = store.nodes.find((node) => node.id === sourceId);
+  const revision = typeof source?.data.remixVisualRequestRevision === 'number'
+    ? source.data.remixVisualRequestRevision + 1 : 1;
+  store.updateNodeData(sourceId, {
+    ...patch,
+    remixVisualRequestRevision: revision,
+    remixVisualOutputCurrent: false,
+    isGenerating: false,
+    generationStartedAt: null,
+    generationTaskKey: null,
+    generationTaskType: null,
+    generationTaskJobId: null,
+  });
+  applyRemixInvalidation(sourceId, 'visual_prompt');
+  return revision;
 }
 
 function ref(value: unknown): Ref | null {

@@ -203,11 +203,25 @@ def _with_operation_failure_transition(runner):
             return runner(envelope, ctx)
         except TimeoutError:
             if operation_id:
-                RemixOperationStore(Path(ctx.output_dir), ctx.project_id).provider_outcome_unknown(str(operation_id), provider_task_id=str(envelope.get("task_id") or ""))
+                operations = RemixOperationStore(Path(ctx.output_dir), ctx.project_id)
+                try:
+                    if operations.get(str(operation_id))["status"] == "cancelling":
+                        operations.cancellation_outcome_unknown(str(operation_id), reason="task timeout during cancellation")
+                    else:
+                        operations.provider_outcome_unknown(str(operation_id), provider_task_id=str(envelope.get("task_id") or ""))
+                except ValueError:
+                    pass
             raise
         except Exception as exc:
             if operation_id:
-                RemixOperationStore(Path(ctx.output_dir), ctx.project_id).fail(str(operation_id), reason=str(exc) or type(exc).__name__)
+                operations = RemixOperationStore(Path(ctx.output_dir), ctx.project_id)
+                try:
+                    if operations.get(str(operation_id))["status"] == "cancelling":
+                        operations.cancellation_outcome_unknown(str(operation_id), reason=str(exc) or type(exc).__name__)
+                    else:
+                        operations.fail(str(operation_id), reason=str(exc) or type(exc).__name__)
+                except ValueError:
+                    pass
             raise
     return guarded
 

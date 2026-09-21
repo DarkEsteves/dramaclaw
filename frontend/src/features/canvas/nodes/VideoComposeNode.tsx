@@ -175,8 +175,12 @@ export const VideoComposeNode = memo(
         if (running || cancelled) return;
         running = true;
         try {
-          const operation = await fetchRemixOperation(project, operationId);
+          let operation = await fetchRemixOperation(project, operationId);
           if (cancelled) return;
+          if (['pending_reconciliation', 'confirming', 'cancelling'].includes(operation.status)) {
+            operation = await reconcileRemixOperation(project, operationId);
+            if (cancelled) return;
+          }
           setRemixOperationStatus(operation.status);
           if (operation.status === 'failed' || operation.status === 'cancelled') { setRemixError(`合成${operation.status === 'failed' ? '失败' : '已取消'}`); return; }
           if (operation.status !== 'needs_confirmation') return;
@@ -461,8 +465,8 @@ export const VideoComposeNode = memo(
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
             <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit(false)} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
             {data.remixOperationId && !data.resultVideoUrl ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { if (project) void transitionRemixOperation(project, data.remixOperationId!, 'cancelled', 'user_cancelled').then(() => updateNodeData(id, { remixOperationId: null })); }}>取消导出</button> : null}
-            {remixOperationStatus === 'pending_reconciliation' && data.remixOperationId ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { if (project) void reconcileRemixOperation(project, data.remixOperationId!).then((operation) => setRemixOperationStatus(operation.status)); }}>重新检查任务</button> : null}
-            {(remixError || remixOperationStatus === 'pending_reconciliation') && exportable ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => void submit(true)}>强制重新导出</button> : null}
+            {['pending_reconciliation', 'confirming', 'cancelling'].includes(remixOperationStatus ?? '') && data.remixOperationId ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { if (project) void reconcileRemixOperation(project, data.remixOperationId!).then((operation) => setRemixOperationStatus(operation.status)); }}>重新检查任务</button> : null}
+            {(remixError || ['pending_reconciliation', 'confirming', 'cancelling'].includes(remixOperationStatus ?? '')) && exportable ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => void submit(true)}>强制重新导出</button> : null}
             {manifestDirty ? <button type="button" disabled={isManifestSaving || conflicts.length > 0 || !manifestReady} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}
             <button type="button" disabled={isRemixPreparing || !project || (!manifestReady && data.remixManifestLoadState !== 'failed') || manifestDirty} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{data.remixManifestLoadState === 'failed' ? '重新生成合成清单' : '更新清单'}</button>
           </div>
@@ -471,7 +475,7 @@ export const VideoComposeNode = memo(
           {(!exportable || nodeRevision == null) && !manifestDirty ? <div className="mt-2 text-[12px] text-amber-300">{t('videoCompose.node.remixBlocked', { reason: conflicts.map(conflictMessage).join('；') || blockReason })}</div> : null}
           {remixTask ? <div className="mt-2 text-[12px] text-green-300">{t('videoCompose.node.remixTask', { task: remixTask.task_key })}</div> : null}
           {data.remixOperationId && !data.resultVideoUrl ? <div className="mt-2 text-[12px] text-text-muted">合成任务处理中，完成后会回填到本节点。</div> : null}
-          {remixOperationStatus === 'pending_reconciliation' ? <div className="mt-2 text-[12px] text-amber-300">任务结果暂时未知，可重新检查或强制重新导出。</div> : null}
+          {['pending_reconciliation', 'confirming', 'cancelling'].includes(remixOperationStatus ?? '') ? <div className="mt-2 text-[12px] text-amber-300">任务正在恢复确认，可重新检查或强制重新导出。</div> : null}
           {data.resultVideoUrl && manifestReady ? <div className="mt-2 space-y-2"><video className="nodrag aspect-[9/16] max-h-60 w-full rounded-[8px] bg-black" src={data.resultVideoUrl} controls /><div className="flex flex-wrap gap-3 text-[12px] text-primary underline"><a href={data.resultVideoUrl} target="_blank" rel="noreferrer">预览成片</a><a href={data.resultVideoUrl.replace('/media/', '/files/')} download>下载 MP4</a>{manifestArtifact ? <><a href={textDownloadUrl(JSON.stringify(manifestArtifact.payload, null, 2), 'application/json')} download={`manifest-r${manifestArtifact.revision}.json`}>下载 JSON</a><a href={textDownloadUrl(manifestToSrt(manifestArtifact.payload as ManifestPayload), 'application/x-subrip')} download={`subtitles-r${manifestArtifact.revision}.srt`}>下载 SRT</a></> : null}</div></div> : null}
           {remixError ? <div className="mt-2 text-[12px] text-red-300">{remixError}</div> : null}
         </div>

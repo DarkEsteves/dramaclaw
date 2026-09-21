@@ -234,18 +234,42 @@ class RemixOperationStore:
                 raise ValueError("illegal operation state transition")
             return self._update(
                 operation_id, guard, status="cancelling", cancel_reason=reason.strip(),
-                cancellation_previous_status=record["status"],
+                cancellation_previous_status=record["status"], cancellation_claimed_at=time.time(),
             )
 
-    def release_cancellation(self, operation_id: str) -> dict[str, Any]:
+    def cancellation_outcome_unknown(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reconciliation reason is required")
         with self._locked() as guard:
             record = self._read(operation_id)
-            if record["status"] != "cancelling":
+            if record["status"] == "pending_reconciliation":
                 return record
-            previous = record.get("cancellation_previous_status")
-            if previous not in {"pending", "pending_reconciliation", "needs_confirmation"}:
-                raise ValueError("operation cancellation cannot be released")
-            return self._update(operation_id, guard, status=previous)
+            if record["status"] != "cancelling":
+                raise ValueError("operation cancellation is not in progress")
+            return self._update(
+                operation_id, guard, status="pending_reconciliation",
+                reconciliation_reason=reason.strip(), reconciliation_owner="", reconciliation_claimed_at=0,
+            )
+
+    def claim_cancellation_reconciliation(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> bool:
+        if not isinstance(owner, str) or not owner or type(lease_seconds) is not int or lease_seconds < 1:
+            raise ValueError("invalid reconciliation claim")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] not in {"cancelling", "pending_reconciliation"} or not record.get("cancel_reason"):
+                return False
+            claimed_at = float(record.get("reconciliation_claimed_at") or 0)
+            active = bool(record.get("reconciliation_owner")) and time.time() - claimed_at < lease_seconds
+            if active:
+                return False
+            self._update(operation_id, guard, reconciliation_owner=owner, reconciliation_claimed_at=time.time())
+            return True
+
+    def release_cancellation_reconciliation(self, operation_id: str, *, owner: str) -> None:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record.get("reconciliation_owner") == owner:
+                self._update(operation_id, guard, reconciliation_owner="", reconciliation_claimed_at=0)
 
     def finish_cancellation(self, operation_id: str) -> dict[str, Any]:
         with self._locked() as guard:
@@ -279,7 +303,21 @@ class RemixOperationStore:
                 return record
             if record["status"] != "needs_confirmation" or not self._outputs_exist(record.get("output_refs", [])):
                 raise ValueError("operation result is not available for confirmation")
-            return self._update(operation_id, guard, status="confirming")
+            return self._update(operation_id, guard, status="confirming", confirmation_claimed_at=time.time())
+
+    def recover_confirmation(self, operation_id: str, *, applied_to_canvas: bool, lease_seconds: int = 60) -> dict[str, Any]:
+        if type(lease_seconds) is not int or lease_seconds < 1:
+            raise ValueError("confirmation lease must be positive")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] != "confirming":
+                return record
+            if applied_to_canvas:
+                return self._update(operation_id, guard, status="completed", stale_reason="")
+            claimed_at = float(record.get("confirmation_claimed_at") or 0)
+            if time.time() - claimed_at < lease_seconds:
+                return record
+            return self._update(operation_id, guard, status="needs_confirmation")
 
     def release_confirmation(self, operation_id: str) -> dict[str, Any]:
         with self._locked() as guard:

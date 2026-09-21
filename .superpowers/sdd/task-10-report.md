@@ -75,3 +75,24 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   frontend run still has three pre-existing unrelated contract failures (Vietnamese
   locale parity, outline coverage for the two remix node types, and a transcript test
   that expects words rendered as one text node).
+
+## Crash recovery and request-version review
+
+- Every image generation input now passes through one durable mutation gate: prompt
+  edits (including translation and mention remapping), model, style, ratio, size,
+  quality, model parameters, camera, and reference attach/detach. It increments the
+  request revision, marks the old output stale, clears only the obsolete task/busy
+  handle, and invalidates downstream compose state.
+- Image completion, fallback, background errors, foreground errors, album cleanup,
+  waiter cleanup, and final busy-state cleanup all require both the in-memory attempt
+  and durable request revision. A late result from an edited request cannot write an
+  image/error or clear a newer request.
+- Cancel transport errors, timeouts, and unconfirmed responses move to durable
+  `pending_reconciliation`; they never reopen the prior pending state.
+- `confirming` and `cancelling` carry durable claim times. Confirmation recovery checks
+  the exact operation, render URL, and manifest ref already written on canvas before
+  completing, otherwise an expired lease safely reopens confirmation. Cancellation
+  recovery reads the exact bound project task and uses a single-owner expiring lease
+  before any repeated backend cancellation.
+- Final crash-recovery verification: 251 Python recovery/workflow tests and 69 focused
+  frontend tests passed; TypeScript, Ruff, and diff checks passed.

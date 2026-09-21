@@ -490,6 +490,8 @@ export interface ImageGenerationFormProps {
   upstreamTextContents: readonly UpstreamContent[];
   upstreamImageContents: readonly UpstreamContent[];
   onDetachUpstream: (sourceNodeId: string) => void;
+  /** Central durable mutation gate for all generation request fields. */
+  onRequestChange: (patch: Record<string, unknown>) => void;
 
   // ── 提示词编辑器 ──
   // prompt 的 draft 状态、IME 合成态由宿主持有——节点上「生成失败」横幅的重试按钮
@@ -584,6 +586,7 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
     upstreamTextContents,
     upstreamImageContents,
     onDetachUpstream,
+    onRequestChange,
     prompt,
     onPromptChange,
     onCompositionStart,
@@ -659,7 +662,7 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
         <StyleChip
           selectedId={styleTemplateId}
           selectedLabel={selectedStyleLabel}
-          onChange={(nextId) => updateNodeData(nodeId, { styleTemplateId: nextId })}
+          onChange={(nextId) => onRequestChange({ styleTemplateId: nextId })}
           onOpenChange={onStylePickerOpenChange}
         />
         <NodeContextPromptPaletteButton
@@ -757,7 +760,7 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
             // 换模型必须清空 modelParams：参数表是按模型声明的，留着上一个模型的
             // 键会原样发给后端，轻则被忽略重则报参数不合法。
             onChange={(nextModelId) =>
-              updateNodeData(nodeId, { model: nextModelId, modelParams: {} })
+              onRequestChange({ model: nextModelId, modelParams: {} })
             }
             popoverPlacement="top"
             getOptionDisabledReason={getModelOptionDisabledReason}
@@ -770,18 +773,18 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
             quality={quality}
             qualityOptions={qualityOptions}
             showQuality={showQuality}
-            onChange={(patch) => updateNodeData(nodeId, patch)}
+            onChange={(patch) => onRequestChange(patch)}
           />
           <MediaModelParameterChip
             parameters={modelParameters}
             values={modelParams}
             mode={modelParamsMode}
-            onChange={(next) => updateNodeData(nodeId, { modelParams: next })}
+            onChange={(next) => onRequestChange({ modelParams: next })}
           />
           <CameraChip
             selection={cameraSelection}
             summary={cameraSummary}
-            onChange={(next) => updateNodeData(nodeId, { cameraSelection: next })}
+            onChange={(next) => onRequestChange({ cameraSelection: next })}
           />
           {showCountSelect && (
             <CountSelect

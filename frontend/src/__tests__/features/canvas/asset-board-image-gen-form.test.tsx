@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { submitFreezoneGen } from '@/api/ops';
+import { awaitTaskCompletion } from '@/api/tasks';
 import { CANVAS_NODE_TYPES, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { AssetBoardView } from '@/features/canvas/ui/asset-board/AssetBoardView';
 import { useCanvasStore } from '@/stores/canvasStore';
@@ -85,6 +86,31 @@ function openDetail(name: string) {
 describe('故事板详情 · 图片生成表单', () => {
   beforeEach(() => {
     vi.mocked(submitFreezoneGen).mockClear();
+    vi.mocked(awaitTaskCompletion).mockReset();
+    vi.mocked(awaitTaskCompletion).mockResolvedValue({ result: { output_url: '/static/out.png' } } as never);
+  });
+
+  it('a request invalidated by a prompt edit cannot write its late error or leave the node busy', async () => {
+    let rejectTask!: (error: Error) => void;
+    vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectTask = reject; }));
+    seed([emptyImageGenNode({ prompt: '旧提示词' })]);
+    openDetail('图片节点 3');
+    fireEvent.click(within(detailPanel()).getByRole('button', { name: '生成' }));
+    await waitFor(() => expect(submitFreezoneGen).toHaveBeenCalled());
+
+    const editor = detailPanel().querySelector('[contenteditable="true"]') as HTMLElement;
+    editor.textContent = '新提示词';
+    fireEvent.input(editor);
+    await waitFor(() => expect(useCanvasStore.getState().nodes[0].data.prompt).toBe('新提示词'));
+    rejectTask(new Error('old request failed'));
+
+    await waitFor(() => {
+      const data = useCanvasStore.getState().nodes[0].data;
+      expect(data.isGenerating).toBe(false);
+      expect(data.generationTaskKey).toBeNull();
+      expect(data.generationError).toBeFalsy();
+      expect(data.imageUrl).toBeNull();
+    });
   });
 
   it('空 imageGen 节点：媒体区显示「待确认后生成」占位，下方挂完整生成表单', () => {

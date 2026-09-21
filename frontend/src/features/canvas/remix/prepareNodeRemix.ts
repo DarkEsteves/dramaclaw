@@ -82,7 +82,7 @@ export interface PreparedNodeRemix {
 }
 
 export function operationReusableForNode(operation: RemixOperation, manifest: RemixArtifact, nodeRevision: number, inputFingerprint = ''): boolean {
-  if (!['pending', 'pending_reconciliation', 'needs_confirmation'].includes(operation.status)
+  if (!['pending', 'pending_reconciliation', 'needs_confirmation', 'confirming', 'cancelling'].includes(operation.status)
     || operation.producer_version !== 'remix-render.v1'
     || operation.node_revision !== nodeRevision
     || operation.normalized_parameters?.input_fingerprint !== inputFingerprint
