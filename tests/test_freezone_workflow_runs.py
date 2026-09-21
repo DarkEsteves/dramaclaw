@@ -1388,28 +1388,96 @@ def test_processing_reconciliation_rejects_a_result_from_another_task(tmp_path: 
     assert checked["actions"][0]["artifact_status"] == "operation_mismatch"
 
 
-def test_processing_needs_review_blocks_dependents(tmp_path: Path) -> None:
+def _processing_review_fixture(
+    tmp_path: Path, *, artifact_schema: str = "reference_evidence.v1"
+) -> tuple[dict, dict, dict]:
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
     run = create_workflow_run(
         project_dir=tmp_path, project_id="project-a", canvas_id="default",
         actions=[
-            {"node_id": "timing", "action": "compile_semantic_timeline", "node_revision": 1,
-             "payload": {"media_path": "voice.wav", "script_ref": {}, "word_timeline_ref": {},
-                         "blueprint_ref": {}, "edit_map": [], "overrides": [], "fps": 30}},
-            {"node_id": "render", "action": "render_manifest", "node_revision": 1,
-             "depends_on": ["timing"], "payload": {"manifest_ref": {}}},
+            {"node_id": "analysis", "action": "analyze_reference_video", "node_revision": 1,
+             "payload": {"media_path": "media/reference.mp4"}},
+            {"node_id": "transcript", "action": "transcribe_media", "node_revision": 1,
+             "depends_on": ["analysis"], "payload": {"media_path": "media/reference.mp4", "language": "en"}},
         ],
+    )
+    operations = RemixOperationStore(tmp_path, "project-a")
+    operation = operations.start(
+        idempotency_key="analysis-review", input_refs=[], producer_version="remix-process.v1",
+        normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
+        node_revision=1, canvas_id="default", node_id="analysis",
+    )
+    operations.bind_task(operation["operation_id"], task_id="task-one")
+    bind_workflow_action_processing_operation(
+        project_dir=tmp_path, canvas_id="default", run_id=run["run_id"], node_id="analysis",
+        action="analyze_reference_video", operation_id=operation["operation_id"],
     )
     update_workflow_run(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
-        action_updates=[{"node_id": "timing", "action": "compile_semantic_timeline",
-                         "status": "running", "task_key": "task:timing"}],
+        action_updates=[{"node_id": "analysis", "action": "analyze_reference_video",
+                         "status": "running", "task_key": "task:analysis"}],
     )
+    if artifact_schema == "reference_evidence.v1":
+        artifact_payload = {
+            "media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+            "cuts": [], "representative_frames": [],
+        }
+    else:
+        artifact_payload = {
+            "narrative_role": "hook", "events": [], "preserve_replace_rules": [],
+            "observations": [], "inferences": [], "user_choices": [],
+        }
+    artifact = RemixArtifactStore(tmp_path, "project-a").create(
+        artifact_schema, artifact_payload, [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": 1}
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[ref])
+    return run, operation, ref
+
+
+def test_processing_needs_review_requires_proof_and_blocks_dependents(tmp_path: Path) -> None:
+    run, _operation, ref = _processing_review_fixture(tmp_path)
 
     reconcile_workflow_runs_with_tasks(
         project_dir=tmp_path, canvas_id="default",
-        tasks_by_key={"task:timing": {"status": "completed", "result": {"status": "needs_review"}}},
+        tasks_by_key={"task:analysis": {"task_id": "task-one", "status": "completed",
+                                        "result": {"status": "needs_review", "artifact_ref": ref}}},
     )
 
     checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
     assert checked["actions"][0]["status"] == "blocked"
+    assert checked["actions"][0]["artifact_status"] == "needs_review"
+    assert checked["actions"][0]["result_ref"] == ref
     assert checked["actions"][1]["status"] == "pending"
+
+
+def test_processing_needs_review_rejects_wrong_task(tmp_path: Path) -> None:
+    run, _operation, ref = _processing_review_fixture(tmp_path)
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:analysis": {"task_id": "task-two", "status": "completed",
+                                        "result": {"status": "needs_review", "artifact_ref": ref}}},
+    )
+
+    checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert checked["actions"][0]["status"] == "failed"
+    assert checked["actions"][0]["artifact_status"] == "operation_mismatch"
+
+
+def test_processing_needs_review_rejects_wrong_artifact_schema(tmp_path: Path) -> None:
+    run, _operation, ref = _processing_review_fixture(
+        tmp_path, artifact_schema="reference_blueprint.v1"
+    )
+
+    reconcile_workflow_runs_with_tasks(
+        project_dir=tmp_path, canvas_id="default",
+        tasks_by_key={"task:analysis": {"task_id": "task-one", "status": "completed",
+                                        "result": {"status": "needs_review", "artifact_ref": ref}}},
+    )
+
+    checked = read_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=run["run_id"])
+    assert checked["actions"][0]["status"] == "failed"
+    assert checked["actions"][0]["artifact_status"] == "invalid_schema"

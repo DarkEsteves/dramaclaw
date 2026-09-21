@@ -16,6 +16,8 @@ The first focused run failed because Workflow left `analyze_reference_video` pen
 
 The review-fix tests first demonstrated four additional gaps: an unresolved timing result was marked complete, a task result could complete without its bound operation and exact artifact schema, semantic compilation dropped the narration and blueprint identities, and deterministic processing could enqueue before a later Recipe admission failed. A further task-identity test proved that an output from a different task was accepted before the operation/task check was tightened.
 
+A final review test showed that `needs_review` could block before validating its operation evidence and omit the review artifact reference. It also showed that an ordinary editor PATCH could mark that processing action complete and release its dependent. Wrong-task, wrong-schema and PATCH-bypass tests now pin the authoritative behavior.
+
 ## Implementation
 
 - Added action roles for reference analysis and manifest rendering to `stable-contract.json`; regenerated Python, TypeScript and MCP contract outputs together.
@@ -32,11 +34,13 @@ The review-fix tests first demonstrated four additional gaps: an unresolved timi
 - Reconciled processing only when the task ID, immutable operation envelope, exact normalized payload, exact input refs, operation output and action-specific output schema all agree.
 - Preserved semantic compilation's exact narration file/hash, script revision, aligned-word revision and reference-blueprint revision through the client request, API preflight, operation record and runner artifact lineage.
 - Completed all Recipe admissions for a mixed run before enqueueing any deterministic processing task, so a failed metered admission leaves no processing work in flight.
+- Applied the full operation/task/input/output/schema proof before accepting `needs_review`, persisted the exact review artifact ref, and kept the dependent frontier closed.
+- Rejected editor PATCH attempts to complete processing actions; durable task reconciliation remains the only completion authority.
 
 ## Verification
 
 - `uv run pytest tests/test_workflow_stable_contract.py tests/test_workflow_plan.py tests/test_workflow_preflight.py tests/test_workflow_transactions.py tests/test_freezone_workflow_runs.py tests/test_api_freezone_workflow_runs.py tests/test_remix_processing_tasks.py -q`
-  - 350 passed; 8 existing dependency deprecation warnings.
+  - 353 passed; 8 existing dependency deprecation warnings.
 - `npx vitest run src/features/canvas/remix/semanticTimelineModel.test.ts src/features/canvas/remix/semanticTimelineNode.test.tsx`
   - 14 passed.
 - `uv run python scripts/generate_workflow_contract.py --check`

@@ -1601,6 +1601,17 @@ def update_workflow_run(
                 # Durable task reconciliation below is the only path that can mark
                 # a generation action completed.
                 node_status = "running"
+            if (
+                action in PROCESSING_ACTIONS
+                and node_status == "completed"
+                and current_node_status != "completed"
+            ):
+                # Only task reconciliation can prove the bound operation, task,
+                # exact inputs/output and action-specific artifact schema. A
+                # browser/editor callback cannot release processing dependents.
+                raise ValueError(
+                    "processing action completion requires durable task reconciliation"
+                )
             item["status"] = node_status
             item["updated_at"] = now
             item["error"] = str(update.get("error") or "").strip() or None
@@ -1842,20 +1853,6 @@ def reconcile_workflow_runs_with_tasks(
                         else {}
                     )
                     action_name = str(item.get("action") or "")
-                    if (
-                        action_name in PROCESSING_ACTIONS
-                        and task_result.get("status") == "needs_review"
-                    ):
-                        updates = {
-                            "status": "blocked",
-                            "error": "processing result requires review",
-                            "artifact_status": "needs_review",
-                        }
-                        if any(item.get(key) != value for key, value in updates.items()):
-                            item.update(updates)
-                            item["updated_at"] = timestamp
-                            changed = True
-                        continue
                     if action_name in PROCESSING_ACTIONS:
                         proof_status, proof_error = _processing_operation_proof(
                             item=item,
@@ -1893,6 +1890,16 @@ def reconcile_workflow_runs_with_tasks(
                             "error": artifact_error,
                             **workflow_error_diagnostics(artifact_error),
                             "artifact_status": artifact_status,
+                        }
+                    elif (
+                        action_name in PROCESSING_ACTIONS
+                        and task_result.get("status") == "needs_review"
+                    ):
+                        updates = {
+                            "status": "blocked",
+                            "error": "processing result requires review",
+                            "artifact_status": "needs_review",
+                            "result_ref": result_ref,
                         }
                     else:
                         updates = {

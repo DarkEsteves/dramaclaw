@@ -2932,6 +2932,62 @@ def test_workflow_run_advances_registered_actions_in_dependency_order(
     assert advanced["actions"][1]["status"] == "running"
 
 
+def test_processing_review_cannot_be_bypassed_by_workflow_patch(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir(exist_ok=True)
+    media.write_bytes(b"reference")
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(base, json={"actions": [
+        {"node_id": "first", "action": "analyze_reference_video", "node_revision": 1,
+         "payload": {"media_path": "media/reference.mp4"}},
+        {"node_id": "second", "action": "analyze_reference_video", "node_revision": 1,
+         "depends_on": ["first"], "payload": {"media_path": "media/reference.mp4"}},
+    ]}).json()["data"]
+    first = created["actions"][0]
+    operations = RemixOperationStore(workflow_run_client.state_dir, "proj_demo")
+    operation = operations.get(first["processing_operation_id"])
+    artifact = RemixArtifactStore(workflow_run_client.state_dir, "proj_demo").create(
+        "reference_evidence.v1",
+        {"media_hash": "sha256:" + "0" * 64, "time_base": "1/1000", "duration_us": 1,
+         "cuts": [], "representative_frames": []}, [],
+    )
+    ref = {"artifact_id": artifact["id"], "revision": 1}
+    operations.publish_result_unverified(operation["operation_id"], output_refs=[ref])
+    task = SimpleNamespace(
+        task_id=operation["task_id"], task_type=first["task_type"], status="completed",
+        progress=1.0, current_task="completed", episode=0, beat_num=None,
+        scope=first["job_id"], result={"status": "needs_review", "artifact_ref": ref}, error=None,
+    )
+    monkeypatch.setattr(
+        freezone, "get_task_manager",
+        lambda: SimpleNamespace(list_tasks_for_project=lambda _ctx: [task]),
+    )
+
+    reviewed = workflow_run_client.get(base).json()["data"]["runs"][0]
+    assert reviewed["actions"][0]["status"] == "blocked"
+    assert reviewed["actions"][0]["result_ref"] == ref
+    assert len(workflow_run_client.enqueued_tasks) == 1
+
+    bypass = workflow_run_client.patch(
+        f"{base}/{created['run_id']}",
+        json={"status": "completed", "action_updates": [{
+            "node_id": "first", "action": "analyze_reference_video", "status": "completed",
+        }]},
+    )
+
+    assert bypass.status_code == 400
+    current = workflow_run_client.get(base).json()["data"]["runs"][0]
+    assert current["actions"][0]["status"] == "blocked"
+    assert current["actions"][1]["status"] == "pending"
+    assert len(workflow_run_client.enqueued_tasks) == 1
+
+
 def test_metered_recipe_admission_failure_submits_no_processing_task(
     workflow_run_client: TestClient, monkeypatch
 ) -> None:
