@@ -195,8 +195,25 @@ def run_remix_render(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str,
     }
 
 
-register_project_task_runner("remix_render", run_remix_render, requires_home_node=True, lane="ffmpeg")
-register_project_task_runner("remix_transcribe_media", run_remix_transcribe_media, requires_home_node=True)
-register_project_task_runner("remix_analyze_reference_video", run_remix_analyze_reference_video, requires_home_node=True)
-register_project_task_runner("remix_align_script", run_remix_align_script, requires_home_node=True)
-register_project_task_runner("remix_compile_semantic_timeline", run_remix_compile_semantic_timeline, requires_home_node=True)
+def _with_operation_failure_transition(runner):
+    def guarded(envelope: dict[str, Any], ctx: ProjectContext):
+        payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+        operation_id = payload.get("operation_id")
+        try:
+            return runner(envelope, ctx)
+        except TimeoutError:
+            if operation_id:
+                RemixOperationStore(Path(ctx.output_dir), ctx.project_id).provider_outcome_unknown(str(operation_id), provider_task_id=str(envelope.get("task_id") or ""))
+            raise
+        except Exception as exc:
+            if operation_id:
+                RemixOperationStore(Path(ctx.output_dir), ctx.project_id).fail(str(operation_id), reason=str(exc) or type(exc).__name__)
+            raise
+    return guarded
+
+
+register_project_task_runner("remix_render", _with_operation_failure_transition(run_remix_render), requires_home_node=True, lane="ffmpeg")
+register_project_task_runner("remix_transcribe_media", _with_operation_failure_transition(run_remix_transcribe_media), requires_home_node=True)
+register_project_task_runner("remix_analyze_reference_video", _with_operation_failure_transition(run_remix_analyze_reference_video), requires_home_node=True)
+register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True)
+register_project_task_runner("remix_compile_semantic_timeline", _with_operation_failure_transition(run_remix_compile_semantic_timeline), requires_home_node=True)

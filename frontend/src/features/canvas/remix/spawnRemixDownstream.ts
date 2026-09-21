@@ -13,6 +13,35 @@ export function planRemixInvalidation(change: RemixChangeKind): RemixInvalidated
   return ['align_script', 'compile_timeline', 'render'];
 }
 
+/** Apply graph state invalidation only; producers run later through explicit node actions. */
+export function applyRemixInvalidation(sourceId: string, change: RemixChangeKind): RemixInvalidatedJob[] {
+  const store = useCanvasStore.getState();
+  const reachable = new Set<string>([sourceId]);
+  const queue = [sourceId];
+  while (queue.length) {
+    const current = queue.shift()!;
+    for (const edge of store.edges) if (edge.source === current && !reachable.has(edge.target)) {
+      reachable.add(edge.target); queue.push(edge.target);
+    }
+  }
+  for (const node of store.nodes) {
+    if (!reachable.has(node.id)) continue;
+    if ((change === 'script' || change === 'voice') && node.type === CANVAS_NODE_TYPES.transcript) {
+      store.updateNodeData(node.id, { artifactRef: null, operationId: null, alignmentStale: true, status: 'needs_review' });
+    }
+    if ((change === 'script' || change === 'voice') && node.type === CANVAS_NODE_TYPES.semanticTimeline) {
+      store.updateNodeData(node.id, { artifactRef: null, compileOperationId: null });
+    }
+    if (node.type === CANVAS_NODE_TYPES.videoCompose) {
+      store.updateNodeData(node.id, {
+        ...(change === 'style' ? {} : { remixInputsCurrent: false }),
+        remixOperationId: null, resultVideoUrl: null,
+      });
+    }
+  }
+  return planRemixInvalidation(change);
+}
+
 function ref(value: unknown): Ref | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Record<string, unknown>;

@@ -37,3 +37,17 @@
 - `git diff --check` — passed.
 
 The only emitted Python warnings are existing third-party Cognee/Pydantic deprecations.
+
+## Independent review fixes
+
+- Confirmation now fails closed on the exact durable canvas fingerprint/current flag,
+  manifest ref, node revision, producer version, and every manifest media hash.
+- Submission uses an atomic, expiring ownership lease, so simultaneous API requests
+  enqueue once; enqueue failures release the lease for a safe retry.
+- Style, visual prompt, script, and voice edit handlers now apply their minimal graph
+  invalidation directly without invoking unrelated paid providers.
+- Force regeneration, cancellation, failed outcome, and unknown provider outcome are
+  production API states. The compose UI exposes cancel and force regenerate; registered
+  task runners transition failures and timeouts durably.
+- Review-fix verification: 234 Python tests and 62 frontend tests passed, plus TypeScript,
+  Ruff, and diff checks.

@@ -24,6 +24,7 @@ import { setAlbumPendingTotal } from '@/features/canvas/nodes/shared/albumPendin
 import { resolveImageGenerationCompletionMode } from '@/features/canvas/nodes/imageGenCompletionMode';
 import { compileWorkflowNodePrompt } from '@/features/canvas/application/workflowRecipeRuntime';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { applyRemixInvalidation } from '@/features/canvas/remix/spawnRemixDownstream';
 import {
   fetchFreezoneJobResult,
   submitFreezoneGen,
@@ -953,6 +954,7 @@ export function useImageGenerationForm(
         setPromptDraft(next);
         if (!isComposingRef.current) {
           updateNodeData(id, { prompt: next });
+          applyRemixInvalidation(id, 'visual_prompt');
         }
       },
       onCompositionStart: () => {
@@ -963,6 +965,7 @@ export function useImageGenerationForm(
         hasUserEditedPromptRef.current = hasImageGenPromptOverride(next);
         setPromptDraft(next);
         updateNodeData(id, { prompt: next });
+        applyRemixInvalidation(id, 'visual_prompt');
       },
       mentionCandidates,
       upstreamTextJoined,

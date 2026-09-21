@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from novelvideo.freezone import canvas_store
 from novelvideo.freezone.remix.operations import RemixOperationStore
+from novelvideo.freezone.remix.store import RemixArtifactStore
 
 
 class RemixNodeConflict(ValueError):
@@ -56,14 +57,28 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         raise ValueError("render output is unavailable")
     url = f"/api/v1/projects/{quote(project_id, safe='')}/media/{quote(relative, safe='/')}"
 
+    def exact_inputs(node: dict | None) -> bool:
+        refs, revision = _current(node)
+        expected = [{"artifact_id": ref["artifact_id"], "revision": ref["revision"]} for ref in record["input_refs"]]
+        data = node.get("data") if isinstance(node, dict) else None
+        if (refs != expected or revision != record["node_revision"] or not isinstance(data, dict)
+            or data.get("remixInputsCurrent") is not True
+            or data.get("remixInputFingerprint") != (record.get("normalized_parameters") or {}).get("input_fingerprint")
+            or record.get("producer_version") != "remix-render.v1"):
+            return False
+        try:
+            manifest = RemixArtifactStore(Path(output_dir), project_id).read(expected[0]["artifact_id"], expected[0]["revision"])
+        except (FileNotFoundError, ValueError):
+            return False
+        hashes = sorted({str(item.get("media_hash")).lower() for item in manifest["payload"].get("media_bindings", []) if isinstance(item, dict) and isinstance(item.get("media_hash"), str)})
+        return hashes == record.get("input_media_hashes", [])
+
     # The node check and write share the canvas mutex. A concurrent edit either
     # lands before this check (stale) or after our versioned save.
     def build(existing: dict | None) -> dict:
         node = _node(existing, node_id)
-        refs, revision = _current(node)
         expected = record["input_refs"]
-        expected_exact = [{"artifact_id": ref["artifact_id"], "revision": ref["revision"]} for ref in expected]
-        if refs != expected_exact or revision != record["node_revision"]:
+        if not exact_inputs(node):
             raise _StaleNode()
         updated = deepcopy(existing)
         target = _node(updated, node_id)
@@ -85,9 +100,7 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
             save_source="remix_result_confirmation",
         )
     except _StaleNode:
-        canvas = canvas_store.read_canvas(Path(state_dir), canvas_id)
-        refs, revision = _current(_node(canvas, node_id))
-        return operations.confirm(operation_id, current_input_refs=refs, current_node_revision=revision, canvas_id=canvas_id, node_id=node_id)
+        return operations.mark_stale(operation_id, reason="exact_inputs_changed")
     return operations.confirm(
         operation_id, current_input_refs=record["input_refs"],
         current_node_revision=record["node_revision"], canvas_id=canvas_id, node_id=node_id,

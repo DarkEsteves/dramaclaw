@@ -162,3 +162,14 @@ def test_late_result_for_cancelled_or_superseded_operation_stays_in_history(tmp_
     late = store.publish_result_unverified(first["operation_id"], output_refs=[{"project_path": "late.mp4"}])
     assert late["status"] == "stale" and late["stale_reason"] == "superseded"
     assert late["output_refs"] == [{"project_path": "late.mp4"}]
+
+
+def test_submission_claim_is_atomic_and_releasable(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="submit", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = list(executor.map(lambda owner: RemixOperationStore(tmp_path, "demo").claim_submission(operation["operation_id"], owner=owner), ["tab-a", "tab-b"]))
+    assert sorted(claims) == [False, True]
+    winner = "tab-a" if claims[0] else "tab-b"
+    store.release_submission(operation["operation_id"], owner=winner)
+    assert store.claim_submission(operation["operation_id"], owner="retry") is True

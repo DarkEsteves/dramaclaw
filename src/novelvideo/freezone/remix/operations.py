@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import uuid
 import re
+import time
 from typing import Any
 
 
@@ -166,7 +167,31 @@ class RemixOperationStore:
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("task_id is required")
         with self._locked() as guard:
-            return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id)
+            return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id, submission_owner="", submission_claimed_at=0)
+
+    def claim_submission(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> bool:
+        if not isinstance(owner, str) or not owner:
+            raise ValueError("submission owner is required")
+        if type(lease_seconds) is not int or lease_seconds < 1:
+            raise ValueError("submission lease must be positive")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            claimed_at = float(record.get("submission_claimed_at") or 0)
+            claim_active = bool(record.get("submission_owner")) and time.time() - claimed_at < lease_seconds
+            if record["status"] != "pending" or record.get("task_id") or claim_active:
+                return False
+            self._update(operation_id, guard, submission_owner=owner, submission_claimed_at=time.time())
+            return True
+
+    def release_submission(self, operation_id: str, *, owner: str) -> None:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record.get("submission_owner") == owner and not record.get("task_id"):
+                self._update(operation_id, guard, submission_owner="", submission_claimed_at=0)
+
+    def mark_stale(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            return self._update(operation_id, guard, status="stale", stale_reason=reason)
 
     def cancel(self, operation_id: str, *, reason: str) -> dict[str, Any]:
         if not isinstance(reason, str) or not reason.strip():
@@ -176,6 +201,12 @@ class RemixOperationStore:
             if record["status"] in {"completed", "stale"}:
                 return record
             return self._update(operation_id, guard, status="cancelled", cancel_reason=reason.strip())
+
+    def fail(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("failure reason is required")
+        with self._locked() as guard:
+            return self._update(operation_id, guard, status="failed", failure_reason=reason.strip(), submission_owner="")
 
     def publish_result_unverified(self, operation_id: str, *, output_refs: list[dict[str, Any]]) -> dict[str, Any]:
         """Save durable runner output without claiming the canvas node is still current."""

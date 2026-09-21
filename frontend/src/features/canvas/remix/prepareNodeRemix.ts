@@ -71,10 +71,11 @@ export interface PreparedNodeRemix {
   conflicts?: ManifestOverrideConflict[];
 }
 
-export function operationReusableForNode(operation: RemixOperation, manifest: RemixArtifact, nodeRevision: number): boolean {
+export function operationReusableForNode(operation: RemixOperation, manifest: RemixArtifact, nodeRevision: number, inputFingerprint = ''): boolean {
   if (!['pending', 'pending_reconciliation', 'needs_confirmation'].includes(operation.status)
     || operation.producer_version !== 'remix-render.v1'
     || operation.node_revision !== nodeRevision
+    || operation.normalized_parameters?.input_fingerprint !== inputFingerprint
     || operation.input_refs?.length !== 1
     || operation.input_refs[0].artifact_id !== manifest.id
     || operation.input_refs[0].revision !== manifest.revision) return false;

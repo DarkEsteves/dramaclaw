@@ -5,6 +5,7 @@ import type { UploadedRemixMedia } from './workbenchModel';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { parseDialogueTurns } from './dialogueTurns';
+import { applyRemixInvalidation } from './spawnRemixDownstream';
 
 type Ref = { artifactId: string; revision: number };
 
@@ -20,6 +21,7 @@ export function applyNarrationMediaChange(
   const changed = audio?.data.audioUrl !== media.url || previous?.media_hash !== media.media_hash;
   store.updateNodeData(audioId, { audioUrl: media.url, remixMedia: media, remixRole: role });
   if (!changed || role !== 'narration') return;
+  applyRemixInvalidation(audioId, 'voice');
   for (const edge of store.edges) {
     if (edge.source !== audioId) continue;
     const transcript = store.nodes.find((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.transcript);

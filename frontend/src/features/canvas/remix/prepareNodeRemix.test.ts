@@ -14,9 +14,9 @@ describe('prepareNodeRemix', () => {
     const artifact = { id: 'manifest', schema: 'composition_manifest.v1', revision: 2, payload: { media_bindings: [
       { media_hash: `sha256:${'b'.repeat(64)}` }, { media_hash: `sha256:${'a'.repeat(64)}` },
     ] } };
-    const exact = { operation_id: 'op', status: 'pending_reconciliation', task_id: 'task', output_refs: [], producer_version: 'remix-render.v1', node_revision: 7, input_refs: [{ artifact_id: 'manifest', revision: 2 }], input_media_hashes: [`sha256:${'a'.repeat(64)}`, `sha256:${'b'.repeat(64)}`] };
-    expect(operationReusableForNode(exact, artifact, 7)).toBe(true);
-    expect(operationReusableForNode({ ...exact, status: 'stale' }, artifact, 7)).toBe(false);
+    const exact = { operation_id: 'op', status: 'pending_reconciliation', task_id: 'task', output_refs: [], producer_version: 'remix-render.v1', normalized_parameters: { input_fingerprint: 'graph-1' }, node_revision: 7, input_refs: [{ artifact_id: 'manifest', revision: 2 }], input_media_hashes: [`sha256:${'a'.repeat(64)}`, `sha256:${'b'.repeat(64)}`] };
+    expect(operationReusableForNode(exact, artifact, 7, 'graph-1')).toBe(true);
+    expect(operationReusableForNode({ ...exact, status: 'stale' }, artifact, 7, 'graph-1')).toBe(false);
     expect(operationReusableForNode({ ...exact, producer_version: 'remix-render.v0' }, artifact, 7)).toBe(false);
     expect(operationReusableForNode({ ...exact, input_media_hashes: [`sha256:${'a'.repeat(64)}`] }, artifact, 7)).toBe(false);
     expect(operationReusableForNode(exact, artifact, 8)).toBe(false);

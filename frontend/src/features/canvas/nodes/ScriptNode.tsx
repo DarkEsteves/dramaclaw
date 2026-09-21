@@ -85,7 +85,7 @@ import { attachRemixMedia, generateRemixBrollPlan, type RemixArtifactRef } from 
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
-import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
+import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
@@ -855,7 +855,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
-            onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null })}
+            onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); }}
             onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, remixBlueprintRef: blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />

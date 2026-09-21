@@ -197,3 +197,17 @@ def test_compile_runner_rejects_unlinked_word_timeline(tmp_path):
             "media_path": "media/voice.wav", "media_sha256": hashlib.sha256(b"voice").hexdigest(),
             "edit_map": [], "overrides": [], "fps": 30,
         }}, SimpleNamespace(output_dir=str(tmp_path), project_id="demo"))
+
+
+@pytest.mark.parametrize("error,status", [(RuntimeError("provider failed"), "failed"), (TimeoutError("unknown"), "pending_reconciliation")])
+def test_runner_failure_transitions_bound_operation(tmp_path, error, status):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.task_backend.runners.remix import _with_operation_failure_transition
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.start(idempotency_key="failure", input_refs=[], producer_version="remix-process.v1", normalized_parameters={}, node_revision=1)
+    def failing(_envelope, _ctx):
+        raise error
+    guarded = _with_operation_failure_transition(failing)
+    with pytest.raises(type(error)):
+        guarded({"task_id": "task-1", "payload": {"operation_id": operation["operation_id"]}}, SimpleNamespace(output_dir=str(tmp_path), project_id="demo"))
+    assert operations.get(operation["operation_id"])["status"] == status

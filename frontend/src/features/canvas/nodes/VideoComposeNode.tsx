@@ -55,9 +55,10 @@ import { RemixEditor } from "@/features/canvas/remix/RemixEditor";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeControlStyles";
 import { canExportManifest, manifestToSrt, previewStatus, resolveManifestOverrideConflict, textDownloadUrl, type ManifestOverrideConflict, type ManifestPayload } from "@/features/canvas/remix/manifestEditor";
-import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, reviseRemixArtifact, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
+import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, reviseRemixArtifact, transitionRemixOperation, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
 import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
+import { applyRemixInvalidation } from "@/features/canvas/remix/spawnRemixDownstream";
 import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
 import { getFreezoneCanvas } from "@/api/canvas";
 import { captureCanvasBaseline, mergeConfirmedCanvasWithLocalChanges } from "@/features/canvas/remix/workbenchCanvasMerge";
@@ -158,7 +159,7 @@ export const VideoComposeNode = memo(
       void listRemixOperations(project).then(({ items }) => {
         if (cancelled) return;
         const match = items.find((item) => item.canvas_id === canvasId && item.node_id === id && item.task_type === 'remix_render'
-          && operationReusableForNode(item, manifestArtifact, data.remixNodeRevision ?? 0));
+          && operationReusableForNode(item, manifestArtifact, data.remixNodeRevision ?? 0, data.remixInputFingerprint));
         if (match) setRecoveredRemixOperationId(match.operation_id);
       }).catch(() => {});
       return () => { cancelled = true; };
@@ -182,7 +183,9 @@ export const VideoComposeNode = memo(
           if (!current?.remixManifestRef || operation.input_refs?.length !== 1
             || operation.input_refs[0].artifact_id !== current.remixManifestRef.artifactId
             || operation.input_refs[0].revision !== current.remixManifestRef.revision
-            || operation.node_revision !== current.remixNodeRevision) { setRemixError('合成已完成，但上游版本已变化；结果保留在任务记录中'); return; }
+            || operation.node_revision !== current.remixNodeRevision
+            || current.remixInputsCurrent !== true
+            || operation.normalized_parameters?.input_fingerprint !== current.remixInputFingerprint) { setRemixError('合成已完成，但上游版本已变化；结果保留在任务记录中'); return; }
           if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('画布尚未保存，请稍后重试结果确认');
           const baseline = captureCanvasBaseline(state.nodes, state.edges);
           const confirmed = await confirmRemixOperation(project, operationId, canvasId, id);
@@ -427,7 +430,7 @@ export const VideoComposeNode = memo(
         updateNodeData(id, { remixManifestConflicts: [], remixManifestDirty: true });
         setRemixError(null);
       };
-      const submit = async () => {
+      const submit = async (regenerate = false) => {
         if (!project || !exportable || nodeRevision == null) return;
         if (data.remixInputFingerprint && currentRemixInputFingerprint !== data.remixInputFingerprint) {
           setRemixError('上游素材或产物已变化，请重新生成合成清单');
@@ -436,7 +439,7 @@ export const VideoComposeNode = memo(
         setRemixSubmitting(true); setRemixError(null);
         try {
           if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('画布尚未保存，请稍后重试');
-          const task = await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision, canvasId, nodeId: id });
+          const task = await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision, canvasId, nodeId: id, inputFingerprint: data.remixInputFingerprint, regenerate });
           setRemixTask(task);
           updateNodeData(id, { remixOperationId: task.operation_id });
           if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('任务已提交，但画布尚未保存；请刷新后从任务记录恢复');
@@ -444,7 +447,7 @@ export const VideoComposeNode = memo(
         catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
         finally { setRemixSubmitting(false); }
       };
-      submitRemixRef.current = () => { void submit(); };
+      submitRemixRef.current = () => { void submit(false); };
       saveManifestRef.current = () => { void saveManifest(); };
       return <div className="group relative w-[380px]" onClick={() => setSelectedNode(id)}>
         <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
@@ -452,9 +455,11 @@ export const VideoComposeNode = memo(
         <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
         <div className={`rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
           <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted"><span>合成清单 · 版本 {data.remixManifestRef.revision}</span><span className={manifestReady && previewState === 'current' ? 'text-green-300' : manifestReady && previewState === 'stale' ? 'text-amber-300' : ''}>{data.remixManifestLoadState === 'failed' ? '清单加载失败' : !manifestReady ? '正在加载清单…' : previewState === 'current' ? '预览与导出一致' : previewState === 'stale' ? '预览已过期' : '尚未生成预览'}</span></div>
-          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} disabled={isManifestSaving} onManifestChange={(next) => { if (!manifestReady || isManifestSaving) return; setManifestDraft(next); setManifestDirty(true); updateNodeData(id, { remixManifestDirty: true }); }} />
+          <RemixEditor selections={data.remixSelections ?? []} events={data.remixEvents ?? []} manifest={manifestReady ? manifestDraft : null} disabled={isManifestSaving} onManifestChange={(next) => { if (!manifestReady || isManifestSaving) return; applyRemixInvalidation(id, 'style'); setManifestDraft(next); setManifestDirty(true); updateNodeData(id, { remixManifestDirty: true }); }} />
           <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-3">
-            <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit()} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+            <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || !project || !remixKey} onClick={() => void submit(false)} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? t('videoCompose.node.remixSubmitting') : t('videoCompose.node.remixSubmit')}</button>
+            {data.remixOperationId && !data.resultVideoUrl ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { if (project) void transitionRemixOperation(project, data.remixOperationId!, 'cancelled', 'user_cancelled').then(() => updateNodeData(id, { remixOperationId: null })); }}>取消导出</button> : null}
+            {remixError && exportable ? <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => void submit(true)}>强制重新导出</button> : null}
             {manifestDirty ? <button type="button" disabled={isManifestSaving || conflicts.length > 0 || !manifestReady} onClick={() => void saveManifest()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{isManifestSaving ? '保存中…' : '保存清单修改'}</button> : null}
             <button type="button" disabled={isRemixPreparing || !project || (!manifestReady && data.remixManifestLoadState !== 'failed') || manifestDirty} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{data.remixManifestLoadState === 'failed' ? '重新生成合成清单' : '更新清单'}</button>
           </div>

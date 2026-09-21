@@ -2,10 +2,10 @@ import { apiCall } from './client';
 
 export interface RemixArtifactRef { artifactId: string; revision: number }
 export interface RemixArtifact { id: string; schema: string; revision: number; payload: Record<string, unknown>; upstream_refs?: Array<{ artifact_id: string; revision: number }> }
-export interface RemixRenderRequest { manifestRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number; canvasId?: string; nodeId?: string }
+export interface RemixRenderRequest { manifestRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number; canvasId?: string; nodeId?: string; inputFingerprint?: string; regenerate?: boolean }
 export interface RemixTaskRef { task_key: string; task_type: string; task_id: string | null; operation_id: string }
 export interface RemixRenderTaskRef extends RemixTaskRef { job_id: string }
-export interface RemixOperation { operation_id: string; status: string; task_id: string | null; task_type?: string | null; task_scope?: string | null; producer_version?: string; canvas_id?: string; node_id?: string; node_revision?: number; input_refs?: Array<{ artifact_id: string; revision: number }>; input_media_hashes?: string[]; output_refs: Array<{ project_path?: string; artifact_id?: string; revision?: number }>; output_urls?: Array<{ media_url: string; download_url: string }> }
+export interface RemixOperation { operation_id: string; status: string; task_id: string | null; task_type?: string | null; task_scope?: string | null; producer_version?: string; normalized_parameters?: { input_fingerprint?: string; [key: string]: unknown }; canvas_id?: string; node_id?: string; node_revision?: number; input_refs?: Array<{ artifact_id: string; revision: number }>; input_media_hashes?: string[]; output_refs: Array<{ project_path?: string; artifact_id?: string; revision?: number }>; output_urls?: Array<{ media_url: string; download_url: string }> }
 export interface RemixUploadedMedia { media_path: string; media_hash: string; url: string; size: number; media_kind: 'image' | 'video' | 'audio'; duration_us: number; has_audio?: boolean; audio_stream_count?: number; width_px?: number; height_px?: number; fps_num?: number; fps_den?: number }
 export type RemixProcessRequest =
   | { action: 'analyze_reference_video'; mediaPath: string; idempotencyKey: string; nodeRevision: number }
@@ -32,7 +32,7 @@ export function generateRemixBrollPlan(project: string, scriptRef: RemixArtifact
     method: 'POST', json: { script_ref: exactRef(scriptRef) }, timeout: false,
   });
 }
-export function renderRemixManifest(project: string, request: RemixRenderRequest) { return apiCall<RemixRenderTaskRef>(`projects/${project}/freezone/remix/artifacts/${request.manifestRef.artifactId}/render`, { method: 'POST', json: { revision: request.manifestRef.revision, idempotency_key: request.idempotencyKey, node_revision: request.nodeRevision, ...(request.canvasId ? { canvas_id: request.canvasId } : {}), ...(request.nodeId ? { node_id: request.nodeId } : {}) } }); }
+export function renderRemixManifest(project: string, request: RemixRenderRequest) { return apiCall<RemixRenderTaskRef>(`projects/${project}/freezone/remix/artifacts/${request.manifestRef.artifactId}/render`, { method: 'POST', json: { revision: request.manifestRef.revision, idempotency_key: request.idempotencyKey, node_revision: request.nodeRevision, input_fingerprint: request.inputFingerprint ?? '', regenerate: request.regenerate ?? false, ...(request.canvasId ? { canvas_id: request.canvasId } : {}), ...(request.nodeId ? { node_id: request.nodeId } : {}) } }); }
 export function uploadRemixMedia(project: string, file: File) {
   const body = new FormData();
   body.append('file', file);
@@ -52,6 +52,9 @@ export function fetchRemixTaskStatus(project: string, taskType: string, scope: s
 }
 export function confirmRemixOperation(project: string, operationId: string, canvasId: string, nodeId: string) {
   return apiCall<RemixOperation>(`projects/${project}/freezone/remix/operations/${operationId}/confirm`, { method: 'POST', json: { canvas_id: canvasId, node_id: nodeId } });
+}
+export function transitionRemixOperation(project: string, operationId: string, outcome: 'unknown' | 'failed' | 'cancelled', reason = '', providerTaskId = '') {
+  return apiCall<RemixOperation>(`projects/${project}/freezone/remix/operations/${operationId}/transition`, { method: 'POST', json: { outcome, reason, provider_task_id: providerTaskId } });
 }
 
 export function submitRemixProcessAction(project: string, request: RemixProcessRequest) {

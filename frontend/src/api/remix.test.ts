@@ -15,7 +15,7 @@ describe('remix API contract', () => {
 
     await renderRemixManifest('demo', { manifestRef: { artifactId: 'manifest', revision: 4 }, idempotencyKey: 'once', nodeRevision: 3 });
     expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/artifacts/manifest/render', {
-      method: 'POST', json: { revision: 4, idempotency_key: 'once', node_revision: 3 },
+      method: 'POST', json: { revision: 4, idempotency_key: 'once', node_revision: 3, input_fingerprint: '', regenerate: false },
     });
 
     await submitRemixProcessAction('demo', {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '../domain/canvasNodes';
-import { createComposeFromTimeline, createTimelineFromScript, planComposeFromTimeline, planRemixInvalidation, planTimelineFromScript } from './spawnRemixDownstream';
+import { applyRemixInvalidation, createComposeFromTimeline, createTimelineFromScript, planComposeFromTimeline, planRemixInvalidation, planTimelineFromScript } from './spawnRemixDownstream';
 
 const graphStore = vi.hoisted(() => ({ getState: vi.fn() }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: graphStore }));
@@ -17,6 +17,19 @@ describe('source-first remix graph plans', () => {
     ['voice', ['align_script', 'compile_timeline', 'render']],
   ] as const)('invalidates only affected work for %s edits', (change, expected) => {
     expect(planRemixInvalidation(change)).toEqual(expected);
+  });
+  it('applies script invalidation through the graph without dispatching paid calls', () => {
+    const updateNodeData = vi.fn();
+    const paidCall = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [node('script', 'scriptNode'), node('words', 'transcriptNode', { artifactRef: ref('w') }), node('timeline', 'semanticTimelineNode', { artifactRef: ref('t') }), node('compose', 'videoComposeNode', { resultVideoUrl: '/old.mp4' })],
+      edges: [edge('script', 'words'), edge('words', 'timeline'), edge('timeline', 'compose')], updateNodeData, paidCall,
+    });
+    expect(applyRemixInvalidation('script', 'script')).toEqual(['align_script', 'compile_timeline', 'render']);
+    expect(updateNodeData).toHaveBeenCalledWith('words', expect.objectContaining({ artifactRef: null, alignmentStale: true }));
+    expect(updateNodeData).toHaveBeenCalledWith('timeline', expect.objectContaining({ artifactRef: null }));
+    expect(updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ resultVideoUrl: null }));
+    expect(paidCall).not.toHaveBeenCalled();
   });
   it('connects the saved script and its directly aligned transcript to a new timeline', () => {
     const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s') }), node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' })];

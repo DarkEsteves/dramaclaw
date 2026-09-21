@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from types import SimpleNamespace
 import hashlib
 
@@ -130,7 +132,7 @@ def test_render_does_not_requeue_when_result_published_before_task_binding(clien
     operation = store.start(
         idempotency_key="fast-render",
         input_refs=[{"artifact_id": created["id"], "revision": 1}],
-        producer_version="remix-render.v1", normalized_parameters={"job_id": job_id},
+        producer_version="remix-render.v1", normalized_parameters={"job_id": job_id, "input_fingerprint": ""},
         node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()],
     )
     output = tmp_path / "freezone" / "remix_renders" / created["id"] / "1" / f"{job_id}.mp4"
@@ -152,7 +154,7 @@ def test_render_reconciles_existing_uncertain_or_cancelled_operation_before_requ
     created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
     job_id = hashlib.sha256(f"demo\0{created['id']}\0{1}\0recover-render".encode()).hexdigest()
     store = RemixOperationStore(tmp_path, "demo")
-    operation = store.start(idempotency_key="recover-render", input_refs=[{"artifact_id": created["id"], "revision": 1}], producer_version="remix-render.v1", normalized_parameters={"job_id": job_id}, node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()])
+    operation = store.start(idempotency_key="recover-render", input_refs=[{"artifact_id": created["id"], "revision": 1}], producer_version="remix-render.v1", normalized_parameters={"job_id": job_id, "input_fingerprint": ""}, node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()])
     if state == "pending_reconciliation":
         store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-1")
     else:
@@ -161,6 +163,45 @@ def test_render_reconciles_existing_uncertain_or_cancelled_operation_before_requ
     assert response.status_code == 200
     assert response.json()["data"]["operation_status"] == state
     assert queued == []
+
+
+def test_simultaneous_render_api_calls_enqueue_once(client, monkeypatch: pytest.MonkeyPatch):
+    from novelvideo.api.routes import remix as routes
+    api, _queued = client
+    created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    class SlowBackend:
+        async def enqueue_project_task(self, ctx, **kwargs):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await asyncio.to_thread(release.wait, 2)
+            return SimpleNamespace(task_state=SimpleNamespace(task_id="task-one"), backend="local", queue="ffmpeg")
+    monkeypatch.setattr(routes, "get_task_backend", lambda: SlowBackend())
+    body = {"revision": 1, "idempotency_key": "simultaneous", "node_revision": 4}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(api.post, f"{BASE}/{created['id']}/render", json=body)
+        assert entered.wait(2)
+        second = executor.submit(api.post, f"{BASE}/{created['id']}/render", json=body)
+        second_response = second.result(timeout=2)
+        release.set()
+        first_response = first.result(timeout=2)
+    assert first_response.status_code == second_response.status_code == 200
+    assert calls == 1
+
+
+def test_force_regenerate_is_reachable_through_render_api(client):
+    api, queued = client
+    created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
+    url = f"{BASE}/{created['id']}/render"
+    body = {"revision": 1, "idempotency_key": "force", "node_revision": 4}
+    first = api.post(url, json=body)
+    second = api.post(url, json={**body, "regenerate": True})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["data"]["operation_id"] != second.json()["data"]["operation_id"]
+    assert len(queued) == 2
 
 
 def test_idempotency_key_cannot_be_reused_for_different_manifest_revision(client):

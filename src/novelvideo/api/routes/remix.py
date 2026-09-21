@@ -8,6 +8,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -49,11 +50,19 @@ class RenderArtifactBody(BaseModel):
     node_revision: int = Field(ge=1, strict=True)
     canvas_id: str = ""
     node_id: str = ""
+    input_fingerprint: str = Field(default="", max_length=256)
+    regenerate: bool = False
 
 
 class ConfirmOperationBody(BaseModel):
     canvas_id: str = Field(min_length=1, max_length=64)
     node_id: str = Field(min_length=1, max_length=128)
+
+
+class OperationTransitionBody(BaseModel):
+    outcome: Literal["unknown", "failed", "cancelled"]
+    provider_task_id: str = ""
+    reason: str = Field(default="", max_length=500)
 
 
 class ProcessActionBody(BaseModel):
@@ -465,15 +474,18 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
     task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=scope)
     if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale"}:
         return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
-    queued = await get_task_backend().enqueue_project_task(
-        ctx,
-        product_surface="freezone",
-        task_type=task_type,
-        queue_kind=prepared["queue_kind"],
-        episode=0,
-        scope=scope,
-        payload={**prepared["task_payload"], "operation_id": operation["operation_id"]},
-    )
+    owner = uuid.uuid4().hex
+    if not await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner):
+        current = await run_in_threadpool(operations.get, operation["operation_id"])
+        return _data({"action": body.action, "task_type": task_type, "task_id": current["task_id"], "task_key": task_key, "operation_id": current["operation_id"], "operation_status": current["status"], "output_refs": current["output_refs"]})
+    try:
+        queued = await get_task_backend().enqueue_project_task(
+            ctx, product_surface="freezone", task_type=task_type, queue_kind=prepared["queue_kind"],
+            episode=0, scope=scope, payload={**prepared["task_payload"], "operation_id": operation["operation_id"]},
+        )
+    except Exception:
+        await run_in_threadpool(operations.release_submission, operation["operation_id"], owner=owner)
+        raise
     await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
     return _data({"action": body.action, "task_type": task_type, "task_id": queued.task_state.task_id, "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": "pending"})
 
@@ -529,22 +541,26 @@ async def render_artifact(
         validate_manifest(artifact["payload"])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    job_id = hashlib.sha256(
-        f"{store.project_id}\0{artifact_id}\0{body.revision}\0{body.idempotency_key}".encode()
-    ).hexdigest()
+    job_seed = f"{store.project_id}\0{artifact_id}\0{body.revision}\0{body.idempotency_key}"
+    if body.regenerate:
+        job_seed += f"\0{uuid.uuid4().hex}"
+    job_id = hashlib.sha256(job_seed.encode()).hexdigest()
     ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
     operations = RemixOperationStore(store.project_dir, store.project_id)
+    if bool(body.canvas_id) != bool(body.input_fingerprint):
+        raise HTTPException(422, "Bound render requires the exact input fingerprint")
     try:
         operation = await run_in_threadpool(
             operations.start,
             idempotency_key=body.idempotency_key,
             input_refs=[{"artifact_id": artifact_id, "revision": body.revision}],
             producer_version="remix-render.v1",
-            normalized_parameters={"job_id": job_id},
+            normalized_parameters={"job_id": job_id, "input_fingerprint": body.input_fingerprint},
             node_revision=body.node_revision,
             input_media_hashes=_input_media_hashes(artifact["payload"]),
             canvas_id=body.canvas_id,
             node_id=body.node_id,
+            regenerate=body.regenerate,
         )
     except ValueError as exc:
         if "Idempotency key" in str(exc):
@@ -562,22 +578,25 @@ async def render_artifact(
             "operation_id": operation["operation_id"],
             "output_refs": operation["output_refs"],
         })
-    queued = await get_task_backend().enqueue_project_task(
-        ctx,
-        product_surface="freezone",
-        task_type="remix_render",
-        queue_kind="ffmpeg",
-        episode=0,
-        scope=job_id,
-        payload={
+    owner = uuid.uuid4().hex
+    if not await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner):
+        current = await run_in_threadpool(operations.get, operation["operation_id"])
+        return _data({"task_type": "remix_render", "job_id": job_id, "task_id": current["task_id"], "task_key": project_task_state_key("remix_render", ctx.project_id, 0, scope=job_id), "manifest_ref": {"artifact_id": artifact_id, "revision": body.revision}, "node_revision": body.node_revision, "operation_status": current["status"], "operation_id": current["operation_id"], "output_refs": current["output_refs"]})
+    try:
+        queued = await get_task_backend().enqueue_project_task(
+            ctx, product_surface="freezone", task_type="remix_render", queue_kind="ffmpeg", episode=0, scope=job_id,
+            payload={
             "job_id": job_id,
             "operation_id": operation["operation_id"],
             "project_dir": str(store.project_dir),
             "manifest_ref": {"artifact_id": artifact_id, "revision": body.revision},
             "idempotency_key": body.idempotency_key,
             "node_revision": body.node_revision,
-        },
-    )
+            },
+        )
+    except Exception:
+        await run_in_threadpool(operations.release_submission, operation["operation_id"], owner=owner)
+        raise
     await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
     return _data({
         "task_type": "remix_render",
@@ -634,4 +653,22 @@ async def confirm_operation(
         raise HTTPException(422, str(exc)) from exc
     except (CanvasLockBusy, OSError) as exc:
         raise HTTPException(503, "Remix result temporarily unavailable; retry") from exc
+    return _data(_operation_view(result))
+
+
+@router.post("/operations/{operation_id}/transition")
+async def transition_operation(project: str, operation_id: str, body: OperationTransitionBody, user: dict = Depends(get_api_user)):
+    store = await _store(project, user, "editor")
+    operations = RemixOperationStore(store.project_dir, store.project_id)
+    try:
+        if body.outcome == "unknown":
+            result = await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=body.provider_task_id)
+        elif body.outcome == "cancelled":
+            result = await _call(operations.cancel, operation_id, reason=body.reason or "user_cancelled")
+        else:
+            result = await _call(operations.fail, operation_id, reason=body.reason or "task_failed")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Operation not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     return _data(_operation_view(result))

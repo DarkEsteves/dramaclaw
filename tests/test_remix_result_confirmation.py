@@ -49,8 +49,9 @@ def _published(tmp_path: Path, *, node_revision: int = 3) -> tuple[dict, dict]:
     operation_store = RemixOperationStore(tmp_path, "demo")
     operation = operation_store.start(
         idempotency_key="render-one", input_refs=[{"artifact_id": artifact["id"], "revision": 1}],
-        producer_version="remix-render.v1", normalized_parameters={"job_id": "a" * 64},
+        producer_version="remix-render.v1", normalized_parameters={"job_id": "a" * 64, "input_fingerprint": "fingerprint-1"},
         node_revision=node_revision, canvas_id="default", node_id="compose-1",
+        input_media_hashes=["sha256:" + "a" * 64, "sha256:" + "b" * 64],
     )
     output = tmp_path / "freezone" / "remix_renders" / artifact["id"] / "1" / f"{'a' * 64}.mp4"
     output.parent.mkdir(parents=True)
@@ -67,6 +68,7 @@ def _canvas(tmp_path: Path, artifact: dict, *, node_revision: int = 3) -> Path:
         "nodes": [{"id": "compose-1", "type": "videoCompose", "data": {
             "remixNodeRevision": node_revision,
             "remixManifestRef": {"artifactId": artifact["id"], "revision": 1},
+            "remixInputFingerprint": "fingerprint-1", "remixInputsCurrent": True,
         }}], "edges": [],
     }))
     return path
@@ -166,7 +168,7 @@ def test_late_render_after_script_revision_is_retained_but_never_backfilled(api:
     response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm", json={"canvas_id": "default", "node_id": "compose-1"})
     record = RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])
     assert response.json()["data"]["status"] == "stale"
-    assert record["output_refs"] and record["stale_reason"] == "node_revision_changed"
+    assert record["output_refs"] and record["stale_reason"] == "exact_inputs_changed"
     assert "resultVideoUrl" not in json.loads(canvas.read_text())["nodes"][0]["data"]
 
 
@@ -178,3 +180,29 @@ def test_deleted_render_cannot_be_backfilled(api: TestClient, tmp_path: Path) ->
     response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm", json={"canvas_id": "default", "node_id": "compose-1"})
     assert response.status_code == 422
     assert RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])["status"] == "needs_confirmation"
+
+
+@pytest.mark.parametrize("patch", [
+    {"remixInputFingerprint": "new-script-fingerprint"},
+    {"remixInputsCurrent": False},
+])
+def test_confirm_retains_late_result_when_exact_upstream_fingerprint_changed(api: TestClient, tmp_path: Path, patch: dict) -> None:
+    artifact, operation = _published(tmp_path)
+    canvas_path_value = _canvas(tmp_path, artifact)
+    canvas = json.loads(canvas_path_value.read_text())
+    canvas["nodes"][0]["data"].update(patch)
+    canvas_path_value.write_text(json.dumps(canvas))
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm", json={"canvas_id": "default", "node_id": "compose-1"})
+    assert response.json()["data"]["status"] == "stale"
+    assert RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])["output_refs"]
+    assert "resultVideoUrl" not in json.loads(canvas_path_value.read_text())["nodes"][0]["data"]
+
+
+def test_operation_transition_endpoint_exposes_cancel_and_unknown_reconciliation(api: TestClient, tmp_path: Path) -> None:
+    _artifact, operation = _published(tmp_path)
+    unknown = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "unknown", "provider_task_id": "provider-9"})
+    assert unknown.status_code == 200
+    assert unknown.json()["data"]["status"] == "pending_reconciliation"
+    cancelled = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "cancelled", "reason": "user_cancelled"})
+    assert cancelled.status_code == 200
+    assert cancelled.json()["data"]["status"] == "cancelled"
