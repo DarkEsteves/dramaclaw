@@ -190,30 +190,42 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("layer opacity must be between 0 and 1")
         if layer.get("fit", "stretch") not in {"stretch", "cover", "contain"}:
             raise ValueError("unsupported layer fit mode")
-        crop = layer.get("crop")
-        if crop is not None:
-            if not isinstance(crop, dict) or any(
-                type(crop.get(key)) is not int for key in ("x", "y", "width", "height")
+        if version == 2:
+            crop = layer.get("crop")
+            if crop is not None:
+                if not isinstance(crop, dict) or any(
+                    type(crop.get(key)) is not int
+                    for key in ("x", "y", "width", "height")
+                ):
+                    raise ValueError("layer crop must use integer pixels")
+                if (
+                    crop["x"] < 0
+                    or crop["y"] < 0
+                    or crop["width"] <= 0
+                    or crop["height"] <= 0
+                ):
+                    raise ValueError("layer crop must be a positive source rectangle")
+            span = layer["end_frame"] - layer["start_frame"]
+            for key in ("fade_in_frames", "fade_out_frames"):
+                value = layer.get(key, 0)
+                if type(value) is not int or value < 0 or value > span:
+                    raise ValueError("layer fade exceeds its event interval")
+            if (
+                layer.get("fade_in_frames", 0) + layer.get("fade_out_frames", 0)
+                > span
             ):
-                raise ValueError("layer crop must use integer pixels")
-            if crop["x"] < 0 or crop["y"] < 0 or crop["width"] <= 0 or crop["height"] <= 0:
-                raise ValueError("layer crop must be a positive source rectangle")
-        span = layer["end_frame"] - layer["start_frame"]
-        for key in ("fade_in_frames", "fade_out_frames"):
-            value = layer.get(key, 0)
-            if type(value) is not int or value < 0 or value > span:
-                raise ValueError("layer fade exceeds its event interval")
-        if layer.get("fade_in_frames", 0) + layer.get("fade_out_frames", 0) > span:
-            raise ValueError("layer fades overlap")
-        zoom = layer.get("zoom")
-        if zoom is not None:
-            if not isinstance(zoom, dict) or any(
-                isinstance(zoom.get(key), bool)
-                or not isinstance(zoom.get(key), (int, float))
-                or not 1 <= zoom[key] <= 4
-                for key in ("start", "end")
-            ):
-                raise ValueError("layer zoom must contain bounded start and end scales")
+                raise ValueError("layer fades overlap")
+            zoom = layer.get("zoom")
+            if zoom is not None:
+                if not isinstance(zoom, dict) or any(
+                    isinstance(zoom.get(key), bool)
+                    or not isinstance(zoom.get(key), (int, float))
+                    or not 1 <= zoom[key] <= 4
+                    for key in ("start", "end")
+                ):
+                    raise ValueError(
+                        "layer zoom must contain bounded start and end scales"
+                    )
     if version == 2 and not any(
         layer.get("start_frame") == 0
         and layer.get("end_frame") == duration_frames
@@ -259,7 +271,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             or not 0 <= volume <= 2
         ):
             raise ValueError("audio volume must be between 0 and 2")
-        ducking = event.get("duck_under_narration")
+        ducking = event.get("duck_under_narration") if version == 2 else None
         if ducking is not None and (
             event.get("role") != "bgm"
             or isinstance(ducking, bool)
@@ -442,7 +454,7 @@ def _render_manifest_ffmpeg(
                 width=width,
                 height=height,
                 fps=fps,
-                safe_area=spec.get("subtitle_safe_area"),
+                safe_area=spec.get("subtitle_safe_area") if layered_v2 else None,
             ),
             encoding="utf-8-sig",
         )
@@ -459,7 +471,7 @@ def _render_manifest_ffmpeg(
             layer_height = layer.get("height", height)
             fit = layer.get("fit", "stretch")
             image_filters: list[str] = []
-            crop = layer.get("crop")
+            crop = layer.get("crop") if layered_v2 else None
             if crop:
                 image_filters.append(
                     f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}"

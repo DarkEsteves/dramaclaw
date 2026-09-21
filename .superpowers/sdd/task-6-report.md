@@ -30,3 +30,10 @@
 ## Fixed-media gate
 
 The real FFmpeg gate generates a 15-second MP4 from media stored under a directory containing Chinese, spaces, a comma, and an apostrophe. `ffprobe` confirms 1080×1920 at 30 fps with audio. Pixel probes confirm the selected blue background before/after the two-second red B-roll, the B-roll during its event, and rendered subtitle pixels inside the safe area while continuous narration and ducked BGM remain present.
+
+## Review fix
+
+- The first implementation routed v1 and v2 separately but still validated v2-only crop/fade/zoom/duck fields and consumed `subtitle_safe_area`/crop in the shared renderer. This could change an old permissive v1 payload that happened to contain extra keys.
+- Added a real-media golden regression whose v1 manifest contains deliberately invalid v2 extension values. It must validate and render the same blue-background/red-overlay sequence as the historical composer.
+- Version 1 now ignores every v2-only extension in both validation and rendering; version 2 retains all strict checks and effects.
+- Post-fix verification: specified render/export suite 33 passed; artifact/task/result compatibility suite 38 passed; Ruff and diff checks passed.

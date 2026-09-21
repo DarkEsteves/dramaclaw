@@ -157,6 +157,38 @@ def test_manifest_versions_route_without_removing_the_legacy_composer() -> None:
         validate_payload("composition_manifest.v1", {**_manifest(), "manifest_version": None})
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_v1_ignores_v2_extension_fields_and_keeps_legacy_rendering(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    product = tmp_path / "product.mp4"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=180x320:r=30:d=1", "-an", str(product))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    manifest = _manifest()
+    manifest["output_spec"]["subtitle_safe_area"] = {
+        "left": -1, "right": -1, "top": -1, "bottom": -1,
+    }
+    manifest["layers"][1].update({
+        "crop": {"x": -1, "y": -1, "width": -1, "height": -1},
+        "fade_in_frames": -1,
+        "fade_out_frames": 999,
+        "zoom": {"start": 0, "end": 99},
+    })
+    manifest["audio_events"][0]["duck_under_narration"] = 99
+    paths = {"background": background, "product": product, "voice": voice}
+
+    validate_manifest(manifest)
+    output = render_manifest(
+        _bind_media_hashes(manifest, paths), media_paths=paths,
+        output_path=tmp_path / "legacy.mp4",
+    )
+
+    assert _pixel(output, 0.25)[2] > _pixel(output, 0.25)[0] * 2
+    assert _pixel(output, 0.75)[0] > _pixel(output, 0.75)[2] * 2
+    assert _pixel(output, 1.75)[2] > _pixel(output, 1.75)[0] * 2
+
+
 def test_v2_validates_crop_motion_fades_and_deterministic_bgm_ducking() -> None:
     manifest = _manifest()
     manifest["manifest_version"] = 2
