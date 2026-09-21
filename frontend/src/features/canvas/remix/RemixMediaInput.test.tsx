@@ -27,4 +27,12 @@ describe('RemixMediaInput', () => {
     expect(screen.queryByText('正在读取素材…')).not.toBeInTheDocument();
     expect(screen.getByText(/2\.0 秒/)).toBeInTheDocument();
   });
+
+  it('can mark a video as the rendered background without changing its media', () => {
+    const media = { media_path: 'input/clip.mp4', media_hash: 'a'.repeat(64), url: '/clip.mp4', size: 2, media_kind: 'video' as const, duration_us: 2_000_000 };
+    const onChange = vi.fn();
+    render(<RemixMediaInput project="demo" kind="video" role="reference" media={media} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText('素材用途'), { target: { value: 'background' } });
+    expect(onChange).toHaveBeenCalledWith({ media, role: 'background' });
+  });
 });

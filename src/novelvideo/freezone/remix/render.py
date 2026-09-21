@@ -104,6 +104,9 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     """Reject unsupported or incomplete media and time bindings before spawning FFmpeg."""
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be an object")
+    version = manifest.get("manifest_version", 1)
+    if type(version) is not int or version not in {1, 2}:
+        raise ValueError("unsupported composition manifest version")
     spec = manifest.get("output_spec")
     if not isinstance(spec, dict):
         raise ValueError("output_spec is required")
@@ -122,8 +125,23 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("output must be even-sized 9:16 portrait video")
     if fps > 60 or duration_frames > 60 * fps:
         raise ValueError("output duration or fps exceeds the remix MVP limit")
+    safe_area = spec.get("subtitle_safe_area")
+    if version == 2:
+        if (width, height, fps) != (1080, 1920, 30):
+            raise ValueError("version 2 output must be 1080x1920 at 30 fps")
+        if not isinstance(safe_area, dict) or any(
+            type(safe_area.get(key)) is not int or safe_area[key] < 0
+            for key in ("left", "right", "top", "bottom")
+        ):
+            raise ValueError("version 2 output requires a subtitle safe area")
+        if (
+            safe_area["left"] + safe_area["right"] >= width
+            or safe_area["top"] + safe_area["bottom"] >= height
+        ):
+            raise ValueError("subtitle safe area exceeds the output canvas")
 
     bindings: dict[str, str] = {}
+    binding_purposes: dict[str, str | None] = {}
     for row in manifest.get("media_bindings", []):
         media_id, kind = row.get("media_id"), row.get("kind")
         if not isinstance(media_id, str) or not media_id or media_id in bindings:
@@ -135,6 +153,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(row.get("media_hash"), str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", row["media_hash"]):
             raise ValueError(f"media_hash is required for {media_id}")
         bindings[media_id] = kind
+        binding_purposes[media_id] = row.get("purpose")
 
     layers = manifest.get("layers", [])
     if not layers:
@@ -171,6 +190,38 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("layer opacity must be between 0 and 1")
         if layer.get("fit", "stretch") not in {"stretch", "cover", "contain"}:
             raise ValueError("unsupported layer fit mode")
+        crop = layer.get("crop")
+        if crop is not None:
+            if not isinstance(crop, dict) or any(
+                type(crop.get(key)) is not int for key in ("x", "y", "width", "height")
+            ):
+                raise ValueError("layer crop must use integer pixels")
+            if crop["x"] < 0 or crop["y"] < 0 or crop["width"] <= 0 or crop["height"] <= 0:
+                raise ValueError("layer crop must be a positive source rectangle")
+        span = layer["end_frame"] - layer["start_frame"]
+        for key in ("fade_in_frames", "fade_out_frames"):
+            value = layer.get(key, 0)
+            if type(value) is not int or value < 0 or value > span:
+                raise ValueError("layer fade exceeds its event interval")
+        if layer.get("fade_in_frames", 0) + layer.get("fade_out_frames", 0) > span:
+            raise ValueError("layer fades overlap")
+        zoom = layer.get("zoom")
+        if zoom is not None:
+            if not isinstance(zoom, dict) or any(
+                isinstance(zoom.get(key), bool)
+                or not isinstance(zoom.get(key), (int, float))
+                or not 1 <= zoom[key] <= 4
+                for key in ("start", "end")
+            ):
+                raise ValueError("layer zoom must contain bounded start and end scales")
+    if version == 2 and not any(
+        layer.get("start_frame") == 0
+        and layer.get("end_frame") == duration_frames
+        and layer.get("z_order") == 0
+        and binding_purposes.get(layer.get("media_id")) in {"background", "a-roll"}
+        for layer in layers
+    ):
+        raise ValueError("version 2 requires an explicit selected background or A-roll")
     for event in manifest.get("subtitle_events", []):
         _interval(event, duration_frames)
         if not isinstance(event.get("text"), str) or not event["text"].strip():
@@ -208,7 +259,36 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             or not 0 <= volume <= 2
         ):
             raise ValueError("audio volume must be between 0 and 2")
+        ducking = event.get("duck_under_narration")
+        if ducking is not None and (
+            event.get("role") != "bgm"
+            or isinstance(ducking, bool)
+            or not isinstance(ducking, (int, float))
+            or not 0 <= ducking <= 1
+        ):
+            raise ValueError("BGM duck factor must be between 0 and 1")
+    if version == 2:
+        narration_ranges = sorted(
+            (_interval(row, duration_frames) for row in audio_events if row.get("role") == "narration")
+        )
+        cursor = 0
+        for start, end in narration_ranges:
+            if start > cursor:
+                raise ValueError("version 2 requires continuous narration")
+            cursor = max(cursor, end)
+        if cursor != duration_frames:
+            raise ValueError("version 2 requires continuous narration")
     return manifest
+
+
+def manifest_renderer(manifest: dict[str, Any]) -> str:
+    """Return the stable renderer route without silently upgrading old manifests."""
+    version = manifest.get("manifest_version", 1)
+    if version == 1:
+        return "legacy_v1"
+    if version == 2:
+        return "layered_v2"
+    raise ValueError("unsupported composition manifest version")
 
 
 def _ass_time(frame: int, fps: int) -> str:
@@ -217,8 +297,19 @@ def _ass_time(frame: int, fps: int) -> str:
 
 
 def _ass_document(
-    events: list[dict[str, Any]], *, width: int, height: int, fps: int
+    events: list[dict[str, Any]],
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    safe_area: dict[str, int] | None = None,
 ) -> str:
+    margins = safe_area or {
+        "left": 20,
+        "right": 20,
+        "top": 30,
+        "bottom": 30,
+    }
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\n"
@@ -227,7 +318,8 @@ def _ass_document(
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,Arial,{max(12, round(height * 0.052))},&H00FFFFFF,&H000000FF,&H00000000,"
-        "&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,30,1\n"
+        f"&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,{margins['left']},"
+        f"{margins['right']},{margins['bottom']},1\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     lines = []
@@ -283,11 +375,14 @@ def _duration_seconds(path: Path) -> float:
     return duration
 
 
-def render_manifest(
-    manifest: dict[str, Any], *, media_paths: dict[str, Path], output_path: Path
+def _render_manifest_ffmpeg(
+    manifest: dict[str, Any],
+    *,
+    media_paths: dict[str, Path],
+    output_path: Path,
+    layered_v2: bool,
 ) -> Path:
     """Render an authorized media table using the exact saved composition manifest."""
-    validate_manifest(manifest)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg and ffprobe are required")
     spec = manifest["output_spec"]
@@ -343,7 +438,11 @@ def render_manifest(
         ass_path = temp_dir / "captions.ass"
         ass_path.write_text(
             _ass_document(
-                manifest.get("subtitle_events", []), width=width, height=height, fps=fps
+                manifest.get("subtitle_events", []),
+                width=width,
+                height=height,
+                fps=fps,
+                safe_area=spec.get("subtitle_safe_area"),
             ),
             encoding="utf-8-sig",
         )
@@ -359,29 +458,67 @@ def render_manifest(
             layer_width = layer.get("width", width)
             layer_height = layer.get("height", height)
             fit = layer.get("fit", "stretch")
+            image_filters: list[str] = []
+            crop = layer.get("crop")
+            if crop:
+                image_filters.append(
+                    f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}"
+                )
             if fit == "cover":
-                image_filter = (
-                    f"scale={layer_width}:{layer_height}:force_original_aspect_ratio=increase,"
-                    f"crop={layer_width}:{layer_height}"
+                image_filters.extend(
+                    [
+                        f"scale={layer_width}:{layer_height}:force_original_aspect_ratio=increase",
+                        f"crop={layer_width}:{layer_height}",
+                    ]
                 )
             elif fit == "contain":
-                image_filter = (
-                    f"scale={layer_width}:{layer_height}:force_original_aspect_ratio=decrease,"
-                    f"format=rgba,pad={layer_width}:{layer_height}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+                image_filters.extend(
+                    [
+                        f"scale={layer_width}:{layer_height}:force_original_aspect_ratio=decrease",
+                        "format=rgba",
+                        f"pad={layer_width}:{layer_height}:(ow-iw)/2:(oh-ih)/2:color=black@0",
+                    ]
                 )
             else:
-                image_filter = f"scale={layer_width}:{layer_height}"
+                image_filters.append(f"scale={layer_width}:{layer_height}")
+            zoom = layer.get("zoom") if layered_v2 else None
+            if zoom:
+                layer_frames = end - start
+                progress = f"n/{max(1, layer_frames - 1)}"
+                scale = f"({zoom['start']}+({zoom['end']}-{zoom['start']})*{progress})"
+                image_filters.extend(
+                    [
+                        f"scale=w='trunc({layer_width}*{scale}/2)*2':"
+                        f"h='trunc({layer_height}*{scale}/2)*2':eval=frame",
+                        f"crop={layer_width}:{layer_height}:(iw-{layer_width})/2:(ih-{layer_height})/2",
+                    ]
+                )
+            image_filters.append("format=rgba")
+            layer_duration = (end - start) / fps
+            fade_in = layer.get("fade_in_frames", 0) if layered_v2 else 0
+            fade_out = layer.get("fade_out_frames", 0) if layered_v2 else 0
+            if fade_in:
+                image_filters.append(f"fade=t=in:st=0:d={fade_in / fps}:alpha=1")
+            if fade_out:
+                image_filters.append(
+                    f"fade=t=out:st={(end - start - fade_out) / fps}:"
+                    f"d={fade_out / fps}:alpha=1"
+                )
+            image_filter = ",".join(image_filters)
             filters.append(
                 f"[{source}:v]{image_filter},setsar=1,"
-                f"trim=duration={(end - start) / fps},setpts=PTS-STARTPTS+{start / fps}/TB,"
-                f"format=rgba,colorchannelmixer=aa={layer.get('opacity', 1)}[{segment}]"
+                f"trim=duration={layer_duration},setpts=PTS-STARTPTS+{start / fps}/TB,"
+                f"colorchannelmixer=aa={layer.get('opacity', 1)}[{segment}]"
             )
             filters.append(
                 f"[{base}][{segment}]overlay=x={layer.get('x', 0)}:y={layer.get('y', 0)}:eof_action=pass:"
                 f"enable='gte(t,{start / fps})*lt(t,{end / fps})'[{next_base}]"
             )
             base = next_base
-        filters.append(f"[{base}]ass={ass_path.as_posix()}[video]")
+        # Run FFmpeg from the private staging directory so the filter graph never
+        # has to parse a user-controlled filesystem path. Media paths remain
+        # separate argv entries and the fixed ASS filename is filter-safe.
+        filters.append(f"[{base}]ass=filename='captions.ass'[video]")
 
         audio_labels = []
         for i, event in enumerate(manifest["audio_events"]):
@@ -389,9 +526,12 @@ def render_manifest(
             start, end = event["start_frame"], event["end_frame"]
             label = f"audio{i}"
             delay_ms = round(start * 1000 / fps)
+            volume = event.get("volume", 1)
+            if layered_v2 and event.get("role") == "bgm":
+                volume *= event.get("duck_under_narration", 1)
             filters.append(
                 f"[{source}:a]atrim=duration={(end - start) / fps},asetpts=PTS-STARTPTS,"
-                f"volume={event.get('volume', 1)},adelay={delay_ms}|{delay_ms}[{label}]"
+                f"volume={volume},adelay={delay_ms}|{delay_ms}[{label}]"
             )
             audio_labels.append(label)
         if len(audio_labels) > 1:
@@ -417,6 +557,10 @@ def render_manifest(
                 str(duration),
                 "-c:v",
                 "libx264",
+                "-preset",
+                "veryfast",
+                "-r",
+                str(fps),
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -424,7 +568,9 @@ def render_manifest(
                 str(staged_output),
             ]
         )
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            command, check=True, capture_output=True, text=True, cwd=temp_dir
+        )
         subprocess.run(
             [
                 "ffprobe",
@@ -442,3 +588,39 @@ def render_manifest(
         )
         os.replace(staged_output, output_path)
     return output_path
+
+
+def _render_manifest_v1(
+    manifest: dict[str, Any], *, media_paths: dict[str, Path], output_path: Path
+) -> Path:
+    return _render_manifest_ffmpeg(
+        manifest,
+        media_paths=media_paths,
+        output_path=output_path,
+        layered_v2=False,
+    )
+
+
+def _render_manifest_v2(
+    manifest: dict[str, Any], *, media_paths: dict[str, Path], output_path: Path
+) -> Path:
+    return _render_manifest_ffmpeg(
+        manifest,
+        media_paths=media_paths,
+        output_path=output_path,
+        layered_v2=True,
+    )
+
+
+def render_manifest(
+    manifest: dict[str, Any], *, media_paths: dict[str, Path], output_path: Path
+) -> Path:
+    """Route immutable manifest versions to their compatible composer."""
+    validate_manifest(manifest)
+    if manifest_renderer(manifest) == "legacy_v1":
+        return _render_manifest_v1(
+            manifest, media_paths=media_paths, output_path=output_path
+        )
+    return _render_manifest_v2(
+        manifest, media_paths=media_paths, output_path=output_path
+    )

@@ -13,9 +13,11 @@ import pytest
 from novelvideo.freezone.remix.render import (
     _ass_document,
     build_manifest,
+    manifest_renderer,
     render_manifest,
     validate_manifest,
 )
+from novelvideo.freezone.remix.contracts import validate_payload
 from novelvideo.freezone.remix.timing import compile_timing
 
 
@@ -55,6 +57,16 @@ def _subtitle_pixels(path: Path, seconds: float) -> bytes:
     result = subprocess.run(
         ["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(path),
          "-frames:v", "1", "-vf", "crop=180:120:0:200", "-pix_fmt", "rgb24",
+         "-f", "rawvideo", "pipe:1"],
+        capture_output=True, check=True,
+    )
+    return result.stdout
+
+
+def _hd_subtitle_pixels(path: Path, seconds: float) -> bytes:
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(path),
+         "-frames:v", "1", "-vf", "crop=900:300:90:1440", "-pix_fmt", "rgb24",
          "-f", "rawvideo", "pipe:1"],
         capture_output=True, check=True,
     )
@@ -111,6 +123,133 @@ def test_manifest_requires_a_narration_track() -> None:
     manifest["audio_events"] = []
     with pytest.raises(ValueError, match="narration"):
         validate_manifest(manifest)
+
+
+def test_v2_manifest_requires_vertical_hd_safe_area_and_continuous_narration() -> None:
+    manifest = _manifest()
+    manifest["manifest_version"] = 2
+    manifest["media_bindings"][0]["purpose"] = "background"
+    manifest["output_spec"].update({
+        "width": 1080,
+        "height": 1920,
+        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180},
+    })
+    validate_manifest(manifest)
+
+    broken = json.loads(json.dumps(manifest))
+    broken["audio_events"][0]["start_frame"] = 1
+    with pytest.raises(ValueError, match="continuous narration"):
+        validate_manifest(broken)
+
+    broken = json.loads(json.dumps(manifest))
+    broken["output_spec"]["width"] = 720
+    broken["output_spec"]["height"] = 1280
+    with pytest.raises(ValueError, match="1080x1920"):
+        validate_manifest(broken)
+
+
+def test_manifest_versions_route_without_removing_the_legacy_composer() -> None:
+    assert manifest_renderer(_manifest()) == "legacy_v1"
+    current = _manifest()
+    current["manifest_version"] = 2
+    assert manifest_renderer(current) == "layered_v2"
+    with pytest.raises(ValueError, match="manifest_version"):
+        validate_payload("composition_manifest.v1", {**_manifest(), "manifest_version": None})
+
+
+def test_v2_validates_crop_motion_fades_and_deterministic_bgm_ducking() -> None:
+    manifest = _manifest()
+    manifest["manifest_version"] = 2
+    manifest["media_bindings"][0]["purpose"] = "background"
+    manifest["output_spec"].update({
+        "width": 1080, "height": 1920,
+        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180},
+    })
+    manifest["layers"][1].update({
+        "crop": {"x": 0, "y": 0, "width": 160, "height": 280},
+        "fade_in_frames": 4,
+        "fade_out_frames": 4,
+        "zoom": {"start": 1.0, "end": 1.05},
+    })
+    manifest["media_bindings"].append({"media_id": "bgm", "kind": "audio", "loop": True, "media_hash": "sha256:" + "0" * 64})
+    manifest["audio_events"].append({
+        "media_id": "bgm", "role": "bgm", "start_frame": 0, "end_frame": 60,
+        "volume": 0.3, "duck_under_narration": 0.35,
+    })
+    validate_manifest(manifest)
+
+    manifest["audio_events"][-1]["duck_under_narration"] = 1.2
+    with pytest.raises(ValueError, match="duck"):
+        validate_manifest(manifest)
+
+
+def test_ass_escapes_markup_and_honours_safe_area() -> None:
+    text = '她说, "你好" {产品}\\下一行'
+    document = _ass_document(
+        [{"text": text, "start_frame": 0, "end_frame": 30}],
+        width=1080, height=1920, fps=30,
+        safe_area={"left": 90, "right": 90, "top": 120, "bottom": 180},
+    )
+    assert "Alignment, MarginL, MarginR, MarginV" in document
+    assert "90,90,180,1" in document
+    assert r'她说, "你好" \{产品\}\\下一行' in document
+
+
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+    reason="FFmpeg required",
+)
+def test_v2_fixed_media_gate_renders_vertical_hd_broll_voice_and_subtitles(tmp_path: Path) -> None:
+    media_dir = tmp_path / "带 空格,quotes'"
+    media_dir.mkdir()
+    background = media_dir / "背景.png"
+    broll = media_dir / "B roll.mp4"
+    voice = media_dir / "旁白.wav"
+    bgm = media_dir / "音乐.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=1080x1920", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=540x960:r=30:d=2", "-an", str(broll))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=15", str(voice))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=220:duration=1", str(bgm))
+    paths = {"background": background, "broll": broll, "voice": voice, "bgm": bgm}
+    manifest = {
+        "manifest_version": 2,
+        "output_spec": {
+            "width": 1080, "height": 1920, "fps": 30, "duration_frames": 450,
+            "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180},
+        },
+        "media_bindings": [
+            {"media_id": "background", "kind": "image", "purpose": "background", "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "broll", "kind": "video", "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "voice", "kind": "audio", "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "bgm", "kind": "audio", "loop": True, "media_hash": "sha256:" + "0" * 64},
+        ],
+        "layers": [
+            {"media_id": "background", "start_frame": 0, "end_frame": 450, "z_order": 0, "fit": "cover"},
+            {"media_id": "broll", "start_frame": 30, "end_frame": 90, "z_order": 1, "fit": "cover", "fade_in_frames": 4, "fade_out_frames": 4, "zoom": {"start": 1, "end": 1.03}},
+        ],
+        "subtitle_events": [{"text": '中文, "caption" {safe}', "start_frame": 150, "end_frame": 300}],
+        "audio_events": [
+            {"media_id": "voice", "role": "narration", "start_frame": 0, "end_frame": 450, "volume": 1},
+            {"media_id": "bgm", "role": "bgm", "start_frame": 0, "end_frame": 450, "volume": 0.3, "duck_under_narration": 0.35},
+        ],
+        "manual_overrides": [], "source_versions": [],
+    }
+    output = render_manifest(
+        _bind_media_hashes(manifest, paths), media_paths=paths,
+        output_path=media_dir / "render output.mp4",
+    )
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(output)],
+        check=True, capture_output=True, text=True,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    video = next(stream for stream in streams if stream["codec_type"] == "video")
+    assert (video["width"], video["height"], video["r_frame_rate"]) == (1080, 1920, "30/1")
+    assert any(stream["codec_type"] == "audio" for stream in streams)
+    assert _pixel(output, 0.5, x=540, y=960)[2] > 100
+    assert _pixel(output, 2.0, x=540, y=960)[0] > 100
+    assert _pixel(output, 12.0, x=540, y=960)[2] > 100
+    assert _hd_subtitle_pixels(output, 6.0) != _hd_subtitle_pixels(output, 12.0)
 
 
 def test_word_cues_render_one_active_word_at_a_time() -> None:

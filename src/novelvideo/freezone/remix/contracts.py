@@ -239,6 +239,8 @@ class PerformanceTiming(_Contract):
 
 
 class CompositionManifest(_Contract):
+    # Missing stays missing so persisted v1 artifacts retain byte-for-byte payloads.
+    manifest_version: Literal[1, 2] | None = None
     output_spec: dict[str, Any]
     media_bindings: list[dict[str, Any]]
     layers: list[dict[str, Any]]
@@ -246,6 +248,12 @@ class CompositionManifest(_Contract):
     audio_events: list[dict[str, Any]]
     manual_overrides: list[dict[str, Any]]
     source_versions: list[dict[str, Any]]
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_version(self) -> "CompositionManifest":
+        if "manifest_version" in self.model_fields_set and self.manifest_version is None:
+            raise ValueError("manifest_version cannot be null")
+        return self
 
 
 PayloadModel = (

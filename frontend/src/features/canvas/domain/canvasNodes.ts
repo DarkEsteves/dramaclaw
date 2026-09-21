@@ -108,7 +108,7 @@ export interface NodeDisplayData {
 export interface NodeImageData extends NodeDisplayData {
   /** Project-owned still image selected for a reference remix event. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
-  remixRole?: 'visual';
+  remixRole?: 'visual' | 'background';
   imageUrl: string | null;
   previewImageUrl?: string | null;
   aspectRatio: string;
@@ -195,7 +195,7 @@ export interface DepthCaptureState {
 export interface VideoNodeData extends NodeDisplayData {
   /** Project-owned source media for the reference remix workflow. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
-  remixRole?: 'reference' | 'visual' | 'speech_clock';
+  remixRole?: 'reference' | 'visual' | 'background' | 'speech_clock';
   videoUrl: string | null;
   previewImageUrl?: string | null;
   /**

@@ -89,11 +89,13 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const transcriptMediaHash = transcriptArtifact.payload.media_hash;
   if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visualTypes = new Set<string>([CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit, CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage]);
+  const backgroundNode = one(upstream.filter((node) => visualTypes.has(node.type) && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') && node.data.remixMedia), '成片背景');
+  const background = backgroundNode.data.remixMedia as UploadedRemixMedia;
   const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual').map((node) => [node.id, boundBrollVisualMedia(project, node)]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)
     .map((node) => ({ id: node.id, role: node.data.remixRole as 'bgm' | 'sfx', media: node.data.remixMedia as UploadedRemixMedia }));
   const payload = buildNodeRemixManifest({
-    reference, narration, visuals, audioTracks,
+    reference, background, narration, visuals, audioTracks,
     timing: timingArtifact.payload as unknown as CompiledTiming,
     script: scriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['script'],
     wordTimeline: transcriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['wordTimeline'],

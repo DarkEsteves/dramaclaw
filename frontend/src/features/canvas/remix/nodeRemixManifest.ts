@@ -14,6 +14,7 @@ interface WordCue { start_char: number; end_char: number; start_frame: number; e
 
 interface Inputs {
   reference: UploadedRemixMedia;
+  background?: UploadedRemixMedia;
   narration: UploadedRemixMedia;
   timing: CompiledTiming;
   script: ScriptPayload;
@@ -52,8 +53,9 @@ function subtitleWordCues(
   return cues;
 }
 
-export function buildNodeRemixManifest({ reference, narration, timing, script, wordTimeline, visuals = {}, audioTracks = [] }: Inputs) {
+export function buildNodeRemixManifest({ reference, background, narration, timing, script, wordTimeline, visuals = {}, audioTracks = [] }: Inputs) {
   if (reference.media_kind !== 'video') throw new Error('参考素材必须是视频');
+  if (!background || (background.media_kind !== 'image' && background.media_kind !== 'video')) throw new Error('请选择单独的成片背景或 A-roll');
   if (narration.media_kind !== 'audio' && !(narration.media_kind === 'video' && narration.has_audio)) throw new Error('需要实际旁白音轨');
   if (timing.unresolved_required_events.length) throw new Error('存在未解析的必需事件');
   if (timing.override_conflicts.length) throw new Error('时间覆盖有冲突');
@@ -62,17 +64,17 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, w
   const durationFrames = Math.floor(narration.duration_us * fps / 1_000_000);
   if (durationFrames < 1) throw new Error('素材时长无效');
   const bindings: Array<Record<string, unknown>> = [
-    { media_id: 'reference', kind: 'video', project_path: reference.media_path, media_hash: `sha256:${reference.media_hash}`, ...(reference.duration_us < narration.duration_us ? { loop: true } : {}) },
+    { media_id: 'background', kind: background.media_kind, purpose: 'background', project_path: background.media_path, media_hash: `sha256:${background.media_hash}`, ...(background.media_kind === 'video' && background.duration_us < narration.duration_us ? { loop: true } : {}) },
     { media_id: 'narration', kind: 'audio', project_path: narration.media_path, media_hash: `sha256:${narration.media_hash}` },
   ];
-  const layers: Array<Record<string, unknown>> = [{ media_id: 'reference', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
+  const layers: Array<Record<string, unknown>> = [{ media_id: 'background', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
   const subtitles: Array<{ text: string; start_frame: number; end_frame: number; word_cues?: WordCue[] }> = [];
   const audioEvents: Array<Record<string, unknown>> = [{ media_id: 'narration', role: 'narration', start_frame: 0, end_frame: durationFrames, volume: 1 }];
   for (const track of audioTracks) {
     if (track.media.media_kind !== 'audio') throw new Error(`${track.role} 必须是音频文件`);
     const mediaId = `${track.role}-${track.id}`;
     bindings.push({ media_id: mediaId, kind: 'audio', project_path: track.media.media_path, media_hash: `sha256:${track.media.media_hash}`, ...(track.role === 'bgm' && track.media.duration_us < narration.duration_us ? { loop: true } : {}) });
-    if (track.role === 'bgm') audioEvents.push({ media_id: mediaId, role: 'bgm', start_frame: 0, end_frame: durationFrames, volume: 0.3 });
+    if (track.role === 'bgm') audioEvents.push({ media_id: mediaId, role: 'bgm', start_frame: 0, end_frame: durationFrames, volume: 0.3, duck_under_narration: 0.35 });
   }
   for (const event of timing.events) {
     if (!Number.isInteger(event.start_frame) || !Number.isInteger(event.end_frame) || event.start_frame < 0 || event.end_frame <= event.start_frame || event.end_frame > durationFrames) throw new Error(`事件 ${event.event_id} 超出素材时长`);
@@ -90,7 +92,7 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, w
       if (!rule.visual_media_revision || media.media_hash !== rule.visual_media_revision) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);
       const mediaId = `visual-${rule.visual_node_id}`;
       if (!bindings.some((binding) => binding.media_id === mediaId)) bindings.push({ media_id: mediaId, kind: media.media_kind, project_path: media.media_path, media_hash: `sha256:${media.media_hash}` });
-      layers.push({ media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover' });
+      layers.push({ media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
     }
     if (!caption.trim() && !rule.visual_node_id) throw new Error(`事件 ${event.event_id} 没有字幕或画面输出`);
     if (rule.sfx_node_id) {
@@ -102,7 +104,8 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, w
     }
   }
   return {
-    output_spec: { width: 720, height: 1280, fps, duration_frames: durationFrames },
+    manifest_version: 2,
+    output_spec: { width: 1080, height: 1920, fps, duration_frames: durationFrames, subtitle_safe_area: { left: 90, right: 90, top: 120, bottom: 180 } },
     media_bindings: bindings,
     layers,
     subtitle_events: subtitles,
