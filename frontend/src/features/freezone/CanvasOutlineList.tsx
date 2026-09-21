@@ -316,7 +316,14 @@ export const CANVAS_OUTLINE_FILTERS: ReadonlyArray<{
   },
   { key: "beat", types: [CANVAS_NODE_TYPES.beatContext] },
   { key: "audio", types: [CANVAS_NODE_TYPES.audio] },
-  { key: "script", types: [CANVAS_NODE_TYPES.script] },
+  {
+    key: "script",
+    types: [
+      CANVAS_NODE_TYPES.script,
+      CANVAS_NODE_TYPES.transcript,
+      CANVAS_NODE_TYPES.semanticTimeline,
+    ],
+  },
   {
     key: "world",
     types: [

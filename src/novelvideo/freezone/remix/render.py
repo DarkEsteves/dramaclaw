@@ -358,7 +358,9 @@ def _ass_document(
 
 def _ass_escape(text: str) -> str:
     return (
-        text.replace("\\", r"\\")
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\\", r"\\")
         .replace("{", r"\{")
         .replace("}", r"\}")
         .replace("\n", r"\N")

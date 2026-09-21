@@ -4,8 +4,8 @@
 `egress_context`，不接受且信封属组织即抛 `InvalidTaskEnvelope`。签名形状不是
 出网与否的证据，于是两个方向同时错：
 
-- **误拦**：原有 5 个纯本地 ffmpeg leaf（`run_freezone_extract_frames` /
-  `run_freezone_video_upscale` / `run_freezone_video_compose` /
+- **误拦**：5 个纯本地 ffmpeg leaf（`run_freezone_extract_frames` /
+  `run_freezone_extract_reference_frames` / `run_freezone_video_compose` /
   `run_freezone_video_erase` / `run_freezone_audio_separate`，均为
   `egress-inventory.md:54` 的 EG-20a `service/local`，不出网、不取凭证）没有
   该形参，组织成员一律撞 `invalid task envelope`——用户报的「上传视频接脚本
@@ -14,7 +14,7 @@
   context 被吞进 kwargs 袋子里静默失效。
 
 改法是分发器内一张显式表，键由**调用点**提供。不能用「函数对象 → 分类」：
-19 个调用点的 import 都在 runner 函数体内，测试 monkeypatch 后拿到的是假对象，
+22 个调用点的 import 都在 runner 函数体内，测试 monkeypatch 后拿到的是假对象，
 模块级建的对象表必然查不中；`leaf.__name__` 同理。
 
 未列入表的 leaf 在组织上下文下**照旧抛**——默认仍 fail-closed（OI-47 护栏 a，
@@ -46,6 +46,7 @@ AUDITED_LOCAL_LEAVES = frozenset(
     {
         "run_freezone_audio_separate",
         "run_freezone_extract_frames",
+        "run_freezone_extract_reference_frames",
         "run_freezone_video_compose",
         "run_freezone_video_erase",
     }
@@ -492,7 +493,7 @@ def test_classification_matches_the_real_leaf_signatures() -> None:
 
 
 def test_every_dispatch_site_names_a_classified_leaf() -> None:
-    """21 个调用点逐个对到表里；新增未分类的调用点即红。
+    """22 个调用点逐个对到表里；新增未分类的调用点即红。
 
     `leaf_name` 是必填位置参数，不是可选项——漏传是 `TypeError`，不是静默放行。
     """

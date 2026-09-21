@@ -8877,7 +8877,14 @@
       "counts": "Video {{video}} · Âm thanh {{audio}}",
       "open": "Mở phần dựng video",
       "reopen": "Mở lại",
-      "resultName": "Video đã dựng"
+      "resultName": "Video đã dựng",
+      "remixManifest": "Bản kê {{id}} · r{{revision}}",
+      "remixKey": "Khóa chống trùng lặp",
+      "remixSubmit": "Kết xuất video",
+      "remixSubmitting": "Đang gửi…",
+      "remixTask": "Tác vụ {{task}}",
+      "remixBlocked": "Không thể kết xuất: {{reason}}",
+      "remixRevisionMissing": "Không thể kết xuất: thiếu phiên bản node canvas"
     },
     "undo": "Hoàn tác",
     "redo": "Làm lại",

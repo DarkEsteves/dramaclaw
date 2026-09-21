@@ -78,7 +78,8 @@ describe('remix canvas nodes', () => {
     );
 
     expect(screen.getByText('已完成 · 版本 2')).toBeTruthy();
-    expect(screen.getByText('Hello world')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Hello/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /world/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '展开逐词校对（2）' }));
     expect(screen.getByDisplayValue('Hello')).toBeTruthy();
     expect(screen.getByText('00:00.100 – 00:00.450')).toBeTruthy();

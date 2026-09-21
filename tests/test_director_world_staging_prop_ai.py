@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pydantic_ai
 
-from novelvideo import config
+from novelvideo import config, model_gateway_settings
 from novelvideo.director_world import staging_prop_ai
 
 
@@ -43,6 +45,11 @@ def test_create_staging_prop_agent_uses_request_model_config(monkeypatch) -> Non
 
 def test_generate_ai_staging_prop_uses_director_world_shape_hints(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        model_gateway_settings,
+        "get_effective_llm_config",
+        lambda: SimpleNamespace(is_brainclaw=False, api_key="", base_url=""),
+    )
 
     async def fake_run_staging_prop_agent(request, **kwargs):
         captured.update(kwargs)
@@ -95,6 +102,16 @@ def test_generate_ai_staging_prop_falls_back_to_shape_hint_inference(monkeypatch
 
 def test_resolve_model_config_defaults_to_staging_prop_dc_alias(monkeypatch) -> None:
     monkeypatch.delenv("STAGING_PROP_MODEL", raising=False)
+    monkeypatch.setattr(
+        model_gateway_settings,
+        "get_effective_llm_config",
+        lambda: SimpleNamespace(is_brainclaw=False, api_key="", base_url=""),
+    )
+    monkeypatch.setattr(
+        config,
+        "get_newapi_runtime_credentials",
+        lambda **_kwargs: ("test-key", "http://example.test/v1"),
+    )
 
     model, _api_key, _base_url = staging_prop_ai.resolve_model_config({})
 

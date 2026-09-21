@@ -432,12 +432,15 @@ class LeafEgressRule:
     eg_id: str
 
 
-# 键是**调用点显式给出的名字**，不是函数对象：19 个调用点的 import 都在 runner
+# 键是**调用点显式给出的名字**，不是函数对象：调用点的 import 都在 runner
 # 函数体内，测试替换掉的是那个局部名，模块级建的对象表必然查不中；`leaf.__name__`
 # 同理（假 leaf 叫别的名字）。名字由调用点提供，替身也就盖不住分类。
 FREEZONE_LEAF_EGRESS: dict[str, LeafEgressRule] = {
     # EG-20a `tool.local.restricted`（egress-inventory.md:54，`service/local`）
     "run_freezone_extract_frames": LeafEgressRule(
+        "novelvideo.freezone.jobs", LeafEgress.LOCAL, "EG-20a"
+    ),
+    "run_freezone_extract_reference_frames": LeafEgressRule(
         "novelvideo.freezone.jobs", LeafEgress.LOCAL, "EG-20a"
     ),
     "run_freezone_video_compose": LeafEgressRule(
@@ -895,7 +898,9 @@ async def _run_freezone_video_story_async(
     if reference_events is not None:
         frame_times_us = select_reference_frame_times(reference_events)
         frame_paths = await _call_freezone_leaf(
-            envelope, run_freezone_extract_reference_frames, "run_freezone_extract_frames",
+            envelope,
+            run_freezone_extract_reference_frames,
+            "run_freezone_extract_reference_frames",
             project_dir=project_dir, job_id=job_id,
             video_path=Path(str(payload["video_path"])), frame_times_us=frame_times_us,
         )
@@ -1957,7 +1962,10 @@ async def _run_freezone_audio_speech_async(
         make_sqlite_store_for_context,
         make_static_url_for_context,
     )
-    from novelvideo.freezone.audio_node import generate_freezone_audio_speech, generate_freezone_dialogue_speech
+    from novelvideo.freezone.audio_node import (
+        generate_freezone_audio_speech,
+        generate_freezone_dialogue_speech,
+    )
     from novelvideo.freezone.jobs import ensure_freezone_dirs
 
     payload = envelope.get("payload") or {}
@@ -1972,30 +1980,40 @@ async def _run_freezone_audio_speech_async(
     store = None if projection is not None else await make_sqlite_store_for_context(ctx)
     try:
         dialogue_turns = payload.get("dialogue_turns")
-        result = await _call_freezone_leaf(
-            envelope,
-            generate_freezone_dialogue_speech if dialogue_turns else generate_freezone_audio_speech,
-            "generate_freezone_dialogue_speech" if dialogue_turns else "generate_freezone_audio_speech",
-            store=store,
-            username=ctx.owner_username,
-            project=ctx.project_name,
-            account_voice_username=str(
+        common_kwargs = {
+            "store": store,
+            "username": ctx.owner_username,
+            "project": ctx.project_name,
+            "account_voice_username": str(
                 payload.get("account_voice_username")
                 or ctx.requester_username
                 or ctx.owner_username
             ),
-            project_dir=project_dir,
-            job_id=job_id,
-            **({"turns": dialogue_turns} if dialogue_turns else {"text": str(payload.get("text") or "")}),
-            emotion_prompt=str(payload.get("emotion_prompt") or ""),
-            **({} if dialogue_turns else {
-                "voice_ref": payload.get("voice_ref"),
-                "speech_mode": str(payload.get("speech_mode") or "clone"),
-                "preset_model": str(payload.get("preset_model") or "edge-tts"),
-                "preset_voice": str(payload.get("preset_voice") or "Serena"),
-            }),
-            projection=projection,
-        )
+            "project_dir": project_dir,
+            "job_id": job_id,
+            "emotion_prompt": str(payload.get("emotion_prompt") or ""),
+            "projection": projection,
+        }
+        if dialogue_turns:
+            result = await _call_freezone_leaf(
+                envelope,
+                generate_freezone_dialogue_speech,
+                "generate_freezone_dialogue_speech",
+                turns=dialogue_turns,
+                **common_kwargs,
+            )
+        else:
+            result = await _call_freezone_leaf(
+                envelope,
+                generate_freezone_audio_speech,
+                "generate_freezone_audio_speech",
+                text=str(payload.get("text") or ""),
+                voice_ref=payload.get("voice_ref"),
+                speech_mode=str(payload.get("speech_mode") or "clone"),
+                preset_model=str(payload.get("preset_model") or "edge-tts"),
+                preset_voice=str(payload.get("preset_voice") or "Serena"),
+                **common_kwargs,
+            )
     finally:
         close = getattr(store, "close", None)
         if close:

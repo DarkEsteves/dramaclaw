@@ -76,6 +76,7 @@ def test_enqueue_render_uses_saved_exact_manifest_revision(client, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["data"]["task_type"] == "remix_render"
+    assert queued[0]["queue_kind"] == "ffmpeg"
     payload = queued[0]["payload"]
     assert payload["manifest_ref"] == {"artifact_id": created["id"], "revision": 1}
     assert payload["idempotency_key"] == "render-one"
@@ -390,6 +391,7 @@ def test_processing_action_queues_once_with_project_local_media(client, tmp_path
     assert first.json()["data"]["task_type"] == "remix_transcribe_media"
     assert second.json()["data"]["task_id"] == first.json()["data"]["task_id"]
     assert len(queued) == 1
+    assert queued[0]["queue_kind"] == "default"
     assert queued[0]["payload"]["media_path"] == "media/voice.wav"
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"voice").hexdigest()
 

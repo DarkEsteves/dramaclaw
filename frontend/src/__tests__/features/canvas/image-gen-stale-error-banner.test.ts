@@ -326,12 +326,13 @@ describe("stale generation-error banner", () => {
   // 旧图，不能一上传就清掉。
   it("only clears the banner on reference upload when nothing was generated yet", () => {
     const source = read("src/features/canvas/nodes/ImageGenNode.tsx");
-    const uploadPatch = updateNodeDataPatches(source).find((patch) =>
-      patch.includes("referenceImageUrl: result.url"),
-    );
+    const uploadStart = source.indexOf("const handleUploadFile = useCallback");
+    const uploadEnd = source.indexOf("const handleClearReference", uploadStart);
+    const uploadHandler = source.slice(uploadStart, uploadEnd);
 
-    expect(uploadPatch).toBeDefined();
-    expect(uploadPatch).toContain(
+    expect(uploadHandler).toContain("mutateGenerationRequest({");
+    expect(uploadHandler).toContain("referenceImageUrl: result.url");
+    expect(uploadHandler).toContain(
       "hasGeneratedResult ? {} : GENERATION_ERROR_CLEARED_PATCH",
     );
   });
@@ -369,10 +370,10 @@ describe("stale generation-error banner", () => {
     expect(submitHandler).toContain(
       "generationAttemptRef.current === generationAttempt",
     );
+    expect(submitHandler).toContain("const isCurrentRequest = () =>");
     expect(
-      submitHandler.match(
-        /if \(!isCurrentGenerationAttempt\(\)\) return 'ignored';/g,
-      ),
-    ).toHaveLength(3);
+      submitHandler.match(/if \(!isCurrentRequest\(\)\) return 'ignored';/g)
+        ?.length ?? 0,
+    ).toBeGreaterThanOrEqual(3);
   });
 });

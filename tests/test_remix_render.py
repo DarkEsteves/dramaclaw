@@ -151,6 +151,13 @@ def test_v2_manifest_requires_vertical_hd_safe_area_and_continuous_narration() -
     with pytest.raises(ValueError, match="1080x1920"):
         validate_manifest(broken)
 
+    broken = json.loads(json.dumps(manifest))
+    broken["output_spec"]["duration_frames"] = 30 * 60 + 1
+    broken["layers"][0]["end_frame"] = 30 * 60 + 1
+    broken["audio_events"][0]["end_frame"] = 30 * 60 + 1
+    with pytest.raises(ValueError, match="MVP limit"):
+        validate_manifest(broken)
+
 
 def test_manifest_versions_route_without_removing_the_legacy_composer() -> None:
     assert manifest_renderer(_manifest()) == "legacy_v1"
@@ -220,7 +227,7 @@ def test_v2_validates_crop_motion_fades_and_deterministic_bgm_ducking() -> None:
 
 
 def test_ass_escapes_markup_and_honours_safe_area() -> None:
-    text = '她说, "你好" {产品}\\下一行'
+    text = '她说, "你好" {产品}\\下一行\r\n收尾\r完成'
     document = _ass_document(
         [{"text": text, "start_frame": 0, "end_frame": 30}],
         width=1080, height=1920, fps=30,
@@ -228,7 +235,8 @@ def test_ass_escapes_markup_and_honours_safe_area() -> None:
     )
     assert "Alignment, MarginL, MarginR, MarginV" in document
     assert "90,90,180,1" in document
-    assert r'她说, "你好" \{产品\}\\下一行' in document
+    assert r'她说, "你好" \{产品\}\\下一行\N收尾\N完成' in document
+    assert "\r" not in document
 
 
 @pytest.mark.skipif(
