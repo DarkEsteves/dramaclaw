@@ -29,6 +29,14 @@ def manifest() -> dict:
     }
 
 
+def render_parameters(job_id: str) -> dict:
+    return {
+        "job_id": job_id,
+        "input_fingerprint": "",
+        "manifest_media_bindings": manifest()["media_bindings"],
+    }
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from novelvideo.api.auth import get_api_user
@@ -88,6 +96,43 @@ def test_repeated_render_request_returns_same_task_without_requeue(client):
 
     assert first.status_code == second.status_code == 200
     assert second.json()["data"]["task_id"] == first.json()["data"]["task_id"]
+    assert len(queued) == 1
+
+
+def test_direct_render_marks_completed_result_stale_after_bound_media_replacement(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    for path in (tmp_path / "media/background.png", tmp_path / "media/narration.wav"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    created = api.post(
+        BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}
+    ).json()["data"]
+    url = f"{BASE}/{created['id']}/render"
+    body = {"revision": 1, "idempotency_key": "direct-render-media-reuse", "node_revision": 4}
+    first = api.post(url, json=body).json()["data"]
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.get(first["operation_id"])
+    output = tmp_path / "freezone/remix_renders/direct-reused.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"render")
+    operations.complete(
+        operation["operation_id"],
+        output_refs=[{"project_path": output.relative_to(tmp_path).as_posix()}],
+        current_input_refs=operation["input_refs"],
+        current_node_revision=4,
+    )
+
+    (tmp_path / "media/background.png").write_bytes(b"replacement")
+    repeated = api.post(url, json=body)
+
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_status"] == "stale"
+    durable = operations.get(operation["operation_id"])
+    assert durable["stale_reason"] == "input_media_changed"
+    assert durable["output_reusable"] is False
+    assert durable["normalized_parameters"]["manifest_media_bindings"] == manifest()["media_bindings"]
     assert len(queued) == 1
 
 
@@ -151,6 +196,9 @@ def test_render_does_not_requeue_when_result_published_before_task_binding(clien
     from novelvideo.freezone.remix.operations import RemixOperationStore
 
     api, queued = client
+    for path in (tmp_path / "media/background.png", tmp_path / "media/narration.wav"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
     created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
     body = {"revision": 1, "idempotency_key": "fast-render", "node_revision": 4}
     store = RemixOperationStore(tmp_path, "demo")
@@ -158,7 +206,7 @@ def test_render_does_not_requeue_when_result_published_before_task_binding(clien
     operation = store.start(
         idempotency_key="fast-render",
         input_refs=[{"artifact_id": created["id"], "revision": 1}],
-        producer_version="remix-render.v1", normalized_parameters={"job_id": job_id, "input_fingerprint": ""},
+        producer_version="remix-render.v1", normalized_parameters=render_parameters(job_id),
         node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()],
     )
     output = tmp_path / "freezone" / "remix_renders" / created["id"] / "1" / f"{job_id}.mp4"
@@ -177,6 +225,9 @@ def test_render_with_same_key_and_missing_published_output_requires_explicit_reg
     from novelvideo.freezone.remix.operations import RemixOperationStore
 
     api, queued = client
+    for path in (tmp_path / "media/background.png", tmp_path / "media/narration.wav"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
     created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
     key = "missing-render-output"
     job_id = hashlib.sha256(f"demo\0{created['id']}\0{1}\0{key}".encode()).hexdigest()
@@ -185,7 +236,7 @@ def test_render_with_same_key_and_missing_published_output_requires_explicit_reg
         idempotency_key=key,
         input_refs=[{"artifact_id": created["id"], "revision": 1}],
         producer_version="remix-render.v1",
-        normalized_parameters={"job_id": job_id, "input_fingerprint": ""},
+        normalized_parameters=render_parameters(job_id),
         node_revision=4,
         input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()],
     )
@@ -220,7 +271,7 @@ def test_render_reconciles_existing_uncertain_or_cancelled_operation_before_requ
     created = api.post(BASE, json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []}).json()["data"]
     job_id = hashlib.sha256(f"demo\0{created['id']}\0{1}\0recover-render".encode()).hexdigest()
     store = RemixOperationStore(tmp_path, "demo")
-    operation = store.start(idempotency_key="recover-render", input_refs=[{"artifact_id": created["id"], "revision": 1}], producer_version="remix-render.v1", normalized_parameters={"job_id": job_id, "input_fingerprint": ""}, node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()])
+    operation = store.start(idempotency_key="recover-render", input_refs=[{"artifact_id": created["id"], "revision": 1}], producer_version="remix-render.v1", normalized_parameters=render_parameters(job_id), node_revision=4, input_media_hashes=["sha256:" + hashlib.sha256(b"media").hexdigest()])
     if state == "pending_reconciliation":
         store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-1")
     else:

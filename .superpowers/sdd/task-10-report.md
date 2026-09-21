@@ -182,3 +182,15 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   after a completed render operation.
 - Final media-reuse verification: 266 Python recovery/workflow tests passed;
   TypeScript, Ruff, and diff checks passed.
+
+## Direct render and workflow stale-state closure
+
+- Direct `POST /artifacts/{id}/render` now stores the same exact manifest media-binding
+  snapshot as registered render actions, so its completed same-key result is also
+  invalidated when bound bytes change in place.
+- Workflow dispatch converts a stale processing operation into a durable `blocked`
+  action with `artifact_status=stale`, the stale reason, and its historical result ref.
+  Blocked actions stay stable across polling and remain eligible for the existing
+  explicit workflow regenerate action; no successor is submitted automatically.
+- Final direct-render/workflow-state verification: 267 Python recovery/workflow tests
+  passed; TypeScript, Ruff, and diff checks passed.

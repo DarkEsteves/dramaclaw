@@ -218,6 +218,7 @@ from novelvideo.freezone.workflow_runs import (
     bind_workflow_media_task,
     claim_workflow_media_action,
     bind_workflow_action_processing_operation,
+    block_workflow_action_for_stale_processing_operation,
     create_workflow_run,
     interrupt_stale_workflow_runs,
     list_workflow_runs,
@@ -5186,6 +5187,21 @@ async def _dispatch_ready_remix_workflow_actions(
                 return await asyncio.to_thread(operations.get, current["operation_id"])
 
         operation = await reconcile_ambiguous_submission(operation)
+        if operation.get("status") == "stale":
+            outputs = operation.get("output_refs")
+            result_ref = outputs[0] if isinstance(outputs, list) and len(outputs) == 1 and isinstance(outputs[0], dict) else None
+            run = await asyncio.to_thread(
+                block_workflow_action_for_stale_processing_operation,
+                project_dir=state_dir,
+                canvas_id=run["canvas_id"],
+                run_id=run["run_id"],
+                node_id=node_id,
+                action=action_name,
+                operation_id=operation["operation_id"],
+                stale_reason=str(operation.get("stale_reason") or "processing_result_stale"),
+                result_ref=result_ref,
+            )
+            continue
         if operation.get("status") == "pending_reconciliation" and not operation.get("task_id"):
             continue
         if not operation.get("task_id") and operation.get("status") != "needs_confirmation":

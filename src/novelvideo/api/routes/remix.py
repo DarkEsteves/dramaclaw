@@ -598,13 +598,18 @@ async def render_artifact(
     operations = RemixOperationStore(store.project_dir, store.project_id)
     if bool(body.canvas_id) != bool(body.input_fingerprint):
         raise HTTPException(422, "Bound render requires the exact input fingerprint")
+    manifest_media_bindings = [dict(item) for item in artifact["payload"]["media_bindings"]]
     try:
         operation = await run_in_threadpool(
             operations.start,
             idempotency_key=body.idempotency_key,
             input_refs=[{"artifact_id": artifact_id, "revision": body.revision}],
             producer_version="remix-render.v1",
-            normalized_parameters={"job_id": job_id, "input_fingerprint": body.input_fingerprint},
+            normalized_parameters={
+                "job_id": job_id,
+                "input_fingerprint": body.input_fingerprint,
+                "manifest_media_bindings": manifest_media_bindings,
+            },
             node_revision=body.node_revision,
             input_media_hashes=_input_media_hashes(artifact["payload"]),
             canvas_id=body.canvas_id,

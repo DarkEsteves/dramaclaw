@@ -3098,12 +3098,28 @@ def test_workflow_render_manifest_same_key_does_not_reuse_after_media_replacemen
     repeated = workflow_run_client.post(base, json=body)
 
     assert repeated.status_code == 200
+    repeated_run = repeated.json()["data"]
+    assert repeated_run["status"] == "running"
+    assert repeated_run["actions"][0]["status"] == "blocked"
+    assert repeated_run["actions"][0]["artifact_status"] == "stale"
+    assert repeated_run["actions"][0]["error"] == "input_media_changed"
+    assert repeated_run["actions"][0]["result_ref"] == {
+        "project_path": output.relative_to(workflow_run_client.state_dir).as_posix()
+    }
     durable = operations.get(operation["operation_id"])
     assert durable["status"] == "stale"
     assert durable["stale_reason"] == "input_media_changed"
     assert durable["output_reusable"] is False
     assert durable["input_media_hashes"] == [media_hash]
     assert len(workflow_run_client.enqueued_tasks) == 1
+
+    for _ in range(2):
+        polled = workflow_run_client.get(base).json()["data"]["runs"][0]
+        assert polled["status"] == "running"
+        assert polled["actions"][0]["status"] == "blocked"
+        assert polled["actions"][0]["artifact_status"] == "stale"
+        assert polled["actions"][0]["error"] == "input_media_changed"
+        assert len(workflow_run_client.enqueued_tasks) == 1
 
 
 def test_workflow_run_processing_action_requires_exact_registered_payload(

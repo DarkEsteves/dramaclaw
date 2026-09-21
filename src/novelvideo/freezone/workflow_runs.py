@@ -1148,6 +1148,60 @@ def bind_workflow_action_processing_operation(
     return payload
 
 
+def block_workflow_action_for_stale_processing_operation(
+    *,
+    project_dir: Path,
+    canvas_id: str,
+    run_id: str,
+    node_id: str,
+    action: str,
+    operation_id: str,
+    stale_reason: str,
+    result_ref: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Expose stale processing output as reviewable history with explicit regeneration."""
+    _validate_scope(canvas_id, run_id)
+    reason = stale_reason.strip() or "processing_result_stale"
+    now = _now()
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            """
+            SELECT processing_operation_id FROM workflow_run_actions
+             WHERE run_id = ? AND node_id = ? AND action = ?
+            """,
+            (run_id, node_id, action),
+        ).fetchone()
+        if current is None:
+            raise ValueError("workflow action not found")
+        if str(current["processing_operation_id"] or "") != operation_id:
+            raise ValueError("workflow action processing operation changed")
+        conn.execute(
+            """
+            UPDATE workflow_run_actions
+               SET status = 'blocked', phase = NULL, updated_at = ?, error = ?,
+                   artifact_status = 'stale', result_ref_json = ?
+             WHERE run_id = ? AND node_id = ? AND action = ?
+            """,
+            (
+                now,
+                reason,
+                json.dumps(result_ref, sort_keys=True, separators=(",", ":")),
+                run_id,
+                node_id,
+                action,
+            ),
+        )
+        conn.execute(
+            "UPDATE workflow_runs SET updated_at = ? WHERE run_id = ? AND canvas_id = ?",
+            (now, run_id, canvas_id),
+        )
+        payload = _read_run(conn, canvas_id=canvas_id, run_id=run_id)
+    if payload is None:
+        raise ValueError("workflow run not found")
+    return payload
+
+
 def create_workflow_run(
     *,
     project_dir: Path,
@@ -1736,32 +1790,36 @@ def _processing_operation_proof(
     task_result: dict[str, Any],
     project_dir: Path,
     project_id: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, dict[str, Any] | None]:
     """Verify task output against the immutable remix operation envelope."""
     operation_id = str(item.get("processing_operation_id") or "")
     if not operation_id:
-        return "invalid", "processing workflow action has no bound operation"
+        return "invalid", "processing workflow action has no bound operation", None
     try:
         from novelvideo.freezone.remix.operations import RemixOperationStore
 
         operation = RemixOperationStore(project_dir, project_id).get(operation_id)
     except (FileNotFoundError, ValueError):
-        return "invalid", "bound processing operation is unavailable"
+        return "invalid", "bound processing operation is unavailable", None
+    if operation.get("status") == "stale":
+        outputs = operation.get("output_refs")
+        result_ref = outputs[0] if isinstance(outputs, list) and len(outputs) == 1 and isinstance(outputs[0], dict) else None
+        return "stale", str(operation.get("stale_reason") or "processing_result_stale"), result_ref
     if operation.get("status") != "needs_confirmation":
-        return "waiting", None
+        return "waiting", None, None
     if (
         operation.get("node_revision") != item.get("node_revision")
         or operation.get("node_id") != item.get("node_id")
         or not task_id
         or operation.get("task_id") != task_id
     ):
-        return "invalid", "processing operation identity does not match workflow action"
+        return "invalid", "processing operation identity does not match workflow action", None
     parameters = operation.get("normalized_parameters")
     if not isinstance(parameters, dict) or (
         parameters.get("action") != item.get("action")
         or parameters.get("payload") != (item.get("payload") or {})
     ):
-        return "invalid", "processing operation inputs do not match workflow action"
+        return "invalid", "processing operation inputs do not match workflow action", None
     expected_inputs = []
     for key in ("script_ref", "word_timeline_ref", "blueprint_ref", "manifest_ref"):
         ref = (item.get("payload") or {}).get(key)
@@ -1772,15 +1830,15 @@ def _processing_operation_proof(
                 "project_id": project_id,
             })
     if operation.get("input_refs") != expected_inputs:
-        return "invalid", "processing operation artifact inputs do not match workflow action"
+        return "invalid", "processing operation artifact inputs do not match workflow action", None
     if item.get("action") == "render_manifest":
         relative = task_result.get("output_path")
         task_output = {"project_path": relative} if isinstance(relative, str) else None
     else:
         task_output = task_result.get("artifact_ref")
     if not isinstance(task_output, dict) or operation.get("output_refs") != [task_output]:
-        return "invalid", "processing operation output does not match task result"
-    return "valid", None
+        return "invalid", "processing operation output does not match task result", None
+    return "valid", None, task_output
 
 
 def reconcile_workflow_runs_with_tasks(
@@ -1854,7 +1912,7 @@ def reconcile_workflow_runs_with_tasks(
                     )
                     action_name = str(item.get("action") or "")
                     if action_name in PROCESSING_ACTIONS:
-                        proof_status, proof_error = _processing_operation_proof(
+                        proof_status, proof_error, proof_result_ref = _processing_operation_proof(
                             item=item,
                             task_id=str(task.get("task_id") or ""),
                             task_result=task_result,
@@ -1862,6 +1920,18 @@ def reconcile_workflow_runs_with_tasks(
                             project_id=str(payload.get("project_id") or ""),
                         )
                         if proof_status == "waiting":
+                            continue
+                        if proof_status == "stale":
+                            updates = {
+                                "status": "blocked",
+                                "error": proof_error,
+                                "artifact_status": "stale",
+                                "result_ref": proof_result_ref,
+                            }
+                            if any(item.get(key) != value for key, value in updates.items()):
+                                item.update(updates)
+                                item["updated_at"] = timestamp
+                                changed = True
                             continue
                         if proof_status != "valid":
                             updates = {
