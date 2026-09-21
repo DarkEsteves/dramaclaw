@@ -53,7 +53,7 @@ class RenderArtifactBody(BaseModel):
     node_revision: int = Field(ge=1, strict=True)
     canvas_id: str = ""
     node_id: str = ""
-    input_fingerprint: str = Field(default="", max_length=256)
+    input_fingerprint: str = ""
     regenerate: bool = False
 
 

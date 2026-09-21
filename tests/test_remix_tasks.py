@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from types import SimpleNamespace
 import hashlib
+import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -84,6 +85,61 @@ def test_enqueue_render_uses_saved_exact_manifest_revision(client, tmp_path):
     assert "project_path" not in response.request.content.decode()
     operation_id = response.json()["data"]["operation_id"]
     assert RemixOperationStore(tmp_path, "demo").get(operation_id)["input_media_hashes"] == ["sha256:" + hashlib.sha256(b"media").hexdigest()]
+
+
+def test_bound_render_accepts_and_persists_full_graph_fingerprint(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    created = api.post(
+        BASE,
+        json={"schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": []},
+    ).json()["data"]
+    fingerprint = json.dumps(
+        {
+            "nodes": [
+                {
+                    "id": f"visual-{index}",
+                    "type": "imageGenNode",
+                    "generationRequest": {
+                        "prompt": f"cinematic scene {index} with stable upstream material",
+                        "model": "image-model",
+                        "aspectRatio": "9:16",
+                        "requestRevision": index,
+                    },
+                    "artifactRefs": {
+                        "artifactRef": [{"artifactId": f"artifact-{index}", "revision": index + 1}]
+                    },
+                }
+                for index in range(12)
+            ],
+            "edges": [
+                {"source": f"visual-{index}", "target": "compose", "sourceHandle": None, "targetHandle": None}
+                for index in range(12)
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert len(fingerprint) > 256
+
+    response = api.post(
+        f"{BASE}/{created['id']}/render",
+        json={
+            "revision": 1,
+            "idempotency_key": "bound-long-fingerprint",
+            "node_revision": 4,
+            "canvas_id": "canvas-a",
+            "node_id": "compose",
+            "input_fingerprint": fingerprint,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(queued) == 1
+    operation_id = response.json()["data"]["operation_id"]
+    operation = RemixOperationStore(tmp_path, "demo").get(operation_id)
+    assert operation["normalized_parameters"]["input_fingerprint"] == fingerprint
 
 
 def test_repeated_render_request_returns_same_task_without_requeue(client):
