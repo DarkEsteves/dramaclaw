@@ -81,7 +81,8 @@ import {
 } from '@/features/canvas/ui/NodeGenerationHistory';
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
-import type { RemixArtifactRef } from '@/api/remix';
+import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
+import { projectMediaPathFromUrl } from '@/features/canvas/remix/remixMediaPath';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
@@ -427,8 +428,48 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const remixScriptLabel = remixScriptEditorLabel(data, Boolean(blueprintRef));
   const isRemixScript = Boolean(remixScriptLabel);
   const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
-  const remixVisualNodes = upstreamNodes.filter((node) => node.type === 'videoNode').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const remixVisualNodes = upstreamNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)).map((node) => ({
+    id: node.id,
+    label: String(node.data.displayName || node.id),
+    mediaRevision: typeof node.data.remixMedia === 'object' && node.data.remixMedia && 'media_hash' in node.data.remixMedia
+      ? String(node.data.remixMedia.media_hash) : undefined,
+  }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const createRemixVisual = useCallback((mode: 'generate' | 'upload', selectionId: string) => {
+    const state = useCanvasStore.getState();
+    const self = state.nodes.find((node) => node.id === id);
+    if (!self) return null;
+    const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
+    const label = mode === 'generate' ? '生成画面' : '上传画面';
+    const childId = state.addNode(type, state.findNodePosition(id, 420, 320), {
+      displayName: `${label} · ${selectionId}`,
+      remixRole: 'visual',
+      ...(mode === 'upload' ? { imageOnly: true } : {}),
+    });
+    state.addEdge(childId, id);
+    state.setSelectedNode(childId);
+    return { id: childId, label };
+  }, [id]);
+  const attachRemixVisual = useCallback(async (nodeId: string) => {
+    const project = readUrl().project;
+    if (!project) throw new Error('缺少项目，无法引用画面素材');
+    const state = useCanvasStore.getState();
+    const visual = state.nodes.find((node) => node.id === nodeId);
+    if (!visual) throw new Error('画面素材节点不存在');
+    const existing = visual.data.remixMedia;
+    if (existing && typeof existing === 'object' && 'media_hash' in existing && typeof existing.media_hash === 'string') return existing.media_hash;
+    const sourceUrl = isVideoNode(visual)
+      ? visual.data.videoUrl
+      : (isUploadNode(visual) || isImageEditNode(visual) || isImageGenNode(visual) || isExportImageNode(visual))
+        ? visual.data.imageUrl || visual.data.previewImageUrl
+        : null;
+    const mediaPath = typeof sourceUrl === 'string' ? projectMediaPathFromUrl(project, sourceUrl) : null;
+    if (!mediaPath) throw new Error('请先在素材节点完成生成或上传');
+    const media = await attachRemixMedia(project, mediaPath);
+    if (media.media_kind !== 'image' && media.media_kind !== 'video') throw new Error('B-roll 只支持图片或视频');
+    state.updateNodeData(nodeId, { remixMedia: media, remixRole: 'visual' });
+    return media.media_hash;
+  }, []);
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.script, data, t),
@@ -809,6 +850,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             blueprintRef={blueprintRef}
             visualNodes={remixVisualNodes}
             sfxNodes={remixSfxNodes}
+            onCreateVisual={createRemixVisual}
+            onAttachVisual={attachRemixVisual}
             onDraftChange={(next) => updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef })}
             onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}

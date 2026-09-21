@@ -3,7 +3,7 @@ export interface UploadedRemixMedia {
   media_hash: string;
   url: string;
   size: number;
-  media_kind: 'video' | 'audio';
+  media_kind: 'image' | 'video' | 'audio';
   duration_us: number;
   has_audio?: boolean;
   audio_stream_count?: number;

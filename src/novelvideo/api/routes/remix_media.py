@@ -29,6 +29,7 @@ _EXTENSIONS = {
     ".mp4": "video", ".mov": "video", ".mkv": "video", ".webm": "video",
     ".mp3": "audio", ".m4a": "audio", ".wav": "audio", ".aac": "audio",
     ".ogg": "audio", ".flac": "audio",
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image",
 }
 
 
@@ -44,13 +45,22 @@ def _probe_media(path: Path, expected_kind: str) -> dict:
         )
         metadata = json.loads(result.stdout)
         streams = metadata.get("streams", [])
-        if not any(stream.get("codec_type") == expected_kind for stream in streams):
+        expected_stream_kind = "video" if expected_kind == "image" else expected_kind
+        if not any(stream.get("codec_type") == expected_stream_kind for stream in streams):
             raise ValueError("Uploaded file has no matching media stream")
+        video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+        if expected_kind == "image":
+            return {
+                "duration_us": 0,
+                "has_audio": False,
+                "audio_stream_count": 0,
+                "width_px": video.get("width") if video else None,
+                "height_px": video.get("height") if video else None,
+            }
         duration = float(metadata.get("format", {}).get("duration", 0))
         if not 0 < duration < 24 * 60 * 60:
             raise ValueError("Uploaded media duration is invalid")
         audio_count = sum(stream.get("codec_type") == "audio" for stream in streams)
-        video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
         result = {"duration_us": round(duration * 1_000_000), "has_audio": audio_count > 0,
                   "audio_stream_count": audio_count}
         if video:

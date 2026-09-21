@@ -5,7 +5,7 @@ const api = vi.hoisted(() => ({ fetchRemixArtifact: vi.fn(), createRemixArtifact
 vi.mock('@/api/remix', () => api);
 import { prepareNodeRemix, remixGraphFingerprint } from './prepareNodeRemix';
 
-const media = (kind: 'video' | 'audio', hash: string) => ({ media_path: `input/${kind}`, media_hash: hash.repeat(64), url: `/${kind}`, size: 1, media_kind: kind, duration_us: 4_000_000, has_audio: kind === 'video' });
+const media = (kind: 'image' | 'video' | 'audio', hash: string) => ({ media_path: `input/${kind}`, media_hash: hash.repeat(64), url: `/${kind}`, size: 1, media_kind: kind, duration_us: kind === 'image' ? 0 : 4_000_000, has_audio: kind === 'video' });
 const node = (id: string, type: string, data: Record<string, unknown>) => ({ id, type, data, position: { x: 0, y: 0 } }) as CanvasNode;
 const edge = (source: string, target: string) => ({ id: `${source}-${target}`, source, target }) as CanvasEdge;
 
@@ -43,6 +43,37 @@ describe('prepareNodeRemix', () => {
     const before = remixGraphFingerprint(nodes, edges, 'compose');
     const after = remixGraphFingerprint([node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 2 } }), nodes[1]], edges, 'compose');
     expect(after).not.toBe(before);
+  });
+
+  it('publishes a connected image node only when its selected media revision still matches', async () => {
+    const scriptRef = { artifactId: 'script-1', revision: 1 };
+    const timingRef = { artifactId: 'timing-1', revision: 1 };
+    const transcriptRef = { artifactId: 'words-1', revision: 1 };
+    const blueprintRef = { artifactId: 'blueprint-1', revision: 1 };
+    const image = media('image', 'c');
+    const nodes = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
+      node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/audio', remixMedia: media('audio', 'b') }),
+      node('visual', 'imageGenNode', { remixRole: 'visual', remixMedia: image, imageUrl: image.url }),
+      node('script', 'scriptNode', { remixScriptRef: scriptRef }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: blueprintRef }),
+      node('words', 'transcriptNode', { artifactRef: transcriptRef }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: timingRef }),
+      node('compose', 'videoComposeNode', {}),
+    ];
+    const edges = [edge('video', 'timeline'), edge('audio', 'timeline'), edge('visual', 'script'), edge('story', 'script'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose')];
+    api.fetchRemixArtifact.mockImplementation((_project: string, ref: { artifactId: string }) => ref.artifactId === 'timing-1'
+      ? Promise.resolve({ schema: 'performance_timing.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }, { artifact_id: 'words-1', revision: 1 }], payload: { media_hash: `sha256:${'b'.repeat(64)}`, fps: 30, events: [{ event_id: 'e1', start_frame: 0, end_frame: 30 }], unresolved_required_events: [], override_conflicts: [] } })
+      : ref.artifactId === 'script-1' ? Promise.resolve({ schema: 'remix_script.v1', upstream_refs: [{ artifact_id: 'blueprint-1', revision: 1 }], payload: { dialogue: '你好', selections: [{ selection_id: 'e1', start_char: 0, end_char: 2 }], events: [{ event_id: 'e1', selection_id: 'e1', caption: '你好', visual_node_id: 'visual', visual_media_revision: image.media_hash }] } })
+        : ref.artifactId === 'words-1' ? Promise.resolve({ schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }], payload: { status: 'completed', media_hash: `sha256:${'b'.repeat(64)}`, script_revision: 1, transcript: '你好', words: [] } })
+          : Promise.resolve({ schema: 'reference_blueprint.v1', payload: { media_hash: 'a'.repeat(64) } }));
+    api.createRemixArtifact.mockResolvedValue({ id: 'manifest-1', revision: 1 });
+
+    await prepareNodeRemix('demo', nodes, edges, 'compose');
+
+    expect(api.createRemixArtifact).toHaveBeenCalledWith('demo', 'composition_manifest.v1', expect.objectContaining({
+      media_bindings: expect.arrayContaining([expect.objectContaining({ media_id: 'visual-visual', kind: 'image', project_path: image.media_path, media_hash: `sha256:${image.media_hash}` })]),
+    }), [timingRef, scriptRef, blueprintRef, transcriptRef]);
   });
 
   it('changes the fingerprint when the same upstream nodes are rewired', () => {

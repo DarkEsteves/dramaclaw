@@ -47,6 +47,15 @@ def _video_bytes(tmp_path) -> bytes:
     return source.read_bytes()
 
 
+def _image_bytes(tmp_path) -> bytes:
+    source = tmp_path / "sample.png"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=green:s=32x48",
+         "-frames:v", "1", "-y", str(source)], check=True,
+    )
+    return source.read_bytes()
+
+
 def test_upload_returns_usable_immutable_project_media(client):
     api, _, root = client
     content = _video_bytes(root)
@@ -81,6 +90,22 @@ def test_video_upload_reports_when_separate_narration_is_needed(client):
     assert response.status_code == 200
     assert response.json()["data"]["has_audio"] is False
     assert response.json()["data"]["audio_stream_count"] == 0
+
+
+def test_upload_accepts_a_still_image_as_project_owned_visual(client):
+    api, _, root = client
+    content = _image_bytes(root)
+    response = api.post(
+        "/api/v1/projects/demo/freezone/remix/media",
+        files={"file": ("product.png", content, "image/png")},
+    )
+    assert response.status_code == 200
+    media = response.json()["data"]
+    assert media["media_kind"] == "image"
+    assert media["duration_us"] == 0
+    assert media["width_px"] == 32
+    assert media["height_px"] == 48
+    assert media["media_hash"] == hashlib.sha256(content).hexdigest()
 
 
 def test_upload_enforces_role_home_and_media_probe(client):

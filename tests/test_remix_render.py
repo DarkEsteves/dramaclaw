@@ -378,6 +378,24 @@ def test_render_manifest_layers_video_and_keeps_voice(tmp_path: Path) -> None:
     assert _pixel(output, 1.75)[2] > _pixel(output, 1.75)[0] * 2
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required")
+def test_render_manifest_layers_still_image_and_keeps_voice(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    product = tmp_path / "product.png"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(background))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=180x320", "-frames:v", "1", str(product))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    manifest = _manifest()
+    manifest["media_bindings"][1]["kind"] = "image"
+    paths = {"background": background, "product": product, "voice": voice}
+    output = render_manifest(_bind_media_hashes(manifest, paths), media_paths=paths, output_path=tmp_path / "still.mp4")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(output)], capture_output=True, text=True, check=True)
+    assert any(stream["codec_type"] == "audio" for stream in json.loads(probe.stdout)["streams"])
+    assert _pixel(output, 0.75)[0] > _pixel(output, 0.75)[2] * 2
+    assert _pixel(output, 1.75)[2] > _pixel(output, 1.75)[0] * 2
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
 def test_render_manifest_respects_position_size_and_opacity(tmp_path: Path) -> None:
     background = tmp_path / "background.png"

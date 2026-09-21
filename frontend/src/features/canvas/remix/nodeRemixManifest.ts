@@ -7,7 +7,7 @@ export interface CompiledTiming {
   override_conflicts: Array<Record<string, unknown>>;
 }
 
-interface ScriptEvent { event_id: string; caption?: string; selection_id?: string; visual_node_id?: string; sfx_node_id?: string }
+interface ScriptEvent { event_id: string; caption?: string; selection_id?: string; visual_node_id?: string; visual_media_revision?: string; sfx_node_id?: string }
 interface ScriptPayload { dialogue: string; events: ScriptEvent[]; selections?: Array<{ selection_id: string; start_char: number; end_char: number }> }
 interface WordTimeline { transcript: string; words: Array<{ text: string; start_char: number; end_char: number; start_us: number; end_us: number }> }
 interface WordCue { start_char: number; end_char: number; start_frame: number; end_frame: number }
@@ -86,9 +86,10 @@ export function buildNodeRemixManifest({ reference, narration, timing, script, w
     }
     if (rule.visual_node_id) {
       const media = visuals[rule.visual_node_id];
-      if (!media || media.media_kind !== 'video') throw new Error(`事件 ${event.event_id} 缺少替换画面`);
+      if (!media || (media.media_kind !== 'image' && media.media_kind !== 'video')) throw new Error(`事件 ${event.event_id} 缺少替换画面`);
+      if (!rule.visual_media_revision || media.media_hash !== rule.visual_media_revision) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);
       const mediaId = `visual-${rule.visual_node_id}`;
-      if (!bindings.some((binding) => binding.media_id === mediaId)) bindings.push({ media_id: mediaId, kind: 'video', project_path: media.media_path, media_hash: `sha256:${media.media_hash}` });
+      if (!bindings.some((binding) => binding.media_id === mediaId)) bindings.push({ media_id: mediaId, kind: media.media_kind, project_path: media.media_path, media_hash: `sha256:${media.media_hash}` });
       layers.push({ media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover' });
     }
     if (!caption.trim() && !rule.visual_node_id) throw new Error(`事件 ${event.event_id} 没有字幕或画面输出`);

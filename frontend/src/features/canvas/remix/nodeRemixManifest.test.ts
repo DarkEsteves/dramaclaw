@@ -3,6 +3,8 @@ import { buildNodeRemixManifest } from './nodeRemixManifest';
 
 const video = { media_path: 'input/reference.mp4', media_hash: 'a'.repeat(64), url: '/reference.mp4', size: 10, media_kind: 'video' as const, duration_us: 4_000_000, has_audio: true };
 const audio = { media_path: 'input/voice.wav', media_hash: 'b'.repeat(64), url: '/voice.wav', size: 10, media_kind: 'audio' as const, duration_us: 4_000_000 };
+const image = { media_path: 'freezone/remix_media/product.png', media_hash: 'c'.repeat(64), url: '/product.png', size: 10, media_kind: 'image' as const, duration_us: 0 };
+const visualVideo = { ...video, media_path: 'freezone/remix_media/product.mp4', media_hash: 'd'.repeat(64), has_audio: false };
 
 describe('buildNodeRemixManifest', () => {
   it('binds compiled timing to project media and script captions', () => {
@@ -76,5 +78,49 @@ describe('buildNodeRemixManifest', () => {
       expect.objectContaining({ role: 'sfx', start_frame: 30, end_frame: 45 }),
     ]));
     expect(output.media_bindings).toContainEqual(expect.objectContaining({ media_id: 'bgm-bgm-node', loop: true }));
+  });
+
+  it('binds an uploaded image by exact project path and selected media revision', () => {
+    const output = buildNodeRemixManifest({ reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '咖啡', events: [{ event_id: 'product', caption: '咖啡', visual_node_id: 'image-1', visual_media_revision: image.media_hash }] },
+      visuals: { 'image-1': image },
+    });
+    expect(output.media_bindings).toContainEqual({ media_id: 'visual-image-1', kind: 'image', project_path: image.media_path, media_hash: `sha256:${image.media_hash}` });
+    expect(output.layers).toContainEqual({ media_id: 'visual-image-1', start_frame: 12, end_frame: 45, z_order: 1, fit: 'cover' });
+  });
+
+  it('binds an uploaded video by exact project path and selected media revision', () => {
+    const output = buildNodeRemixManifest({ reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '咖啡', events: [{ event_id: 'product', caption: '咖啡', visual_node_id: 'video-1', visual_media_revision: visualVideo.media_hash }] },
+      visuals: { 'video-1': visualVideo },
+    });
+    expect(output.media_bindings).toContainEqual({ media_id: 'visual-video-1', kind: 'video', project_path: visualVideo.media_path, media_hash: `sha256:${visualVideo.media_hash}` });
+  });
+
+  it('binds a generated visual node using the immutable generated media revision', () => {
+    const generated = { ...image, media_path: 'freezone/image/generated/product.webp', media_hash: 'e'.repeat(64) };
+    const output = buildNodeRemixManifest({ reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '咖啡', events: [{ event_id: 'product', caption: '咖啡', visual_node_id: 'generated-1', visual_media_revision: generated.media_hash }] },
+      visuals: { 'generated-1': generated },
+    });
+    expect(output.media_bindings).toContainEqual(expect.objectContaining({ project_path: generated.media_path, media_hash: `sha256:${generated.media_hash}` }));
+  });
+
+  it('rejects a required visual that has no attached media before submission', () => {
+    expect(() => buildNodeRemixManifest({ reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '咖啡', events: [{ event_id: 'product', caption: '咖啡', visual_node_id: 'missing', visual_media_revision: 'f'.repeat(64) }] },
+    })).toThrow(/缺少替换画面/);
+  });
+
+  it('rejects a visual whose media hash changed after the script selection', () => {
+    expect(() => buildNodeRemixManifest({ reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '咖啡', events: [{ event_id: 'product', caption: '咖啡', visual_node_id: 'image-1', visual_media_revision: 'f'.repeat(64) }] },
+      visuals: { 'image-1': image },
+    })).toThrow(/素材已变化/);
   });
 });

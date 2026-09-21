@@ -12,14 +12,16 @@ interface Props {
   initialDraft: RemixScriptDraft;
   existingRef: RemixArtifactRef | null;
   blueprintRef: RemixArtifactRef | null;
-  visualNodes: Array<{ id: string; label: string }>;
+  visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
+  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
+  onAttachVisual?: (nodeId: string) => Promise<string>;
   onDraftChange: (draft: RemixScriptDraft) => void;
   onSave: (ref: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -73,6 +75,26 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
     } catch (cause) { setError(cause instanceof Error ? cause.message : '保存脚本失败'); }
     finally { setSaving(false); }
   };
+  const bindVisual = async (index: number, nodeId: string) => {
+    setError(null);
+    try {
+      const knownRevision = visualNodes.find((node) => node.id === nodeId)?.mediaRevision;
+      const mediaRevision = nodeId && !knownRevision && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
+      changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index
+        ? { ...item, visualNodeId: nodeId || undefined, visualMediaRevision: nodeId ? mediaRevision : undefined }
+        : item) });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');
+    }
+  };
+  const createVisual = (index: number, mode: 'generate' | 'upload') => {
+    const selection = draft.selections[index];
+    const created = selection && onCreateVisual?.(mode, selection.id);
+    if (!created) return;
+    changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index
+      ? { ...item, visualNodeId: created.id, visualMediaRevision: created.mediaRevision }
+      : item) });
+  };
 
   return <div className={`nodrag flex max-h-[82vh] w-[min(720px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><h2 className="text-sm font-semibold">改编脚本与语义区间</h2><button type="button" onClick={onClose} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>关闭</button></div>
@@ -87,9 +109,15 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
         <label>事件名称<input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className={fieldClass} /></label>
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
-        <label>B-roll 画面<select aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, visualNodeId: event.target.value || undefined } : item) })} className={fieldClass}><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <label>B-roll 画面<select id={`remix-visual-${selection.id}`} aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => void bindVisual(index, event.target.value)} className={fieldClass}><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待生成/上传'}</option>)}</select></label>
         <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: event.target.value || undefined } : item) })} className={fieldClass}><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
         <button type="button" onClick={() => changeDraft({ ...draft, selections: draft.selections.filter((_, position) => position !== index) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>删除</button>
+        <div className="col-span-6 flex items-center gap-2">
+          <button type="button" aria-label={`生成 ${selection.label} 素材`} onClick={() => createVisual(index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button>
+          <button type="button" aria-label={`上传 ${selection.label} 素材`} onClick={() => createVisual(index, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button>
+          <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
+          {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">素材节点已创建，生成或上传完成后再保存。</span>}
+        </div>
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
       </div>)}
       {error && <p role="alert" className="text-red-300">{error}</p>}

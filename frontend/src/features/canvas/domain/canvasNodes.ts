@@ -106,6 +106,9 @@ export interface NodeDisplayData {
 }
 
 export interface NodeImageData extends NodeDisplayData {
+  /** Project-owned still image selected for a reference remix event. */
+  remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
+  remixRole?: 'visual';
   imageUrl: string | null;
   previewImageUrl?: string | null;
   aspectRatio: string;
