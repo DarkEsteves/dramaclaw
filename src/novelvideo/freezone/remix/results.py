@@ -57,6 +57,13 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         raise ValueError("render output is unavailable")
     url = f"/api/v1/projects/{quote(project_id, safe='')}/media/{quote(relative, safe='/')}"
 
+    # This state claim is the serialization point with cancellation and
+    # provider-timeout reconciliation. Once claimed, neither can win between
+    # the exact-input check and the canvas write.
+    record = operations.claim_confirmation(operation_id, canvas_id=canvas_id, node_id=node_id)
+    if record["status"] == "completed":
+        return record
+
     def exact_inputs(node: dict | None) -> bool:
         refs, revision = _current(node)
         expected = [{"artifact_id": ref["artifact_id"], "revision": ref["revision"]} for ref in record["input_refs"]]
@@ -101,7 +108,7 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         )
     except _StaleNode:
         return operations.mark_stale(operation_id, reason="exact_inputs_changed")
-    return operations.confirm(
-        operation_id, current_input_refs=record["input_refs"],
-        current_node_revision=record["node_revision"], canvas_id=canvas_id, node_id=node_id,
-    )
+    except Exception:
+        operations.release_confirmation(operation_id)
+        raise
+    return operations.finish_confirmation(operation_id)

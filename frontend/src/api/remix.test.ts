@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('./client', () => ({ apiCall: vi.fn(async (_path: string, _options?: unknown) => ({})) }));
 
 import { apiCall } from './client';
-import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixBrollPlan, generateRemixScriptDraft, listRemixOperations, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
+import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixBrollPlan, generateRemixScriptDraft, listRemixOperations, reconcileRemixOperation, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
 
 describe('remix API contract', () => {
   it('sends exact artifact refs and render revision to the backend routes', async () => {
@@ -43,6 +43,8 @@ describe('remix API contract', () => {
     expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations/operation-1/confirm', { method: 'POST', json: { canvas_id: 'default', node_id: 'compose-1' } });
     await listRemixOperations('demo');
     expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations?limit=50');
+    await reconcileRemixOperation('demo', 'operation-1');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/operations/operation-1/reconcile', { method: 'POST' });
   });
 
   it('generates a draft from an exact saved blueprint revision', async () => {

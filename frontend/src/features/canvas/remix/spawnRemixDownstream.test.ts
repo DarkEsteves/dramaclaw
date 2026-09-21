@@ -31,6 +31,16 @@ describe('source-first remix graph plans', () => {
     expect(updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ resultVideoUrl: null }));
     expect(paidCall).not.toHaveBeenCalled();
   });
+  it('durably marks the edited visual output stale until a new generation completes', () => {
+    const updateNodeData = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [node('visual', 'imageGenNode', { prompt: 'new prompt', remixVisualOutputCurrent: true }), node('compose', 'videoComposeNode', { remixInputsCurrent: true })],
+      edges: [edge('visual', 'compose')], updateNodeData,
+    });
+    expect(applyRemixInvalidation('visual', 'visual_prompt')).toEqual(['generate_visual', 'render']);
+    expect(updateNodeData).toHaveBeenCalledWith('visual', expect.objectContaining({ remixVisualOutputCurrent: false, remixVisualRequestRevision: 1 }));
+    expect(updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({ remixInputsCurrent: false }));
+  });
   it('connects the saved script and its directly aligned transcript to a new timeline', () => {
     const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s') }), node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' })];
     expect(planTimelineFromScript(nodes, [edge('script', 'words')], 'script')).toEqual({ sourceIds: ['script', 'words'] });

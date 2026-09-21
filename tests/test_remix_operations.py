@@ -173,3 +173,45 @@ def test_submission_claim_is_atomic_and_releasable(tmp_path: Path) -> None:
     winner = "tab-a" if claims[0] else "tab-b"
     store.release_submission(operation["operation_id"], owner=winner)
     assert store.claim_submission(operation["operation_id"], owner="retry") is True
+
+
+def test_confirmation_claim_serializes_cancel_and_unknown_outcome(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "result.mp4").write_bytes(b"video")
+    operation = store.start(idempotency_key="confirm-race", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "result.mp4"}])
+
+    claimed = store.claim_confirmation(operation["operation_id"], canvas_id="canvas", node_id="node")
+    assert claimed["status"] == "confirming"
+    with pytest.raises(ValueError, match="confirmation"):
+        store.cancel(operation["operation_id"], reason="user_cancelled")
+    with pytest.raises(ValueError, match="confirmation"):
+        store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider")
+    completed = store.finish_confirmation(operation["operation_id"])
+    assert completed["status"] == "completed"
+
+
+def test_terminal_operations_reject_illegal_state_rewrites(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="terminal", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.cancel(operation["operation_id"], reason="user_cancelled")
+    with pytest.raises(ValueError, match="transition"):
+        store.fail(operation["operation_id"], reason="too late")
+    with pytest.raises(ValueError, match="transition"):
+        store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider")
+    with pytest.raises(ValueError, match="transition"):
+        store.bind_task(operation["operation_id"], task_id="late-task")
+    with pytest.raises(ValueError, match="transition"):
+        store.complete(operation["operation_id"], output_refs=[], current_input_refs=refs(), current_node_revision=1)
+
+
+def test_cancellation_claim_blocks_confirmation_and_late_output_stays_stale(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "late.mp4").write_bytes(b"video")
+    operation = store.start(idempotency_key="cancel-claim", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    store.claim_cancellation(operation["operation_id"], reason="user_cancelled")
+    with pytest.raises(ValueError, match="not available"):
+        store.claim_confirmation(operation["operation_id"], canvas_id="", node_id="")
+    late = store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "late.mp4"}])
+    assert late["status"] == "stale" and late["stale_reason"] == "cancelled"
+    assert store.finish_cancellation(operation["operation_id"])["status"] == "stale"

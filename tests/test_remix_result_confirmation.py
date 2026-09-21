@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -199,10 +200,107 @@ def test_confirm_retains_late_result_when_exact_upstream_fingerprint_changed(api
 
 
 def test_operation_transition_endpoint_exposes_cancel_and_unknown_reconciliation(api: TestClient, tmp_path: Path) -> None:
-    _artifact, operation = _published(tmp_path)
+    operation = RemixOperationStore(tmp_path, "demo").start(
+        idempotency_key="transition", input_refs=[], producer_version="remix-render.v1",
+        normalized_parameters={"job_id": "a" * 64}, node_revision=1,
+    )
     unknown = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "unknown", "provider_task_id": "provider-9"})
     assert unknown.status_code == 200
     assert unknown.json()["data"]["status"] == "pending_reconciliation"
     cancelled = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition", json={"outcome": "cancelled", "reason": "user_cancelled"})
     assert cancelled.status_code == 200
     assert cancelled.json()["data"]["status"] == "cancelled"
+
+
+def test_cancel_transition_cancels_the_bound_project_task_before_operation(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.api.routes import remix
+
+    operation_store = RemixOperationStore(tmp_path, "demo")
+    operation = operation_store.start(
+        idempotency_key="cancel-task", input_refs=[], producer_version="remix-render.v1",
+        normalized_parameters={"job_id": "c" * 64}, node_revision=1,
+    )
+    operation_store.bind_task(operation["operation_id"], task_id="task-bound")
+    task = SimpleNamespace(task_id="task-bound", task_type="remix_render", episode=0, beat_num=None, scope="c" * 64)
+    manager = SimpleNamespace(get_task_for_project=lambda ctx, task_type, episode, beat_num=None, scope=None: task)
+    cancelled = []
+    class Backend:
+        async def cancel_project_task(self, ctx, task_state, **kwargs):
+            cancelled.append((task_state, kwargs))
+            return {"ok": True, "status": "cancelled"}
+    monkeypatch.setattr(remix, "get_task_manager", lambda: manager)
+    monkeypatch.setattr(remix, "get_task_backend", lambda: Backend())
+
+    response = api.post(
+        f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/transition",
+        json={"outcome": "cancelled", "reason": "user_cancelled"},
+    )
+
+    assert response.status_code == 200
+    assert cancelled == [(task, {"force": True, "acknowledge_no_refund": True})]
+    assert operation_store.get(operation["operation_id"])["status"] == "cancelled"
+
+
+def test_confirmation_claim_wins_race_without_allowing_cancelled_state_and_applied_canvas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix.results import confirm_render
+
+    artifact, operation = _published(tmp_path)
+    canvas = _canvas(tmp_path, artifact)
+    entered = threading.Event()
+    release = threading.Event()
+    original_save = canvas_store.save_canvas
+
+    def delayed_save(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(canvas_store, "save_canvas", delayed_save)
+    result: list[dict] = []
+    thread = threading.Thread(target=lambda: result.append(confirm_render(
+        tmp_path, tmp_path / "state", "demo", operation["operation_id"],
+        canvas_id="default", node_id="compose-1",
+    )))
+    thread.start()
+    assert entered.wait(2)
+    with pytest.raises(ValueError, match="confirmation"):
+        RemixOperationStore(tmp_path, "demo").cancel(operation["operation_id"], reason="user_cancelled")
+    release.set()
+    thread.join(2)
+
+    assert result[0]["status"] == "completed"
+    assert json.loads(canvas.read_text())["nodes"][0]["data"]["resultVideoUrl"].endswith(".mp4")
+
+
+def test_cancel_wins_before_confirmation_and_canvas_is_untouched(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.results import confirm_render
+
+    artifact, operation = _published(tmp_path)
+    canvas = _canvas(tmp_path, artifact)
+    original = canvas.read_bytes()
+    RemixOperationStore(tmp_path, "demo").cancel(operation["operation_id"], reason="user_cancelled")
+    with pytest.raises(ValueError, match="not available"):
+        confirm_render(tmp_path, tmp_path / "state", "demo", operation["operation_id"], canvas_id="default", node_id="compose-1")
+    assert canvas.read_bytes() == original
+    assert RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])["status"] == "cancelled"
+
+
+def test_reconcile_timeout_reads_bound_task_and_transitions_failure(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.api.routes import remix
+
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(
+        idempotency_key="timeout", input_refs=[], producer_version="remix-render.v1",
+        normalized_parameters={"job_id": "d" * 64}, node_revision=1,
+    )
+    store.bind_task(operation["operation_id"], task_id="task-timeout")
+    store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-timeout")
+    task = SimpleNamespace(task_id="task-timeout", status="failed", error="provider timeout")
+    monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "failed"
+    assert store.get(operation["operation_id"])["failure_reason"] == "provider timeout"

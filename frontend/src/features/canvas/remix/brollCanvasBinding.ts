@@ -54,6 +54,9 @@ function currentVisualProjectPath(project: string, visual: CanvasNode): string |
 }
 
 export function boundBrollVisualMedia(project: string, visual: CanvasNode): RemixUploadedMedia {
+  if (visual.data.remixVisualOutputCurrent === false) {
+    throw new Error(`画面素材 ${visual.id} 的生成提示已变化，请重新生成`);
+  }
   const media = visual.data.remixMedia as RemixUploadedMedia | undefined;
   const currentPath = currentVisualProjectPath(project, visual);
   const sourceUrl = visualSourceUrl(visual);

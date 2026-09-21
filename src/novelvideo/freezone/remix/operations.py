@@ -161,12 +161,24 @@ class RemixOperationStore:
 
     def provider_outcome_unknown(self, operation_id: str, *, provider_task_id: str) -> dict[str, Any]:
         with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] == "pending_reconciliation":
+                return record
+            if record["status"] == "confirming":
+                raise ValueError("operation confirmation is in progress")
+            if record["status"] != "pending":
+                raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="pending_reconciliation", provider_task_id=provider_task_id)
 
     def bind_task(self, operation_id: str, *, task_id: str, provider_task_id: str = "") -> dict[str, Any]:
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("task_id is required")
         with self._locked() as guard:
+            record = self._read(operation_id)
+            if record.get("task_id") == task_id:
+                return record
+            if record["status"] not in {"pending", "pending_reconciliation", "needs_confirmation"}:
+                raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id, submission_owner="", submission_claimed_at=0)
 
     def claim_submission(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> bool:
@@ -191,6 +203,9 @@ class RemixOperationStore:
 
     def mark_stale(self, operation_id: str, *, reason: str) -> dict[str, Any]:
         with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] in {"completed", "cancelled", "failed"}:
+                raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="stale", stale_reason=reason)
 
     def cancel(self, operation_id: str, *, reason: str) -> dict[str, Any]:
@@ -198,15 +213,89 @@ class RemixOperationStore:
             raise ValueError("cancellation reason is required")
         with self._locked() as guard:
             record = self._read(operation_id)
-            if record["status"] in {"completed", "stale"}:
+            if record["status"] == "cancelled":
                 return record
+            if record["status"] == "confirming":
+                raise ValueError("operation confirmation is in progress")
+            if record["status"] in {"completed", "stale", "failed"}:
+                raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="cancelled", cancel_reason=reason.strip())
+
+    def claim_cancellation(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("cancellation reason is required")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] == "cancelled":
+                return record
+            if record["status"] in {"confirming", "cancelling"}:
+                raise ValueError("operation confirmation or cancellation is in progress")
+            if record["status"] not in {"pending", "pending_reconciliation", "needs_confirmation"}:
+                raise ValueError("illegal operation state transition")
+            return self._update(
+                operation_id, guard, status="cancelling", cancel_reason=reason.strip(),
+                cancellation_previous_status=record["status"],
+            )
+
+    def release_cancellation(self, operation_id: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] != "cancelling":
+                return record
+            previous = record.get("cancellation_previous_status")
+            if previous not in {"pending", "pending_reconciliation", "needs_confirmation"}:
+                raise ValueError("operation cancellation cannot be released")
+            return self._update(operation_id, guard, status=previous)
+
+    def finish_cancellation(self, operation_id: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] in {"cancelled", "stale"}:
+                return record
+            if record["status"] != "cancelling":
+                raise ValueError("operation cancellation was not claimed")
+            return self._update(operation_id, guard, status="cancelled")
 
     def fail(self, operation_id: str, *, reason: str) -> dict[str, Any]:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("failure reason is required")
         with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] == "failed":
+                return record
+            if record["status"] == "confirming":
+                raise ValueError("operation confirmation is in progress")
+            if record["status"] not in {"pending", "pending_reconciliation"}:
+                raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="failed", failure_reason=reason.strip(), submission_owner="")
+
+    def claim_confirmation(self, operation_id: str, *, canvas_id: str, node_id: str) -> dict[str, Any]:
+        """Atomically reserve result application against cancel/timeout transitions."""
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record.get("canvas_id") and (record["canvas_id"] != canvas_id or record["node_id"] != node_id):
+                raise ValueError("operation belongs to a different canvas node")
+            if record["status"] == "completed":
+                return record
+            if record["status"] != "needs_confirmation" or not self._outputs_exist(record.get("output_refs", [])):
+                raise ValueError("operation result is not available for confirmation")
+            return self._update(operation_id, guard, status="confirming")
+
+    def release_confirmation(self, operation_id: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] != "confirming":
+                return record
+            return self._update(operation_id, guard, status="needs_confirmation")
+
+    def finish_confirmation(self, operation_id: str) -> dict[str, Any]:
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] == "completed":
+                return record
+            if record["status"] != "confirming":
+                raise ValueError("operation confirmation was not claimed")
+            return self._update(operation_id, guard, status="completed", stale_reason="")
 
     def publish_result_unverified(self, operation_id: str, *, output_refs: list[dict[str, Any]]) -> dict[str, Any]:
         """Save durable runner output without claiming the canvas node is still current."""
@@ -222,6 +311,8 @@ class RemixOperationStore:
                 return self._update(operation_id, guard, status="stale", stale_reason="superseded", output_refs=output_refs)
             if record["status"] == "cancelled":
                 return self._update(operation_id, guard, status="stale", stale_reason="cancelled", output_refs=output_refs)
+            if record["status"] == "cancelling":
+                return self._update(operation_id, guard, status="stale", stale_reason="cancelled", output_refs=output_refs)
             if record["status"] not in {"pending", "pending_reconciliation"}:
                 raise ValueError("operation cannot publish result in its current state")
             return self._update(operation_id, guard, status="needs_confirmation", output_refs=output_refs)
@@ -230,6 +321,10 @@ class RemixOperationStore:
         refs = self._refs(current_input_refs)
         with self._locked() as guard:
             record = self._read(operation_id)
+            if record["status"] in {"completed", "stale"}:
+                return record
+            if record["status"] not in {"pending", "pending_reconciliation"}:
+                raise ValueError("illegal operation state transition")
             status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
             stale_reason = "" if status == "completed" else ("input_refs_changed" if record["input_refs"] != refs else "node_revision_changed")
             return self._update(operation_id, guard, status=status, output_refs=output_refs, stale_reason=stale_reason)

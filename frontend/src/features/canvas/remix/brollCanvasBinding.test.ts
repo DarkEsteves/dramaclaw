@@ -46,4 +46,13 @@ describe('B-roll canvas binding', () => {
     });
     expect(() => boundBrollVisualMedia('demo', current)).toThrow(/已变化/);
   });
+
+  it('rejects the old generated image after its prompt changes until regeneration finishes', () => {
+    const current = node('visual', 'imageGenNode', {
+      prompt: 'new prompt', imageUrl: '/static/projects/demo/freezone/image/old.png', remixRole: 'visual',
+      remixVisualOutputCurrent: false,
+      remixMedia: { url: '/static/projects/demo/freezone/image/old.png', media_path: 'freezone/image/old.png', media_hash: 'a'.repeat(64), media_kind: 'image' },
+    });
+    expect(() => boundBrollVisualMedia('demo', current)).toThrow(/重新生成/);
+  });
 });

@@ -25,6 +25,7 @@ from novelvideo.freezone.remix.broll_plan import generate_broll_plan
 from novelvideo.project_context import require_project_home_node, resolve_project_context
 from novelvideo.ports import get_task_backend
 from novelvideo.task_identity import project_task_state_key
+from novelvideo.task_state import get_task_manager
 
 
 router = APIRouter(prefix="/projects/{project}/freezone/remix", tags=["freezone-remix"])
@@ -664,7 +665,34 @@ async def transition_operation(project: str, operation_id: str, body: OperationT
         if body.outcome == "unknown":
             result = await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=body.provider_task_id)
         elif body.outcome == "cancelled":
-            result = await _call(operations.cancel, operation_id, reason=body.reason or "user_cancelled")
+            reason = body.reason or "user_cancelled"
+            record = await _call(operations.claim_cancellation, operation_id, reason=reason)
+            if record["status"] == "cancelled":
+                return _data(_operation_view(record))
+            if record.get("task_id"):
+                ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+                view = _operation_view(record)
+                task = await run_in_threadpool(
+                    get_task_manager().get_task_for_project, ctx, view["task_type"], 0,
+                    beat_num=None, scope=view["task_scope"],
+                )
+                if task is None or task.task_id != record["task_id"]:
+                    await _call(operations.release_cancellation, operation_id)
+                    previous = record.get("cancellation_previous_status")
+                    if previous == "pending":
+                        await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=record.get("provider_task_id", ""))
+                    raise HTTPException(409, "Task outcome is unknown; reconcile before cancellation")
+                try:
+                    cancelled = await get_task_backend().cancel_project_task(
+                        ctx, task, force=True, acknowledge_no_refund=True,
+                    )
+                except Exception:
+                    await _call(operations.release_cancellation, operation_id)
+                    raise
+                if not cancelled.get("ok") or cancelled.get("requires_confirmation"):
+                    await _call(operations.release_cancellation, operation_id)
+                    raise HTTPException(409, "Task cancellation was not confirmed")
+            result = await _call(operations.finish_cancellation, operation_id)
         else:
             result = await _call(operations.fail, operation_id, reason=body.reason or "task_failed")
     except FileNotFoundError as exc:
@@ -672,3 +700,33 @@ async def transition_operation(project: str, operation_id: str, body: OperationT
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return _data(_operation_view(result))
+
+
+@router.post("/operations/{operation_id}/reconcile")
+async def reconcile_operation(project: str, operation_id: str, user: dict = Depends(get_api_user)):
+    """Refresh an uncertain operation from its durable project task without resubmitting."""
+    store = await _store(project, user, "editor")
+    operations = RemixOperationStore(store.project_dir, store.project_id)
+    try:
+        record = await _call(operations.get, operation_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Operation not found") from exc
+    if record["status"] != "pending_reconciliation":
+        return _data(_operation_view(record))
+    view = _operation_view(record)
+    if not record.get("task_id") or not view.get("task_type") or not view.get("task_scope"):
+        return _data(view)
+    ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+    task = await run_in_threadpool(
+        get_task_manager().get_task_for_project, ctx, view["task_type"], 0,
+        beat_num=None, scope=view["task_scope"],
+    )
+    if task is None or task.task_id != record["task_id"]:
+        return _data(view)
+    if task.status == "failed":
+        record = await _call(operations.fail, operation_id, reason=task.error or "task_failed")
+    elif task.status == "cancelled":
+        record = await _call(operations.cancel, operation_id, reason="task_cancelled")
+    # Successful runners publish output_refs themselves. Leaving an operation
+    # uncertain until that durable publish appears prevents a false success.
+    return _data(_operation_view(record))

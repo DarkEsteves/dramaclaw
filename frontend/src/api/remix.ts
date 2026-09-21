@@ -56,6 +56,9 @@ export function confirmRemixOperation(project: string, operationId: string, canv
 export function transitionRemixOperation(project: string, operationId: string, outcome: 'unknown' | 'failed' | 'cancelled', reason = '', providerTaskId = '') {
   return apiCall<RemixOperation>(`projects/${project}/freezone/remix/operations/${operationId}/transition`, { method: 'POST', json: { outcome, reason, provider_task_id: providerTaskId } });
 }
+export function reconcileRemixOperation(project: string, operationId: string) {
+  return apiCall<RemixOperation>(`projects/${project}/freezone/remix/operations/${operationId}/reconcile`, { method: 'POST' });
+}
 
 export function submitRemixProcessAction(project: string, request: RemixProcessRequest) {
   const payload = request.action === 'analyze_reference_video'

@@ -613,6 +613,17 @@ export function useImageGenerationForm(
       });
       throw error;
     }
+    const latestBeforeSubmit = (useCanvasStore.getState().nodes.find((node) => node.id === id)?.data ?? {}) as Record<string, unknown>;
+    const generationVisualRequestRevision = (typeof latestBeforeSubmit.remixVisualRequestRevision === 'number'
+      ? latestBeforeSubmit.remixVisualRequestRevision : 0) + 1;
+    updateNodeData(id, {
+      remixVisualRequestRevision: generationVisualRequestRevision,
+      remixVisualOutputCurrent: false,
+    });
+    const isCurrentVisualGenerationRequest = () => {
+      const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data as Record<string, unknown> | undefined;
+      return latest?.remixVisualRequestRevision === generationVisualRequestRevision;
+    };
     const genPayload = {
       prompt: effectivePrompt,
       // 后端只接受固定的几个比例；节点上的 aspectRatio 可能是图片自然尺寸约分出的
@@ -691,12 +702,13 @@ export function useImageGenerationForm(
             }
           }
           if (url) {
-            if (!isCurrentGenerationAttempt()) return 'ignored';
+            if (!isCurrentGenerationAttempt() || !isCurrentVisualGenerationRequest()) return 'ignored';
             completedUrls.push(url);
             const isFirstCompleted = completedUrls.length === 1;
             updateNodeData(id, {
               // 第 1 张完成的设为主图并结束 loading；后续只扩充画册。
               ...(isFirstCompleted ? buildImageGenerationSuccessPatch(url) : {}),
+              ...(isFirstCompleted ? { remixVisualOutputCurrent: true } : {}),
               ...(total > 1 ? { generationBatch: [...completedUrls] } : {}),
             });
             if (isFirstCompleted && options.attachStoryFrame !== false) {

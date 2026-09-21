@@ -131,6 +131,16 @@ describe('prepareNodeRemix', () => {
     expect(after).not.toBe(before);
   });
 
+  it('keeps a prompt edit in the durable graph fingerprint even before a replacement image arrives', () => {
+    const compose = node('compose', 'videoComposeNode', {});
+    const visual = node('visual', 'imageGenNode', { prompt: 'old prompt', imageUrl: '/same.png', remixVisualOutputCurrent: true });
+    const edges = [edge('visual', 'compose')];
+    const before = remixGraphFingerprint([visual, compose], edges, 'compose');
+    const after = remixGraphFingerprint([node('visual', 'imageGenNode', { ...visual.data, prompt: 'new prompt', remixVisualOutputCurrent: false }), compose], edges, 'compose');
+    expect(after).not.toBe(before);
+    expect(remixGraphFingerprint([node('visual', 'imageGenNode', { ...visual.data, prompt: 'new prompt', remixVisualOutputCurrent: false }), compose], edges, 'compose')).toBe(after);
+  });
+
   it('refuses to prepare an existing compose after narration audio was cleared', async () => {
     const nodes = [
       node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),

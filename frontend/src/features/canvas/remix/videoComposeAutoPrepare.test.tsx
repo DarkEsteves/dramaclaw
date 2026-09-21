@@ -8,6 +8,8 @@ const remixGraphFingerprint = vi.hoisted(() => vi.fn(() => 'current-fingerprint'
 const renderRemixManifest = vi.hoisted(() => vi.fn());
 const fetchRemixArtifact = vi.hoisted(() => vi.fn());
 const reviseRemixArtifact = vi.hoisted(() => vi.fn());
+const fetchRemixOperation = vi.hoisted(() => vi.fn());
+const reconcileRemixOperation = vi.hoisted(() => vi.fn());
 const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[], listeners: new Set<() => void>() }));
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -27,7 +29,7 @@ vi.mock('@/features/canvas/remix/prepareNodeRemix', () => ({ prepareNodeRemix, r
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
 vi.mock('@/api/remix', () => ({
   listRemixOperations: vi.fn(async () => ({ items: [] })),
-  fetchRemixOperation: vi.fn(), fetchRemixArtifact, reviseRemixArtifact, confirmRemixOperation: vi.fn(), renderRemixManifest,
+  fetchRemixOperation, reconcileRemixOperation, transitionRemixOperation: vi.fn(), fetchRemixArtifact, reviseRemixArtifact, confirmRemixOperation: vi.fn(), renderRemixManifest,
 }));
 vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true), applyRemoteFreezoneCanvas: vi.fn() }));
 vi.mock('@/api/canvas', () => ({ getFreezoneCanvas: vi.fn() }));
@@ -43,6 +45,21 @@ describe('VideoComposeNode automatic preparation', () => {
     remixGraphFingerprint.mockReturnValue('current-fingerprint');
     fetchRemixArtifact.mockReset();
     reviseRemixArtifact.mockReset();
+    fetchRemixOperation.mockReset();
+    reconcileRemixOperation.mockReset();
+  });
+
+  it('offers reconciliation and force regeneration while provider outcome is unknown', async () => {
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2, upstream_refs: [], payload: {
+      output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 60 }, media_bindings: [], layers: [], subtitle_events: [], audio_events: [], manual_overrides: [], source_versions: [],
+    } });
+    fetchRemixOperation.mockResolvedValue({ operation_id: 'op-1', status: 'pending_reconciliation', task_id: 'task-1', output_refs: [] });
+    reconcileRemixOperation.mockResolvedValue({ operation_id: 'op-1', status: 'pending_reconciliation', task_id: 'task-1', output_refs: [] });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose', remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixInputFingerprint: 'current-fingerprint', remixInputsCurrent: true, remixNodeRevision: 2, remixOperationId: 'op-1', unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(await screen.findByRole('button', { name: '重新检查任务' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '强制重新导出' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '重新检查任务' }));
+    await waitFor(() => expect(reconcileRemixOperation).toHaveBeenCalledWith('demo', 'op-1'));
   });
   it('publishes one manifest under StrictMode while preparation is pending', async () => {
     let release!: (value: { manifestRef: { artifactId: string; revision: number }; events: []; selections: []; unresolvedRequiredEvents: [] }) => void;

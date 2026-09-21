@@ -51,3 +51,27 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   task runners transition failures and timeouts durably.
 - Review-fix verification: 234 Python tests and 62 frontend tests passed, plus TypeScript,
   Ruff, and diff checks.
+
+## Final recovery race review
+
+- Generated visual requests are now durable fingerprint inputs. Prompt/model/request
+  changes version the visual request and mark its existing output stale; an older
+  in-flight generation cannot overwrite the edited request. Manifest preparation is
+  blocked until the replacement visual is generated and reattached.
+- Result confirmation atomically claims the operation before checking and writing the
+  canvas. Cancellation and timeout reconciliation cannot cross that claim, so a canvas
+  can no longer show an applied result while its operation says cancelled or failed.
+- Cancellation first claims the operation, cancels the exact bound project task through
+  the configured task backend, then commits the terminal operation state. Late output is
+  retained as stale history.
+- `pending_reconciliation` is visible without relying on a generic error. The compose
+  node offers both a durable task-status reconciliation action and explicit force
+  regeneration.
+- Added race coverage for confirm versus cancel, actual backend cancellation, terminal
+  transition legality, provider-timeout reconciliation, and persistent visual prompt
+  invalidation across recalculation.
+- Final focused recovery/workflow verification: 241 Python tests passed; 52 focused
+  frontend tests passed; TypeScript, Ruff, and diff checks passed. The repository-wide
+  frontend run still has three pre-existing unrelated contract failures (Vietnamese
+  locale parity, outline coverage for the two remix node types, and a transcript test
+  that expects words rendered as one text node).

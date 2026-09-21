@@ -52,6 +52,16 @@ export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], 
     previewImageUrl: 'previewImageUrl' in node.data ? node.data.previewImageUrl ?? null : undefined,
     audioUrl: node.type === CANVAS_NODE_TYPES.audio ? node.data.audioUrl ?? null : undefined,
     role: 'remixRole' in node.data ? node.data.remixRole : undefined,
+    generationRequest: node.type === CANVAS_NODE_TYPES.imageGen ? {
+      prompt: node.data.prompt ?? '', model: node.data.model ?? null,
+      aspectRatio: node.data.aspectRatio ?? null, size: node.data.size ?? null,
+      quality: node.data.quality ?? null, modelParams: node.data.modelParams ?? null,
+      styleTemplateId: node.data.styleTemplateId ?? null,
+      cameraSelection: node.data.cameraSelection ?? null,
+      referenceImageUrl: node.data.referenceImageUrl ?? null,
+      requestRevision: node.data.remixVisualRequestRevision ?? null,
+      outputCurrent: node.data.remixVisualOutputCurrent ?? null,
+    } : undefined,
     artifactRefs: artifactRefs(node.data as Record<string, unknown>),
   })).sort((left, right) => left.id.localeCompare(right.id)), edges: edges.filter((edge) => included.has(edge.source) && included.has(edge.target))
     .map((edge) => ({ source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle }))

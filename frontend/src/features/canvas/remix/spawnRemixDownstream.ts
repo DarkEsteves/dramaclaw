@@ -26,6 +26,11 @@ export function applyRemixInvalidation(sourceId: string, change: RemixChangeKind
   }
   for (const node of store.nodes) {
     if (!reachable.has(node.id)) continue;
+    if (change === 'visual_prompt' && node.id === sourceId) {
+      const revision = typeof node.data.remixVisualRequestRevision === 'number'
+        ? node.data.remixVisualRequestRevision : 0;
+      store.updateNodeData(node.id, { remixVisualOutputCurrent: false, remixVisualRequestRevision: revision + 1 });
+    }
     if ((change === 'script' || change === 'voice') && node.type === CANVAS_NODE_TYPES.transcript) {
       store.updateNodeData(node.id, { artifactRef: null, operationId: null, alignmentStale: true, status: 'needs_review' });
     }
