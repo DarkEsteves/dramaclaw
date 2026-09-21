@@ -8,6 +8,35 @@ import { parseDialogueTurns } from './dialogueTurns';
 
 type Ref = { artifactId: string; revision: number };
 
+/** Replace the selected take and make every directly-derived alignment stale. */
+export function applyNarrationMediaChange(
+  audioId: string,
+  media: UploadedRemixMedia,
+  role: 'narration' | 'bgm' | 'sfx',
+): void {
+  const store = useCanvasStore.getState();
+  const audio = store.nodes.find((node) => node.id === audioId && node.type === CANVAS_NODE_TYPES.audio);
+  const previous = audio?.data.remixMedia as UploadedRemixMedia | undefined;
+  const changed = audio?.data.audioUrl !== media.url || previous?.media_hash !== media.media_hash;
+  store.updateNodeData(audioId, { audioUrl: media.url, remixMedia: media, remixRole: role });
+  if (!changed || role !== 'narration') return;
+  for (const edge of store.edges) {
+    if (edge.source !== audioId) continue;
+    const transcript = store.nodes.find((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.transcript);
+    if (!transcript) continue;
+    store.updateNodeData(transcript.id, {
+      artifactRef: null,
+      operationId: null,
+      autoStartMode: null,
+      pendingScriptRef: null,
+      alignedScriptRef: null,
+      alignmentStale: true,
+      status: 'needs_review',
+      unresolved: ['配音已更换，请重新按脚本对齐。'],
+    });
+  }
+}
+
 function validRef(value: unknown): Ref | null {
   if (!value || typeof value !== 'object') return null;
   const ref = value as Record<string, unknown>;

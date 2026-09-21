@@ -116,7 +116,7 @@ def run_remix_compile_semantic_timeline(envelope: dict[str, Any], ctx: ProjectCo
         return artifact
     script_artifact = read_ref("script_ref", "remix_script.v1")
     words_artifact = read_ref("word_timeline_ref", "word_timeline.v1")
-    words = words_artifact["payload"]
+    words = {**words_artifact["payload"], "artifact_revision": words_artifact["revision"]}
     if words.get("status") != "completed":
         raise ValueError("semantic timing requires completed alignment")
     linked = any(

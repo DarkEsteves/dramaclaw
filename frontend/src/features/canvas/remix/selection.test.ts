@@ -27,6 +27,10 @@ describe('remix script selections', () => {
     expect(rebaseSelectionAfterEdit('咖啡和咖啡', '咖啡和茶饮', { start: 3, end: 5 })).toBeNull();
   });
 
+  it('does not guess which repeated phrase survived an ambiguous insertion', () => {
+    expect(rebaseSelectionAfterEdit('go go', 'go go go', { start: 3, end: 5 })).toBeNull();
+  });
+
   it('preserves a named selection or records its invalid reason after an edit', () => {
     expect(rebaseNamedSelections('咖啡和咖啡', '咖啡和茶饮', [{ id: 'reveal', label: '商品登场', start: 3, end: 5 }]))
       .toEqual([{ id: 'reveal', label: '商品登场', start: 3, end: 5, invalidReason: 'Script edit changed this selection' }]);

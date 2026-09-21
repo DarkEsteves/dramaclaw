@@ -228,6 +228,9 @@ class PerformanceTiming(_Contract):
         default=None, alias="schema"
     )
     script_revision: int = Field(ge=1)
+    # Older immutable timing artifacts predate this field; every new compile
+    # records the exact aligned-word revision used by the runner.
+    alignment_revision: int | None = Field(default=None, ge=1)
     media_hash: str = Field(min_length=1)
     fps: int = Field(gt=0)
     events: list[OutputFrameEvent]

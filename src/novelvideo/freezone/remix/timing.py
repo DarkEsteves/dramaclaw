@@ -133,11 +133,12 @@ def compile_timing(
             continue
 
         assert source_interval is not None
+        pieces = _apply_minimum_duration(pieces, overrides_by_event.get(event_id, []))
         for start_frame, end_frame in pieces:
             event_rows.append({"event_id": event_id, "start_frame": start_frame, "end_frame": end_frame})
         conflicts.extend(_fixed_frame_conflicts(event_id, pieces, overrides_by_event.get(event_id, [])))
 
-    return {
+    result = {
         "schema": "performance_timing.v1",
         "script_revision": script["revision"],
         "media_hash": script["media_hash"],
@@ -146,6 +147,9 @@ def compile_timing(
         "unresolved_required_events": unresolved_required,
         "override_conflicts": conflicts,
     }
+    if type(words.get("artifact_revision")) is int and words["artifact_revision"] > 0:
+        result["alignment_revision"] = words["artifact_revision"]
+    return result
 
 
 def _validate_bindings(script: dict[str, Any], words: dict[str, Any]) -> None:
@@ -304,3 +308,25 @@ def _fixed_frame_conflicts(
                 }
             )
     return conflicts
+
+
+def _apply_minimum_duration(
+    pieces: list[tuple[int, int]], overrides: Iterable[dict[str, Any]]
+) -> list[tuple[int, int]]:
+    values = [override.get("frames") for override in overrides if override.get("kind") == "minimum_duration_frames"]
+    if len(values) > 1:
+        raise TimingCompileError("only one minimum duration override is allowed per event")
+    if not values:
+        return pieces
+    frames = values[0]
+    if type(frames) is not int or frames <= 0:
+        raise TimingCompileError("minimum duration override requires positive integer frames")
+    if not pieces:
+        return pieces
+    actual = sum(end - start for start, end in pieces)
+    if actual >= frames:
+        return pieces
+    result = list(pieces)
+    start, end = result[-1]
+    result[-1] = (start, end + frames - actual)
+    return result

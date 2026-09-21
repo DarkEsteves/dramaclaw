@@ -1,5 +1,6 @@
 export interface TimelineEventOverride {
   offsetMs?: number;
+  minimumDurationFrames?: number;
   startFrame?: number;
   endFrame?: number;
 }
@@ -22,7 +23,8 @@ export function operationMatchesTimelineInputs(operation: OperationInputs, scrip
 
 type AlignedWord = { start_us?: unknown; end_us?: unknown };
 
-export function buildTimelineEditMap(words: AlignedWord[]): Record<string, number>[] {
+export function buildTimelineEditMap(words: AlignedWord[], manual?: Record<string, number>[]): Record<string, number>[] {
+  if (manual?.length) return manual.map((segment) => ({ ...segment }));
   const ends = words.map((word) => word.end_us).filter((value): value is number => Number.isInteger(value) && Number(value) > 0);
   const end = Math.max(0, ...ends);
   return end ? [{ source_start_us: 0, source_end_us: end, timeline_start_us: 0 }] : [];
@@ -33,6 +35,9 @@ export function buildTimelineOverrides(values: Record<string, TimelineEventOverr
     const rows: Record<string, unknown>[] = [];
     if (Number.isFinite(value.offsetMs) && value.offsetMs !== undefined && value.offsetMs !== 0) {
       rows.push({ event_id: eventId, relative_offset_us: Math.round(value.offsetMs * 1000) });
+    }
+    if (Number.isInteger(value.minimumDurationFrames) && Number(value.minimumDurationFrames) > 0) {
+      rows.push({ event_id: eventId, kind: 'minimum_duration_frames', frames: value.minimumDurationFrames });
     }
     if (Number.isInteger(value.startFrame) && Number.isInteger(value.endFrame)) {
       rows.push({ event_id: eventId, kind: 'fixed_frames', start_frame: value.startFrame, end_frame: value.endFrame });

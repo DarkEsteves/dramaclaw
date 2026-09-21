@@ -70,6 +70,10 @@ export function planTimelineFromScript(nodes: CanvasNode[], edges: CanvasEdge[],
 export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[], timelineId: string): { sourceIds: string[] } {
   const timeline = nodes.find((node) => node.id === timelineId && node.type === CANVAS_NODE_TYPES.semanticTimeline);
   if (!ref(timeline?.data.artifactRef)) throw new Error('请先完成语义时间轴编译。');
+  const timingEvents = Array.isArray(timeline?.data.events) ? timeline.data.events : [];
+  if (timingEvents.some((event) => event && typeof event === 'object' && Boolean((event as { invalidReason?: unknown }).invalidReason))) {
+    throw new Error('语义时间轴仍有未解决的必需事件，请先修正后重新编译。');
+  }
   const upstream = ancestors(nodes, edges, timelineId);
   const script = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && ref(node.data.remixScriptRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
   const words = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.transcript && ref(node.data.artifactRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
@@ -84,6 +88,13 @@ export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[]
   if (narration.length !== 1 && (narration.length > 1 || !referenceMedia.has_audio)) throw new Error('请先连接旁白音频，或使用带声音的参考视频。');
   const transcriptAncestors = ancestors(nodes, edges, words[0].id);
   if (narration.length === 1 && !transcriptAncestors.some((node) => node.id === narration[0].id)) throw new Error('请将旁白音频连接到转写节点。');
+  if (narration.length === 1 && typeof timeline?.data.compiledMediaHash !== 'string') {
+    throw new Error('语义时间轴缺少配音版本信息，请重新编译。');
+  }
+  if (narration.length === 1
+    && (narration[0].data.remixMedia as { media_hash?: unknown }).media_hash !== timeline?.data.compiledMediaHash) {
+    throw new Error('语义时间轴使用了旧的配音版本，请重新编译。');
+  }
   if (narration.length === 0 && !transcriptAncestors.some((node) => node.id === reference[0].id)) throw new Error('请将参考视频连接到转写节点。');
   return { sourceIds: [timelineId] };
 }

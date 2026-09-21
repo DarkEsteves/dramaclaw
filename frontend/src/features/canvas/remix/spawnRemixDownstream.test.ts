@@ -81,6 +81,34 @@ describe('source-first remix graph plans', () => {
     expect(() => planComposeFromTimeline(nodes, edges.filter((item) => item.target !== 'story'), 'timeline')).toThrow('参考视频');
   });
 
+  it('blocks compose when required timing is unresolved or uses an obsolete narration take', () => {
+    const base = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: { media_hash: 'v', has_audio: true } }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: ref('b') }),
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixMedia: { media_hash: 'voice-new' }, audioUrl: '/new.wav' }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed', sourceMediaHash: 'voice-new' }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: ref('t'), compiledMediaHash: 'voice-old', events: [{ selectionId: 'required', label: 'required', invalidReason: 'selection invalid' }] }),
+    ];
+    const edges = [edge('video', 'story'), edge('story', 'script'), edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words'), edge('script', 'timeline'), edge('words', 'timeline')];
+    expect(() => planComposeFromTimeline(base, edges, 'timeline')).toThrow('未解决');
+    const resolved = base.map((item) => item.id === 'timeline' ? node('timeline', 'semanticTimelineNode', { artifactRef: ref('t'), compiledMediaHash: 'voice-old', events: [] }) : item);
+    expect(() => planComposeFromTimeline(resolved, edges, 'timeline')).toThrow('配音版本');
+  });
+
+  it('requires legacy timing without a narration hash to be recompiled before export', () => {
+    const nodes = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: { media_hash: 'v', has_audio: true } }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: ref('b') }),
+      node('script', 'scriptNode', { remixScriptRef: ref('s') }),
+      node('audio', 'audioNode', { remixRole: 'narration', remixMedia: { media_hash: 'voice' }, audioUrl: '/voice.wav' }),
+      node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: ref('t'), events: [] }),
+    ];
+    const edges = [edge('video', 'story'), edge('story', 'script'), edge('script', 'audio'), edge('audio', 'words'), edge('script', 'words'), edge('script', 'timeline'), edge('words', 'timeline')];
+    expect(() => planComposeFromTimeline(nodes, edges, 'timeline')).toThrow('重新编译');
+  });
+
   it('creates and connects one timeline with an automatic compile request', () => {
     const addNode = vi.fn(() => 'timeline');
     const addEdge = vi.fn(() => 'edge');

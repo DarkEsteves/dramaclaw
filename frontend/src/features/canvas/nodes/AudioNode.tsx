@@ -42,7 +42,7 @@ import { setNodeMediaActive } from '@/features/canvas/application/canvasLod';
 import { useNodeGenerationTaskState } from '@/features/canvas/application/useNodeGenerationTaskState';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { RemixMediaInput } from '@/features/canvas/remix/RemixMediaInput';
-import { createAlignedTranscriptFromAudio } from '@/features/canvas/remix/spawnNarrationAndAlignment';
+import { applyNarrationMediaChange, createAlignedTranscriptFromAudio } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { useCanvasStore, useIsBoxSelecting } from '@/stores/canvasStore';
 import { AudioOperationsPanel } from '@/features/canvas/nodes/AudioOperationsPanel';
@@ -488,7 +488,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
           media={data.remixMedia}
           sourceUrl={data.audioUrl}
           role={data.remixRole ?? 'narration'}
-          onChange={({ media, role }) => updateNodeData(id, { audioUrl: media.url, remixMedia: media, remixRole: role as AudioNodeData['remixRole'] })}
+          onChange={({ media, role }) => applyNarrationMediaChange(id, media, role as NonNullable<AudioNodeData['remixRole']>)}
         />
       </div>}
 

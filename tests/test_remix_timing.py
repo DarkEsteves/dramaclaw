@@ -239,3 +239,73 @@ def test_compile_reports_fixed_frame_override_conflict_after_recompile() -> None
     assert result["override_conflicts"] == [
         {"event_id": "hello", "reason": "fixed frame override differs from compiled timing", "override": {"start_frame": 10, "end_frame": 20}}
     ]
+
+
+def test_compile_records_exact_alignment_revision_and_selected_narration_hash() -> None:
+    result = compile_timing(
+        script={
+            "revision": 3,
+            "media_hash": "sha256:final-take",
+            "text": "hello",
+            "selections": [{"selection_id": "hello", "start_char": 0, "end_char": 5, "script_revision": 3}],
+            "events": [{"event_id": "hello", "selection_id": "hello", "required": True}],
+        },
+        words={
+            "artifact_revision": 9,
+            "script_revision": 3,
+            "media_hash": "sha256:final-take",
+            "words": [{"text": "hello", "start_char": 0, "end_char": 5, "start_us": 0, "end_us": 1_000_000}],
+        },
+        edit_map=[{"source_start_us": 0, "source_end_us": 1_000_000, "timeline_start_us": 0}],
+        overrides=[],
+        fps=30,
+    )
+
+    assert result["script_revision"] == 3
+    assert result["alignment_revision"] == 9
+    assert result["media_hash"] == "sha256:final-take"
+
+
+def test_compile_applies_minimum_duration_after_speed_mapping_within_one_frame() -> None:
+    result = compile_timing(
+        script={
+            "revision": 1,
+            "media_hash": "voice-a",
+            "text": "hello",
+            "selections": [{"selection_id": "hello", "start_char": 0, "end_char": 5, "script_revision": 1}],
+            "events": [{"event_id": "hello", "selection_id": "hello", "required": True}],
+        },
+        words={
+            "artifact_revision": 1,
+            "script_revision": 1,
+            "media_hash": "voice-a",
+            "words": [{"text": "hello", "start_char": 0, "end_char": 5, "start_us": 0, "end_us": 1_000_000}],
+        },
+        edit_map=[{"source_start_us": 0, "source_end_us": 1_000_000, "timeline_start_us": 0, "speed_num": 2, "speed_den": 1}],
+        overrides=[{"event_id": "hello", "kind": "minimum_duration_frames", "frames": 20}],
+        fps=30,
+    )
+
+    # 2x narration maps to 15 frames, then the linked event grows to the requested floor.
+    assert result["events"] == [{"event_id": "hello", "start_frame": 0, "end_frame": 20}]
+
+
+def test_narration_speed_retimes_linked_event_on_the_output_frame_grid() -> None:
+    script = {
+        "revision": 1,
+        "media_hash": "voice-a",
+        "text": "product",
+        "selections": [{"selection_id": "product", "start_char": 0, "end_char": 7, "script_revision": 1}],
+        "events": [{"event_id": "product", "selection_id": "product", "required": True}],
+    }
+    words = {
+        "script_revision": 1,
+        "media_hash": "voice-a",
+        "words": [{"text": "product", "start_char": 0, "end_char": 7, "start_us": 1_000_000, "end_us": 2_000_000}],
+    }
+
+    normal = compile_timing(script, words, [{"source_start_us": 0, "source_end_us": 2_000_000, "timeline_start_us": 0}], [], 30)
+    faster = compile_timing(script, words, [{"source_start_us": 0, "source_end_us": 2_000_000, "timeline_start_us": 0, "speed_num": 2, "speed_den": 1}], [], 30)
+
+    assert normal["events"] == [{"event_id": "product", "start_frame": 30, "end_frame": 60}]
+    assert faster["events"] == [{"event_id": "product", "start_frame": 15, "end_frame": 30}]

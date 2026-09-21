@@ -21,6 +21,8 @@ type TimelineData = SemanticTimelineNodeData & {
   compileOperationId?: string | null;
   nodeRevision?: number;
   autoCompileRequested?: boolean;
+  editMap?: Record<string, number>[];
+  compiledMediaHash?: string;
 };
 
 function asRef(value: unknown): RemixArtifactRef | null {
@@ -93,7 +95,15 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           const current = currentInputsRef.current;
           if (!mountedRef.current || currentOperationRef.current !== operationId || !operationMatchesTimelineInputs(operation, current.script, current.words, current.revision)) return;
           currentOperationRef.current = null;
-          updateNodeData(id, { artifactRef, events: readTimingEvents(timing.payload), compileOperationId: null, compileError: null });
+          updateNodeData(id, {
+            artifactRef,
+            events: readTimingEvents(timing.payload),
+            compiledMediaHash: typeof timing.payload.media_hash === 'string' ? timing.payload.media_hash : undefined,
+            compiledScriptRef: current.script,
+            compiledAlignmentRef: current.words,
+            compileOperationId: null,
+            compileError: null,
+          });
           return;
         }
         if (operation.status === 'failed' || operation.status === 'cancelled') {
@@ -145,7 +155,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     try {
       const aligned = await fetchRemixArtifact(project, exactWordRef);
       if (aligned.schema !== 'word_timeline.v1' || aligned.payload.status !== 'completed') throw new Error('转写节点需要完成脚本与语音对齐。');
-      const editMap = buildTimelineEditMap(Array.isArray(aligned.payload.words) ? aligned.payload.words : []);
+      const editMap = buildTimelineEditMap(Array.isArray(aligned.payload.words) ? aligned.payload.words : [], data.editMap);
       if (!editMap.length) throw new Error('对齐结果没有有效语音时间。');
       const nodeRevision = currentInputsRef.current.revision + 1;
       const task = await submitRemixProcessAction(project, {
@@ -196,8 +206,8 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
         return <div key={`${event.selectionId}-${index}`} className="border-b border-white/[0.06] py-2 text-[12px] text-text-dark">
           <div>{event.label}</div>
           {event.invalidReason ? <div className="text-amber-300">未解决：{event.invalidReason}</div> : <div className="text-text-muted">{event.startFrame !== undefined ? `帧 ${event.startFrame}–${event.endFrame}` : '等待编译'}</div>}
-          <div className="mt-1 grid grid-cols-3 gap-1">
-            {([['offsetMs', '偏移毫秒'], ['startFrame', '固定起始帧'], ['endFrame', '固定结束帧']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${event.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 h-8 w-full rounded-[12px] border border-white/10 bg-surface-field px-2 text-[11px] text-text-dark outline-none focus:border-white/25" /></label>)}
+          <div className="mt-1 grid grid-cols-4 gap-1">
+            {([['offsetMs', '语义偏移毫秒'], ['minimumDurationFrames', '最短帧数'], ['startFrame', '固定起始帧'], ['endFrame', '固定结束帧']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${event.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 h-8 w-full rounded-[12px] border border-white/10 bg-surface-field px-2 text-[11px] text-text-dark outline-none focus:border-white/25" /></label>)}
           </div>
         </div>;
       })}

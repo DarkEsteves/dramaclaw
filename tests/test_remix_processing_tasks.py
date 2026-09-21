@@ -150,6 +150,8 @@ def test_compile_runner_uses_aligned_media_hash_and_exact_script_link(tmp_path):
     assert result["status"] == "completed"
     compiled = store.read(**result["artifact_ref"])
     assert compiled["payload"]["media_hash"] == "sha256:voice"
+    assert compiled["payload"]["script_revision"] == script["revision"]
+    assert compiled["payload"]["alignment_revision"] == words["revision"]
     assert compiled["payload"]["events"] == [{"event_id": "product", "start_frame": 3, "end_frame": 15}]
 
 

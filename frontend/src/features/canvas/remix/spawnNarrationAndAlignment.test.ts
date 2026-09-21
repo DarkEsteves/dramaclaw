@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '../domain/canvasNodes';
-import { createAlignedTranscriptFromAudio, createNarrationFromScript } from './spawnNarrationAndAlignment';
+import { applyNarrationMediaChange, createAlignedTranscriptFromAudio, createNarrationFromScript } from './spawnNarrationAndAlignment';
 
 const graphStore = vi.hoisted(() => ({ getState: vi.fn() }));
 const attachRemixMedia = vi.hoisted(() => vi.fn());
@@ -15,6 +15,21 @@ const scriptRef = { artifactId: 'script-a', revision: 3 };
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('remix narration and alignment continuation', () => {
+  it('invalidates the old alignment task immediately when the narration take changes', () => {
+    const updateNodeData = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [
+        node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/old.wav', remixMedia: { media_hash: 'old' } }),
+        node('words', 'transcriptNode', { artifactRef: { artifactId: 'words', revision: 1 }, operationId: 'old-task', alignedScriptRef: scriptRef, status: 'completed' }),
+      ],
+      edges: [edge('audio', 'words')], updateNodeData,
+    });
+
+    applyNarrationMediaChange('audio', { url: '/new.wav', media_path: 'new.wav', media_hash: 'new', media_kind: 'audio', duration_us: 1, size: 1 }, 'narration');
+
+    expect(updateNodeData).toHaveBeenCalledWith('audio', expect.objectContaining({ audioUrl: '/new.wav', remixMedia: expect.objectContaining({ media_hash: 'new' }) }));
+    expect(updateNodeData).toHaveBeenCalledWith('words', expect.objectContaining({ artifactRef: null, operationId: null, alignmentStale: true }));
+  });
   it('creates one dialogue-mode audio node without putting role labels in its speakable text', () => {
     const addNode = vi.fn(() => 'audio');
     const addEdge = vi.fn(() => 'edge');

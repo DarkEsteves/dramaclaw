@@ -30,7 +30,8 @@ describe('SemanticTimelineNode', () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('产品登场 偏移毫秒'), { target: { value: '250' } });
+    expect(screen.getByLabelText('产品登场 最短帧数')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('产品登场 语义偏移毫秒'), { target: { value: '250' } });
     fireEvent.click(screen.getByRole('button', { name: '重新编译' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({
       action: 'compile_semantic_timeline',

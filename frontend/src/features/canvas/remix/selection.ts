@@ -46,6 +46,19 @@ export function rebaseSelectionAfterEdit(
   const before = Array.from(oldText);
   const after = Array.from(newText);
   validSpan(selection.start, selection.end, before.length);
+  if (oldText === newText) return selection;
+  const selected = before.slice(selection.start, selection.end).join('');
+  let occurrences = 0;
+  let cursor = 0;
+  while (selected && cursor <= newText.length) {
+    const found = newText.indexOf(selected, cursor);
+    if (found < 0) break;
+    occurrences += 1;
+    cursor = found + 1;
+  }
+  // Repeated text cannot be identity-mapped safely after an edit. Keeping the
+  // old id would silently bind a semantic event to an arbitrary occurrence.
+  if (occurrences !== 1) return null;
   let prefix = 0;
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
     prefix += 1;
