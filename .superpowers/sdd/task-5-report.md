@@ -20,8 +20,8 @@
 
 ## Verification
 
-- `npm test -- --run src/features/canvas/remix/*.test.ts src/features/canvas/remix/*.test.tsx` — 29 files, 187 tests passed.
-- Focused final RemixScriptPanel/manifest/preparation/model run — 4 files, 28 tests passed.
+- `npm test -- --run src/features/canvas/remix/*.test.ts src/features/canvas/remix/*.test.tsx` — 30 files, 192 tests passed after review fixes.
+- Focused final B-roll binding/RemixScriptPanel/manifest/preparation run — 4 files, 28 tests passed.
 - `uv run pytest -q tests/test_api_remix_media.py tests/test_remix_render.py` — 21 passed; 8 existing dependency deprecation warnings.
 - `npx tsc -b --pretty false` — passed.
 - `uv run ruff check src/novelvideo/api/routes/remix_media.py tests/test_api_remix_media.py tests/test_remix_render.py` — passed.
@@ -30,3 +30,10 @@
 ## Known unrelated baseline
 
 - `frontend/src/__tests__/features/canvas/remix-nodes.test.tsx` still has the pre-existing assertion that searches for one `Hello world` text node. TranscriptNode now intentionally renders separate word buttons, so 1 of its 5 tests fails. Task 5 does not modify TranscriptNode.
+
+## Review fixes
+
+- A visual node replacement now compares its current project URL with the saved `remixMedia.media_path`. A changed source is reattached and rehashed; preparation also rejects a stale path binding if the script was not reopened.
+- The semantic-selection upload action now creates a normal upload node. It accepts images and videos, and the existing upload-node morph keeps the node ID and compatible edge.
+- Async visual attachment records the intended selection, merges the returned revision into the latest draft, and ignores stale attachment completions. Edits made while attachment is pending are retained.
+- Added regressions for replacement after binding, video-capable upload node creation, stale preparation binding, and editing during an outstanding attachment.

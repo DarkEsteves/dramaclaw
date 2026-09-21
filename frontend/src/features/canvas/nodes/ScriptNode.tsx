@@ -82,7 +82,7 @@ import {
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
-import { projectMediaPathFromUrl } from '@/features/canvas/remix/remixMediaPath';
+import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
@@ -436,19 +436,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const createRemixVisual = useCallback((mode: 'generate' | 'upload', selectionId: string) => {
-    const state = useCanvasStore.getState();
-    const self = state.nodes.find((node) => node.id === id);
-    if (!self) return null;
-    const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
-    const label = mode === 'generate' ? '生成画面' : '上传画面';
-    const childId = state.addNode(type, state.findNodePosition(id, 420, 320), {
-      displayName: `${label} · ${selectionId}`,
-      remixRole: 'visual',
-      ...(mode === 'upload' ? { imageOnly: true } : {}),
-    });
-    state.addEdge(childId, id);
-    state.setSelectedNode(childId);
-    return { id: childId, label };
+    return createBrollVisualNode(useCanvasStore.getState(), id, mode, selectionId);
   }, [id]);
   const attachRemixVisual = useCallback(async (nodeId: string) => {
     const project = readUrl().project;
@@ -456,19 +444,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     const state = useCanvasStore.getState();
     const visual = state.nodes.find((node) => node.id === nodeId);
     if (!visual) throw new Error('画面素材节点不存在');
-    const existing = visual.data.remixMedia;
-    if (existing && typeof existing === 'object' && 'media_hash' in existing && typeof existing.media_hash === 'string') return existing.media_hash;
-    const sourceUrl = isVideoNode(visual)
-      ? visual.data.videoUrl
-      : (isUploadNode(visual) || isImageEditNode(visual) || isImageGenNode(visual) || isExportImageNode(visual))
-        ? visual.data.imageUrl || visual.data.previewImageUrl
-        : null;
-    const mediaPath = typeof sourceUrl === 'string' ? projectMediaPathFromUrl(project, sourceUrl) : null;
-    if (!mediaPath) throw new Error('请先在素材节点完成生成或上传');
-    const media = await attachRemixMedia(project, mediaPath);
-    if (media.media_kind !== 'image' && media.media_kind !== 'video') throw new Error('B-roll 只支持图片或视频');
-    state.updateNodeData(nodeId, { remixMedia: media, remixRole: 'visual' });
-    return media.media_hash;
+    return attachBrollVisualMedia(project, visual, attachRemixMedia, state.updateNodeData);
   }, []);
 
   const resolvedTitle = useMemo(

@@ -80,4 +80,30 @@ describe('RemixScriptPanel', () => {
     await waitFor(() => expect(onAttachVisual).toHaveBeenCalledWith('image-1'));
     await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })] })));
   });
+
+  it('rechecks an already-bound visual so a replaced node cannot reuse its old revision', async () => {
+    const onAttachVisual = vi.fn(async () => 'b'.repeat(64));
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[{ id: 'image-1', label: '产品图', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onAttachVisual={onAttachVisual} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'image-1' } });
+
+    await waitFor(() => expect(onAttachVisual).toHaveBeenCalledWith('image-1'));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualMediaRevision: 'b'.repeat(64) })] })));
+  });
+
+  it('merges a completed async attachment into the latest draft without reverting newer edits', async () => {
+    let release!: (revision: string) => void;
+    const onAttachVisual = vi.fn(() => new Promise<string>((resolve) => { release = resolve; }));
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[{ id: 'image-1', label: '产品图' }]} sfxNodes={[]} onAttachVisual={onAttachVisual} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'image-1' } });
+    await waitFor(() => expect(onAttachVisual).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText('事件 1 名称'), { target: { value: '新品登场' } });
+    release('f'.repeat(64));
+
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      selections: [expect.objectContaining({ label: '新品登场', visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })],
+    })));
+  });
 });

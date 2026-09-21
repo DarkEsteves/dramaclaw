@@ -3,6 +3,7 @@ import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import { createRemixArtifact, fetchRemixArtifact, type RemixArtifactRef } from '@/api/remix';
 import { buildNodeRemixManifest, type CompiledTiming } from './nodeRemixManifest';
 import type { UploadedRemixMedia } from './workbenchModel';
+import { boundBrollVisualMedia } from './brollCanvasBinding';
 
 function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): CanvasNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -88,7 +89,7 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const transcriptMediaHash = transcriptArtifact.payload.media_hash;
   if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visualTypes = new Set<string>([CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit, CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage]);
-  const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual' && node.data.remixMedia).map((node) => [node.id, node.data.remixMedia as UploadedRemixMedia]));
+  const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual').map((node) => [node.id, boundBrollVisualMedia(project, node)]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)
     .map((node) => ({ id: node.id, role: node.data.remixRole as 'bgm' | 'sfx', media: node.data.remixMedia as UploadedRemixMedia }));
   const payload = buildNodeRemixManifest({

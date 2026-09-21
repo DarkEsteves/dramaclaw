@@ -30,6 +30,9 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
   const [blueprintRole, setBlueprintRole] = useState<string | null>(null);
   const dialogueRef = useRef<HTMLTextAreaElement>(null);
   const draftEditCount = useRef(0);
+  const draftRef = useRef(draft);
+  const visualBindingRequest = useRef(new Map<string, number>());
+  draftRef.current = draft;
   const currentBlueprintRef = useRef(blueprintRef);
   currentBlueprintRef.current = blueprintRef;
 
@@ -42,7 +45,7 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
     return () => { active = false; };
   }, [blueprintRef?.artifactId, blueprintRef?.revision, project]);
 
-  const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; setDraft(next); onDraftChange(next); setError(null); };
+  const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; draftRef.current = next; setDraft(next); onDraftChange(next); setError(null); };
   const generate = async () => {
     if (generating || saving || !blueprintRef || !newTopic.trim()) return;
     const source = blueprintRef;
@@ -77,11 +80,20 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
   };
   const bindVisual = async (index: number, nodeId: string) => {
     setError(null);
+    const selectionId = draft.selections[index]?.id;
+    if (!selectionId) return;
+    const request = (visualBindingRequest.current.get(selectionId) ?? 0) + 1;
+    visualBindingRequest.current.set(selectionId, request);
+    changeDraft({ ...draftRef.current, selections: draftRef.current.selections.map((item) => item.id === selectionId
+      ? { ...item, visualNodeId: nodeId || undefined, visualMediaRevision: undefined }
+      : item) });
     try {
       const knownRevision = visualNodes.find((node) => node.id === nodeId)?.mediaRevision;
-      const mediaRevision = nodeId && !knownRevision && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
-      changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index
-        ? { ...item, visualNodeId: nodeId || undefined, visualMediaRevision: nodeId ? mediaRevision : undefined }
+      const mediaRevision = nodeId && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
+      if (visualBindingRequest.current.get(selectionId) !== request) return;
+      const latest = draftRef.current;
+      changeDraft({ ...latest, selections: latest.selections.map((item) => item.id === selectionId && item.visualNodeId === nodeId
+        ? { ...item, visualMediaRevision: nodeId ? mediaRevision : undefined }
         : item) });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');

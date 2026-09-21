@@ -50,7 +50,7 @@ describe('prepareNodeRemix', () => {
     const timingRef = { artifactId: 'timing-1', revision: 1 };
     const transcriptRef = { artifactId: 'words-1', revision: 1 };
     const blueprintRef = { artifactId: 'blueprint-1', revision: 1 };
-    const image = media('image', 'c');
+    const image = { ...media('image', 'c'), url: '/static/projects/demo/input/image' };
     const nodes = [
       node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
       node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/audio', remixMedia: media('audio', 'b') }),
