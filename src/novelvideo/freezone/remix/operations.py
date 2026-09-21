@@ -148,7 +148,7 @@ class RemixOperationStore:
                 )
                 return {**old, "created": False}
             operation_id = uuid.uuid4().hex
-            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "input_media_hashes": media_hashes, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": [], "supersedes": old_id or "", "superseded_by": ""}
+            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "input_media_hashes": media_hashes, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": [], "supersedes": old_id or "", "superseded_by": "", "submission_fence": 0}
             self._atomic(self._path(operation_id), record, guard)
             if old_id:
                 old = self._read(old_id)
@@ -175,18 +175,31 @@ class RemixOperationStore:
                 raise ValueError("illegal operation state transition")
             return self._update(operation_id, guard, status="pending_reconciliation", provider_task_id=provider_task_id)
 
-    def bind_task(self, operation_id: str, *, task_id: str, provider_task_id: str = "") -> dict[str, Any]:
+    def bind_task(self, operation_id: str, *, task_id: str, owner: str, fencing_token: int, provider_task_id: str = "") -> dict[str, Any]:
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("task_id is required")
+        if not isinstance(owner, str) or not owner or type(fencing_token) is not int or fencing_token < 1:
+            raise ValueError("valid submission fencing owner and token are required")
         with self._locked() as guard:
             record = self._read(operation_id)
-            if record.get("task_id") == task_id:
-                return record
+            if record.get("task_id"):
+                if (record["task_id"] == task_id
+                        and record.get("submission_bound_owner") == owner
+                        and record.get("submission_bound_fence") == fencing_token):
+                    return record
+                raise ValueError("operation task is already bound")
+            if (record.get("submission_owner") != owner
+                    or record.get("submission_fence") != fencing_token):
+                raise ValueError("stale submission fencing token")
             if record["status"] not in {"pending", "pending_reconciliation", "needs_confirmation"}:
                 raise ValueError("illegal operation state transition")
-            return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id, submission_owner="", submission_claimed_at=0)
+            return self._update(
+                operation_id, guard, task_id=task_id, provider_task_id=provider_task_id,
+                submission_bound_owner=owner, submission_bound_fence=fencing_token,
+                submission_owner="", submission_claimed_at=0,
+            )
 
-    def claim_submission(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> bool:
+    def claim_submission(self, operation_id: str, *, owner: str, lease_seconds: int = 60) -> int | None:
         if not isinstance(owner, str) or not owner:
             raise ValueError("submission owner is required")
         if type(lease_seconds) is not int or lease_seconds < 1:
@@ -194,20 +207,36 @@ class RemixOperationStore:
         with self._locked() as guard:
             record = self._read(operation_id)
             claimed_at = float(record.get("submission_claimed_at") or 0)
-            claim_active = bool(record.get("submission_owner")) and time.time() - claimed_at < lease_seconds
+            existing_owner = record.get("submission_owner")
+            claim_active = bool(existing_owner) and time.time() - claimed_at < int(record.get("submission_lease_seconds") or lease_seconds)
             if record["status"] != "pending" or record.get("task_id") or claim_active:
-                return False
+                return None
+            if existing_owner:
+                self._update(
+                    operation_id, guard, status="pending_reconciliation",
+                    reconciliation_reason="submission_lease_expired",
+                )
+                return None
+            fencing_token = int(record.get("submission_fence") or 0) + 1
             self._update(
                 operation_id, guard, submission_owner=owner,
                 submission_claimed_at=time.time(), submission_lease_seconds=lease_seconds,
+                submission_fence=fencing_token,
             )
-            return True
+            return fencing_token
 
-    def release_submission(self, operation_id: str, *, owner: str) -> None:
+    def release_submission(self, operation_id: str, *, owner: str, fencing_token: int) -> None:
         with self._locked() as guard:
             record = self._read(operation_id)
-            if record.get("submission_owner") == owner and not record.get("task_id"):
-                self._update(operation_id, guard, submission_owner="", submission_claimed_at=0)
+            if (record.get("submission_owner") == owner
+                    and record.get("submission_fence") == fencing_token
+                    and not record.get("task_id")):
+                changes: dict[str, Any] = {"submission_owner": "", "submission_claimed_at": 0}
+                if (record["status"] == "pending_reconciliation"
+                        and record.get("reconciliation_reason") == "submission_lease_expired"
+                        and not record.get("cancel_reason")):
+                    changes.update(status="pending", reconciliation_reason="")
+                self._update(operation_id, guard, **changes)
 
     def mark_stale(self, operation_id: str, *, reason: str) -> dict[str, Any]:
         with self._locked() as guard:
@@ -240,9 +269,14 @@ class RemixOperationStore:
                 return record
             submission_claimed_at = float(record.get("submission_claimed_at") or 0)
             submission_lease_seconds = int(record.get("submission_lease_seconds") or 60)
-            if (record.get("submission_owner")
-                    and time.time() - submission_claimed_at < submission_lease_seconds):
-                raise ValueError("operation submission is in progress")
+            if record.get("submission_owner"):
+                if time.time() - submission_claimed_at < submission_lease_seconds:
+                    raise ValueError("operation submission is in progress")
+                return self._update(
+                    operation_id, guard, status="pending_reconciliation",
+                    cancel_reason=reason.strip(), cancellation_previous_status=record["status"],
+                    reconciliation_reason="submission_lease_expired_during_cancellation",
+                )
             if record["status"] in {"confirming", "cancelling"}:
                 raise ValueError("operation confirmation or cancellation is in progress")
             if record["status"] not in {"pending", "pending_reconciliation", "needs_confirmation"}:

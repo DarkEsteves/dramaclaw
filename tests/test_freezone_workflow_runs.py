@@ -27,6 +27,15 @@ from novelvideo.freezone.workflow_runs import (
 )
 
 
+def _bind_remix_task(operations, operation_id: str, task_id: str) -> dict:
+    owner = f"test-{task_id}"
+    token = operations.claim_submission(operation_id, owner=owner)
+    assert token is not None
+    return operations.bind_task(
+        operation_id, task_id=task_id, owner=owner, fencing_token=token,
+    )
+
+
 def _set_run_timestamps(
     project_dir: Path,
     run_id: str,
@@ -1221,7 +1230,7 @@ def test_processing_task_reconciliation_persists_artifact_proof(tmp_path: Path) 
         normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
         node_revision=2, canvas_id="default", node_id="analysis",
     )
-    operations.bind_task(operation["operation_id"], task_id="task-one")
+    _bind_remix_task(operations, operation["operation_id"], "task-one")
     bind_workflow_action_processing_operation(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
         node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
@@ -1269,7 +1278,7 @@ def test_processing_reconciliation_requires_matching_operation_and_schema(tmp_pa
         normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
         node_revision=2, canvas_id="default", node_id="analysis",
     )
-    operations.bind_task(operation["operation_id"], task_id="task-one")
+    _bind_remix_task(operations, operation["operation_id"], "task-one")
     bind_workflow_action_processing_operation(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
         node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
@@ -1312,7 +1321,7 @@ def test_processing_reconciliation_waits_for_operation_needs_confirmation(tmp_pa
         normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
         node_revision=2, canvas_id="default", node_id="analysis",
     )
-    operations.bind_task(operation["operation_id"], task_id="task-one")
+    _bind_remix_task(operations, operation["operation_id"], "task-one")
     bind_workflow_action_processing_operation(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
         node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
@@ -1359,7 +1368,7 @@ def test_processing_reconciliation_rejects_a_result_from_another_task(tmp_path: 
         normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
         node_revision=2, canvas_id="default", node_id="analysis",
     )
-    operations.bind_task(operation["operation_id"], task_id="task-one")
+    _bind_remix_task(operations, operation["operation_id"], "task-one")
     bind_workflow_action_processing_operation(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"],
         node_id="analysis", action="analyze_reference_video", operation_id=operation["operation_id"],
@@ -1409,7 +1418,7 @@ def _processing_review_fixture(
         normalized_parameters={"action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"}},
         node_revision=1, canvas_id="default", node_id="analysis",
     )
-    operations.bind_task(operation["operation_id"], task_id="task-one")
+    _bind_remix_task(operations, operation["operation_id"], "task-one")
     bind_workflow_action_processing_operation(
         project_dir=tmp_path, canvas_id="default", run_id=run["run_id"], node_id="analysis",
         action="analyze_reference_video", operation_id=operation["operation_id"],

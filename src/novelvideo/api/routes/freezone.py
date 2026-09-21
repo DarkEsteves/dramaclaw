@@ -5147,24 +5147,39 @@ async def _dispatch_ready_remix_workflow_actions(
             prepared["task_type"], ctx.project_id, 0, scope=scope
         )
         if not operation.get("task_id") and operation.get("status") != "needs_confirmation":
-            queued = await get_task_backend().enqueue_project_task(
-                ctx,
-                product_surface="freezone",
-                task_type=prepared["task_type"],
-                queue_kind=prepared["queue_kind"],
-                episode=0,
-                scope=scope,
-                payload={
-                    **prepared["task_payload"],
-                    "operation_id": operation["operation_id"],
-                    "workflow_run_id": run["run_id"],
-                    "workflow_node_id": node_id,
-                },
+            owner = uuid.uuid4().hex
+            fencing_token = await asyncio.to_thread(
+                operations.claim_submission, operation["operation_id"], owner=owner,
             )
+            if fencing_token is None:
+                continue
+            try:
+                queued = await get_task_backend().enqueue_project_task(
+                    ctx,
+                    product_surface="freezone",
+                    task_type=prepared["task_type"],
+                    queue_kind=prepared["queue_kind"],
+                    episode=0,
+                    scope=scope,
+                    payload={
+                        **prepared["task_payload"],
+                        "operation_id": operation["operation_id"],
+                        "workflow_run_id": run["run_id"],
+                        "workflow_node_id": node_id,
+                    },
+                )
+            except Exception:
+                await asyncio.to_thread(
+                    operations.release_submission, operation["operation_id"],
+                    owner=owner, fencing_token=fencing_token,
+                )
+                raise
             operation = await asyncio.to_thread(
                 operations.bind_task,
                 operation["operation_id"],
                 task_id=queued.task_state.task_id,
+                owner=owner,
+                fencing_token=fencing_token,
             )
         run = await asyncio.to_thread(
             bind_workflow_action_processing_operation,

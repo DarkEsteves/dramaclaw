@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -2866,6 +2868,49 @@ def test_workflow_run_dispatches_registered_remix_action_without_recipe(
     assert action["product_operation_id"] is None
     assert action["recipe_id"] is None
     assert workflow_run_client.enqueued_tasks[0]["payload"]["media_sha256"]
+
+
+def test_concurrent_workflow_processing_dispatch_enqueues_once(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+
+    media = workflow_run_client.state_dir / "media" / "reference.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"reference")
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class SlowBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await asyncio.to_thread(release.wait, 2)
+            return SimpleNamespace(task_state=SimpleNamespace(task_id="workflow-task-one"))
+
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: SlowBackend())
+    body = {
+        "idempotency_key": "concurrent-processing-run",
+        "actions": [{
+            "node_id": "analysis",
+            "action": "analyze_reference_video",
+            "node_revision": 4,
+            "payload": {"media_path": "media/reference.mp4"},
+        }],
+    }
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(workflow_run_client.post, base, json=body)
+        assert entered.wait(2)
+        second = executor.submit(workflow_run_client.post, base, json=body)
+        second_response = second.result(timeout=2)
+        release.set()
+        first_response = first.result(timeout=2)
+
+    assert first_response.status_code == second_response.status_code == 200
+    assert calls == 1
 
 
 def test_workflow_run_processing_action_requires_exact_registered_payload(

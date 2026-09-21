@@ -15,6 +15,13 @@ from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.paths import canvas_path
 
 
+def _bind_task(store: RemixOperationStore, operation_id: str, task_id: str) -> dict:
+    owner = f"test-{task_id}"
+    token = store.claim_submission(operation_id, owner=owner)
+    assert token is not None
+    return store.bind_task(operation_id, task_id=task_id, owner=owner, fencing_token=token)
+
+
 def _manifest() -> dict:
     return {
         "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 30},
@@ -220,7 +227,7 @@ def test_cancel_transition_cancels_the_bound_project_task_before_operation(api: 
         idempotency_key="cancel-task", input_refs=[], producer_version="remix-render.v1",
         normalized_parameters={"job_id": "c" * 64}, node_revision=1,
     )
-    operation_store.bind_task(operation["operation_id"], task_id="task-bound")
+    _bind_task(operation_store, operation["operation_id"], "task-bound")
     task = SimpleNamespace(task_id="task-bound", task_type="remix_render", episode=0, beat_num=None, scope="c" * 64)
     manager = SimpleNamespace(get_task_for_project=lambda ctx, task_type, episode, beat_num=None, scope=None: task)
     cancelled = []
@@ -294,7 +301,7 @@ def test_reconcile_timeout_reads_bound_task_and_transitions_failure(api: TestCli
         idempotency_key="timeout", input_refs=[], producer_version="remix-render.v1",
         normalized_parameters={"job_id": "d" * 64}, node_revision=1,
     )
-    store.bind_task(operation["operation_id"], task_id="task-timeout")
+    _bind_task(store, operation["operation_id"], "task-timeout")
     store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-timeout")
     task = SimpleNamespace(task_id="task-timeout", status="failed", error="provider timeout")
     monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
@@ -304,6 +311,30 @@ def test_reconcile_timeout_reads_bound_task_and_transitions_failure(api: TestCli
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "failed"
     assert store.get(operation["operation_id"])["failure_reason"] == "provider timeout"
+
+
+def test_reconcile_finds_and_fenced_binds_task_after_submission_lease_expiry(api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.api.routes import remix
+    import novelvideo.freezone.remix.operations as operations_module
+
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(
+        idempotency_key="expired-submit-reconcile", input_refs=[], producer_version="remix-render.v1",
+        normalized_parameters={"job_id": "9" * 64}, node_revision=1,
+    )
+    monkeypatch.setattr(operations_module.time, "time", lambda: 100.0)
+    token = store.claim_submission(operation["operation_id"], owner="slow-submit", lease_seconds=10)
+    assert token == 1
+    monkeypatch.setattr(operations_module.time, "time", lambda: 111.0)
+    assert store.claim_submission(operation["operation_id"], owner="replacement", lease_seconds=10) is None
+    task = SimpleNamespace(task_id="discovered-task", status="running", error=None)
+    monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
+
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "pending_reconciliation"
+    assert store.get(operation["operation_id"])["task_id"] == "discovered-task"
 
 
 def test_restart_reconcile_finishes_confirmation_already_written_to_canvas(api: TestClient, tmp_path: Path) -> None:
@@ -350,7 +381,7 @@ def test_restart_reconcile_finishes_exact_cancelled_task(api: TestClient, tmp_pa
     from novelvideo.api.routes import remix
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="cancel-restart", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "e" * 64}, node_revision=1)
-    store.bind_task(operation["operation_id"], task_id="task-cancelled")
+    _bind_task(store, operation["operation_id"], "task-cancelled")
     store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="test-request")
     task = SimpleNamespace(task_id="task-cancelled", status="cancelled", error=None)
     monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
@@ -369,7 +400,7 @@ def test_unconfirmed_task_cancel_moves_to_reconciliation_instead_of_reopening(ap
     from novelvideo.api.routes import remix
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key=f"cancel-unconfirmed-{backend_result}", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "f" * 64}, node_revision=1)
-    store.bind_task(operation["operation_id"], task_id="task-running")
+    _bind_task(store, operation["operation_id"], "task-running")
     task = SimpleNamespace(task_id="task-running", status="running", error=None)
     monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
     class Backend:
@@ -387,7 +418,7 @@ def test_cancel_backend_exception_is_durable_unknown_not_reopened(api: TestClien
     from novelvideo.api.routes import remix
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="cancel-exception", input_refs=[], producer_version="remix-render.v1", normalized_parameters={"job_id": "1" * 64}, node_revision=1)
-    store.bind_task(operation["operation_id"], task_id="task-running")
+    _bind_task(store, operation["operation_id"], "task-running")
     task = SimpleNamespace(task_id="task-running", status="running", error=None)
     monkeypatch.setattr(remix, "get_task_manager", lambda: SimpleNamespace(get_task_for_project=lambda *args, **kwargs: task))
     class Backend:

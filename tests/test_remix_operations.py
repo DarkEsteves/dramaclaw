@@ -109,7 +109,8 @@ def test_runner_result_waits_for_node_confirmation(tmp_path: Path) -> None:
 def test_reload_reconciles_bound_task_without_replacement(tmp_path: Path) -> None:
     store = RemixOperationStore(tmp_path, "demo")
     operation = store.start(idempotency_key="reload", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "a" * 64])
-    store.bind_task(operation["operation_id"], task_id="task-1", provider_task_id="provider-1")
+    token = store.claim_submission(operation["operation_id"], owner="reload-request")
+    store.bind_task(operation["operation_id"], task_id="task-1", provider_task_id="provider-1", owner="reload-request", fencing_token=token)
     recovered = store.start(idempotency_key="reload", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "a" * 64])
     assert recovered["created"] is False and recovered["operation_id"] == operation["operation_id"]
     assert recovered["task_id"] == "task-1" and recovered["provider_task_id"] == "provider-1"
@@ -177,10 +178,72 @@ def test_submission_claim_is_atomic_and_releasable(tmp_path: Path) -> None:
     operation = store.start(idempotency_key="submit", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
     with ThreadPoolExecutor(max_workers=2) as executor:
         claims = list(executor.map(lambda owner: RemixOperationStore(tmp_path, "demo").claim_submission(operation["operation_id"], owner=owner), ["tab-a", "tab-b"]))
-    assert sorted(claims) == [False, True]
+    assert sorted(claim for claim in claims if claim is not None) == [1]
+    assert claims.count(None) == 1
     winner = "tab-a" if claims[0] else "tab-b"
-    store.release_submission(operation["operation_id"], owner=winner)
-    assert store.claim_submission(operation["operation_id"], owner="retry") is True
+    winning_token = claims[0] or claims[1]
+    store.release_submission(operation["operation_id"], owner=winner, fencing_token=winning_token)
+    assert store.claim_submission(operation["operation_id"], owner="retry") == 2
+
+
+def test_expired_unbound_submission_becomes_unknown_and_never_grants_a_second_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import novelvideo.freezone.remix.operations as module
+
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="slow-submit", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    first_token = store.claim_submission(operation["operation_id"], owner="slow", lease_seconds=10)
+    assert first_token == 1
+    monkeypatch.setattr(module.time, "time", lambda: 111.0)
+
+    assert store.claim_submission(operation["operation_id"], owner="second", lease_seconds=10) is None
+    unknown = store.get(operation["operation_id"])
+    assert unknown["status"] == "pending_reconciliation"
+    assert unknown["reconciliation_reason"] == "submission_lease_expired"
+    assert unknown["submission_owner"] == "slow"
+
+    bound = store.bind_task(
+        operation["operation_id"], task_id="slow-task", owner="slow",
+        fencing_token=first_token,
+    )
+    assert bound["task_id"] == "slow-task"
+    assert bound["status"] == "pending_reconciliation"
+
+
+def test_submission_fence_rejects_released_stale_owner_and_task_overwrite(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="submit-fence", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    first = store.claim_submission(operation["operation_id"], owner="first")
+    assert first == 1
+    store.release_submission(operation["operation_id"], owner="first", fencing_token=first)
+    second = store.claim_submission(operation["operation_id"], owner="second")
+    assert second == 2
+
+    with pytest.raises(ValueError, match="fencing"):
+        store.bind_task(operation["operation_id"], task_id="stale-task", owner="first", fencing_token=first)
+    store.bind_task(operation["operation_id"], task_id="current-task", owner="second", fencing_token=second)
+    with pytest.raises(ValueError, match="already bound"):
+        store.bind_task(operation["operation_id"], task_id="overwrite-task", owner="second", fencing_token=second)
+
+
+def test_cancel_after_submission_lease_expiry_records_unknown_intent_until_slow_bind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import novelvideo.freezone.remix.operations as module
+
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="cancel-slow-submit", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=1)
+    monkeypatch.setattr(module.time, "time", lambda: 100.0)
+    token = store.claim_submission(operation["operation_id"], owner="slow", lease_seconds=10)
+    monkeypatch.setattr(module.time, "time", lambda: 111.0)
+
+    cancelling = store.claim_cancellation(operation["operation_id"], reason="user_cancelled", owner="cancel-request")
+    assert cancelling["status"] == "pending_reconciliation"
+    assert cancelling["cancel_reason"] == "user_cancelled"
+    bound = store.bind_task(
+        operation["operation_id"], task_id="slow-task", owner="slow",
+        fencing_token=token,
+    )
+    assert bound["task_id"] == "slow-task"
+    assert bound["status"] == "pending_reconciliation"
 
 
 def test_confirmation_claim_serializes_cancel_and_unknown_outcome(tmp_path: Path) -> None:
@@ -207,8 +270,8 @@ def test_terminal_operations_reject_illegal_state_rewrites(tmp_path: Path) -> No
         store.fail(operation["operation_id"], reason="too late")
     with pytest.raises(ValueError, match="transition"):
         store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider")
-    with pytest.raises(ValueError, match="transition"):
-        store.bind_task(operation["operation_id"], task_id="late-task")
+    with pytest.raises(ValueError, match="fencing"):
+        store.bind_task(operation["operation_id"], task_id="late-task", owner="late", fencing_token=1)
     with pytest.raises(ValueError, match="transition"):
         store.complete(operation["operation_id"], output_refs=[], current_input_refs=refs(), current_node_revision=1)
 

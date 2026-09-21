@@ -477,7 +477,8 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
     if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale"}:
         return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
     owner = uuid.uuid4().hex
-    if not await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner):
+    fencing_token = await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner)
+    if fencing_token is None:
         current = await run_in_threadpool(operations.get, operation["operation_id"])
         return _data({"action": body.action, "task_type": task_type, "task_id": current["task_id"], "task_key": task_key, "operation_id": current["operation_id"], "operation_status": current["status"], "output_refs": current["output_refs"]})
     try:
@@ -486,9 +487,15 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             episode=0, scope=scope, payload={**prepared["task_payload"], "operation_id": operation["operation_id"]},
         )
     except Exception:
-        await run_in_threadpool(operations.release_submission, operation["operation_id"], owner=owner)
+        await run_in_threadpool(
+            operations.release_submission, operation["operation_id"],
+            owner=owner, fencing_token=fencing_token,
+        )
         raise
-    await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
+    await run_in_threadpool(
+        operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id,
+        owner=owner, fencing_token=fencing_token,
+    )
     return _data({"action": body.action, "task_type": task_type, "task_id": queued.task_state.task_id, "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": "pending"})
 
 
@@ -581,7 +588,8 @@ async def render_artifact(
             "output_refs": operation["output_refs"],
         })
     owner = uuid.uuid4().hex
-    if not await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner):
+    fencing_token = await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner)
+    if fencing_token is None:
         current = await run_in_threadpool(operations.get, operation["operation_id"])
         return _data({"task_type": "remix_render", "job_id": job_id, "task_id": current["task_id"], "task_key": project_task_state_key("remix_render", ctx.project_id, 0, scope=job_id), "manifest_ref": {"artifact_id": artifact_id, "revision": body.revision}, "node_revision": body.node_revision, "operation_status": current["status"], "operation_id": current["operation_id"], "output_refs": current["output_refs"]})
     try:
@@ -597,9 +605,15 @@ async def render_artifact(
             },
         )
     except Exception:
-        await run_in_threadpool(operations.release_submission, operation["operation_id"], owner=owner)
+        await run_in_threadpool(
+            operations.release_submission, operation["operation_id"],
+            owner=owner, fencing_token=fencing_token,
+        )
         raise
-    await run_in_threadpool(operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id)
+    await run_in_threadpool(
+        operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id,
+        owner=owner, fencing_token=fencing_token,
+    )
     return _data({
         "task_type": "remix_render",
         "job_id": job_id,
@@ -674,6 +688,8 @@ async def transition_operation(project: str, operation_id: str, body: OperationT
             )
             if record["status"] == "cancelled":
                 return _data(_operation_view(record))
+            if record["status"] == "pending_reconciliation" and not record.get("task_id"):
+                raise HTTPException(409, "Submission outcome is unknown; reconcile before cancellation")
             if record.get("task_id"):
                 ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
                 view = _operation_view(record)
@@ -733,7 +749,7 @@ async def reconcile_operation(project: str, operation_id: str, user: dict = Depe
     if record["status"] not in {"pending_reconciliation", "cancelling"}:
         return _data(_operation_view(record))
     view = _operation_view(record)
-    if not record.get("task_id") or not view.get("task_type") or not view.get("task_scope"):
+    if not view.get("task_type") or not view.get("task_scope"):
         if record["status"] == "cancelling":
             record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="bound task unavailable")
             return _data(_operation_view(record))
@@ -743,10 +759,25 @@ async def reconcile_operation(project: str, operation_id: str, user: dict = Depe
         get_task_manager().get_task_for_project, ctx, view["task_type"], 0,
         beat_num=None, scope=view["task_scope"],
     )
-    if task is None or task.task_id != record["task_id"]:
+    if task is None:
         if record["status"] == "cancelling":
             record = await _call(operations.cancellation_outcome_unknown, operation_id, reason="bound task unavailable")
             return _data(_operation_view(record))
+        return _data(view)
+    if not record.get("task_id"):
+        submission_owner = record.get("submission_owner")
+        submission_fence = record.get("submission_fence")
+        if not submission_owner or type(submission_fence) is not int:
+            return _data(view)
+        try:
+            record = await _call(
+                operations.bind_task, operation_id, task_id=task.task_id,
+                owner=submission_owner, fencing_token=submission_fence,
+            )
+        except ValueError:
+            return _data(_operation_view(await _call(operations.get, operation_id)))
+        view = _operation_view(record)
+    if task.task_id != record["task_id"]:
         return _data(view)
     if record.get("cancel_reason") and record["status"] in {"cancelling", "pending_reconciliation"}:
         if task.status == "cancelled":

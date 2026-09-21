@@ -14,6 +14,7 @@ const VISUAL_GENERATION_REQUEST_FIELDS = new Set([
   'aspectRatio',
   'requestAspectRatio',
   'size',
+  'count',
   'quality',
   'modelParams',
   'cameraSelection',

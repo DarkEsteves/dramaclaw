@@ -147,7 +147,7 @@ describe('故事板详情 · 图片生成表单', () => {
     });
   });
 
-  it('an agent update_node_data edit during generation rejects the old late result', async () => {
+  it('an agent generic count edit during generation rejects the old late result', async () => {
     let resolveTask!: (value: unknown) => void;
     vi.mocked(awaitTaskCompletion).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }) as never);
     seed([emptyImageGenNode({ prompt: 'Agent 修改前' })]);
@@ -157,14 +157,15 @@ describe('故事板详情 · 图片生成表单', () => {
 
     const applied = applyCanvasChatCommands(extractCanvasChatCommandEnvelopes([{
       schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
-      commands: [{ type: 'update_node_data', node_id: 'gen-1', data: { prompt: 'Agent 修改后' } }],
+      commands: [{ type: 'update_node_data', node_id: 'gen-1', data: { count: 2 } }],
     }]));
     expect(applied.errors).toEqual([]);
     resolveTask({ result: { output_url: '/late-agent-request.png' } });
 
     await waitFor(() => {
       const data = useCanvasStore.getState().nodes.find((item) => item.id === 'gen-1')!.data;
-      expect(data.prompt).toBe('Agent 修改后');
+      expect(data.prompt).toBe('Agent 修改前');
+      expect(data.count).toBe(2);
       expect(data.remixVisualRequestRevision).toBe(2);
       expect(data.isGenerating).toBe(false);
       expect(data.generationTaskKey).toBeNull();

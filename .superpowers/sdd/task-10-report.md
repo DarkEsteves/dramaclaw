@@ -130,3 +130,23 @@ The only emitted Python warnings are existing third-party Cognee/Pydantic deprec
   back afterward.
 - Final verification: 254 Python recovery/workflow tests and 265 frontend recovery,
   store, and Agent-command tests passed; TypeScript, Ruff, and diff checks passed.
+
+## Fenced submission recovery
+
+- Submission claims now return a durable monotonic fencing token. Task binding is a
+  compare-and-set on the exact owner and token, so an expired or released submitter
+  cannot bind late or overwrite a task accepted by the current submitter.
+- Lease expiry never grants another paid submission. An unbound expired claim moves to
+  `pending_reconciliation`; reconciliation looks up the deterministic project task and
+  fenced-binds it when found. Cancellation after expiry records durable cancellation
+  intent and waits for that exact task instead of assuming the enqueue stopped.
+- Registered workflow processing actions now use the same claim, fenced bind, and safe
+  release path as direct remix actions. Concurrent workflow dispatch is covered and
+  enqueues exactly once.
+- Image request count is part of the central durable request fingerprint. An Agent count
+  edit during an in-flight generation invalidates the prior attempt, and its late result
+  or error cannot write back.
+- Final fenced-recovery verification: 259 Python recovery/workflow tests and 80 focused
+  frontend recovery, store, and Agent-command tests passed; TypeScript, Ruff, and diff
+  checks passed. The preceding 265-test frontend recovery run remains green for the
+  same implementation series.
