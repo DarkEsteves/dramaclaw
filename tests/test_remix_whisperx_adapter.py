@@ -180,6 +180,36 @@ def test_spoken_script_comparison_treats_asr_differences_as_low_confidence_evide
     }
 
 
+def test_unequal_replacement_records_the_uncovered_script_suffix():
+    report = whisperx_adapter.compare_spoken_script(
+        "0123456789AB", "0123456789X"
+    )
+
+    assert report.character_coverage == pytest.approx(10 / 12)
+    assert report.required_script_covered is False
+    assert [
+        (row.script_range.text, row.asr_range.text)
+        for row in report.substitutions
+    ] == [("A", "X")]
+    assert [row.script_range.text for row in report.omissions] == ["B"]
+
+
+def test_full_string_nfkc_normalizes_composed_and_decomposed_text_with_source_ranges():
+    equal = whisperx_adapter.compare_spoken_script("Cafe\u0301", "cafÉ")
+    different = whisperx_adapter.compare_spoken_script("e\u0301", "x")
+
+    assert equal.normalized_script == equal.normalized_asr == "café"
+    assert equal.character_coverage == 1
+    assert equal.substitutions == []
+    assert different.substitutions[0].script_range.model_dump() == {
+        "text": "e\u0301",
+        "start_char": 0,
+        "end_char": 2,
+        "normalized_start": 0,
+        "normalized_end": 1,
+    }
+
+
 def test_configured_adapter_force_aligns_high_coverage_generated_speech_differences(
     tmp_path: Path, monkeypatch
 ):
@@ -238,6 +268,29 @@ def test_configured_adapter_blocks_a_truly_omitted_required_phrase(
     assert not any(name == "load_align_model" for name, _ in fake.calls)
 
 
+def test_configured_adapter_blocks_high_coverage_unequal_replacement(
+    tmp_path: Path, monkeypatch
+):
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+    fake = FakeWhisperX(transcript="0123456789X")
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.align_script(
+        media,
+        {"revision": 5, "language": "en", "text": "0123456789AB"},
+    )
+
+    assert result["status"] == "script_mismatch"
+    assert result["mismatch"]["report"]["required_script_covered"] is False
+    assert result["mismatch"]["report"]["omissions"][0]["script_range"]["text"] == "B"
+    assert not any(name == "load_align_model" for name, _ in fake.calls)
+
+
 def test_spoken_text_with_no_timed_characters_is_not_reported_as_silence(tmp_path: Path, monkeypatch):
     media = tmp_path / "voice.wav"
     media.write_bytes(b"audio")
@@ -279,7 +332,7 @@ def test_partially_untimed_required_characters_do_not_publish_a_timeline(
 
     assert result["status"] == "script_mismatch"
     assert result["mismatch"]["untimed_script_ranges"] == [
-        {"start_char": 1, "end_char": 2}
+        {"start_char": 1, "end_char": 2, "text": "o"}
     ]
 
 

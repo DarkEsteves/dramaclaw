@@ -3,7 +3,7 @@ import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflo
 import { FileText } from 'lucide-react';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { TranscriptNodeData } from '@/features/canvas/domain/canvasNodes';
-import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, speechReviewItems, timelineWords, transcriptPlaybackParts, transcriptSrt, type SpeechMismatch, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
+import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, speechReviewItems, timelineWords, transcriptPlaybackParts, transcriptSrt, type SpeechMatchReport, type SpeechMismatch, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArtifactApi';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
@@ -58,8 +58,9 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     : data.words.map((word) => word.text).join('');
   const playbackParts = useMemo(() => transcriptPlaybackParts(transcriptText, data.words), [transcriptText, data.words]);
   const speechMismatch = data.speechMismatch as SpeechMismatch | null | undefined;
-  const speechReview = useMemo(() => speechReviewItems(speechMismatch), [speechMismatch]);
-  const hasSpeechReview = Boolean(speechMismatch?.report);
+  const speechMatchReport = data.speechMatchReport as SpeechMatchReport | null | undefined;
+  const speechReview = useMemo(() => speechReviewItems(speechMismatch, speechMatchReport), [speechMatchReport, speechMismatch]);
+  const hasSpeechReview = Boolean(speechReview.length || speechMismatch?.report);
   const reviewScript = () => {
     const expected = (data.pendingScriptRef ?? scriptRef) as RemixArtifactRef | null | undefined;
     const scriptNode = nodes.find((node) => {
@@ -136,7 +137,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       const task = await submitRemixProcessAction(project, mode === 'align'
         ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
         : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
-      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, reviewArtifactRef: null, speechMismatch: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
+      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, reviewArtifactRef: null, speechMismatch: null, speechMatchReport: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
       setShowWordDetails(false);
       setOperationId(task.operation_id);
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
@@ -201,14 +202,14 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         }
         if (payload.status === 'script_mismatch') {
           const message = '脚本与音频不一致，请核对台词后重新对齐';
-          updateNodeData(id, { artifactRef: null, reviewArtifactRef: { artifactId: artifact.id, revision: artifact.revision }, speechMismatch: payload.mismatch ?? null, operationId: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
+          updateNodeData(id, { artifactRef: null, reviewArtifactRef: { artifactId: artifact.id, revision: artifact.revision }, speechMismatch: payload.mismatch ?? null, speechMatchReport: null, operationId: null, status: 'needs_review', alignmentStale: true, unresolved: [message] });
           setError(message);
           setOperationId(null);
           return;
         }
         const words = timelineWords(payload);
         if (payload.status !== 'completed' || words.length === 0) throw new Error('没有识别到人声，请检查素材');
-        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, transcriptText: typeof payload.transcript === 'string' ? payload.transcript : words.map((word) => word.text).join(''), status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
+        updateNodeData(id, { artifactRef: { artifactId: artifact.id, revision: artifact.revision }, words, transcriptText: typeof payload.transcript === 'string' ? payload.transcript : words.map((word) => word.text).join(''), speechMismatch: null, speechMatchReport: payload.match_report ?? null, status: 'completed', unresolved: [], operationId: null, alignedScriptRef: saved?.pendingScriptRef ?? null, pendingScriptRef: null, alignmentStale: false });
         setShowWordDetails(false);
         setOperationId(null);
       } catch (caught) {

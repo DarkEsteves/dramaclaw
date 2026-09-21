@@ -273,13 +273,60 @@ describe('TranscriptNode', () => {
       pendingScriptRef: { artifactId: 'script-1', revision: 3 },
       speechMismatch: { reason: 'forced alignment left required script characters untimed', report: {
         substitutions: [], insertions: [], omissions: [], character_coverage: 1,
-      } },
+      }, untimed_script_ranges: [{ text: '好', start_char: 3, end_char: 4 }] },
     };
 
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
 
     expect(screen.getByRole('button', { name: '校对台词' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '重新对齐' })).toBeTruthy();
+    expect(screen.getByText(/未对齐.*好.*3.*4/)).toBeTruthy();
+  });
+
+  it('keeps successful high-coverage differences available for review and realignment', async () => {
+    vi.mocked(fetchRemixArtifact).mockResolvedValueOnce({
+      id: 'words-1', revision: 2, schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 3 }], payload: {
+        status: 'completed', script_revision: 3, transcript: '今天想喝馋奶茶',
+        match_report: {
+          character_coverage: 0.9,
+          substitutions: [{ script_range: { text: '馋', start_char: 4, end_char: 5 }, asr_range: { text: '茶', start_char: 4, end_char: 5 }, confidence: 'low', provenance: 'asr_comparison' }],
+          insertions: [], omissions: [],
+        },
+        words: [{ text: '今', start_char: 0, end_char: 1, start_us: 0, end_us: 100_000 }],
+      },
+    } as never);
+    state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
+    state.edges.push({ source: 'script', target: 'transcript' });
+    state.nodes[1].data = {
+      words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1',
+      sourceMediaPath: 'narration.wav', pendingScriptRef: { artifactId: 'script-1', revision: 3 },
+    };
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const view = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 2 }));
+    expect(state.nodes[1].data.speechMatchReport).toMatchObject({ character_coverage: 0.9 });
+    view.rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    expect(screen.getByText(/馋.*→.*茶/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '校对台词' }));
+    expect(state.setSelectedNode).toHaveBeenCalledWith('script');
+    fireEvent.click(screen.getByRole('button', { name: '重新对齐' }));
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({
+      action: 'align_script', mediaPath: 'narration.wav', scriptRef: { artifactId: 'script-1', revision: 3 },
+    })));
+  });
+
+  it('does not flag an exact successful alignment for review', () => {
+    state.nodes[1].data = {
+      words: [{ text: '你', startUs: 0, endUs: 100_000 }],
+      transcriptText: '你', status: 'completed', artifactRef: { artifactId: 'words-1', revision: 2 },
+      speechMatchReport: { character_coverage: 1, substitutions: [], insertions: [], omissions: [] },
+    };
+
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+
+    expect(screen.queryByText('对齐覆盖不完整，请核对台词')).toBeNull();
+    expect(screen.queryByRole('button', { name: '校对台词' })).toBeNull();
   });
 
   it('does not accept an alignment completed for a previous script revision', async () => {

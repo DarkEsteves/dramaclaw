@@ -34,18 +34,33 @@ def compare_spoken_script(script: str, asr: str) -> MatchReport:
         if tag == "equal":
             matched += script_end - script_start
             continue
-        difference = SpeechDifference(
-            script_range=_source_range(
-                script, script_offsets, script_start, script_end
-            ),
-            asr_range=_source_range(asr, asr_offsets, asr_start, asr_end),
-        )
         if tag == "replace":
-            substitutions.append(difference)
+            shared = min(script_end - script_start, asr_end - asr_start)
+            if shared:
+                substitutions.append(_difference(
+                    script, script_offsets, script_start, script_start + shared,
+                    asr, asr_offsets, asr_start, asr_start + shared,
+                ))
+            if script_start + shared < script_end:
+                omissions.append(_difference(
+                    script, script_offsets, script_start + shared, script_end,
+                    asr, asr_offsets, asr_start + shared, asr_start + shared,
+                ))
+            if asr_start + shared < asr_end:
+                insertions.append(_difference(
+                    script, script_offsets, script_start + shared, script_start + shared,
+                    asr, asr_offsets, asr_start + shared, asr_end,
+                ))
         elif tag == "insert":
-            insertions.append(difference)
+            insertions.append(_difference(
+                script, script_offsets, script_start, script_end,
+                asr, asr_offsets, asr_start, asr_end,
+            ))
         else:
-            omissions.append(difference)
+            omissions.append(_difference(
+                script, script_offsets, script_start, script_end,
+                asr, asr_offsets, asr_start, asr_end,
+            ))
     script_count = len(normalized_script)
     coverage = matched / script_count if script_count else float(not normalized_asr)
     return MatchReport(
@@ -62,14 +77,60 @@ def compare_spoken_script(script: str, asr: str) -> MatchReport:
 
 
 def _normalized_characters(text: str) -> tuple[list[str], list[tuple[int, int]]]:
-    characters: list[str] = []
-    offsets: list[tuple[int, int]] = []
+    expanded: list[str] = []
+    expanded_offsets: list[tuple[int, int]] = []
     for index, character in enumerate(text):
         for normalized in unicodedata.normalize("NFKC", character).casefold():
-            if normalized.isalnum():
-                characters.append(normalized)
-                offsets.append((index, index + 1))
+            expanded.append(normalized)
+            expanded_offsets.append((index, index + 1))
+    normalized_text = unicodedata.normalize("NFKC", text).casefold()
+    normalized_offsets: list[tuple[int, int] | None] = [None] * len(normalized_text)
+    for tag, source_start, source_end, target_start, target_end in SequenceMatcher(
+        None, "".join(expanded), normalized_text, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            for offset in range(target_end - target_start):
+                normalized_offsets[target_start + offset] = expanded_offsets[source_start + offset]
+            continue
+        if source_start < source_end:
+            source_range = (
+                expanded_offsets[source_start][0],
+                expanded_offsets[source_end - 1][1],
+            )
+        else:
+            anchor = (
+                expanded_offsets[source_start][0]
+                if source_start < len(expanded_offsets)
+                else len(text)
+            )
+            source_range = (anchor, anchor)
+        for target_index in range(target_start, target_end):
+            normalized_offsets[target_index] = source_range
+    characters: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    for character, source_range in zip(normalized_text, normalized_offsets, strict=True):
+        if character.isalnum():
+            characters.append(character)
+            offsets.append(source_range or (len(text), len(text)))
     return characters, offsets
+
+
+def _difference(
+    script: str,
+    script_offsets: list[tuple[int, int]],
+    script_start: int,
+    script_end: int,
+    asr: str,
+    asr_offsets: list[tuple[int, int]],
+    asr_start: int,
+    asr_end: int,
+) -> SpeechDifference:
+    return SpeechDifference(
+        script_range=_source_range(
+            script, script_offsets, script_start, script_end
+        ),
+        asr_range=_source_range(asr, asr_offsets, asr_start, asr_end),
+    )
 
 
 def _source_range(
@@ -254,7 +315,9 @@ class WhisperXSpeechAligner:
                 "words": [],
                 "mismatch": {
                     "reason": "forced alignment left required script characters untimed",
-                    "untimed_script_ranges": _contiguous_ranges(untimed_required),
+                    "untimed_script_ranges": _contiguous_ranges(
+                        untimed_required, text
+                    ),
                 },
             }
         if not words:
@@ -272,11 +335,15 @@ def _is_required_character(value: object) -> bool:
     )
 
 
-def _contiguous_ranges(indices: list[int]) -> list[dict[str, int]]:
-    ranges: list[dict[str, int]] = []
+def _contiguous_ranges(
+    indices: list[int], source: str
+) -> list[dict[str, Any]]:
+    ranges: list[dict[str, Any]] = []
     for index in indices:
         if ranges and ranges[-1]["end_char"] == index:
             ranges[-1]["end_char"] = index + 1
         else:
             ranges.append({"start_char": index, "end_char": index + 1})
+    for item in ranges:
+        item["text"] = source[item["start_char"]:item["end_char"]]
     return ranges

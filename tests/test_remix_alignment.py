@@ -197,7 +197,12 @@ def test_align_script_preserves_match_report_and_maps_script_ranges_after_role_p
             "confidence": "low",
             "provenance": "asr_comparison",
         }],
-        "insertions": [],
+        "insertions": [{
+            "script_range": {"text": "", "start_char": 3, "end_char": 3, "normalized_start": 2, "normalized_end": 2},
+            "asr_range": {"text": "啊", "start_char": 2, "end_char": 3, "normalized_start": 2, "normalized_end": 3},
+            "confidence": "low",
+            "provenance": "asr_comparison",
+        }],
         "omissions": [],
     }
 
@@ -227,3 +232,37 @@ def test_align_script_preserves_match_report_and_maps_script_ranges_after_role_p
         "normalized_start": 1,
         "normalized_end": 2,
     }
+    assert result["match_report"]["insertions"][0]["script_range"] == {
+        "text": "",
+        "start_char": 7,
+        "end_char": 7,
+        "normalized_start": 2,
+        "normalized_end": 2,
+    }
+
+
+def test_align_script_maps_untimed_ranges_after_role_prefixes(tmp_path: Path) -> None:
+    media = tmp_path / "dialogue.wav"
+    media.write_bytes(b"voice")
+
+    result = align_script(
+        media,
+        {"revision": 2, "language": "zh", "dialogue": "男：你好\n女：再见"},
+        aligner=FakeSpeechAligner(
+            transcription={"status": "completed", "words": []},
+            alignment={
+                "status": "script_mismatch",
+                "words": [],
+                "mismatch": {
+                    "reason": "forced alignment left required script characters untimed",
+                    "untimed_script_ranges": [
+                        {"text": "好", "start_char": 1, "end_char": 2}
+                    ],
+                },
+            },
+        ),
+    )
+
+    assert result["mismatch"]["untimed_script_ranges"] == [
+        {"text": "好", "start_char": 3, "end_char": 4}
+    ]

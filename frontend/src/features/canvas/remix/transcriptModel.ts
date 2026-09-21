@@ -44,17 +44,22 @@ export interface TranscriptTimeline extends Record<string, unknown> {
   words: TimelineWord[];
   transcript?: string | null;
   mismatch?: SpeechMismatch | null;
+  match_report?: SpeechMatchReport | null;
 }
 
 interface SpeechTextRange { text?: unknown; start_char?: unknown; end_char?: unknown }
 interface SpeechDifference { script_range?: SpeechTextRange; asr_range?: SpeechTextRange }
-interface SpeechMatchReport {
+export interface SpeechMatchReport {
   substitutions?: unknown;
   insertions?: unknown;
   omissions?: unknown;
   character_coverage?: unknown;
 }
-export interface SpeechMismatch { reason?: unknown; report?: SpeechMatchReport | null }
+export interface SpeechMismatch {
+  reason?: unknown;
+  report?: SpeechMatchReport | null;
+  untimed_script_ranges?: unknown;
+}
 
 function differences(value: unknown): SpeechDifference[] {
   return Array.isArray(value) ? value.filter((item): item is SpeechDifference => Boolean(item && typeof item === 'object')) : [];
@@ -65,13 +70,15 @@ function rangeText(value: SpeechTextRange | undefined): string {
 }
 
 /** Turn backend comparison evidence into compact review rows without trusting ASR as truth. */
-export function speechReviewItems(mismatch: SpeechMismatch | null | undefined): string[] {
-  const report = mismatch?.report;
-  if (!report || typeof report !== 'object') return [];
+export function speechReviewItems(mismatch: SpeechMismatch | null | undefined, successfulReport?: SpeechMatchReport | null): string[] {
+  const report = mismatch?.report ?? successfulReport;
+  const untimed = Array.isArray(mismatch?.untimed_script_ranges)
+    ? mismatch.untimed_script_ranges.filter((item): item is SpeechTextRange => Boolean(item && typeof item === 'object')) : [];
   return [
-    ...differences(report.substitutions).map((item) => `可能替换：${rangeText(item.script_range)} → ${rangeText(item.asr_range)}（ASR 低置信度）`),
-    ...differences(report.omissions).map((item) => `缺少：${rangeText(item.script_range)}`),
-    ...differences(report.insertions).map((item) => `可能多读：${rangeText(item.asr_range)}（ASR 低置信度）`),
+    ...differences(report?.substitutions).map((item) => `可能替换：${rangeText(item.script_range)} → ${rangeText(item.asr_range)}（ASR 低置信度）`),
+    ...differences(report?.omissions).map((item) => `缺少：${rangeText(item.script_range)}`),
+    ...differences(report?.insertions).map((item) => `可能多读：${rangeText(item.asr_range)}（ASR 低置信度）`),
+    ...untimed.map((item) => `未对齐：${rangeText(item)}（脚本字符 ${String(item.start_char)}–${String(item.end_char)}）`),
   ];
 }
 

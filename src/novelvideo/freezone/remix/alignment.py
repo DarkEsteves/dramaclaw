@@ -94,28 +94,37 @@ def _map_match_report_to_original_script(
     if not isinstance(report, dict):
         mismatch = result.get("mismatch")
         report = mismatch.get("report") if isinstance(mismatch, dict) else None
-    if not isinstance(report, dict):
+    if isinstance(report, dict):
+        for key in ("substitutions", "insertions", "omissions"):
+            differences = report.get(key)
+            if not isinstance(differences, list):
+                continue
+            for difference in differences:
+                span = difference.get("script_range") if isinstance(difference, dict) else None
+                if not isinstance(span, dict):
+                    continue
+                _map_script_span(span, original_positions)
+    mismatch = result.get("mismatch")
+    untimed = mismatch.get("untimed_script_ranges") if isinstance(mismatch, dict) else None
+    if isinstance(untimed, list):
+        for span in untimed:
+            if isinstance(span, dict):
+                _map_script_span(span, original_positions)
+
+
+def _map_script_span(span: dict[str, Any], original_positions: list[int]) -> None:
+    start, end = span.get("start_char"), span.get("end_char")
+    if not isinstance(start, int) or not isinstance(end, int):
         return
-    for key in ("substitutions", "omissions"):
-        differences = report.get(key)
-        if not isinstance(differences, list):
-            continue
-        for difference in differences:
-            span = difference.get("script_range") if isinstance(difference, dict) else None
-            if not isinstance(span, dict):
-                continue
-            start, end = span.get("start_char"), span.get("end_char")
-            if not isinstance(start, int) or not isinstance(end, int):
-                continue
-            if start < end and end <= len(original_positions):
-                span["start_char"] = original_positions[start]
-                span["end_char"] = original_positions[end - 1] + 1
-            elif start == end:
-                span["start_char"] = span["end_char"] = (
-                    original_positions[start]
-                    if start < len(original_positions)
-                    else original_positions[-1] + 1
-                )
+    if start < end and end <= len(original_positions):
+        span["start_char"] = original_positions[start]
+        span["end_char"] = original_positions[end - 1] + 1
+    elif start == end:
+        span["start_char"] = span["end_char"] = (
+            original_positions[start]
+            if start < len(original_positions)
+            else original_positions[-1] + 1
+        )
 
 
 _SPEAKER_PREFIX = re.compile(r"^\s*[^：:\n]{1,24}[：:]\s*")
