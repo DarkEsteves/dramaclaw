@@ -1,0 +1,38 @@
+{
+  "schema_version": "dramaclaw.workflow-skill.v1",
+  "id": "reference-video-remix",
+  "enabled": true,
+  "version": "1.0.0",
+  "name": "参考视频改编",
+  "description": "保留参考片的叙事作用与节奏，用新主题、旁白和素材制作可编辑竖屏成片。",
+  "category": "video",
+  "triggers": {
+    "keywords": ["参考视频改编", "参考片复刻", "换主题改编", "视频 remix"],
+    "node_scopes": ["textGeneration", "imageGeneration", "videoGeneration", "audioGeneration"]
+  },
+  "input_parameters": [
+    {"id": "new_topic", "label": "新主题", "type": "text", "required": true},
+    {"id": "narration_source", "label": "旁白来源", "type": "single_select", "required": true, "default": "generate_or_upload", "options": ["generate_or_upload", "manual_upload"]}
+  ],
+  "allowed_recipe_ids": ["reference-blueprint", "reference-remix-script", "reference-broll-plan"],
+  "planning": {
+    "planning_notes": "按原片证据、参考蓝图、新主题脚本、B-roll、旁白对齐、语义时间轴、合成清单和导出顺序推进。可改台词、产品、人物、场景与素材；保留用户确认的叙事作用和节奏。旁白既可调用音频动作生成，也可由用户上传。",
+    "prompt_guide": "创意判断只调用已声明的结构化 Recipes；媒体处理、对齐、时间轴、清单和渲染只调用注册动作，不复制动作实现。",
+    "conduct_rules": [
+      "仅调用 allowed_recipe_ids 中的 Recipe 和系统注册动作，不执行外部命令",
+      "参考蓝图、改写脚本、必需 B-roll 与合成清单发布前都保留人工确认点",
+      "输入或人工修改变化后只重跑受影响阶段及其下游，已确认且版本匹配的上游产物继续复用"
+    ]
+  },
+  "evaluation": {
+    "rating_bands": [
+      {"score": 10, "description": "从参考片到可编辑 MP4 的原生画布链路完整且版本一致"},
+      {"score": 7, "description": "主链路完整，仅有可见的人工输入待补"},
+      {"score": 4, "description": "缺少关键产物、依赖或人工复核"}
+    ],
+    "visual_review_items": [{"name": "叙事作用与素材匹配"}, {"name": "9:16 画面与字幕安全区"}],
+    "text_review_items": [{"name": "新主题台词与事实准确性"}, {"name": "语义事件与旁白对齐"}],
+    "quality_threshold": 7,
+    "domain_constraints": ["不得照抄参考片台词", "不得绕过结构化输出校验或人工复核", "最终输出为 1080x1920 MP4"]
+  }
+}

@@ -302,7 +302,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
-  const generateScript = async () => {
+  const generateScript = useCallback(async () => {
     if (isCreatingScript) return;
     setIsCreatingScript(true);
     setScriptError(null);
@@ -315,7 +315,11 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     } finally {
       setIsCreatingScript(false);
     }
-  };
+  }, [isCreatingScript, id]);
+
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId === id && action === 'continue_story') void generateScript();
+  }), [generateScript, id]);
 
   return (
     <div

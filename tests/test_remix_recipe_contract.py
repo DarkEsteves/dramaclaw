@@ -1,6 +1,8 @@
 import pytest
+import json
+from pathlib import Path
 
-from novelvideo.freezone.agent_catalog_schema import validate_agent_recipe_config
+from novelvideo.freezone.agent_catalog_schema import validate_agent_recipe_config, validate_agent_skill_config
 from novelvideo.freezone.recipe_runtime import RecipeRuntimeError, validate_structured_recipe_output
 from novelvideo.freezone.recipe_runtime import publish_structured_recipe_output
 
@@ -56,3 +58,32 @@ def test_agent_product_delivery_adapter_publishes_before_finish(tmp_path, monkey
     result = operations.deliver_structured_recipe_result(operation_project_dir=tmp_path, artifact_project_dir=tmp_path, operation_id="op", expected_task_id="task", recipe={**recipe(), "output_schema": {"type": "object", "required": ["narrative_role", "events", "preserve_replace_rules", "observations", "inferences", "user_choices"]}}, content='{"narrative_role":"hook","events":[],"preserve_replace_rules":[],"observations":[],"inferences":[],"user_choices":[]}', created_by="alice", upstream_refs=[])
     assert result["result_ref"]["kind"] == "remix_artifact"
     assert calls
+
+
+def test_builtin_reference_remix_skill_declares_review_and_rerun_contract() -> None:
+    root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins"
+    skill = json.loads((root / "skills/reference-video-remix.json").read_text())
+    skill = validate_agent_skill_config(skill)
+    assert skill["allowed_recipe_ids"] == [
+        "reference-blueprint",
+        "reference-remix-script",
+        "reference-broll-plan",
+    ]
+    rules = "\n".join(skill["planning"]["conduct_rules"])
+    assert "注册动作" in rules
+    assert "人工确认" in rules
+    assert "只重跑" in rules
+    assert "shell" not in json.dumps(skill).lower()
+
+
+def test_reference_creative_recipes_are_structured_v2_and_legacy_v1_is_unchanged() -> None:
+    root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins/recipes"
+    for recipe_id in ("reference-blueprint", "reference-remix-script", "reference-broll-plan"):
+        payload = validate_agent_recipe_config(json.loads((root / f"{recipe_id}.json").read_text()))
+        assert payload["schema_version"] == "dramaclaw.recipe.v2"
+        assert payload["output_schema"]["type"] == "object"
+        assert payload["input_contract"]["required"]
+
+    legacy = validate_agent_recipe_config(json.loads((root / "general-text.json").read_text()))
+    assert legacy["schema_version"] == "dramaclaw.recipe.v1"
+    assert "output_schema" not in legacy

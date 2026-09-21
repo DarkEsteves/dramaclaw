@@ -95,6 +95,8 @@ export const VideoComposeNode = memo(
     const [manifestDirty, setManifestDirty] = useState(false);
     const [isManifestSaving, setManifestSaving] = useState(false);
     const prepareClaimRef = useRef(false);
+    const submitRemixRef = useRef<null | (() => void)>(null);
+    const [autoRenderRequested, setAutoRenderRequested] = useState(false);
     const [recoveredRemixOperationId, setRecoveredRemixOperationId] = useState<string | null>(null);
 
     const seedNodeIds = useMemo(
@@ -212,7 +214,14 @@ export const VideoComposeNode = memo(
     }, [project, id, updateNodeData, data.remixNodeRevision, data.remixManifestRef, manifestDirty, manifestReady]);
     useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
       if (nodeId === id && action === 'prepare_compose') void handlePrepareRemix();
+      if (nodeId === id && action === 'render_export') setAutoRenderRequested(true);
     }), [id, handlePrepareRemix]);
+
+    useEffect(() => {
+      if (!autoRenderRequested || !manifestReady || !submitRemixRef.current) return;
+      setAutoRenderRequested(false);
+      submitRemixRef.current();
+    }, [autoRenderRequested, manifestReady]);
 
     useEffect(() => {
       if (!data.autoPrepareRequested || !hasSemanticTimeline) return;
@@ -390,6 +399,7 @@ export const VideoComposeNode = memo(
         catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
         finally { setRemixSubmitting(false); }
       };
+      submitRemixRef.current = () => { void submit(); };
       return <div className="group relative w-[380px]" onClick={() => setSelectedNode(id)}>
         <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
         <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
@@ -412,6 +422,8 @@ export const VideoComposeNode = memo(
         </div>
       </div>;
     }
+
+    submitRemixRef.current = null;
 
     return (
       <div

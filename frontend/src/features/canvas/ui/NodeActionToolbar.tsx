@@ -143,6 +143,8 @@ import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/rem
 import { audioToolbarState } from './audioToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
+import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
+import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1639,6 +1641,39 @@ export const NodeActionToolbar = memo(
       ? remixScriptEditorLabel(node.data, edges.some((edge) => edge.target === node.id
         && nodes.some((source) => source.id === edge.source && source.type === CANVAS_NODE_TYPES.videoStory && Boolean(source.data.referenceBlueprintRef))))
       : null;
+    const remixJourneyStep = useMemo(
+      () => nextRemixJourneyStep(nodes, edges, node.id),
+      [edges, node.id, nodes],
+    );
+
+    const advanceRemixJourney = useCallback(() => {
+      if (!remixJourneyStep) return;
+      setSelectedNode(remixJourneyStep.targetNodeId);
+      requestFocusNode(remixJourneyStep.targetNodeId);
+      if (!remixJourneyStep.action) return;
+      try {
+        switch (remixJourneyStep.action) {
+          case 'analyze_reference': {
+            const source = nodes.find((candidate) => candidate.id === remixJourneyStep.targetNodeId);
+            if (!source || typeof source.data.videoUrl !== 'string' || !source.data.videoUrl) throw new Error('请先上传参考视频');
+            const started = analyzeReferenceVideo(source.id, { videoUrl: source.data.videoUrl });
+            setSelectedNode(started.nodeId); requestFocusNode(started.nodeId);
+            break;
+          }
+          case 'continue_story': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'continue_story' }); break;
+          case 'edit_script': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'edit_script' }); break;
+          case 'create_narration': createNarrationFromScript(remixJourneyStep.targetNodeId); break;
+          case 'align_narration': void createAlignedTranscriptFromAudio(remixJourneyStep.targetNodeId).catch((cause) => toast.error(cause instanceof Error ? cause.message : '无法按脚本对齐')); break;
+          case 'create_timeline': createTimelineFromScript(remixJourneyStep.targetNodeId); break;
+          case 'compile_timeline': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'compile' }); break;
+          case 'create_compose': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'create_compose' }); break;
+          case 'prepare_manifest': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'prepare_compose' }); break;
+          case 'render_export': canvasEventBus.publish('remix-node/action', { nodeId: remixJourneyStep.targetNodeId, action: 'render_export' }); break;
+        }
+      } catch (cause) {
+        toast.error(cause instanceof Error ? cause.message : '无法继续改编');
+      }
+    }, [nodes, remixJourneyStep, requestFocusNode, setSelectedNode]);
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;
 
@@ -1662,6 +1697,9 @@ export const NodeActionToolbar = memo(
           {/* 节点激活时，顶部菜单从节点上沿淡入+轻微上滑浮现（而非生硬地直接出现），
               与下方操作区的入场动画呼应。motion-reduce 下退化为无动画。 */}
           <UiPanel className="flex animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-2 items-center gap-1.5 rounded-[18px] !border-white/10 !bg-[#242426]/95 px-2 py-1.5 text-sm shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-2xl duration-200 ease-out motion-reduce:animate-none [&_svg]:h-4 [&_svg]:w-4">
+            {remixJourneyStep && (
+              <RemixJourneyButton key="remix-continue" step={remixJourneyStep} onContinue={advanceRemixJourney} />
+            )}
             {/* Mainline lock indicator — shown as a leading pill when the
                 node is preset-managed (or canvas-level fallback applies).
                 The chips below remain visible for spawn-style edits; the

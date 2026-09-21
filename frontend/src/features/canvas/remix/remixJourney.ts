@@ -1,0 +1,109 @@
+import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
+
+export type RemixJourneyAction =
+  | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
+  | 'align_narration' | 'create_timeline' | 'compile_timeline'
+  | 'create_compose' | 'prepare_manifest' | 'render_export';
+
+export type RemixJourneyStep = {
+  kind: 'action' | 'input' | 'wait' | 'complete';
+  targetNodeId: string;
+  label: string;
+  inputHint?: string;
+  action?: RemixJourneyAction;
+};
+
+type Ref = { artifactId: string; revision: number };
+
+function ref(value: unknown): Ref | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Record<string, unknown>;
+  return typeof item.artifactId === 'string' && Number.isInteger(item.revision) && Number(item.revision) > 0
+    ? { artifactId: item.artifactId, revision: Number(item.revision) } : null;
+}
+
+function sameRef(left: unknown, right: unknown): boolean {
+  const a = ref(left); const b = ref(right);
+  return Boolean(a && b && a.artifactId === b.artifactId && a.revision === b.revision);
+}
+
+function connectedIds(edges: CanvasEdge[], startId: string): Set<string> {
+  const found = new Set([startId]);
+  const queue = [startId];
+  while (queue.length) {
+    const current = queue.shift()!;
+    for (const edge of edges) {
+      const next = edge.source === current ? edge.target : edge.target === current ? edge.source : null;
+      if (next && !found.has(next)) { found.add(next); queue.push(next); }
+    }
+  }
+  return found;
+}
+
+function directChild(nodes: CanvasNode[], edges: CanvasEdge[], sourceId: string, type: CanvasNode['type']): CanvasNode | undefined {
+  const ids = new Set(edges.filter((edge) => edge.source === sourceId).map((edge) => edge.target));
+  return nodes.find((node) => ids.has(node.id) && node.type === type);
+}
+
+function missingBroll(node: CanvasNode): boolean {
+  const draft = node.data.remixScriptDraft as { selections?: Array<{ visualNodeId?: unknown; visualMediaRevision?: unknown }> } | undefined;
+  return Boolean(draft?.selections?.some((selection) => selection.visualNodeId
+    && (typeof selection.visualMediaRevision !== 'string' || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision))));
+}
+
+/** Resolve exactly one visible next step from the selected remix graph. */
+export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], selectedNodeId: string): RemixJourneyStep | null {
+  const component = connectedIds(edges, selectedNodeId);
+  const graph = nodes.filter((node) => component.has(node.id));
+  const reference = graph.find((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference');
+  if (!reference) return null;
+  if (!reference.data.videoUrl) return { kind: 'input', targetNodeId: reference.id, label: '上传参考视频', inputHint: '在视频节点上传一个参考视频。' };
+
+  const story = directChild(nodes, edges, reference.id, CANVAS_NODE_TYPES.videoStory);
+  if (!story) return { kind: 'action', action: 'analyze_reference', targetNodeId: reference.id, label: '分析参考视频' };
+  if (story.data.isAnalyzing || ['preparing', 'extracting', 'transcribing', 'analyzing'].includes(String(story.data.remixAnalysisStage))) {
+    return { kind: 'wait', targetNodeId: story.id, label: '等待原片分析', inputHint: '分析完成后可继续检查蓝图。' };
+  }
+  const hasEvidence = (Array.isArray(story.data.referenceEvents) && story.data.referenceEvents.length > 0)
+    || (Array.isArray(story.data.rows) && story.data.rows.length > 0);
+  if (!hasEvidence || story.data.analysisError) return { kind: 'action', action: 'analyze_reference', targetNodeId: reference.id, label: '重新分析参考视频' };
+  if (!ref(story.data.referenceBlueprintRef)) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '确认分析并生成脚本', inputHint: '先检查叙事作用和保留/替换规则。' };
+
+  const script = directChild(nodes, edges, story.id, CANVAS_NODE_TYPES.script);
+  if (!script) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '填写新主题并生成脚本', inputHint: '输入新主题后生成可编辑台词。' };
+  if (!ref(script.data.remixScriptRef)) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '填写新主题并生成脚本', inputHint: '确认台词、语义区间和素材要求后保存。' };
+  if (missingBroll(script)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，生成或上传标记事件所需的画面素材。' };
+
+  const scriptRef = script.data.remixScriptRef;
+  const audio = directChild(nodes, edges, script.id, CANVAS_NODE_TYPES.audio);
+  if (!audio || audio.data.remixRole !== 'narration' || !sameRef(audio.data.remixScriptRef, scriptRef)) {
+    return { kind: 'action', action: 'create_narration', targetNodeId: script.id, label: '创建旁白节点' };
+  }
+  if (!audio.data.audioUrl) return { kind: 'input', targetNodeId: audio.id, label: '生成或上传旁白音频', inputHint: '可选择音色生成，也可直接上传已经录好的音频。' };
+
+  const transcript = nodes.find((node) => node.type === CANVAS_NODE_TYPES.transcript
+    && edges.some((edge) => edge.source === script.id && edge.target === node.id)
+    && edges.some((edge) => edge.source === audio.id && edge.target === node.id));
+  const currentAlignment = transcript?.data.status === 'completed' && !transcript.data.alignmentStale
+    && ref(transcript.data.artifactRef) && sameRef(transcript.data.alignedScriptRef, scriptRef);
+  if (!currentAlignment) {
+    if (transcript && (transcript.data.operationId || transcript.data.autoStartMode === 'align')) {
+      return { kind: 'wait', targetNodeId: transcript.id, label: '等待旁白对齐', inputHint: '对齐完成后会生成逐词时间。' };
+    }
+    return { kind: 'action', action: 'align_narration', targetNodeId: audio.id, label: '按脚本对齐旁白' };
+  }
+
+  const timeline = nodes.find((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline
+    && edges.some((edge) => edge.source === script.id && edge.target === node.id)
+    && edges.some((edge) => edge.source === transcript.id && edge.target === node.id));
+  if (!timeline) return { kind: 'action', action: 'create_timeline', targetNodeId: script.id, label: '生成语义时间轴' };
+  if (timeline.data.compileOperationId) return { kind: 'wait', targetNodeId: timeline.id, label: '等待时间轴编译' };
+  if (!ref(timeline.data.artifactRef)) return { kind: 'action', action: 'compile_timeline', targetNodeId: timeline.id, label: '编译语义时间轴' };
+
+  const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
+  if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };
+  if (!ref(compose.data.remixManifestRef)) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '生成合成清单' };
+  if (compose.data.remixOperationId && !compose.data.resultVideoUrl) return { kind: 'wait', targetNodeId: compose.id, label: '等待成片导出' };
+  if (!compose.data.resultVideoUrl) return { kind: 'action', action: 'render_export', targetNodeId: compose.id, label: '导出 MP4' };
+  return { kind: 'complete', targetNodeId: compose.id, label: '成片可编辑并可下载 MP4' };
+}
