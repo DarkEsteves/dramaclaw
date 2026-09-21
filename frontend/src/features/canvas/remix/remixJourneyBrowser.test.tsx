@@ -35,6 +35,8 @@ describe('browser remix journey', () => {
       createNarration: vi.fn(() => { nodes.push(node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('script'), text: '新品登场' })); edges.push(edge('script', 'audio')); }),
       alignNarration: vi.fn(async () => { nodes.push(node('words', 'transcriptNode', { artifactRef: ref('words'), alignedScriptRef: ref('script'), status: 'completed', sourceMediaPath: 'voice.wav', sourceMediaHash: 'b'.repeat(64) })); edges.push(edge('script', 'words'), edge('audio', 'words')); }),
       createTimeline: vi.fn(() => { nodes.push(node('timeline', 'semanticTimelineNode', { events: [] })); edges.push(edge('script', 'timeline'), edge('words', 'timeline')); }),
+      createBackground: vi.fn(() => { nodes.push(node('background', 'uploadNode', { remixRole: 'background' })); edges.push(edge('background', 'script')); }),
+      bindBackground: vi.fn(async () => { Object.assign(nodes.find((item) => item.id === 'background')!.data, { imageUrl: '/background.png', remixMedia: { media_kind: 'image', media_path: 'background.png', media_hash: 'd'.repeat(64), url: '/background.png' } }); }),
       createCompose: vi.fn(() => { nodes.push(node('compose', 'videoComposeNode', {})); edges.push(edge('timeline', 'compose')); }),
     };
     const view = render(<div />);
@@ -49,6 +51,7 @@ describe('browser remix journey', () => {
     expect((await clickNext('script')).action).toBe('plan_broll');
     expect(nodes[2].data.remixBrollRequirements).toEqual([expect.objectContaining({ event_id: 'product', required: true })]);
     expect((await clickNext('script')).label).toBe('补齐必需 B-roll');
+    nodes.push(node('visual', 'uploadNode', { imageUrl: '/visual.png', remixRole: 'visual', remixMedia: { media_kind: 'image', media_path: 'visual.png', media_hash: 'c'.repeat(64), url: '/visual.png' } })); edges.push(edge('visual', 'script'));
     Object.assign((nodes[2].data.remixScriptDraft as { selections: Array<Record<string, unknown>> }).selections[0], { visualNodeId: 'visual', visualMediaRevision: 'c'.repeat(64) });
     expect((await clickNext('script')).action).toBe('create_narration');
     expect(nodes.some((item) => item.id === 'audio')).toBe(true);
@@ -57,6 +60,10 @@ describe('browser remix journey', () => {
     expect((await clickNext('audio')).action).toBe('align_narration');
     expect((await clickNext('words')).action).toBe('create_timeline');
     expect((await clickNext('timeline')).action).toBe('compile_timeline');
+    expect((await clickNext('timeline')).action).toBe('create_background');
+    expect((await clickNext('background')).label).toBe('上传成片背景 / A-roll');
+    Object.assign(nodes.find((item) => item.id === 'background')!.data, { imageUrl: '/background.png' });
+    expect((await clickNext('background')).action).toBe('bind_background');
     expect((await clickNext('timeline')).action).toBe('create_compose');
     expect((await clickNext('compose')).action).toBe('prepare_manifest');
     expect((await clickNext('compose')).action).toBe('render_export');

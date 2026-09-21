@@ -1,9 +1,11 @@
 import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
+import { boundBrollVisualMedia } from './brollCanvasBinding';
 
 export type RemixJourneyAction =
   | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
   | 'plan_broll' | 'align_narration' | 'create_timeline' | 'compile_timeline'
-  | 'create_compose' | 'prepare_manifest' | 'save_manifest' | 'render_export';
+  | 'create_background' | 'bind_background' | 'create_compose' | 'prepare_manifest'
+  | 'save_manifest' | 'render_export';
 
 export type RemixJourneyStep = {
   kind: 'action' | 'input' | 'wait' | 'complete';
@@ -45,15 +47,34 @@ function directChild(nodes: CanvasNode[], edges: CanvasEdge[], sourceId: string,
   return nodes.find((node) => ids.has(node.id) && node.type === type);
 }
 
-function missingRequiredBroll(node: CanvasNode): boolean {
+const VISUAL_NODE_TYPES = new Set<CanvasNode['type']>([
+  CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit,
+  CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage,
+]);
+
+function validBoundVisual(node: CanvasNode | undefined, expectedHash?: unknown): boolean {
+  if (!node || !VISUAL_NODE_TYPES.has(node.type)) return false;
+  try {
+    const media = boundBrollVisualMedia('', node);
+    return expectedHash === undefined || media.media_hash === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
+function missingRequiredBroll(node: CanvasNode, nodes: CanvasNode[], edges: CanvasEdge[]): boolean {
   const draft = node.data.remixScriptDraft as { selections?: Array<{ id?: unknown; visualNodeId?: unknown; visualMediaRevision?: unknown }> } | undefined;
   const requirements = Array.isArray(node.data.remixBrollRequirements)
     ? node.data.remixBrollRequirements as Array<{ event_id?: unknown; required?: unknown }> : [];
   return requirements.some((requirement) => {
     if (requirement.required !== true || typeof requirement.event_id !== 'string') return false;
     const selection = draft?.selections?.find((item) => item.id === requirement.event_id);
-    return !selection?.visualNodeId || typeof selection.visualMediaRevision !== 'string'
-      || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision);
+    if (typeof selection?.visualNodeId !== 'string' || typeof selection.visualMediaRevision !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision)) return true;
+    const visual = nodes.find((item) => item.id === selection.visualNodeId);
+    return !edges.some((edge) => edge.source === selection.visualNodeId && edge.target === node.id)
+      || visual?.data.remixRole !== 'visual'
+      || !validBoundVisual(visual, selection.visualMediaRevision);
   });
 }
 
@@ -82,7 +103,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   if (!ref(script.data.remixBrollPlanRef) || !sameRef(script.data.remixBrollScriptRef, script.data.remixScriptRef)) {
     return { kind: 'action', action: 'plan_broll', targetNodeId: script.id, label: '规划 B-roll' };
   }
-  if (missingRequiredBroll(script)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，为每个必需事件生成或上传画面并完成绑定。' };
+  if (missingRequiredBroll(script, nodes, edges)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，重新选择当前已连接的替换画面，并确认素材版本。' };
 
   const scriptRef = script.data.remixScriptRef;
   const audio = directChild(nodes, edges, script.id, CANVAS_NODE_TYPES.audio);
@@ -109,6 +130,14 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   if (!timeline) return { kind: 'action', action: 'create_timeline', targetNodeId: script.id, label: '生成语义时间轴' };
   if (timeline.data.compileOperationId) return { kind: 'wait', targetNodeId: timeline.id, label: '等待时间轴编译' };
   if (!ref(timeline.data.artifactRef)) return { kind: 'action', action: 'compile_timeline', targetNodeId: timeline.id, label: '编译语义时间轴' };
+
+  const backgrounds = graph.filter((node) => VISUAL_NODE_TYPES.has(node.type) && node.data.remixRole === 'background'
+    && node.id !== reference.id && edges.some((edge) => edge.source === node.id && edge.target === script.id));
+  if (!backgrounds.length) return { kind: 'action', action: 'create_background', targetNodeId: script.id, label: '添加成片背景 / A-roll', inputHint: '参考片仅用于分析；请上传或选择单独的成片画面。' };
+  const background = backgrounds[0];
+  const hasBackgroundSource = Boolean(background.data.videoUrl || background.data.imageUrl || background.data.previewImageUrl);
+  if (!hasBackgroundSource) return { kind: 'input', targetNodeId: background.id, label: '上传成片背景 / A-roll', inputHint: '在新建素材节点上传用于最终成片的图片或视频。' };
+  if (!validBoundVisual(background)) return { kind: 'action', action: 'bind_background', targetNodeId: background.id, label: '绑定成片背景 / A-roll' };
 
   const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
   if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };

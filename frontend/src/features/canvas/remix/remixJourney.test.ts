@@ -52,6 +52,33 @@ describe('reference video remix canvas journey', () => {
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'audio')).toEqual(expect.objectContaining({ kind: 'input', targetNodeId: 'audio', label: '生成或上传旁白音频', inputHint: expect.stringContaining('上传') }));
   });
 
+  it('requires the saved B-roll binding to match the live connected visual node', () => {
+    const graph = completeThroughScript();
+    const script = graph.nodes[2];
+    script.data.remixBrollPlanRef = ref('broll');
+    script.data.remixBrollScriptRef = ref('script');
+    script.data.remixBrollRequirements = [{ event_id: 'product', required: true }];
+    (script.data.remixScriptDraft as { selections: Array<Record<string, unknown>> }).selections[0] = {
+      id: 'product', label: '产品登场', start: 0, end: 4,
+      visualNodeId: 'visual', visualMediaRevision: 'c'.repeat(64),
+    };
+    const visual = node('visual', 'uploadNode', { imageUrl: '/visual.png', remixRole: 'visual', remixMedia: { media_kind: 'image', media_path: 'visual.png', media_hash: 'c'.repeat(64), url: '/visual.png' } });
+    graph.nodes.push(visual); graph.edges.push(edge('visual', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ action: 'create_narration' });
+
+    visual.data.remixRole = 'background';
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+    visual.data.remixRole = 'visual'; visual.data.remixMedia = { media_kind: 'image', media_path: 'visual.png', media_hash: 'd'.repeat(64), url: '/visual.png' };
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+    visual.data.remixMedia = { media_kind: 'image', media_path: 'visual.png', media_hash: 'c'.repeat(64), url: '/old.png' };
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+    visual.data.remixMedia = { media_kind: 'image', media_path: 'visual.png', media_hash: 'c'.repeat(64), url: '/visual.png' };
+    graph.edges = graph.edges.filter((item) => item.source !== 'visual');
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+    graph.nodes = graph.nodes.filter((item) => item.id !== 'visual');
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+  });
+
   it('stops for missing required B-roll and then advances alignment through editable MP4', () => {
     const graph = completeThroughScript();
     const draft = graph.nodes[2].data.remixScriptDraft as { selections: Array<Record<string, unknown>> };
@@ -62,6 +89,8 @@ describe('reference video remix canvas journey', () => {
     draft.selections[0] = { ...draft.selections[0], visualNodeId: 'visual' };
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ kind: 'input', label: '补齐必需 B-roll' });
     draft.selections[0].visualMediaRevision = 'c'.repeat(64);
+    graph.nodes.push(node('visual', 'uploadNode', { imageUrl: '/visual.png', remixRole: 'visual', remixMedia: { media_kind: 'image', media_path: 'visual.png', media_hash: 'c'.repeat(64), url: '/visual.png' } }));
+    graph.edges.push(edge('visual', 'script'));
 
     graph.nodes.push(
       node('audio', 'audioNode', { audioUrl: '/media/voice.wav', remixRole: 'narration', remixScriptRef: ref('script'), remixMedia: { media_kind: 'audio', media_hash: 'b'.repeat(64), media_path: 'voice.wav', url: '/media/voice.wav' } }),
@@ -75,6 +104,17 @@ describe('reference video remix canvas journey', () => {
 
     graph.nodes.push(node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing'), compiledMediaHash: `sha256:${'b'.repeat(64)}`, events: [] }));
     graph.edges.push(edge('script', 'timeline'), edge('words', 'timeline'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_background' });
+    graph.nodes.push(node('wrong-background', 'uploadNode', { imageUrl: '/wrong.png', remixRole: 'background', remixMedia: { media_kind: 'image', media_path: 'wrong.png', media_hash: 'e'.repeat(64), url: '/wrong.png' } }));
+    graph.edges.push(edge('wrong-background', 'timeline'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_background' });
+    graph.nodes.pop(); graph.edges.pop();
+    graph.nodes.push(node('background', 'uploadNode', { remixRole: 'background' }));
+    graph.edges.push(edge('background', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'background')).toMatchObject({ kind: 'input', label: '上传成片背景 / A-roll' });
+    Object.assign(graph.nodes[graph.nodes.length - 1].data, { imageUrl: '/background.png' });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'background')).toMatchObject({ action: 'bind_background' });
+    Object.assign(graph.nodes[graph.nodes.length - 1].data, { remixMedia: { media_kind: 'image', media_path: 'background.png', media_hash: 'd'.repeat(64), url: '/background.png' } });
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
 
     graph.nodes.push(node('compose', 'videoComposeNode', {}));
@@ -102,9 +142,10 @@ describe('reference video remix canvas journey', () => {
       node('audio', 'audioNode', { audioUrl: '/voice.wav', remixRole: 'narration', remixScriptRef: ref('script'), remixMedia: { media_kind: 'audio', media_hash: 'b'.repeat(64), media_path: 'voice.wav', url: '/voice.wav' } }),
       node('words', 'transcriptNode', { artifactRef: ref('words'), alignedScriptRef: ref('script'), status: 'completed', sourceMediaPath: 'voice.wav', sourceMediaHash: 'b'.repeat(64) }),
       node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing'), compiledMediaHash: `sha256:${'b'.repeat(64)}`, events: [] }),
+      node('background', 'uploadNode', { imageUrl: '/background.png', remixRole: 'background', remixMedia: { media_kind: 'image', media_path: 'background.png', media_hash: 'd'.repeat(64), url: '/background.png' } }),
       node('compose', 'videoComposeNode', { remixManifestRef: ref('manifest'), remixManifestLoadedRef: ref('manifest'), remixManifestLoadState: 'ready', remixManifestDirty: false, remixNodeRevision: 1, remixInputFingerprint: 'current', remixInputsCurrent: true }),
     );
-    graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose'));
+    graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('background', 'script'), edge('timeline', 'compose'));
     const compose = graph.nodes[graph.nodes.length - 1];
     compose.data.remixManifestDirty = true;
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'compose')).toMatchObject({ action: 'save_manifest', label: '保存合成清单修改' });

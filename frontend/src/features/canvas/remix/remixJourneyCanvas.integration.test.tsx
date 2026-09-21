@@ -214,6 +214,13 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'transcriptNode')?.data.status).toBe('completed'));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 生成语义时间轴' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')?.data.artifactRef).toBeTruthy());
+    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 添加成片背景 / A-roll' }));
+    const background = useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'background')!;
+    const backgroundInput = document.querySelector(`[data-id="${background.id}"] input[type="file"]`) as HTMLInputElement;
+    fireEvent.change(backgroundInput, { target: { files: [new File(['png'], 'background.png', { type: 'image/png' })] } });
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === background.id)?.data.imageUrl).toContain('broll.png'));
+    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 绑定成片背景 / A-roll' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === background.id)?.data.remixMedia).toBeTruthy());
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 创建成片清单' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')?.data.remixManifestLoadState).toBe('ready'));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 导出 MP4' }));

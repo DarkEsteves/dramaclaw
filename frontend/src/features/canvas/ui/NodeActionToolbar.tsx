@@ -138,6 +138,7 @@ import { findSeedance25VideoModel } from "@/features/canvas/nodes/shared/videoMo
 import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
+import { attachRemixMedia } from '@/api/remix';
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import { audioToolbarState } from './audioToolbarState';
@@ -146,6 +147,7 @@ import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDown
 import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
 import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
 import { advanceRemixJourneyStep } from '@/features/canvas/remix/remixJourneyActions';
+import { attachBrollVisualMedia, createBackgroundVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1665,6 +1667,17 @@ export const NodeActionToolbar = memo(
         createNarration: (targetNodeId) => { createNarrationFromScript(targetNodeId); },
         alignNarration: (targetNodeId) => createAlignedTranscriptFromAudio(targetNodeId),
         createTimeline: (targetNodeId) => { createTimelineFromScript(targetNodeId); },
+        createBackground: (targetNodeId) => {
+          if (!createBackgroundVisualNode(useCanvasStore.getState(), targetNodeId)) throw new Error('无法创建成片背景素材节点');
+        },
+        bindBackground: async (targetNodeId) => {
+          const project = readUrl().project;
+          const store = useCanvasStore.getState();
+          const background = store.nodes.find((candidate) => candidate.id === targetNodeId);
+          if (!project || !background) throw new Error('无法找到成片背景素材');
+          const attachment = await attachBrollVisualMedia(project, background, attachRemixMedia, store.updateNodeData, 'background');
+          attachment.commit();
+        },
         createCompose: (targetNodeId) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action: 'create_compose' }),
       }).catch((cause) => {
         toast.error(cause instanceof Error ? cause.message : '无法继续改编');

@@ -18,6 +18,8 @@ export interface RemixJourneyActionPorts {
   createNarration: (nodeId: string) => void;
   alignNarration: (nodeId: string) => Promise<unknown> | void;
   createTimeline: (nodeId: string) => void;
+  createBackground: (nodeId: string) => void;
+  bindBackground: (nodeId: string) => Promise<unknown> | void;
   createCompose: (nodeId: string) => void;
 }
 
@@ -40,6 +42,8 @@ export async function advanceRemixJourneyStep(
     case 'align_narration': await ports.alignNarration(step.targetNodeId); return;
     case 'create_timeline': ports.createTimeline(step.targetNodeId); return;
     case 'compile_timeline': ports.publish(step.targetNodeId, 'compile'); return;
+    case 'create_background': ports.createBackground(step.targetNodeId); return;
+    case 'bind_background': await ports.bindBackground(step.targetNodeId); return;
     case 'create_compose': ports.createCompose(step.targetNodeId); return;
     case 'prepare_manifest': ports.publish(step.targetNodeId, 'prepare_compose'); return;
     case 'save_manifest': ports.publish(step.targetNodeId, 'save_manifest'); return;

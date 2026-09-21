@@ -29,6 +29,17 @@ export function createBrollVisualNode(store: BrollCanvasStore, scriptId: string,
   return { id: childId, label };
 }
 
+export function createBackgroundVisualNode(store: BrollCanvasStore, scriptId: string) {
+  if (!store.nodes.some((node) => node.id === scriptId)) return null;
+  const childId = store.addNode(CANVAS_NODE_TYPES.upload, store.findNodePosition(scriptId, 420, 320), {
+    displayName: '成片背景 / A-roll',
+    remixRole: 'background',
+  });
+  store.addEdge(childId, scriptId);
+  store.setSelectedNode(childId);
+  return childId;
+}
+
 function visualSourceUrl(node: CanvasNode): string | null {
   if (isVideoNode(node)) return node.data.videoUrl;
   if (isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)) {
@@ -45,7 +56,9 @@ function currentVisualProjectPath(project: string, visual: CanvasNode): string |
 export function boundBrollVisualMedia(project: string, visual: CanvasNode): RemixUploadedMedia {
   const media = visual.data.remixMedia as RemixUploadedMedia | undefined;
   const currentPath = currentVisualProjectPath(project, visual);
-  if (!media || !currentPath || media.media_path !== currentPath
+  const sourceUrl = visualSourceUrl(visual);
+  const exactUrl = Boolean(media?.url && sourceUrl && media.url === sourceUrl);
+  if (!media || (!exactUrl && (!currentPath || media.media_path !== currentPath))
     || (media.media_kind !== 'image' && media.media_kind !== 'video')) {
     throw new Error(`画面素材 ${visual.id} 已变化，请重新选择`);
   }
@@ -57,6 +70,7 @@ export async function attachBrollVisualMedia(
   visual: CanvasNode,
   attach: (project: string, mediaPath: string) => Promise<RemixUploadedMedia>,
   updateNodeData: (nodeId: string, data: Partial<CanvasNodeData>) => void,
+  role: 'visual' | 'background' = 'visual',
 ): Promise<BrollVisualAttachment> {
   const mediaPath = currentVisualProjectPath(project, visual);
   if (!mediaPath) throw new Error('请先在素材节点完成生成或上传');
@@ -69,6 +83,6 @@ export async function attachBrollVisualMedia(
   if (media.media_kind !== 'image' && media.media_kind !== 'video') throw new Error('B-roll 只支持图片或视频');
   return {
     mediaRevision: media.media_hash,
-    commit: () => updateNodeData(visual.id, { remixMedia: media, remixRole: 'visual' }),
+    commit: () => updateNodeData(visual.id, { remixMedia: media, remixRole: role }),
   };
 }
