@@ -1,6 +1,6 @@
 import type { CanvasEdge, CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
-import { createRemixArtifact, fetchRemixArtifact, type RemixArtifactRef } from '@/api/remix';
+import { createRemixArtifact, fetchRemixArtifact, type RemixArtifact, type RemixArtifactRef, type RemixOperation } from '@/api/remix';
 import { buildNodeRemixManifest, type CompiledTiming } from './nodeRemixManifest';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { boundBrollVisualMedia } from './brollCanvasBinding';
@@ -69,6 +69,23 @@ export interface PreparedNodeRemix {
   selections: Array<{ id: string; label: string; start: number; end: number }>;
   unresolvedRequiredEvents: string[];
   conflicts?: ManifestOverrideConflict[];
+}
+
+export function operationReusableForNode(operation: RemixOperation, manifest: RemixArtifact, nodeRevision: number): boolean {
+  if (!['pending', 'pending_reconciliation', 'needs_confirmation'].includes(operation.status)
+    || operation.producer_version !== 'remix-render.v1'
+    || operation.node_revision !== nodeRevision
+    || operation.input_refs?.length !== 1
+    || operation.input_refs[0].artifact_id !== manifest.id
+    || operation.input_refs[0].revision !== manifest.revision) return false;
+  const bindings = Array.isArray(manifest.payload.media_bindings) ? manifest.payload.media_bindings : [];
+  const expected = [...new Set(bindings.flatMap((binding) => {
+    if (!binding || typeof binding !== 'object') return [];
+    const hash = (binding as { media_hash?: unknown }).media_hash;
+    return typeof hash === 'string' ? [hash.toLowerCase()] : [];
+  }))].sort();
+  const recorded = [...new Set(operation.input_media_hashes ?? [])].map((hash) => hash.toLowerCase()).sort();
+  return JSON.stringify(recorded) === JSON.stringify(expected);
 }
 
 export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string, previousManifestRef?: RemixArtifactRef | null): Promise<PreparedNodeRemix> {

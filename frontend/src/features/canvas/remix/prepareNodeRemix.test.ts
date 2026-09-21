@@ -3,13 +3,24 @@ import type { CanvasEdge, CanvasNode } from '@/features/canvas/domain/canvasNode
 
 const api = vi.hoisted(() => ({ fetchRemixArtifact: vi.fn(), createRemixArtifact: vi.fn() }));
 vi.mock('@/api/remix', () => api);
-import { prepareNodeRemix, remixGraphFingerprint } from './prepareNodeRemix';
+import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from './prepareNodeRemix';
 
 const media = (kind: 'image' | 'video' | 'audio', hash: string) => ({ media_path: `input/${kind}`, media_hash: hash.repeat(64), url: `/${kind}`, size: 1, media_kind: kind, duration_us: kind === 'image' ? 0 : 4_000_000, has_audio: kind === 'video' });
 const node = (id: string, type: string, data: Record<string, unknown>) => ({ id, type, data, position: { x: 0, y: 0 } }) as CanvasNode;
 const edge = (source: string, target: string) => ({ id: `${source}-${target}`, source, target }) as CanvasEdge;
 
 describe('prepareNodeRemix', () => {
+  it('recovers only an active exact-version operation with the same media hashes', () => {
+    const artifact = { id: 'manifest', schema: 'composition_manifest.v1', revision: 2, payload: { media_bindings: [
+      { media_hash: `sha256:${'b'.repeat(64)}` }, { media_hash: `sha256:${'a'.repeat(64)}` },
+    ] } };
+    const exact = { operation_id: 'op', status: 'pending_reconciliation', task_id: 'task', output_refs: [], producer_version: 'remix-render.v1', node_revision: 7, input_refs: [{ artifact_id: 'manifest', revision: 2 }], input_media_hashes: [`sha256:${'a'.repeat(64)}`, `sha256:${'b'.repeat(64)}`] };
+    expect(operationReusableForNode(exact, artifact, 7)).toBe(true);
+    expect(operationReusableForNode({ ...exact, status: 'stale' }, artifact, 7)).toBe(false);
+    expect(operationReusableForNode({ ...exact, producer_version: 'remix-render.v0' }, artifact, 7)).toBe(false);
+    expect(operationReusableForNode({ ...exact, input_media_hashes: [`sha256:${'a'.repeat(64)}`] }, artifact, 7)).toBe(false);
+    expect(operationReusableForNode(exact, artifact, 8)).toBe(false);
+  });
   beforeEach(() => { api.fetchRemixArtifact.mockReset(); api.createRemixArtifact.mockReset(); });
 
   it('walks connected nodes and publishes a versioned manifest from timing and media', async () => {

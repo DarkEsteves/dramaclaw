@@ -158,3 +158,23 @@ def test_operation_ids_are_validated(api: TestClient) -> None:
         "/api/v1/projects/demo/freezone/remix/operations/not-an-id/confirm",
         json={"canvas_id": "default", "node_id": "compose-1"},
     ).status_code == 422
+
+
+def test_late_render_after_script_revision_is_retained_but_never_backfilled(api: TestClient, tmp_path: Path) -> None:
+    artifact, operation = _published(tmp_path, node_revision=3)
+    canvas = _canvas(tmp_path, artifact, node_revision=4)
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm", json={"canvas_id": "default", "node_id": "compose-1"})
+    record = RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])
+    assert response.json()["data"]["status"] == "stale"
+    assert record["output_refs"] and record["stale_reason"] == "node_revision_changed"
+    assert "resultVideoUrl" not in json.loads(canvas.read_text())["nodes"][0]["data"]
+
+
+def test_deleted_render_cannot_be_backfilled(api: TestClient, tmp_path: Path) -> None:
+    artifact, operation = _published(tmp_path)
+    _canvas(tmp_path, artifact)
+    published = RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])
+    (tmp_path / published["output_refs"][0]["project_path"]).unlink()
+    response = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm", json={"canvas_id": "default", "node_id": "compose-1"})
+    assert response.status_code == 422
+    assert RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])["status"] == "needs_confirmation"

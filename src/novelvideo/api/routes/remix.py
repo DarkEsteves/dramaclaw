@@ -88,6 +88,26 @@ def _speech_engine_ready() -> bool:
     return bool(_speech_engine_readiness()["ready"])
 
 
+def _input_media_hashes(payload: dict[str, Any]) -> list[str]:
+    """Snapshot the exact immutable media inputs used by an operation."""
+    hashes: set[str] = set()
+    def visit(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                visit(child, str(child_key))
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, key)
+        elif isinstance(value, str) and key in {"media_hash", "media_sha256"}:
+            normalized = value.strip().lower()
+            if not normalized.startswith("sha256:"):
+                normalized = f"sha256:{normalized}"
+            if len(normalized) == 71:
+                hashes.add(normalized)
+    visit(payload)
+    return sorted(hashes)
+
+
 def _complete_model_snapshot(root: Path, required: tuple[str, ...]) -> bool:
     return any(
         all(
@@ -436,13 +456,14 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             producer_version=prepared["producer_version"],
             normalized_parameters=parameters,
             node_revision=body.node_revision,
+            input_media_hashes=_input_media_hashes(parameters),
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     task_type = prepared["task_type"]
     scope = prepared["scope"] or operation["operation_id"]
     task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=scope)
-    if operation["task_id"] or operation["status"] == "needs_confirmation":
+    if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale"}:
         return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
     queued = await get_task_backend().enqueue_project_task(
         ctx,
@@ -521,6 +542,7 @@ async def render_artifact(
             producer_version="remix-render.v1",
             normalized_parameters={"job_id": job_id},
             node_revision=body.node_revision,
+            input_media_hashes=_input_media_hashes(artifact["payload"]),
             canvas_id=body.canvas_id,
             node_id=body.node_id,
         )
@@ -528,7 +550,7 @@ async def render_artifact(
         if "Idempotency key" in str(exc):
             raise HTTPException(409, str(exc)) from exc
         raise HTTPException(422, str(exc)) from exc
-    if operation["task_id"] or operation["status"] == "needs_confirmation":
+    if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale"}:
         return _data({
             "task_type": "remix_render",
             "job_id": job_id,

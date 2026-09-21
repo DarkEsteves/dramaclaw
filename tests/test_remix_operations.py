@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -95,3 +96,69 @@ def test_runner_result_waits_for_node_confirmation(tmp_path: Path) -> None:
     assert finished["output_refs"] == [{"project_path": "output.mp4"}]
     assert retried["created"] is False
     assert retried["status"] == "needs_confirmation"
+
+
+def test_reload_reconciles_bound_task_without_replacement(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="reload", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "a" * 64])
+    store.bind_task(operation["operation_id"], task_id="task-1", provider_task_id="provider-1")
+    recovered = store.start(idempotency_key="reload", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "a" * 64])
+    assert recovered["created"] is False and recovered["operation_id"] == operation["operation_id"]
+    assert recovered["task_id"] == "task-1" and recovered["provider_task_id"] == "provider-1"
+
+
+def test_exact_media_hash_is_part_of_reuse_contract(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    store.start(idempotency_key="media", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "a" * 64])
+    with pytest.raises(ValueError, match="Idempotency key"):
+        store.start(idempotency_key="media", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, input_media_hashes=["sha256:" + "b" * 64])
+
+
+def test_regenerate_retains_superseded_operation_history(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    first = store.start(idempotency_key="regen", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    second = store.start(idempotency_key="regen", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, regenerate=True)
+    assert store.get(first["operation_id"])["superseded_by"] == second["operation_id"]
+    assert second["supersedes"] == first["operation_id"]
+    assert {item["operation_id"] for item in store.list()} >= {first["operation_id"], second["operation_id"]}
+
+
+def test_provider_timeout_and_cancellation_reconcile_before_retry(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(idempotency_key="provider", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-1")
+    recovered = store.start(idempotency_key="provider", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    assert recovered["status"] == "pending_reconciliation" and recovered["created"] is False
+    cancelled = store.cancel(operation["operation_id"], reason="user_cancelled")
+    assert cancelled["status"] == "cancelled" and cancelled["cancel_reason"] == "user_cancelled"
+
+
+def test_simultaneous_tabs_claim_one_operation(tmp_path: Path) -> None:
+    def claim() -> dict:
+        return RemixOperationStore(tmp_path, "demo").start(idempotency_key="two-tabs", input_refs=refs(), producer_version="render.v2", normalized_parameters={"quality": "high"}, node_revision=4)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = list(executor.map(lambda _: claim(), range(2)))
+    assert len({item["operation_id"] for item in claimed}) == 1
+    assert sorted(item["created"] for item in claimed) == [False, True]
+
+
+def test_unknown_provider_outcome_can_be_reconciled_without_resubmission(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "provider.mp4").write_bytes(b"video")
+    operation = store.start(idempotency_key="unknown", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    store.provider_outcome_unknown(operation["operation_id"], provider_task_id="provider-1")
+    reconciled = store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": "provider.mp4"}])
+    assert reconciled["status"] == "needs_confirmation" and reconciled["provider_task_id"] == "provider-1"
+
+
+def test_late_result_for_cancelled_or_superseded_operation_stays_in_history(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    (tmp_path / "late.mp4").write_bytes(b"video")
+    cancelled = store.start(idempotency_key="cancel-late", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    store.cancel(cancelled["operation_id"], reason="user_cancelled")
+    assert store.publish_result_unverified(cancelled["operation_id"], output_refs=[{"project_path": "late.mp4"}])["status"] == "stale"
+    first = store.start(idempotency_key="superseded-late", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4)
+    store.start(idempotency_key="superseded-late", input_refs=refs(), producer_version="render.v2", normalized_parameters={}, node_revision=4, regenerate=True)
+    late = store.publish_result_unverified(first["operation_id"], output_refs=[{"project_path": "late.mp4"}])
+    assert late["status"] == "stale" and late["stale_reason"] == "superseded"
+    assert late["output_refs"] == [{"project_path": "late.mp4"}]

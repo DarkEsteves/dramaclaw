@@ -58,6 +58,19 @@ class RemixOperationStore:
             result.append({"artifact_id": artifact_id, "revision": revision, "project_id": self.project_id})
         return result
 
+    @staticmethod
+    def _media_hashes(values: list[str] | None) -> list[str]:
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            raise ValueError("input_media_hashes must be a list")
+        normalized: list[str] = []
+        for value in values:
+            if not isinstance(value, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", value.strip().lower()):
+                raise ValueError("invalid input media hash")
+            normalized.append(value.strip().lower())
+        return sorted(set(normalized))
+
     def _path(self, operation_id: str) -> Path:
         if not isinstance(operation_id, str) or not re.fullmatch(r"[a-f0-9]{32}", operation_id):
             raise ValueError("invalid operation ID")
@@ -107,12 +120,13 @@ class RemixOperationStore:
                 return False
         return True
 
-    def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False, canvas_id: str = "", node_id: str = "") -> dict[str, Any]:
+    def start(self, *, idempotency_key: str, input_refs: list[dict[str, Any]], producer_version: str, normalized_parameters: dict[str, Any], node_revision: int, regenerate: bool = False, canvas_id: str = "", node_id: str = "", input_media_hashes: list[str] | None = None) -> dict[str, Any]:
         if not isinstance(idempotency_key, str) or not idempotency_key or not isinstance(producer_version, str) or not producer_version or type(node_revision) is not int or node_revision < 1 or not isinstance(normalized_parameters, dict):
             raise ValueError("invalid operation request")
         if bool(canvas_id) != bool(node_id) or (canvas_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", canvas_id)) or (node_id and (not isinstance(node_id, str) or len(node_id) > 128)):
             raise ValueError("invalid canvas or node identity")
         refs = self._refs(input_refs)
+        media_hashes = self._media_hashes(input_media_hashes)
         key = hashlib.sha256(f"{self.project_id}\0{idempotency_key}".encode()).hexdigest()
         with self._locked() as guard:
             index_path = self.root / "index.json"
@@ -120,7 +134,7 @@ class RemixOperationStore:
             old_id = index.get(key)
             if old_id and not regenerate:
                 old = self._read(old_id)
-                if (old["input_refs"] != refs or old["producer_version"] != producer_version
+                if (old["input_refs"] != refs or old.get("input_media_hashes", []) != media_hashes or old["producer_version"] != producer_version
                     or old["normalized_parameters"] != normalized_parameters
                     or old["node_revision"] != node_revision
                     or old.get("canvas_id", "") != canvas_id or old.get("node_id", "") != node_id):
@@ -128,8 +142,12 @@ class RemixOperationStore:
                 if old["status"] not in {"completed", "needs_confirmation"} or self._outputs_exist(old.get("output_refs", [])):
                     return {**old, "created": False}
             operation_id = uuid.uuid4().hex
-            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": []}
+            record = {"operation_id": operation_id, "project_id": self.project_id, "idempotency_key_hash": key, "input_refs": refs, "input_media_hashes": media_hashes, "producer_version": producer_version, "normalized_parameters": normalized_parameters, "node_revision": node_revision, "canvas_id": canvas_id, "node_id": node_id, "task_id": "", "provider_task_id": "", "status": "pending", "output_refs": [], "supersedes": old_id or "", "superseded_by": ""}
             self._atomic(self._path(operation_id), record, guard)
+            if old_id:
+                old = self._read(old_id)
+                old["superseded_by"] = operation_id
+                self._atomic(self._path(old_id), old, guard)
             index[key] = operation_id
             self._atomic(index_path, index, guard)
             return {**record, "created": True}
@@ -150,6 +168,15 @@ class RemixOperationStore:
         with self._locked() as guard:
             return self._update(operation_id, guard, task_id=task_id, provider_task_id=provider_task_id)
 
+    def cancel(self, operation_id: str, *, reason: str) -> dict[str, Any]:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("cancellation reason is required")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if record["status"] in {"completed", "stale"}:
+                return record
+            return self._update(operation_id, guard, status="cancelled", cancel_reason=reason.strip())
+
     def publish_result_unverified(self, operation_id: str, *, output_refs: list[dict[str, Any]]) -> dict[str, Any]:
         """Save durable runner output without claiming the canvas node is still current."""
         if not isinstance(output_refs, list) or not output_refs:
@@ -160,7 +187,11 @@ class RemixOperationStore:
             record = self._read(operation_id)
             if record["status"] == "needs_confirmation" and record["output_refs"] == output_refs:
                 return record
-            if record["status"] != "pending":
+            if record.get("superseded_by"):
+                return self._update(operation_id, guard, status="stale", stale_reason="superseded", output_refs=output_refs)
+            if record["status"] == "cancelled":
+                return self._update(operation_id, guard, status="stale", stale_reason="cancelled", output_refs=output_refs)
+            if record["status"] not in {"pending", "pending_reconciliation"}:
                 raise ValueError("operation cannot publish result in its current state")
             return self._update(operation_id, guard, status="needs_confirmation", output_refs=output_refs)
 
@@ -169,7 +200,8 @@ class RemixOperationStore:
         with self._locked() as guard:
             record = self._read(operation_id)
             status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
-            return self._update(operation_id, guard, status=status, output_refs=output_refs)
+            stale_reason = "" if status == "completed" else ("input_refs_changed" if record["input_refs"] != refs else "node_revision_changed")
+            return self._update(operation_id, guard, status=status, output_refs=output_refs, stale_reason=stale_reason)
 
     def confirm(self, operation_id: str, *, current_input_refs: list[dict[str, Any]], current_node_revision: int, canvas_id: str, node_id: str) -> dict[str, Any]:
         refs = self._refs(current_input_refs)
@@ -182,4 +214,5 @@ class RemixOperationStore:
             if record["status"] != "needs_confirmation" or not self._outputs_exist(record["output_refs"]):
                 raise ValueError("operation result is not available for confirmation")
             status = "completed" if record["input_refs"] == refs and record["node_revision"] == current_node_revision else "stale"
-            return self._update(operation_id, guard, status=status)
+            stale_reason = "" if status == "completed" else ("input_refs_changed" if record["input_refs"] != refs else "node_revision_changed")
+            return self._update(operation_id, guard, status=status, stale_reason=stale_reason)

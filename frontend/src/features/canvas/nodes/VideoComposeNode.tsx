@@ -57,7 +57,7 @@ import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeCon
 import { canExportManifest, manifestToSrt, previewStatus, resolveManifestOverrideConflict, textDownloadUrl, type ManifestOverrideConflict, type ManifestPayload } from "@/features/canvas/remix/manifestEditor";
 import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, renderRemixManifest, reviseRemixArtifact, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
-import { prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
+import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
 import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
 import { getFreezoneCanvas } from "@/api/canvas";
 import { captureCanvasBaseline, mergeConfirmedCanvasWithLocalChanges } from "@/features/canvas/remix/workbenchCanvasMerge";
@@ -153,19 +153,16 @@ export const VideoComposeNode = memo(
     }, [project, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision, id, updateNodeData]);
 
     useEffect(() => {
-      if (!project || !data.remixManifestRef || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.remixOperationId) return;
+      if (!project || !data.remixManifestRef || !manifestArtifact || (data.remixWorkbenchDraft && !data.remixInputFingerprint) || data.remixOperationId) return;
       let cancelled = false;
       void listRemixOperations(project).then(({ items }) => {
         if (cancelled) return;
         const match = items.find((item) => item.canvas_id === canvasId && item.node_id === id && item.task_type === 'remix_render'
-          && item.node_revision === data.remixNodeRevision
-          && item.input_refs?.length === 1
-          && item.input_refs[0].artifact_id === data.remixManifestRef?.artifactId
-          && item.input_refs[0].revision === data.remixManifestRef?.revision);
+          && operationReusableForNode(item, manifestArtifact, data.remixNodeRevision ?? 0));
         if (match) setRecoveredRemixOperationId(match.operation_id);
       }).catch(() => {});
       return () => { cancelled = true; };
-    }, [project, canvasId, id, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision, data.remixNodeRevision, data.remixWorkbenchDraft, data.remixOperationId]);
+    }, [project, canvasId, id, data.remixManifestRef?.artifactId, data.remixManifestRef?.revision, data.remixNodeRevision, data.remixWorkbenchDraft, data.remixOperationId, manifestArtifact]);
 
     useEffect(() => {
       const operationId = data.remixOperationId ?? recoveredRemixOperationId;

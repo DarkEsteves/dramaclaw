@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '../domain/canvasNodes';
-import { createComposeFromTimeline, createTimelineFromScript, planComposeFromTimeline, planTimelineFromScript } from './spawnRemixDownstream';
+import { createComposeFromTimeline, createTimelineFromScript, planComposeFromTimeline, planRemixInvalidation, planTimelineFromScript } from './spawnRemixDownstream';
 
 const graphStore = vi.hoisted(() => ({ getState: vi.fn() }));
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: graphStore }));
@@ -10,6 +10,14 @@ const edge = (source: string, target: string) => ({ id: `${source}-${target}`, s
 const ref = (artifactId: string) => ({ artifactId, revision: 1 });
 
 describe('source-first remix graph plans', () => {
+  it.each([
+    ['style', ['render']],
+    ['visual_prompt', ['generate_visual', 'render']],
+    ['script', ['align_script', 'compile_timeline', 'render']],
+    ['voice', ['align_script', 'compile_timeline', 'render']],
+  ] as const)('invalidates only affected work for %s edits', (change, expected) => {
+    expect(planRemixInvalidation(change)).toEqual(expected);
+  });
   it('connects the saved script and its directly aligned transcript to a new timeline', () => {
     const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s') }), node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('s'), status: 'completed' })];
     expect(planTimelineFromScript(nodes, [edge('script', 'words')], 'script')).toEqual({ sourceIds: ['script', 'words'] });
