@@ -25,6 +25,72 @@ class ReferenceEvidence(_Contract):
     transcript_ref: ArtifactReference | None = None
 
 
+class BlueprintObservedFrame(_Contract):
+    evidence_ref: ArtifactReference
+    time_us: int = Field(ge=0)
+    pts: int | None = None
+    time_base: str | None = Field(default=None, min_length=1)
+    url: str | None = None
+
+    @model_validator(mode="after")
+    def _require_clock_for_pts(self) -> "BlueprintObservedFrame":
+        if self.pts is not None and self.time_base is None:
+            raise ValueError("a frame PTS requires its source time base")
+        return self
+
+
+class BlueprintSpokenRange(_Contract):
+    transcript_ref: ArtifactReference
+    text: str
+    start_us: int = Field(ge=0)
+    end_us: int = Field(ge=1)
+    start_char: int | None = Field(default=None, ge=0)
+    end_char: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "BlueprintSpokenRange":
+        if self.end_us <= self.start_us:
+            raise ValueError("spoken range must be non-empty")
+        if (self.start_char is None) != (self.end_char is None):
+            raise ValueError("spoken character offsets must be paired")
+        if self.start_char is not None and self.end_char <= self.start_char:
+            raise ValueError("spoken character range must be non-empty")
+        return self
+
+
+class BlueprintModelNote(_Contract):
+    visual_observation: str = ""
+    narrative_inference: str = ""
+
+
+class BlueprintUserOverride(_Contract):
+    narrative_role: str = Field(min_length=1)
+    review_state: Literal["needs_review", "reviewed", "reviewed_uncertain"]
+
+
+class BlueprintEvent(_Contract):
+    event_id: str = Field(min_length=1)
+    start_us: int = Field(ge=0)
+    end_us: int = Field(ge=1)
+    observed_frame: BlueprintObservedFrame
+    spoken_range: BlueprintSpokenRange | None
+    model: BlueprintModelNote
+    user_override: BlueprintUserOverride
+
+    @model_validator(mode="after")
+    def _validate_event_clock(self) -> "BlueprintEvent":
+        if self.end_us <= self.start_us:
+            raise ValueError("blueprint event must be non-empty")
+        if not self.start_us <= self.observed_frame.time_us < self.end_us:
+            raise ValueError("observed frame must fall inside its event")
+        if self.spoken_range is not None and (
+            self.spoken_range.end_us <= self.start_us
+            or self.spoken_range.start_us >= self.end_us
+        ):
+            raise ValueError("spoken range must overlap its event")
+        return self
+
+
 class WordSpan(_Contract):
     text: str = Field(min_length=1)
     start_char: int = Field(ge=0)
@@ -116,6 +182,25 @@ class ReferenceBlueprint(_Contract):
     observations: list[dict[str, Any]]
     inferences: list[dict[str, Any]]
     user_choices: list[dict[str, Any]]
+    evidence_ref: ArtifactReference | None = None
+    transcript_ref: ArtifactReference | None = None
+
+    @model_validator(mode="after")
+    def _validate_reviewable_events(self) -> "ReferenceBlueprint":
+        # Artifacts written before event review shipped used a loose event
+        # shape. Keep those immutable revisions readable, while every new
+        # reviewable event is validated as a complete evidence link.
+        for event in self.events:
+            if "observed_frame" in event or "user_override" in event:
+                reviewed = BlueprintEvent.model_validate(event)
+                if self.evidence_ref is None or reviewed.observed_frame.evidence_ref != self.evidence_ref:
+                    raise ValueError("blueprint event has a broken evidence reference")
+                if reviewed.spoken_range is not None and (
+                    self.transcript_ref is None
+                    or reviewed.spoken_range.transcript_ref != self.transcript_ref
+                ):
+                    raise ValueError("blueprint event has a broken transcript reference")
+        return self
 
 
 class RemixScript(_Contract):

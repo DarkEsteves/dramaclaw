@@ -290,6 +290,18 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     [id, rows, updateNodeData],
   );
 
+  const handleReferenceOverride = useCallback((eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => {
+    const nextEvents = referenceEvents.map((event, index) => {
+      if ((event.event_id ?? `event-${index + 1}`) !== eventId) return event;
+      return {
+        ...event,
+        ...(patch.narrativeRole !== undefined ? { user_narrative_role: patch.narrativeRole } : {}),
+        ...(patch.reviewState !== undefined ? { review_state: patch.reviewState } : {}),
+      };
+    });
+    updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
+  }, [id, referenceEvents, updateNodeData]);
+
   const generateScript = async () => {
     if (isCreatingScript) return;
     setIsCreatingScript(true);
@@ -387,7 +399,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
           ) : hasError ? (
             <ErrorStoryState message={data.analysisError ?? t(`${V}.unknownError`)} />
           ) : hasReferenceEvents ? (
-            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} />
+            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} />
           ) : hasRows ? (
             <StoryTable rows={rows} compact onCellCommit={handleCellCommit} />
           ) : (

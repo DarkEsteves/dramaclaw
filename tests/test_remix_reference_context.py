@@ -2,6 +2,9 @@
 
 import hashlib
 
+import pytest
+
+from novelvideo.freezone.remix.contracts import validate_payload
 from novelvideo.freezone.remix.reference_context import build_reference_events
 from novelvideo.freezone.remix.reference_context import load_reference_events
 from novelvideo.freezone.remix.reference_context import bind_reference_story
@@ -12,6 +15,7 @@ from novelvideo.freezone.remix.store import RemixArtifactStore
 
 def test_reference_events_pair_scene_windows_with_spoken_words() -> None:
     evidence = {
+        "time_base": "1/1000",
         "duration_us": 4_000_000,
         "cuts": [{"time_us": 2_000_000}],
         "representative_frames": [
@@ -33,7 +37,9 @@ def test_reference_events_pair_scene_windows_with_spoken_words() -> None:
             "end_us": 2_000_000,
             "frame_pts": [1],
             "frame_times_us": [500_000],
+            "frame_references": [{"pts": 1, "time_base": "1/1000", "time_us": 500_000}],
             "spoken_text": "hello",
+            "spoken_range": {"start_us": 300_000, "end_us": 700_000, "start_char": None, "end_char": None, "text": "hello"},
             "word_spans": [{"text": "hello", "start_us": 300_000, "end_us": 700_000}],
         },
         {
@@ -41,7 +47,9 @@ def test_reference_events_pair_scene_windows_with_spoken_words() -> None:
             "end_us": 4_000_000,
             "frame_pts": [2],
             "frame_times_us": [2_500_000],
+            "frame_references": [{"pts": 2, "time_base": "1/1000", "time_us": 2_500_000}],
             "spoken_text": "world",
+            "spoken_range": {"start_us": 2_200_000, "end_us": 2_700_000, "start_char": None, "end_char": None, "text": "world"},
             "word_spans": [{"text": "world", "start_us": 2_200_000, "end_us": 2_700_000}],
         },
     ]
@@ -86,8 +94,8 @@ def test_reference_context_reads_exact_project_artifact_revisions(tmp_path) -> N
 
 def test_story_notes_keep_evidence_times_and_observation_separate_from_inference() -> None:
     events = [
-        {"start_us": 0, "end_us": 1_000_000, "spoken_text": "你好", "frame_times_us": [500_000]},
-        {"start_us": 1_000_000, "end_us": 2_000_000, "spoken_text": "咖啡", "frame_times_us": [1_500_000]},
+        {"start_us": 0, "end_us": 1_000_000, "spoken_text": "你好", "frame_times_us": [500_000], "frame_references": [{"pts": 5, "time_base": "1/10", "time_us": 500_000}], "spoken_range": {"start_us": 100_000, "end_us": 600_000, "text": "你好"}},
+        {"start_us": 1_000_000, "end_us": 2_000_000, "spoken_text": "咖啡", "frame_times_us": [1_500_000], "frame_references": [{"pts": 15, "time_base": "1/10", "time_us": 1_500_000}], "spoken_range": {"start_us": 1_100_000, "end_us": 1_600_000, "text": "咖啡"}},
     ]
     shots = [
         {"start_time": 0, "end_time": 1, "visual_description": "人物起床", "narrative": "提出问题"},
@@ -99,11 +107,69 @@ def test_story_notes_keep_evidence_times_and_observation_separate_from_inference
     assert notes[0] == {
         **events[0], "visual_observation": "人物起床", "narrative_inference": "提出问题",
         "frame_url": "/one.png", "analysis_frame_time_us": 500_000, "note_status": "needs_review",
+        "observed_frame": {"pts": 5, "time_base": "1/10", "time_us": 500_000, "url": "/one.png"},
         "visible_text": "", "transcript_warnings": [],
     }
     assert notes[1]["start_us"] == 1_000_000
     assert notes[1]["spoken_text"] == "咖啡"
     assert notes[1]["frame_url"] == "/two.png"
+
+
+def test_bound_story_keeps_explicit_frame_and_spoken_range_for_every_event() -> None:
+    events = build_reference_events({
+        "time_base": "1/90k",
+        "duration_us": 3_000_000,
+        "cuts": [{"time_us": 1_000_000}, {"time_us": 2_000_000}],
+        "representative_frames": [
+            {"pts": 9_000, "time_base": "1/90k", "time_us": 100_000},
+            {"pts": 135_000, "time_base": "1/90k", "time_us": 1_500_000},
+            {"pts": 261_000, "time_base": "1/90k", "time_us": 2_900_000},
+        ],
+    }, {
+        "status": "completed",
+        "transcript": "first middle last",
+        "words": [
+            {"text": "first", "start_char": 0, "end_char": 5, "start_us": 100_000, "end_us": 400_000},
+            {"text": "middle", "start_char": 6, "end_char": 12, "start_us": 1_100_000, "end_us": 1_500_000},
+            {"text": "last", "start_char": 13, "end_char": 17, "start_us": 2_500_000, "end_us": 2_900_000},
+        ],
+    })
+
+    notes = bind_reference_story(events, [
+        {"start_time": 0, "end_time": 1},
+        {"start_time": 1, "end_time": 2},
+        {"start_time": 2, "end_time": 3},
+    ], [100_000, 1_500_000, 2_900_000], ["/first.png", "/middle.png", "/last.png"])
+
+    assert [note["observed_frame"] for note in notes] == [
+        {"pts": 9_000, "time_base": "1/90k", "time_us": 100_000, "url": "/first.png"},
+        {"pts": 135_000, "time_base": "1/90k", "time_us": 1_500_000, "url": "/middle.png"},
+        {"pts": 261_000, "time_base": "1/90k", "time_us": 2_900_000, "url": "/last.png"},
+    ]
+    assert [note["spoken_range"]["text"] for note in notes] == ["first", "middle", "last"]
+
+
+def test_blueprint_contract_accepts_reviewed_uncertainty_but_rejects_broken_evidence() -> None:
+    payload = {
+        "narrative_role": "产品演示",
+        "evidence_ref": {"artifact_id": "evidence-1", "revision": 2},
+        "events": [{
+            "event_id": "event-1", "start_us": 0, "end_us": 1_000_000,
+            "observed_frame": {
+                "evidence_ref": {"artifact_id": "evidence-1", "revision": 2},
+                "pts": 45, "time_base": "1/90", "time_us": 500_000,
+            },
+            "spoken_range": None,
+            "model": {"visual_observation": "人物举杯", "narrative_inference": "可能是产品揭晓"},
+            "user_override": {"narrative_role": "保留悬念", "review_state": "reviewed_uncertain"},
+        }],
+        "preserve_replace_rules": [], "observations": [], "inferences": [], "user_choices": [],
+    }
+    assert validate_payload("reference_blueprint.v1", payload)["events"][0]["user_override"]["review_state"] == "reviewed_uncertain"
+
+    payload["events"][0]["observed_frame"]["evidence_ref"] = {"artifact_id": "evidence-other", "revision": 1}
+    with pytest.raises(ValueError, match="reference_blueprint"):
+        validate_payload("reference_blueprint.v1", payload)
 
 
 def test_excess_scene_cuts_are_merged_to_vision_budget() -> None:

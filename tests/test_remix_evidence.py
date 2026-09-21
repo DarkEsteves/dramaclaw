@@ -110,3 +110,37 @@ def test_build_reference_evidence_detects_visual_cut_without_codec_keyframe(tmp_
     assert evidence["cuts"][0]["scene_score"] == pytest.approx(0.4)
     assert evidence["keyframes"] == [{"pts": 0, "time_us": 0}]
     assert evidence["representative_frames"][-1]["time_us"] == 4_800_000
+
+
+def test_vfr_representatives_cover_first_middle_and_last_source_times(tmp_path: Path) -> None:
+    video = tmp_path / "vfr.mp4"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=64x64:rate=10:duration=1.8",
+        "-vf",
+        "setpts=if(lt(N\\,10)\\,N/(10*TB)\\,(1+(N-10)/2)/TB)",
+        "-fps_mode",
+        "vfr",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(video),
+    )
+
+    evidence = build_reference_evidence(video)
+    frames = evidence["representative_frames"]
+    targets = [
+        index * frames[-1]["time_us"] // (len(frames) - 1)
+        for index in range(len(frames))
+    ]
+
+    assert frames[0]["time_us"] == 0
+    assert abs(frames[len(frames) // 2]["time_us"] - frames[-1]["time_us"] // 2) <= 300_000
+    assert frames[-1]["time_us"] >= 4_400_000
+    assert all(frame["time_base"] == evidence["time_base"] for frame in frames)
+    assert all(isinstance(frame["pts"], int) for frame in frames)
+    assert max(abs(frame["time_us"] - target) for frame, target in zip(frames, targets)) <= 300_000

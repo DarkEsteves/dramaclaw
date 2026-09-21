@@ -53,6 +53,7 @@ def build_reference_events(
     if len(times) > 61:
         times = [times[index * (len(times) - 1) // 60] for index in range(61)]
     frames = evidence.get("representative_frames", [])
+    evidence_time_base = evidence.get("time_base")
     words = transcript.get("words", []) if transcript and transcript.get("status") == "completed" else []
     source_text = transcript.get("transcript") if transcript else None
     events: list[dict[str, Any]] = []
@@ -65,6 +66,18 @@ def build_reference_events(
             and start <= (word["start_us"] + word["end_us"]) // 2 < end
         ]
         spoken_text = _spoken_text(selected, source_text)
+        frame_references = [
+            {
+                "pts": frame["pts"],
+                "time_base": frame.get("time_base", evidence_time_base),
+                "time_us": frame["time_us"],
+            }
+            for frame in frames
+            if isinstance(frame, dict)
+            and type(frame.get("time_us")) is int
+            and start <= frame["time_us"] < end
+            and type(frame.get("pts")) is int
+        ]
         events.append({
             "start_us": start,
             "end_us": end,
@@ -82,13 +95,28 @@ def build_reference_events(
                 and start <= frame["time_us"] < end
                 and type(frame.get("pts")) is int
             ],
+            "frame_references": frame_references,
             "spoken_text": spoken_text,
+            "spoken_range": _spoken_range(selected, spoken_text),
             "word_spans": [
                 {"text": word["text"], "start_us": word["start_us"], "end_us": word["end_us"]}
                 for word in selected
             ],
         })
     return events
+
+
+def _spoken_range(words: list[dict[str, Any]], text: str) -> dict[str, Any] | None:
+    if not words:
+        return None
+    first, last = words[0], words[-1]
+    return {
+        "start_us": first["start_us"],
+        "end_us": last["end_us"],
+        "start_char": first.get("start_char") if type(first.get("start_char")) is int else None,
+        "end_char": last.get("end_char") if type(last.get("end_char")) is int else None,
+        "text": text,
+    }
 
 
 def _spoken_text(words: list[dict[str, Any]], source_text: object) -> str:
@@ -195,10 +223,21 @@ def bind_reference_story(
         ]
         selected_frame = min(candidates) if candidates else None
         frame_url = selected_frame[2] if selected_frame else None
+        frame_reference = next((
+            frame for frame in event.get("frame_references", [])
+            if isinstance(frame, dict) and frame.get("time_us") == (selected_frame[1] if selected_frame else None)
+        ), None)
+        observed_frame = ({
+            "pts": frame_reference.get("pts") if frame_reference else None,
+            "time_base": frame_reference.get("time_base") if frame_reference else event.get("time_base"),
+            "time_us": selected_frame[1],
+            "url": frame_url,
+        } if selected_frame else None)
         notes.append({
             **event,
             "frame_url": frame_url,
             "analysis_frame_time_us": selected_frame[1] if selected_frame else None,
+            "observed_frame": observed_frame,
             "visible_text": shot.get("visible_text", "") if frame_url else "",
             "transcript_warnings": _transcript_warnings(
                 str(shot.get("visible_text", "")), str(event.get("spoken_text", ""))

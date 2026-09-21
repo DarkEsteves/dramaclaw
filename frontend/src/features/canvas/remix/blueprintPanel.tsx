@@ -1,8 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
-import { createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
+import { createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, reviseRemixArtifact, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { VideoStoryRow } from '@/features/canvas/domain/canvasNodes';
 import { readUrl } from '@/lib/url-params';
-import { buildReferenceBlueprint, type BlueprintSources } from './blueprintModel';
+import { blueprintReadinessErrors, buildReferenceBlueprint, referenceEventsFromBlueprint, type BlueprintSources } from './blueprintModel';
 import type { ReferenceEvent } from './ReferenceEventList';
 
 interface BlueprintDraft {
@@ -15,6 +15,7 @@ interface BlueprintDraft {
   blueprintPreserveRule?: string;
   blueprintReplaceRule?: string;
   blueprintRevision?: number;
+  blueprintDirty?: boolean;
 }
 
 interface Props {
@@ -42,6 +43,26 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
+
+  useEffect(() => {
+    if (!project || !draft.referenceBlueprintRef || draft.blueprintDirty) return;
+    let active = true;
+    fetchRemixArtifact(project, draft.referenceBlueprintRef).then((artifact) => {
+      if (!active || artifact.schema !== 'reference_blueprint.v1') return;
+      const payload = artifact.payload;
+      const restoredEvents = referenceEventsFromBlueprint(payload);
+      const patch: Partial<BlueprintDraft> & { referenceEvents?: ReferenceEvent[] } = {};
+      if (typeof payload.narrative_role === 'string' && !draft.blueprintNarrativeRole) { setRole(payload.narrative_role); patch.blueprintNarrativeRole = payload.narrative_role; }
+      const choices = Array.isArray(payload.user_choices) ? payload.user_choices : [];
+      const preserveChoice = choices.find((choice) => choice && typeof choice === 'object' && (choice as Record<string, unknown>).type === 'preserve') as Record<string, unknown> | undefined;
+      const replaceChoice = choices.find((choice) => choice && typeof choice === 'object' && (choice as Record<string, unknown>).type === 'replace') as Record<string, unknown> | undefined;
+      if (typeof preserveChoice?.text === 'string' && !draft.blueprintPreserveRule) { setPreserve(preserveChoice.text); patch.blueprintPreserveRule = preserveChoice.text; }
+      if (typeof replaceChoice?.text === 'string' && !draft.blueprintReplaceRule) { setReplace(replaceChoice.text); patch.blueprintReplaceRule = replaceChoice.text; }
+      if ((!referenceEvents || referenceEvents.length === 0) && restoredEvents.length) patch.referenceEvents = restoredEvents;
+      if (Object.keys(patch).length) onPatch(patch);
+    }).catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : String(caught)); });
+    return () => { active = false; };
+  }, [draft.blueprintDirty, draft.referenceBlueprintRef?.artifactId, draft.referenceBlueprintRef?.revision, project]);
 
   const analyzeEvidence = async () => {
     if (!project || !source || busy || operationId || draft.managedEvidenceOperationId) return;
@@ -87,16 +108,20 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
     if (!project || !source) throw new Error('请先连接已上传的原片视频。');
     if (!evidenceRef) throw new Error('请先完成原片证据提取。');
     if (busy) throw new Error('参考蓝图正在处理，请稍后再试。');
-    if (draft.referenceBlueprintRef && !dirty) return draft.referenceBlueprintRef;
+    if (draft.referenceBlueprintRef && !dirty && !draft.blueprintDirty) return draft.referenceBlueprintRef;
     const narrativeRole = role.trim() || suggestedNarrativeRole?.trim() || '';
     if (!narrativeRole) throw new Error('缺少叙事作用，请在参考蓝图设置中填写。');
     setBusy(true); setError(null);
     try {
       const payload = buildReferenceBlueprint({ source, rows, referenceEvents, narrativeRole, preserveRule: preserve, replaceRule: replace, evidenceRef });
+      const blockers = blueprintReadinessErrors(payload);
+      if (blockers.length) throw new Error(blockers.join('；'));
       const upstream = [evidenceRef, ...(source.transcriptRef ? [source.transcriptRef] : [])];
-      const artifact = await createRemixArtifact(project, 'reference_blueprint.v1', payload, upstream);
+      const artifact = draft.referenceBlueprintRef
+        ? await reviseRemixArtifact(project, draft.referenceBlueprintRef, payload, upstream)
+        : await createRemixArtifact(project, 'reference_blueprint.v1', payload, upstream);
       const nextRef = { artifactId: artifact.id, revision: artifact.revision };
-      onPatch({ referenceBlueprintRef: nextRef, blueprintNarrativeRole: narrativeRole, blueprintPreserveRule: preserve, blueprintReplaceRule: replace });
+      onPatch({ referenceBlueprintRef: nextRef, blueprintNarrativeRole: narrativeRole, blueprintPreserveRule: preserve, blueprintReplaceRule: replace, blueprintDirty: false });
       if (!role.trim()) setRole(narrativeRole);
       setDirty(false);
       return nextRef;
@@ -108,7 +133,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
   const edit = (field: 'blueprintNarrativeRole' | 'blueprintPreserveRule' | 'blueprintReplaceRule', value: string, setter: (value: string) => void) => {
     setter(value);
     setDirty(true);
-    onPatch({ [field]: value, referenceBlueprintRef: null });
+    onPatch({ [field]: value, blueprintDirty: true });
   };
 
   return <section className="ui-scrollbar nowheel max-h-[220px] overflow-auto border-b border-white/[0.08] p-3 text-xs text-text-dark">

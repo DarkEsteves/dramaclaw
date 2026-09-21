@@ -214,7 +214,34 @@ def _representative_frames(
     if count == 1:
         indexes = [0]
     else:
-        indexes = [(index * (len(frames) - 1)) // (count - 1) for index in range(count)]
+        # Choose by source-clock time rather than decoded frame ordinal.  Frame
+        # ordinal sampling over-represents a high-frame-rate section of VFR
+        # media and can leave the middle of the actual video unobserved.
+        first_pts = frames[0]["pts"]
+        last_pts = frames[-1]["pts"]
+        indexes = []
+        # A VFR gap can make two adjacent target times resolve to the same
+        # decoded frame. Reduce the sample count until all retained samples
+        # still represent evenly spaced source-clock targets.
+        for target_count in range(count, 1, -1):
+            candidates = [
+                min(
+                    range(len(frames)),
+                    key=lambda candidate: (
+                        abs(
+                            frames[candidate]["pts"]
+                            - (first_pts + (last_pts - first_pts) * slot / (target_count - 1))
+                        ),
+                        candidate,
+                    ),
+                )
+                for slot in range(target_count)
+            ]
+            if len(set(candidates)) == len(candidates):
+                indexes = candidates
+                break
+        if not indexes:
+            indexes = [0, len(frames) - 1]
     return [
         {
             "frame_index": index,

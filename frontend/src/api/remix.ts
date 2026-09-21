@@ -18,6 +18,9 @@ const exactRef = (ref: RemixArtifactRef) => ({ artifact_id: ref.artifactId, revi
 export function createRemixArtifact(project: string, schema: string, payload: Record<string, unknown>, upstreamRefs: RemixArtifactRef[]) {
   return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts`, { method: 'POST', json: { schema, payload, upstream_refs: upstreamRefs.map(exactRef) } });
 }
+export function reviseRemixArtifact(project: string, ref: RemixArtifactRef, payload: Record<string, unknown>, upstreamRefs: RemixArtifactRef[]) {
+  return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${ref.artifactId}`, { method: 'PUT', json: { expected_revision: ref.revision, payload, upstream_refs: upstreamRefs.map(exactRef) } });
+}
 export function fetchRemixArtifact(project: string, ref: RemixArtifactRef) { return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${ref.artifactId}?revision=${ref.revision}`); }
 export function generateRemixScriptDraft(project: string, blueprintRef: RemixArtifactRef, newTopic: string) {
   return apiCall<{ dialogue: string; selections: Array<{ id: string; label: string; start: number; end: number }> }>(`projects/${project}/freezone/remix/script-drafts`, {

@@ -51,15 +51,51 @@ export interface ReferenceBlueprintInput {
   evidenceRef?: RemixArtifactRef | null;
 }
 
+const exactPayloadRef = (ref: RemixArtifactRef) => ({ artifact_id: ref.artifactId, revision: ref.revision });
+
+function secondsToUs(value: string | null | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * 1_000_000) : 0;
+}
+
+function structuredReferenceEvent(event: ReferenceEvent, index: number, evidenceRef: RemixArtifactRef, transcriptRef: RemixArtifactRef | null) {
+  const frame = event.observed_frame ?? (event.analysis_frame_time_us != null ? {
+    time_us: event.analysis_frame_time_us,
+    url: event.frame_url,
+  } : null);
+  const spoken = event.spoken_range ?? ((event.spoken_text?.trim() && event.word_spans?.length) ? {
+    text: event.spoken_text,
+    start_us: event.word_spans[0].start_us,
+    end_us: event.word_spans[event.word_spans.length - 1].end_us,
+  } : null);
+  return {
+    event_id: event.event_id ?? `event-${index + 1}`,
+    start_us: event.start_us,
+    end_us: event.end_us,
+    observed_frame: frame ? { evidence_ref: exactPayloadRef(evidenceRef), ...frame } : null,
+    spoken_range: spoken && transcriptRef ? { transcript_ref: exactPayloadRef(transcriptRef), ...spoken } : null,
+    model: {
+      visual_observation: event.visual_observation ?? '',
+      narrative_inference: event.narrative_inference ?? '',
+    },
+    user_override: {
+      narrative_role: event.user_narrative_role ?? event.narrative_inference ?? '',
+      review_state: event.review_state ?? 'needs_review',
+    },
+  };
+}
+
 /** Analysis rows are model observations and interpretations; user edits stay distinct. */
 export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<string, unknown> {
-  const eventFallback = input.rows.length === 0 ? input.referenceEvents ?? [] : [];
-  const observations = input.rows.length
+  const analyzedEvents = input.referenceEvents ?? [];
+  const useReferenceEvents = analyzedEvents.length > 0;
+  const eventFallback = useReferenceEvents ? analyzedEvents : [];
+  const observations = !useReferenceEvents && input.rows.length
     ? input.rows.filter((row) => typeof row.visualDescription === 'string' && row.visualDescription.trim())
       .map((row, index) => ({ source: 'video_story_analysis', verified: false, shot: index + 1, start_time: row.startTime, end_time: row.endTime, description: row.visualDescription }))
     : eventFallback.filter((event) => event.visual_observation?.trim())
       .map((event, index) => ({ source: 'reference_event', verified: false, shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), description: event.visual_observation }));
-  const inferences = input.rows.length
+  const inferences = !useReferenceEvents && input.rows.length
     ? input.rows.filter((row) => typeof row.narrative === 'string' && row.narrative.trim())
       .map((row, index) => ({ source: 'video_story_analysis', shot: index + 1, interpretation: row.narrative }))
     : eventFallback.filter((event) => event.narrative_inference?.trim())
@@ -70,9 +106,20 @@ export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<
   ].filter((choice) => choice.text);
   return {
     narrative_role: input.narrativeRole.trim(),
-    events: input.rows.length
-      ? input.rows.map((row, index) => ({ shot: index + 1, start_time: row.startTime, end_time: row.endTime, visual_description: row.visualDescription ?? '', narrative: row.narrative ?? '' }))
-      : eventFallback.map((event, index) => ({ shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), visual_description: event.visual_observation ?? '', spoken_text: event.spoken_text ?? '', narrative: event.narrative_inference ?? '', note_status: event.note_status ?? '' })),
+    events: input.evidenceRef && useReferenceEvents
+      ? eventFallback.map((event, index) => structuredReferenceEvent(event, index, input.evidenceRef!, input.source.transcriptRef))
+      : input.evidenceRef && input.rows.length
+        ? input.rows.map((row, index) => ({
+          event_id: `event-${index + 1}`,
+          start_us: secondsToUs(row.startTime), end_us: secondsToUs(row.endTime),
+          observed_frame: { evidence_ref: exactPayloadRef(input.evidenceRef!), time_us: secondsToUs(row.startTime), ...(row.keyframeUrl ? { url: row.keyframeUrl } : {}) },
+          spoken_range: null,
+          model: { visual_observation: row.visualDescription ?? '', narrative_inference: row.narrative ?? '' },
+          user_override: { narrative_role: row.narrative ?? '', review_state: 'reviewed' },
+        }))
+        : input.rows.length
+          ? input.rows.map((row, index) => ({ shot: index + 1, start_time: row.startTime, end_time: row.endTime, visual_description: row.visualDescription ?? '', narrative: row.narrative ?? '' }))
+          : eventFallback.map((event, index) => ({ shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), visual_description: event.visual_observation ?? '', spoken_text: event.spoken_text ?? '', narrative: event.narrative_inference ?? '', note_status: event.note_status ?? '' })),
     preserve_replace_rules: choices,
     observations,
     inferences,
@@ -82,4 +129,64 @@ export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<
     ...(input.evidenceRef ? { evidence_ref: { artifact_id: input.evidenceRef.artifactId, revision: input.evidenceRef.revision } } : {}),
     ...(input.source.transcriptRef ? { transcript_ref: { artifact_id: input.source.transcriptRef.artifactId, revision: input.source.transcriptRef.revision } } : {}),
   };
+}
+
+function isExactRef(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const ref = value as Record<string, unknown>;
+  return typeof ref.artifact_id === 'string' && ref.artifact_id.length > 0 && Number.isInteger(ref.revision) && Number(ref.revision) > 0;
+}
+
+/** Return user-facing blockers before an exact blueprint revision can feed script generation. */
+export function blueprintReadinessErrors(payload: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  if (typeof payload.narrative_role !== 'string' || !payload.narrative_role.trim()) errors.push('缺少整体叙事作用');
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  if (!events.length) return [...errors, '缺少故事事件'];
+  events.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') { errors.push(`事件 ${index + 1} 结构无效`); return; }
+    const event = raw as Record<string, unknown>;
+    if (typeof event.event_id !== 'string' || !event.event_id || !Number.isInteger(event.start_us) || !Number.isInteger(event.end_us) || Number(event.end_us) <= Number(event.start_us)) errors.push(`事件 ${index + 1} 缺少必要结构`);
+    const frame = event.observed_frame as Record<string, unknown> | null;
+    if (!frame || !isExactRef(frame.evidence_ref) || !Number.isInteger(frame.time_us)) errors.push(`事件 ${index + 1} 的画面证据引用无效`);
+    const spoken = event.spoken_range as Record<string, unknown> | null;
+    if (spoken && (!isExactRef(spoken.transcript_ref) || !Number.isInteger(spoken.start_us) || !Number.isInteger(spoken.end_us) || Number(spoken.end_us) <= Number(spoken.start_us))) errors.push(`事件 ${index + 1} 的台词证据引用无效`);
+    const override = event.user_override as Record<string, unknown> | null;
+    if (!override || typeof override.narrative_role !== 'string' || !override.narrative_role.trim()) errors.push(`事件 ${index + 1} 缺少叙事作用`);
+    if (!override || !['reviewed', 'reviewed_uncertain'].includes(String(override.review_state))) errors.push(`事件 ${index + 1} 尚未核对`);
+  });
+  return errors;
+}
+
+/** Restore review state from an immutable blueprint revision after canvas reload. */
+export function referenceEventsFromBlueprint(payload: Record<string, unknown>): ReferenceEvent[] {
+  if (!Array.isArray(payload.events)) return [];
+  return payload.events.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const event = raw as Record<string, unknown>;
+    const frame = event.observed_frame && typeof event.observed_frame === 'object' ? event.observed_frame as Record<string, unknown> : null;
+    const spoken = event.spoken_range && typeof event.spoken_range === 'object' ? event.spoken_range as Record<string, unknown> : null;
+    const model = event.model && typeof event.model === 'object' ? event.model as Record<string, unknown> : {};
+    const override = event.user_override && typeof event.user_override === 'object' ? event.user_override as Record<string, unknown> : {};
+    if (typeof event.event_id !== 'string' || !Number.isInteger(event.start_us) || !Number.isInteger(event.end_us)) return [];
+    return [{
+      event_id: event.event_id,
+      start_us: Number(event.start_us), end_us: Number(event.end_us),
+      observed_frame: frame && Number.isInteger(frame.time_us) ? {
+        time_us: Number(frame.time_us),
+        pts: Number.isInteger(frame.pts) ? Number(frame.pts) : null,
+        time_base: typeof frame.time_base === 'string' ? frame.time_base : null,
+        url: typeof frame.url === 'string' ? frame.url : null,
+      } : null,
+      frame_url: typeof frame?.url === 'string' ? frame.url : null,
+      analysis_frame_time_us: Number.isInteger(frame?.time_us) ? Number(frame?.time_us) : null,
+      spoken_range: spoken && typeof spoken.text === 'string' && Number.isInteger(spoken.start_us) && Number.isInteger(spoken.end_us) ? { text: spoken.text, start_us: Number(spoken.start_us), end_us: Number(spoken.end_us) } : null,
+      spoken_text: typeof spoken?.text === 'string' ? spoken.text : '',
+      visual_observation: typeof model.visual_observation === 'string' ? model.visual_observation : '',
+      narrative_inference: typeof model.narrative_inference === 'string' ? model.narrative_inference : '',
+      user_narrative_role: typeof override.narrative_role === 'string' ? override.narrative_role : '',
+      review_state: ['needs_review', 'reviewed', 'reviewed_uncertain'].includes(String(override.review_state)) ? override.review_state as ReferenceEvent['review_state'] : 'needs_review',
+      note_status: frame ? 'needs_review' : 'missing_frame',
+    }];
+  });
 }

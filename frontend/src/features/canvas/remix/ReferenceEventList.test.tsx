@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ReferenceEventList } from './ReferenceEventList';
 
 describe('ReferenceEventList', () => {
@@ -49,5 +49,24 @@ describe('ReferenceEventList', () => {
     }]} />);
     expect(screen.getByText('Christine, five grams a day.')).toBeTruthy();
     expect(screen.getByText(/Christine.*CREATINE/)).toBeTruthy();
+  });
+
+  it('exposes immutable evidence beside editable narrative role and review state', () => {
+    const onOverrideChange = vi.fn();
+    render(<ReferenceEventList onOverrideChange={onOverrideChange} events={[{
+      event_id: 'event-1', start_us: 4_000_000, end_us: 6_000_000,
+      observed_frame: { pts: 360_000, time_base: '1/90000', time_us: 4_000_000, url: '/frame.png' },
+      spoken_range: { text: 'maybe this works', start_us: 4_100_000, end_us: 5_500_000 },
+      visual_observation: '人物展示杯子', narrative_inference: '模型认为这是产品揭晓',
+      user_narrative_role: '制造悬念', review_state: 'needs_review',
+    }]} />);
+
+    expect(screen.getByText(/PTS 360000 · 1\/90000/)).toBeTruthy();
+    expect(screen.getByText('模型认为这是产品揭晓')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('事件 1 叙事作用'), { target: { value: '明确产品价值' } });
+    fireEvent.change(screen.getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed_uncertain' } });
+
+    expect(onOverrideChange).toHaveBeenNthCalledWith(1, 'event-1', { narrativeRole: '明确产品价值' });
+    expect(onOverrideChange).toHaveBeenNthCalledWith(2, 'event-1', { reviewState: 'reviewed_uncertain' });
   });
 });
