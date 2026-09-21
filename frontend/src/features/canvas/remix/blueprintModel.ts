@@ -73,7 +73,11 @@ function structuredReferenceEvent(event: ReferenceEvent, index: number, evidence
     start_us: event.start_us,
     end_us: event.end_us,
     observed_frame: frame ? { evidence_ref: exactPayloadRef(evidenceRef), ...frame } : null,
-    spoken_range: spoken && transcriptRef ? { transcript_ref: exactPayloadRef(transcriptRef), ...spoken } : null,
+    spoken_range: spoken
+      ? transcriptRef
+        ? { transcript_ref: exactPayloadRef(transcriptRef), ...spoken }
+        : { ...spoken, unresolved_reason: 'missing_transcript_reference' }
+      : null,
     model: {
       visual_observation: event.visual_observation ?? '',
       narrative_inference: event.narrative_inference ?? '',
@@ -137,20 +141,46 @@ function isExactRef(value: unknown): boolean {
   return typeof ref.artifact_id === 'string' && ref.artifact_id.length > 0 && Number.isInteger(ref.revision) && Number(ref.revision) > 0;
 }
 
+function sameExactRef(left: unknown, right: unknown): boolean {
+  if (!isExactRef(left) || !isExactRef(right)) return false;
+  const leftRef = left as Record<string, unknown>;
+  const rightRef = right as Record<string, unknown>;
+  return leftRef.artifact_id === rightRef.artifact_id && leftRef.revision === rightRef.revision;
+}
+
+interface BlueprintReadinessContext {
+  evidenceRef?: RemixArtifactRef | null;
+  transcriptRef?: RemixArtifactRef | null;
+  upstreamRefs?: Array<{ artifact_id: string; revision: number }>;
+}
+
 /** Return user-facing blockers before an exact blueprint revision can feed script generation. */
-export function blueprintReadinessErrors(payload: Record<string, unknown>): string[] {
+export function blueprintReadinessErrors(payload: Record<string, unknown>, context: BlueprintReadinessContext = {}): string[] {
   const errors: string[] = [];
   if (typeof payload.narrative_role !== 'string' || !payload.narrative_role.trim()) errors.push('缺少整体叙事作用');
   const events = Array.isArray(payload.events) ? payload.events : [];
   if (!events.length) return [...errors, '缺少故事事件'];
+  const evidenceRef = payload.evidence_ref;
+  const transcriptRef = payload.transcript_ref;
+  const expectedEvidence = context.evidenceRef ? exactPayloadRef(context.evidenceRef) : undefined;
+  const expectedTranscript = context.transcriptRef ? exactPayloadRef(context.transcriptRef) : context.transcriptRef;
+  if (expectedEvidence && !sameExactRef(evidenceRef, expectedEvidence)) errors.push('蓝图画面证据不是当前精确版本');
+  if (expectedTranscript !== undefined && ((expectedTranscript === null && transcriptRef != null) || (expectedTranscript !== null && !sameExactRef(transcriptRef, expectedTranscript)))) errors.push('蓝图台词证据不是当前精确版本');
+  if (context.upstreamRefs && !context.upstreamRefs.some((ref) => sameExactRef(evidenceRef, ref))) errors.push('蓝图画面证据引用已损坏');
+  if (transcriptRef != null && context.upstreamRefs && !context.upstreamRefs.some((ref) => sameExactRef(transcriptRef, ref))) errors.push('蓝图台词证据引用已损坏');
+  const seenIds = new Set<string>();
   events.forEach((raw, index) => {
     if (!raw || typeof raw !== 'object') { errors.push(`事件 ${index + 1} 结构无效`); return; }
     const event = raw as Record<string, unknown>;
     if (typeof event.event_id !== 'string' || !event.event_id || !Number.isInteger(event.start_us) || !Number.isInteger(event.end_us) || Number(event.end_us) <= Number(event.start_us)) errors.push(`事件 ${index + 1} 缺少必要结构`);
+    else if (seenIds.has(event.event_id)) errors.push(`事件 ${index + 1} 标识重复`);
+    else seenIds.add(event.event_id);
     const frame = event.observed_frame as Record<string, unknown> | null;
-    if (!frame || !isExactRef(frame.evidence_ref) || !Number.isInteger(frame.time_us)) errors.push(`事件 ${index + 1} 的画面证据引用无效`);
+    if (!frame || !isExactRef(frame.evidence_ref) || !Number.isInteger(frame.time_us) || !sameExactRef(frame.evidence_ref, evidenceRef ?? frame.evidence_ref) || Number(frame.time_us) < Number(event.start_us) || Number(frame.time_us) >= Number(event.end_us)) errors.push(`事件 ${index + 1} 的画面证据引用无效`);
     const spoken = event.spoken_range as Record<string, unknown> | null;
-    if (spoken && (!isExactRef(spoken.transcript_ref) || !Number.isInteger(spoken.start_us) || !Number.isInteger(spoken.end_us) || Number(spoken.end_us) <= Number(spoken.start_us))) errors.push(`事件 ${index + 1} 的台词证据引用无效`);
+    if (spoken && (!isExactRef(spoken.transcript_ref) || !sameExactRef(spoken.transcript_ref, transcriptRef ?? spoken.transcript_ref) || !Number.isInteger(spoken.start_us) || !Number.isInteger(spoken.end_us) || Number(spoken.end_us) <= Number(spoken.start_us) || Number(spoken.end_us) <= Number(event.start_us) || Number(spoken.start_us) >= Number(event.end_us))) errors.push(`事件 ${index + 1} 的台词证据引用无效`);
+    const model = event.model as Record<string, unknown> | null;
+    if (!model || typeof model.visual_observation !== 'string' || typeof model.narrative_inference !== 'string') errors.push(`事件 ${index + 1} 缺少模型分析结构`);
     const override = event.user_override as Record<string, unknown> | null;
     if (!override || typeof override.narrative_role !== 'string' || !override.narrative_role.trim()) errors.push(`事件 ${index + 1} 缺少叙事作用`);
     if (!override || !['reviewed', 'reviewed_uncertain'].includes(String(override.review_state))) errors.push(`事件 ${index + 1} 尚未核对`);

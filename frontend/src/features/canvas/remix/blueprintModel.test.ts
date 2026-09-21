@@ -75,6 +75,29 @@ describe('reference blueprint model', () => {
     expect(blueprintReadinessErrors(payload)).toEqual([]);
   });
 
+  it('preserves analyzed speech as unresolved when no transcript revision is connected', () => {
+    const payload = buildReferenceBlueprint({
+      source: { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/video.mp4', transcriptRef: null },
+      rows: [],
+      referenceEvents: [{
+        event_id: 'event-1', start_us: 0, end_us: 2_000_000,
+        observed_frame: { pts: 0, time_base: '1/1000', time_us: 0 },
+        spoken_range: { text: 'detected speech', start_us: 200_000, end_us: 1_500_000 },
+        narrative_inference: 'hook', user_narrative_role: 'hook', review_state: 'reviewed',
+      }],
+      narrativeRole: 'hook', preserveRule: '', replaceRule: '',
+      evidenceRef: { artifactId: 'evidence-1', revision: 1 },
+    });
+
+    expect(payload.events).toEqual([expect.objectContaining({
+      spoken_range: expect.objectContaining({
+        text: 'detected speech', start_us: 200_000, end_us: 1_500_000,
+        unresolved_reason: 'missing_transcript_reference',
+      }),
+    })]);
+    expect(blueprintReadinessErrors(payload)).toEqual(expect.arrayContaining([expect.stringMatching(/台词证据/)]));
+  });
+
   it('blocks broken evidence structure while allowing reviewed uncertainty', () => {
     const payload = {
       narrative_role: '产品演示',

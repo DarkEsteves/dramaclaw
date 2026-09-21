@@ -18,6 +18,29 @@ def blueprint_payload() -> dict:
     }
 
 
+def reviewed_blueprint_payload(evidence: dict, *, review_state: str = "reviewed") -> dict:
+    evidence_ref = {"artifact_id": evidence["id"], "revision": evidence["revision"]}
+    return {
+        "narrative_role": "问题开场，演示产品，结尾行动号召",
+        "evidence_ref": evidence_ref,
+        "events": [{
+            "event_id": "hook", "start_us": 0, "end_us": 1_000_000,
+            "observed_frame": {"evidence_ref": evidence_ref, "pts": 0, "time_base": "1/1000", "time_us": 0},
+            "spoken_range": None,
+            "model": {"visual_observation": "早上没精神", "narrative_inference": "问题开场"},
+            "user_override": {"narrative_role": "问题开场", "review_state": review_state},
+        }],
+        "preserve_replace_rules": [], "observations": [], "inferences": [], "user_choices": [],
+    }
+
+
+def create_evidence(store: RemixArtifactStore, marker: str = "video") -> dict:
+    return store.create("reference_evidence.v1", {
+        "media_hash": marker, "time_base": "1/1000", "duration_us": 1_000_000,
+        "cuts": [], "representative_frames": [],
+    }, [])
+
+
 def test_generated_quotes_become_unicode_codepoint_selections() -> None:
     from novelvideo.freezone.remix.script_draft import draft_from_recipe_output
 
@@ -89,7 +112,10 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path):
     app = FastAPI()
     app.include_router(routes.router, prefix="/api/v1")
     app.dependency_overrides[get_api_user] = lambda: {"username": "alice"}
-    blueprint = RemixArtifactStore(tmp_path, "demo").create("reference_blueprint.v1", blueprint_payload(), [])
+    store = RemixArtifactStore(tmp_path, "demo")
+    evidence = create_evidence(store)
+    evidence_ref = {"artifact_id": evidence["id"], "revision": evidence["revision"]}
+    blueprint = store.create("reference_blueprint.v1", reviewed_blueprint_payload(evidence), [evidence_ref])
     return TestClient(app), blueprint
 
 
@@ -111,7 +137,7 @@ def test_script_draft_endpoint_reads_exact_blueprint_and_does_not_publish(api, m
     assert response.status_code == 200
     assert response.json()["data"]["dialogue"] == "用新咖啡开始一天。"
     assert calls == [(blueprint["payload"], "新咖啡", "alice")]
-    assert len(list((tmp_path / "freezone" / "_remix_artifacts").iterdir())) == 1
+    assert len(list((tmp_path / "freezone" / "_remix_artifacts").iterdir())) == 2
 
 
 def test_script_draft_endpoint_rejects_wrong_schema_and_other_project(api, tmp_path) -> None:
@@ -135,3 +161,28 @@ def test_script_draft_endpoint_rejects_blank_topic(api) -> None:
         "blueprint_ref": {"artifact_id": blueprint["id"], "revision": 1}, "new_topic": "   ",
     })
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("kind", ["legacy", "unreviewed", "broken_reference"])
+def test_script_draft_endpoint_rejects_blueprint_that_is_not_script_ready(api, tmp_path, kind: str) -> None:
+    client, _ = api
+    store = RemixArtifactStore(tmp_path, "demo")
+    if kind == "legacy":
+        blueprint = store.create("reference_blueprint.v1", blueprint_payload(), [])
+    else:
+        evidence = create_evidence(store, kind)
+        declared = {"artifact_id": evidence["id"], "revision": evidence["revision"]}
+        payload = reviewed_blueprint_payload(evidence, review_state="needs_review" if kind == "unreviewed" else "reviewed")
+        upstream = [declared]
+        if kind == "broken_reference":
+            other = create_evidence(store, "other")
+            upstream = [{"artifact_id": other["id"], "revision": other["revision"]}]
+        blueprint = store.create("reference_blueprint.v1", payload, upstream)
+
+    response = client.post("/api/v1/projects/demo/freezone/remix/script-drafts", json={
+        "blueprint_ref": {"artifact_id": blueprint["id"], "revision": blueprint["revision"]},
+        "new_topic": "咖啡",
+    })
+
+    assert response.status_code == 422
+    assert "blueprint" in response.json()["detail"].lower()

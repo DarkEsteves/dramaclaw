@@ -265,6 +265,65 @@ SCHEMA_MODELS: dict[str, type[PayloadModel]] = {
 V1_SCHEMAS = frozenset(SCHEMA_MODELS)
 
 
+def _same_artifact_reference(left: object, right: object) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (
+        left.get("artifact_id") == right.get("artifact_id")
+        and left.get("revision") == right.get("revision")
+        and isinstance(left.get("artifact_id"), str)
+        and bool(left.get("artifact_id"))
+        and type(left.get("revision")) is int
+        and left["revision"] > 0
+    )
+
+
+def reference_blueprint_readiness_errors(
+    payload: dict[str, Any], upstream_refs: list[dict[str, Any]] | None = None
+) -> list[str]:
+    """Return structural and evidence-lineage blockers for script generation."""
+    errors: list[str] = []
+    if not isinstance(payload.get("narrative_role"), str) or not payload["narrative_role"].strip():
+        errors.append("missing narrative role")
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        return [*errors, "missing story events"]
+    evidence_ref = payload.get("evidence_ref")
+    transcript_ref = payload.get("transcript_ref")
+    declared_refs = upstream_refs if upstream_refs is not None else []
+    if upstream_refs is not None and not any(
+        _same_artifact_reference(evidence_ref, reference) for reference in declared_refs
+    ):
+        errors.append("broken blueprint evidence reference")
+    if transcript_ref is not None and upstream_refs is not None and not any(
+        _same_artifact_reference(transcript_ref, reference) for reference in declared_refs
+    ):
+        errors.append("broken blueprint transcript reference")
+    seen_ids: set[str] = set()
+    for index, raw_event in enumerate(events, 1):
+        if not isinstance(raw_event, dict):
+            errors.append(f"event {index} has invalid structure")
+            continue
+        try:
+            event = BlueprintEvent.model_validate(raw_event)
+        except ValidationError:
+            errors.append(f"event {index} has invalid review or evidence structure")
+            continue
+        if event.event_id in seen_ids:
+            errors.append(f"event {index} has a duplicate id")
+        seen_ids.add(event.event_id)
+        frame_ref = event.observed_frame.evidence_ref.model_dump(mode="json")
+        if not _same_artifact_reference(frame_ref, evidence_ref):
+            errors.append(f"event {index} has a broken evidence reference")
+        if event.spoken_range is not None:
+            spoken_ref = event.spoken_range.transcript_ref.model_dump(mode="json")
+            if not _same_artifact_reference(spoken_ref, transcript_ref):
+                errors.append(f"event {index} has a broken transcript reference")
+        if event.user_override.review_state not in {"reviewed", "reviewed_uncertain"}:
+            errors.append(f"event {index} has not been reviewed")
+    return errors
+
+
 def validate_payload(schema: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Return JSON-safe payload data after checking its declared v1 schema."""
     model = SCHEMA_MODELS.get(schema)

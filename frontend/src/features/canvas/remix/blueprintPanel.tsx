@@ -108,7 +108,25 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
     if (!project || !source) throw new Error('请先连接已上传的原片视频。');
     if (!evidenceRef) throw new Error('请先完成原片证据提取。');
     if (busy) throw new Error('参考蓝图正在处理，请稍后再试。');
-    if (draft.referenceBlueprintRef && !dirty && !draft.blueprintDirty) return draft.referenceBlueprintRef;
+    if (draft.referenceBlueprintRef && !dirty && !draft.blueprintDirty) {
+      setBusy(true); setError(null);
+      try {
+        const artifact = await fetchRemixArtifact(project, draft.referenceBlueprintRef);
+        if (artifact.id !== draft.referenceBlueprintRef.artifactId || artifact.revision !== draft.referenceBlueprintRef.revision || artifact.schema !== 'reference_blueprint.v1') throw new Error('已保存的参考蓝图版本无效。');
+        const blockers = blueprintReadinessErrors(artifact.payload, {
+          evidenceRef,
+          transcriptRef: source.transcriptRef,
+          upstreamRefs: artifact.upstream_refs,
+        });
+        if (blockers.length) throw new Error(blockers.join('；'));
+        return draft.referenceBlueprintRef;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+        throw caught;
+      } finally {
+        setBusy(false);
+      }
+    }
     const narrativeRole = role.trim() || suggestedNarrativeRole?.trim() || '';
     if (!narrativeRole) throw new Error('缺少叙事作用，请在参考蓝图设置中填写。');
     setBusy(true); setError(null);

@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from novelvideo.api.auth import get_api_user
 from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
+from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.project_context import require_project_home_node, resolve_project_context
@@ -238,6 +239,13 @@ async def create_script_draft(project: str, body: ScriptDraftBody, user: dict = 
     artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
     if artifact["schema"] != "reference_blueprint.v1":
         raise HTTPException(422, "blueprint_ref must reference a saved blueprint")
+    readiness_errors = reference_blueprint_readiness_errors(
+        artifact["payload"], artifact.get("upstream_refs", [])
+    )
+    if readiness_errors:
+        raise HTTPException(
+            422, "blueprint is not script-ready: " + "; ".join(readiness_errors)
+        )
     try:
         draft = await generate_script_draft(
             blueprint=artifact["payload"], topic=topic, username=str(user.get("username") or "")
