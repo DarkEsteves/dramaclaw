@@ -156,6 +156,32 @@ def test_compile_blocks_required_event_with_partial_character_alignment() -> Non
     ]
 
 
+def test_compile_allows_unaligned_whitespace_between_aligned_words() -> None:
+    result = compile_timing(
+        script={
+            "revision": 1,
+            "media_hash": "voice-a",
+            "dialogue": "hello world",
+            "selections": [{"selection_id": "phrase", "start_char": 0, "end_char": 11, "script_revision": 1}],
+            "events": [{"event_id": "phrase", "selection_id": "phrase", "required": True}],
+        },
+        words={
+            "script_revision": 1,
+            "media_hash": "voice-a",
+            "words": [
+                {"start_char": 0, "end_char": 5, "start_us": 0, "end_us": 400_000},
+                {"start_char": 6, "end_char": 11, "start_us": 500_000, "end_us": 1_000_000},
+            ],
+        },
+        edit_map=[{"source_start_us": 0, "source_end_us": 1_000_000, "timeline_start_us": 0}],
+        overrides=[],
+        fps=30,
+    )
+
+    assert result["events"] == [{"event_id": "phrase", "start_frame": 0, "end_frame": 30}]
+    assert result["unresolved_required_events"] == []
+
+
 def test_compile_rejects_overlapping_source_edit_segments() -> None:
     with pytest.raises(TimingCompileError, match="overlap"):
         compile_timing(

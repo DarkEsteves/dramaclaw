@@ -85,6 +85,7 @@ def compile_timing(
     _validate_bindings(script, words)
     aligned_words = _validate_aligned_words(words.get("words", []))
     edit_segments = _validate_edit_map(edit_map)
+    script_text = script.get("dialogue", script.get("text"))
 
     selections = _index_by_id(script.get("selections", []), "selection_id", "selection")
     overrides_by_event = _index_overrides(overrides)
@@ -104,7 +105,7 @@ def compile_timing(
             reason = "selection script revision does not match script"
         else:
             try:
-                source_interval = _aligned_interval(selection, aligned_words)
+                source_interval = _aligned_interval(selection, aligned_words, script_text)
             except _IncompleteAlignment as error:
                 reason = str(error)
             if source_interval is None:
@@ -217,7 +218,9 @@ def _required_string(row: dict[str, Any], key: str, label: str) -> str:
     return value
 
 
-def _aligned_interval(selection: dict[str, Any], word_rows: Iterable[dict[str, Any]]) -> tuple[int, int] | None:
+def _aligned_interval(
+    selection: dict[str, Any], word_rows: Iterable[dict[str, Any]], script_text: object
+) -> tuple[int, int] | None:
     start_char = selection.get("start_char")
     end_char = selection.get("end_char")
     if not isinstance(start_char, int) or not isinstance(end_char, int) or end_char <= start_char:
@@ -232,12 +235,19 @@ def _aligned_interval(selection: dict[str, Any], word_rows: Iterable[dict[str, A
         return None
     cursor = start_char
     for word in sorted(matched, key=lambda item: item["start_char"]):
-        if word["start_char"] > cursor:
+        if word["start_char"] > cursor and not _is_whitespace_gap(script_text, cursor, word["start_char"]):
             raise _IncompleteAlignment("selection has incomplete aligned character coverage")
         cursor = max(cursor, word["end_char"])
-    if cursor < end_char:
+    if cursor < end_char and not _is_whitespace_gap(script_text, cursor, end_char):
         raise _IncompleteAlignment("selection has incomplete aligned character coverage")
     return min(word["start_us"] for word in matched), max(word["end_us"] for word in matched)
+
+
+def _is_whitespace_gap(script_text: object, start_char: int, end_char: int) -> bool:
+    if not isinstance(script_text, str):
+        return False
+    gap = script_text[start_char:end_char]
+    return len(gap) == end_char - start_char and gap.isspace()
 
 
 def _map_interval(source: tuple[int, int], edit_map: Iterable[dict[str, Any]], fps: int) -> list[tuple[int, int]]:
