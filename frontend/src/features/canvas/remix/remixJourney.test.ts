@@ -37,7 +37,7 @@ describe('reference video remix canvas journey', () => {
 
     story.data = { ...story.data, referenceBlueprintRef: ref('blueprint') };
     const script = node('script', 'scriptNode', { remixBlueprintRef: ref('blueprint'), remixScriptDraft: { dialogue: '', selections: [] } });
-    expect(nextRemixJourneyStep([reference, story, script], [edge('reference', 'story'), edge('story', 'script')], 'script')).toMatchObject({ kind: 'action', action: 'edit_script', label: '填写新主题并生成脚本' });
+    expect(nextRemixJourneyStep([reference, story, script], [edge('reference', 'story'), edge('story', 'script')], 'script')).toMatchObject({ kind: 'action', action: 'edit_script', label: '生成或手动编辑改编台词' });
   });
 
   it('supports manual narration upload without requiring a voice provider', () => {
