@@ -276,6 +276,8 @@ describe('native canvas remix journey integration', () => {
     });
 
     render(<JourneyCanvas />);
+    expect(await screen.findByText('1 个语义事件 · 下一步：补齐必需 B-roll')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '制作配音' })).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
 
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();

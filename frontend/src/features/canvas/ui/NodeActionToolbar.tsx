@@ -1650,6 +1650,9 @@ export const NodeActionToolbar = memo(
       () => nextRemixJourneyStep(nodes, edges, node.id),
       [edges, node.id, nodes],
     );
+    const remixJourneyBlocksScriptDownstream = node.type === CANVAS_NODE_TYPES.script
+      && remixJourneyStep?.targetNodeId === node.id
+      && (remixJourneyStep.kind === 'wait' || remixJourneyStep.action === 'plan_broll' || remixJourneyStep.action === 'edit_script');
     const storyScriptAction = node.type === CANVAS_NODE_TYPES.videoStory
       ? storyScriptToolbarState(nodes, edges, node.id) : null;
 
@@ -1779,13 +1782,13 @@ export const NodeActionToolbar = memo(
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
                   : node.type === CANVAS_NODE_TYPES.script ? remixScriptLabel ? [
                     { action: 'edit_script', label: remixScriptLabel, Icon: PenLine },
-                    ...(remixScriptState?.nextAction === 'create_timeline'
+                    ...(!remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
-                      : remixScriptState?.nextAction === 'view_alignment'
+                      : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'view_alignment'
                       ? [{ action: 'view_alignment', label: '查看对齐进度', Icon: Workflow }]
-                      : remixScriptState?.nextAction === 'align_narration'
+                      : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'align_narration'
                       ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
-                      : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
+                      : !remixJourneyBlocksScriptDownstream && node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
                   ] : []
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '重新编译', Icon: Workflow }, { action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]

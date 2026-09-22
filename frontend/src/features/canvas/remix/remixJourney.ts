@@ -47,6 +47,37 @@ function directChild(nodes: CanvasNode[], edges: CanvasEdge[], sourceId: string,
   return nodes.find((node) => ids.has(node.id) && node.type === type);
 }
 
+function scriptBranchForSelection(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+  storyId: string,
+  selectedNodeId: string,
+): CanvasNode | undefined {
+  const scriptIds = new Set(edges
+    .filter((edge) => edge.source === storyId)
+    .map((edge) => edge.target));
+  const scripts = nodes.filter((node) => scriptIds.has(node.id) && node.type === CANVAS_NODE_TYPES.script);
+  const selectedScript = scripts.find((script) => script.id === selectedNodeId);
+  if (selectedScript) return selectedScript;
+
+  for (const script of scripts) {
+    const branch = new Set([script.id]);
+    const queue = [script.id];
+    while (queue.length) {
+      const current = queue.shift()!;
+      for (const edge of edges) {
+        const next = edge.source === current ? edge.target : edge.target === current ? edge.source : null;
+        if (!next || next === storyId || (scriptIds.has(next) && next !== script.id) || branch.has(next)) continue;
+        branch.add(next);
+        queue.push(next);
+      }
+    }
+    if (branch.has(selectedNodeId)) return script;
+  }
+
+  return scripts[0];
+}
+
 const VISUAL_NODE_TYPES = new Set<CanvasNode['type']>([
   CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit,
   CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage,
@@ -94,7 +125,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   const hasEvidence = (Array.isArray(story.data.referenceEvents) && story.data.referenceEvents.length > 0)
     || (Array.isArray(story.data.rows) && story.data.rows.length > 0);
   if (!hasEvidence || story.data.analysisError) return { kind: 'action', action: 'analyze_reference', targetNodeId: reference.id, label: '重新分析参考视频' };
-  const script = directChild(nodes, edges, story.id, CANVAS_NODE_TYPES.script);
+  const script = scriptBranchForSelection(nodes, edges, story.id, selectedNodeId);
   if (!script) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '确认分析并生成脚本', inputHint: '新脚本节点会继承分析结果，并在自己的编辑弹窗中设置改编规则。' };
   if (!ref(script.data.remixScriptRef)) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '填写新主题并生成脚本', inputHint: '确认台词、语义区间和素材要求后保存。' };
   if (script.data.remixBrollPlanStatus === 'running') return { kind: 'wait', targetNodeId: script.id, label: '等待 B-roll 规划' };

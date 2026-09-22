@@ -52,6 +52,28 @@ describe('reference video remix canvas journey', () => {
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'audio')).toEqual(expect.objectContaining({ kind: 'input', targetNodeId: 'audio', label: '生成或上传旁白音频', inputHint: expect.stringContaining('上传') }));
   });
 
+  it('resolves the journey from the selected script branch when one story has sibling scripts', () => {
+    const graph = completeThroughScript();
+    graph.nodes[2].data.remixBrollPlanRef = ref('first-plan');
+    graph.nodes[2].data.remixBrollScriptRef = ref('script');
+    graph.nodes[2].data.remixBrollRequirements = [];
+    graph.nodes.push(node('script-two', 'scriptNode', {
+      remixScriptRef: ref('script-two'),
+      remixBlueprintRef: ref('blueprint'),
+      remixScriptDraft: { dialogue: '第二个分支', selections: [{ id: 'second', label: '第二个事件', start: 0, end: 5 }] },
+      remixBrollPlanRef: null,
+      remixBrollScriptRef: null,
+      remixBrollRequirements: [],
+    }));
+    graph.edges.push(edge('story', 'script-two'));
+
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script-two')).toMatchObject({
+      action: 'plan_broll',
+      targetNodeId: 'script-two',
+      label: '规划 B-roll',
+    });
+  });
+
   it('requires the saved B-roll binding to match the live connected visual node', () => {
     const graph = completeThroughScript();
     const script = graph.nodes[2];

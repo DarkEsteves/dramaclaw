@@ -93,6 +93,7 @@ import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
 import {
   consumeRemixScriptEditorRequest,
   subscribeRemixScriptEditorRequest,
@@ -483,6 +484,14 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const remixScriptLabel = remixScriptEditorLabel(data, Boolean(blueprintRef));
   const isRemixScript = Boolean(remixScriptLabel);
   const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
+  const remixJourneyStep = isRemixScript ? nextRemixJourneyStep(canvasNodes, canvasEdges, id) : null;
+  const remixJourneyStatus = remixJourneyStep?.targetNodeId === id
+    ? remixJourneyStep.action === 'create_narration'
+      ? '下一步：制作配音'
+      : remixJourneyStep.kind === 'wait' || remixJourneyStep.kind === 'complete'
+        ? remixJourneyStep.label
+        : `下一步：${remixJourneyStep.label}`
+    : null;
   const remixVisualNodes = upstreamNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)).map((node) => ({
     id: node.id,
     label: String(node.data.displayName || node.id),
@@ -826,7 +835,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
               <p className="flex-1">点击“{remixScriptLabel}”填写台词。</p>
             )}
             <div className="border-t border-white/[0.08] pt-2">
-              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'view_alignment' ? '对齐中：查看进度' : remixNextAction === 'align_narration' ? '下一步：按脚本对齐' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本'}`}
+              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixJourneyStatus ?? (remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'view_alignment' ? '对齐中：查看进度' : remixNextAction === 'align_narration' ? '下一步：按脚本对齐' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本')}`}
             </div>
           </div>
         ) : hasResult ? (
