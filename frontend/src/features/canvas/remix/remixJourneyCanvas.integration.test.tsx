@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ReactFlow, ReactFlowProvider, type NodeTypes } from '@xyflow/react';
 import { useMemo } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -189,6 +189,11 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
 
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 规划 B-roll' }));
+    const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
+    const scriptNode = useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')!;
+    act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '继续改编 · 补齐必需 B-roll' })).toBeNull());
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
     fireEvent.click(await screen.findByRole('button', { name: '上传 产品登场 素材' }));
     const visual = useCanvasStore.getState().nodes.find((node) => node.type === 'uploadNode')!;
@@ -196,6 +201,7 @@ describe('native canvas remix journey integration', () => {
     fireEvent.change(visualInput, { target: { files: [new File(['png'], 'product.png', { type: 'image/png' })] } });
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === visual.id)?.data.imageUrl).toContain('broll.png'));
 
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: /继续改编 · 填写新主题并生成脚本/ }));
     fireEvent.click(await screen.findByRole('button', { name: '替换 产品登场 素材' }));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptDraft as { selections: Array<{ visualMediaRevision?: string }> }).selections[0].visualMediaRevision).toBe('c'.repeat(64)));
@@ -212,8 +218,10 @@ describe('native canvas remix journey integration', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 按脚本对齐旁白' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'transcriptNode')?.data.status).toBe('completed'));
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 生成语义时间轴' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')?.data.artifactRef).toBeTruthy());
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 添加成片背景 / A-roll' }));
     const background = useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'background')!;
     const backgroundInput = document.querySelector(`[data-id="${background.id}"] input[type="file"]`) as HTMLInputElement;
@@ -221,6 +229,8 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === background.id)?.data.imageUrl).toContain('broll.png'));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 绑定成片背景 / A-roll' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === background.id)?.data.remixMedia).toBeTruthy());
+    const timelineNode = useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')!;
+    act(() => useCanvasStore.getState().setSelectedNode(timelineNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 创建成片清单' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')?.data.remixManifestLoadState).toBe('ready'));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 导出 MP4' }));

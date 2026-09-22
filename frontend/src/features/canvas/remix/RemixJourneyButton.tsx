@@ -3,7 +3,8 @@ import { UiChipButton } from '@/components/ui';
 import { TOOLBAR_TEXT_BUTTON_CLASS } from '@/features/canvas/ui/nodeToolbarStyles';
 import type { RemixJourneyStep } from './remixJourney';
 
-export function RemixJourneyButton({ step, onContinue }: { step: RemixJourneyStep; onContinue: () => void }) {
+export function RemixJourneyButton({ nodeId, step, onContinue }: { nodeId: string; step: RemixJourneyStep; onContinue: () => void }) {
+  if (step.targetNodeId !== nodeId) return null;
   const label = step.kind === 'complete' ? step.label : `继续改编 · ${step.label}`;
   return (
     <UiChipButton

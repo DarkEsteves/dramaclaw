@@ -42,7 +42,7 @@ describe('browser remix journey', () => {
     const view = render(<div />);
     const clickNext = async (selected: string) => {
       const step = nextRemixJourneyStep(nodes, edges, selected)!;
-      view.rerender(<RemixJourneyButton step={step} onContinue={() => { void advanceRemixJourneyStep(step, ports); }} />);
+      view.rerender(<RemixJourneyButton nodeId={selected} step={step} onContinue={() => { void advanceRemixJourneyStep(step, ports); }} />);
       fireEvent.click(screen.getByRole('button'));
       await Promise.resolve();
       return step;
@@ -58,9 +58,9 @@ describe('browser remix journey', () => {
     expect((await clickNext('audio')).label).toBe('生成或上传旁白音频');
     Object.assign(nodes.find((item) => item.id === 'audio')!.data, { audioUrl: '/voice.wav', remixMedia: { media_kind: 'audio', media_hash: 'b'.repeat(64), media_path: 'voice.wav', url: '/voice.wav' } });
     expect((await clickNext('audio')).action).toBe('align_narration');
-    expect((await clickNext('words')).action).toBe('create_timeline');
+    expect((await clickNext('script')).action).toBe('create_timeline');
     expect((await clickNext('timeline')).action).toBe('compile_timeline');
-    expect((await clickNext('timeline')).action).toBe('create_background');
+    expect((await clickNext('script')).action).toBe('create_background');
     expect((await clickNext('background')).label).toBe('上传成片背景 / A-roll');
     Object.assign(nodes.find((item) => item.id === 'background')!.data, { imageUrl: '/background.png' });
     expect((await clickNext('background')).action).toBe('bind_background');
