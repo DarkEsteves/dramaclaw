@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const addNode = vi.fn(() => 'script-new');
+const addNode = vi.fn((_type?: unknown, _position?: unknown, _data?: unknown) => 'script-new');
 const addEdge = vi.fn(() => 'edge-new');
 const updateNodeData = vi.fn();
 const setSelectedNode = vi.fn();

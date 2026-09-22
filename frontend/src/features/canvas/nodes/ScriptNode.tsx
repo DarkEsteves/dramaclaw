@@ -83,7 +83,9 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, generateRemixBrollPlan, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
+import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
+import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
 import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
 import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
 import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
@@ -499,6 +501,50 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (!visual) throw new Error('画面素材节点不存在');
     return attachBrollVisualMedia(project, visual, attachRemixMedia, state.updateNodeData);
   }, []);
+  const pendingBrollSyncRef = useRef<string | null>(null);
+  useEffect(() => {
+    const activeScriptRef = remixRef(data.remixScriptRef);
+    const draft = data.remixScriptDraft as RemixScriptDraft | undefined;
+    const project = readUrl().project;
+    if (!activeScriptRef || !draft || !project) return;
+    const readyVisualIds = upstreamNodes.filter((visual) => {
+      if (isVideoNode(visual)) return Boolean(visual.data.videoUrl);
+      if (isUploadNode(visual) || isImageEditNode(visual) || isImageGenNode(visual) || isExportImageNode(visual)) {
+        return Boolean(visual.data.imageUrl || visual.data.previewImageUrl);
+      }
+      return false;
+    }).map((visual) => visual.id);
+    const pendingReadyIds = [...new Set(draft.selections
+      .filter((selection) => selection.visualNodeId && !selection.visualMediaRevision && readyVisualIds.includes(selection.visualNodeId))
+      .map((selection) => selection.visualNodeId!))];
+    if (pendingReadyIds.length === 0) return;
+    const syncKey = `${activeScriptRef.artifactId}:${activeScriptRef.revision}:${pendingReadyIds.sort().join(',')}`;
+    if (pendingBrollSyncRef.current === syncKey) return;
+    pendingBrollSyncRef.current = syncKey;
+    void resolvePendingBrollDraft(draft, readyVisualIds, attachRemixVisual).then(async (nextDraft) => {
+      if (!nextDraft) return;
+      const currentNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+      if (!sameRemixRef(remixRef(currentNode?.data.remixScriptRef), activeScriptRef)) return;
+      const currentBlueprintRef = remixRef(currentNode?.data.referenceBlueprintRef) ?? blueprintRef;
+      const nextRef = await saveRemixScriptArtifact(project, nextDraft, activeScriptRef, currentBlueprintRef);
+      const latestNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+      if (!sameRemixRef(remixRef(latestNode?.data.remixScriptRef), activeScriptRef)) return;
+      applyRemixInvalidation(id, 'script');
+      useCanvasStore.getState().updateNodeData(id, {
+        remixScriptDraft: nextDraft,
+        remixScriptRef: nextRef,
+        remixScriptLastSavedRef: nextRef,
+        remixBrollPlanRef: null,
+        remixBrollScriptRef: null,
+        remixBrollRequirements: [],
+        remixBrollPlanStatus: null,
+      });
+    }).catch((cause) => {
+      toast.error(cause instanceof Error ? cause.message : '补充画面自动关联失败');
+    }).finally(() => {
+      if (pendingBrollSyncRef.current === syncKey) pendingBrollSyncRef.current = null;
+    });
+  }, [attachRemixVisual, blueprintRef, data.remixScriptDraft, data.remixScriptRef, id, upstreamNodes]);
 
   const resolvedTitle = useMemo(
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.script, data, t),
@@ -884,7 +930,18 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
               source={blueprintSource}
               rows={storyRows}
               referenceEvents={storyReferenceEvents}
-              draft={data}
+              draft={{
+                referenceEvidenceRef: remixRef(data.referenceEvidenceRef),
+                referenceBlueprintRef: remixRef(data.referenceBlueprintRef),
+                evidenceOperationId: typeof data.evidenceOperationId === 'string' ? data.evidenceOperationId : null,
+                managedEvidenceOperationId: typeof data.managedEvidenceOperationId === 'string' ? data.managedEvidenceOperationId : null,
+                sourceMediaPath: typeof data.sourceMediaPath === 'string' ? data.sourceMediaPath : null,
+                blueprintNarrativeRole: typeof data.blueprintNarrativeRole === 'string' ? data.blueprintNarrativeRole : '',
+                blueprintPreserveRule: typeof data.blueprintPreserveRule === 'string' ? data.blueprintPreserveRule : '',
+                blueprintReplaceRule: typeof data.blueprintReplaceRule === 'string' ? data.blueprintReplaceRule : '',
+                blueprintRevision: typeof data.blueprintRevision === 'number' ? data.blueprintRevision : 0,
+                blueprintDirty: data.blueprintDirty === true,
+              }}
               seedRef={blueprintSeedRef}
               onPatch={patchBranchBlueprint}
               onReanalyze={() => canvasEventBus.publish('remix-node/action', { nodeId: upstreamStory.id, action: 'analyze' })}

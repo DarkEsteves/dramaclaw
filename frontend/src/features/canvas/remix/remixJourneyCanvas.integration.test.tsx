@@ -189,28 +189,21 @@ describe('native canvas remix journey integration', () => {
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
     await screen.findByDisplayValue('新品登场');
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
-    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef).toBeTruthy());
-
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 规划 B-roll' }));
-    const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
-    const scriptNode = useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')!;
-    act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
-    await waitFor(() => expect(screen.queryByRole('button', { name: '继续改编 · 补齐必需 B-roll' })).toBeNull());
-    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
     fireEvent.click(await screen.findByRole('button', { name: '上传 产品登场 素材' }));
     const visual = useCanvasStore.getState().nodes.find((node) => node.type === 'uploadNode')!;
+    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef).toBeTruthy());
+    const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
+    const scriptNode = useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')!;
     const visualInput = document.querySelector(`input[type="file"]`) as HTMLInputElement;
     fireEvent.change(visualInput, { target: { files: [new File(['png'], 'product.png', { type: 'image/png' })] } });
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === visual.id)?.data.imageUrl).toContain('broll.png'));
-
-    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: /继续改编 · 填写新主题并生成脚本/ }));
-    expect(await screen.findByLabelText('新主题')).toHaveValue('新品咖啡');
-    fireEvent.click(await screen.findByRole('button', { name: '替换 产品登场 素材' }));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptDraft as { selections: Array<{ visualMediaRevision?: string }> }).selections[0].visualMediaRevision).toBe('c'.repeat(64)));
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
+    await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef as { revision?: number }).revision).toBe(2));
+
+    act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '继续改编 · 补齐必需 B-roll' })).toBeNull());
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 规划 B-roll' }));
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 创建旁白节点' }));
 

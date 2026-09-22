@@ -21,8 +21,11 @@ describe('remix script editor', () => {
     expect(() => buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], end: 99 }] }, 1)).toThrow('语义区间');
   });
 
-  it('blocks saving a B-roll selection until its exact media revision is attached', () => {
-    expect(() => buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], visualMediaRevision: undefined }] }, 1)).toThrow(/素材/);
+  it('saves a pending B-roll node before its media revision is available', () => {
+    const payload = buildRemixScriptPayload({ ...draft, selections: [{ ...draft.selections[0], visualMediaRevision: undefined }] }, 1);
+    expect(payload.events).toEqual([expect.objectContaining({ visual_node_id: 'video-1' })]);
+    expect(payload.events).not.toEqual([expect.objectContaining({ visual_media_revision: expect.anything() })]);
+    expect(payload.media_requirements).toEqual([{ event_id: 'product', visual_node_id: 'video-1' }]);
   });
 
   it('serializes an SFX directive for a timed selection', () => {
