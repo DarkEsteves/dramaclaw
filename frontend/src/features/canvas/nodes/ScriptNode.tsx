@@ -88,6 +88,10 @@ import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
+import {
+  consumeRemixScriptEditorRequest,
+  subscribeRemixScriptEditorRequest,
+} from '@/features/canvas/remix/remixScriptEditorRequests';
 import type { RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
 import {
   BillingRuleNotConfiguredError,
@@ -443,10 +447,11 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     }
   }), [id]);
   useEffect(() => {
-    if (!data.openRemixEditorRequested) return;
-    updateNodeData(id, { openRemixEditorRequested: false });
-    setRemixScriptOpen(true);
-  }, [data.openRemixEditorRequested, id, updateNodeData]);
+    const openEditor = () => setRemixScriptOpen(true);
+    const unsubscribe = subscribeRemixScriptEditorRequest(id, openEditor);
+    if (consumeRemixScriptEditorRequest(id)) openEditor();
+    return unsubscribe;
+  }, [id]);
   const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;

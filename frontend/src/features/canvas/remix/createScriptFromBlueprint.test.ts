@@ -11,6 +11,7 @@ const state = { nodes: [] as unknown[], edges: [] as unknown[], addNode, addEdge
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: { getState: () => state } }));
 
 import { createScriptFromBlueprint } from './createScriptFromBlueprint';
+import { consumeRemixScriptEditorRequest } from './remixScriptEditorRequests';
 
 describe('createScriptFromBlueprint', () => {
   beforeEach(() => {
@@ -21,10 +22,11 @@ describe('createScriptFromBlueprint', () => {
 
   it('creates and connects a script, then requests its editor', () => {
     expect(createScriptFromBlueprint('story-1')).toBe('script-new');
-    expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 }, { openRemixEditorRequested: true });
+    expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 });
     expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
     expect(setSelectedNode).toHaveBeenCalledWith('script-new');
     expect(requestFocusNode).toHaveBeenCalledWith('script-new');
+    expect(consumeRemixScriptEditorRequest('script-new')).toBe(true);
   });
 
   it('reuses an already connected script instead of duplicating it', () => {
@@ -32,7 +34,8 @@ describe('createScriptFromBlueprint', () => {
     state.edges = [{ source: 'story-1', target: 'script-existing' }];
     expect(createScriptFromBlueprint('story-1')).toBe('script-existing');
     expect(addNode).not.toHaveBeenCalled();
-    expect(updateNodeData).toHaveBeenCalledWith('script-existing', { openRemixEditorRequested: true });
+    expect(updateNodeData).not.toHaveBeenCalled();
+    expect(consumeRemixScriptEditorRequest('script-existing')).toBe(true);
   });
 
   it('removes an unconnected new script and reports a failed connection', () => {
