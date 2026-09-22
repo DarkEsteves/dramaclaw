@@ -386,7 +386,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
               event.stopPropagation();
               setIsFullscreen(true);
             }}
-            disabled={!hasRows}
+            disabled={!hasRows && !hasReferenceEvents}
           >
             <Expand className="h-3 w-3" />
             {t(`${V}.fullscreen`)}
@@ -424,6 +424,9 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
 
       {typeof document !== 'undefined' && isFullscreen && createPortal(
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${resolvedTitle}全屏校对`}
           className="fixed inset-0 z-[220] flex flex-col bg-black/85 p-6"
           onClick={(event) => event.stopPropagation()}
         >
@@ -431,7 +434,9 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             <div className="flex items-center gap-3">
               <FileVideo2 className="h-5 w-5" />
               <span className="text-base font-medium">{resolvedTitle}</span>
-              <span className="text-sm text-text-muted">{t(`${V}.rowCountTotal`, { count: rows.length })}</span>
+              <span className="text-sm text-text-muted">
+                {hasReferenceEvents ? `${referenceEvents.length} 个原片事件` : t(`${V}.rowCountTotal`, { count: rows.length })}
+              </span>
             </div>
             <button
               type="button"
@@ -443,7 +448,17 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             </button>
           </div>
           <div className="flex-1 overflow-hidden rounded-lg border border-[rgba(255,255,255,0.12)] bg-surface-dark/95">
-            <StoryTable rows={rows} onCellCommit={handleCellCommit} />
+            {hasReferenceEvents ? (
+              <ReferenceEventList
+                events={referenceEvents}
+                videoUrl={data.sourceVideoUrl}
+                onOverrideChange={handleReferenceOverride}
+                onReviewAll={handleReviewAll}
+                showFullText
+              />
+            ) : (
+              <StoryTable rows={rows} onCellCommit={handleCellCommit} />
+            )}
           </div>
         </div>,
         document.body,

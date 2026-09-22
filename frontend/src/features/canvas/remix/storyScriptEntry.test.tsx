@@ -1,5 +1,5 @@
 import { forwardRef, useImperativeHandle } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { ensureSaved, createScriptFromBlueprint, updateNodeData } = vi.hoisted(() => ({
@@ -60,5 +60,25 @@ describe('story script entry', () => {
       ],
       blueprintDirty: true,
     });
+  });
+
+  it('shows the complete reference-event review UI in fullscreen', () => {
+    render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], sourceVideoUrl: '/clip.mp4', referenceEvents: [{
+      event_id: 'event-1', start_us: 0, end_us: 1_000_000,
+      visual_observation: '人物展示产品', spoken_text: '这是产品台词', narrative_inference: '产品登场', review_state: 'needs_review',
+      observed_frame: { time_us: 500_000, pts: 7500, time_base: '1/15000', url: '/frame.png' },
+    }] }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'node.videoStory.fullscreen' }));
+    const dialog = screen.getByRole('dialog', { name: '原片拆解全屏校对' });
+    expect(within(dialog).getByText('人物展示产品')).not.toHaveClass('line-clamp-2');
+    expect(within(dialog).getByText('这是产品台词')).toBeTruthy();
+    expect(within(dialog).getByText('产品登场')).toBeTruthy();
+    expect(within(dialog).getByText(/PTS 7500 · 1\/15000/)).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed' } });
+    expect(updateNodeData).toHaveBeenCalledWith('story-1', expect.objectContaining({
+      referenceEvents: [expect.objectContaining({ event_id: 'event-1', review_state: 'reviewed' })],
+      blueprintDirty: true,
+    }));
   });
 });
