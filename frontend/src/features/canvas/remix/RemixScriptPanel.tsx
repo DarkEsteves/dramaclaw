@@ -131,7 +131,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       {blueprintSettings}
       {!blueprintSettings && blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
       {!blueprintSettings && blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
-      {(blueprintRef || onEnsureBlueprint) && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
+      {(blueprintRef || onEnsureBlueprint) && <div>
+        <label htmlFor="remix-new-topic">新主题</label>
+        <div className="flex items-center gap-2">
+          <input id="remix-new-topic" aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={`${fieldClass} min-w-0 flex-1`} />
+          <button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className="nodrag mt-1 inline-flex h-9 shrink-0 items-center justify-center rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">{generating ? '生成中…' : '生成改编台词'}</button>
+        </div>
+        <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
+      </div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>

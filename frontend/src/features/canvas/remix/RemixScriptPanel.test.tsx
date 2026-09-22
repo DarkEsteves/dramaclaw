@@ -11,6 +11,19 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 
 describe('RemixScriptPanel', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('makes script generation the clear primary action after entering a topic', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    const generateButton = screen.getByRole('button', { name: '生成改编台词' });
+    expect(screen.getByText('填写新主题后，点击右侧按钮生成台词')).toBeVisible();
+    expect(generateButton).toBeDisabled();
+    expect(generateButton).toHaveClass('bg-primary');
+
+    fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新品咖啡' } });
+    expect(generateButton).toBeEnabled();
+  });
+
   it('marks a selected phrase and saves a versioned script artifact', async () => {
     const onSave = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
@@ -61,7 +74,7 @@ describe('RemixScriptPanel', () => {
     const onDraftChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={onSave} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新咖啡' } });
-    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
 
     await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', { artifactId: 'blueprint-1', revision: 1 }, '新咖啡'));
     expect((await screen.findByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('新主题来了，喝一口咖啡。');
@@ -93,7 +106,7 @@ describe('RemixScriptPanel', () => {
 
     expect(screen.getByText('当前脚本的改编规则')).toBeVisible();
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新品饮料' } });
-    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
     await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', branchRef, '新品饮料'));
 
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
@@ -107,7 +120,7 @@ describe('RemixScriptPanel', () => {
     const onDraftChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '原稿', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '茶' } });
-    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
 
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '模型输出无效');
     expect((screen.getByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('原稿');
