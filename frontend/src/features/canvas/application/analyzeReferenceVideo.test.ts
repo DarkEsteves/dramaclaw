@@ -64,6 +64,54 @@ describe('analyzeReferenceVideo', () => {
     expect(reanalyzeVideoStory).toHaveBeenCalledWith('story', expect.objectContaining({ transcriptRef: null }));
   });
 
+  it('creates a fresh story node when a completed analysis already exists', async () => {
+    state.nodes.push({
+      id: 'story-existing',
+      type: 'videoStoryNode',
+      data: { sourceVideoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4', remixAnalysisStage: 'completed' },
+    });
+    state.edges.push({ source: 'video', target: 'story-existing' });
+
+    const result = analyzeReferenceVideo('video', { videoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4' });
+    expect(result.nodeId).toBe('story');
+    expect(state.edges).toContainEqual({ source: 'video', target: 'story' });
+    await result.completion;
+    expect(reanalyzeVideoStory).toHaveBeenCalledWith('story', expect.any(Object));
+  });
+
+  it('reanalyzes an explicit story target in place', async () => {
+    state.nodes.push({
+      id: 'story-existing',
+      type: 'videoStoryNode',
+      data: { sourceVideoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4', remixAnalysisStage: 'completed' },
+    });
+    state.edges.push({ source: 'video', target: 'story-existing' });
+
+    const result = analyzeReferenceVideo('video', {
+      videoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4',
+      targetStoryId: 'story-existing',
+    });
+    expect(result.nodeId).toBe('story-existing');
+    expect(state.addNode).not.toHaveBeenCalledWith('videoStoryNode', expect.anything(), expect.anything());
+    await result.completion;
+    expect(reanalyzeVideoStory).toHaveBeenCalledWith('story-existing', expect.any(Object));
+  });
+
+  it('returns the running story when the toolbar is clicked again before completion', async () => {
+    let releaseMedia!: (media: Record<string, unknown>) => void;
+    api.attachRemixMedia.mockReturnValueOnce(new Promise((resolve) => { releaseMedia = resolve; }));
+
+    const first = analyzeReferenceVideo('video', { videoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4' });
+    const second = analyzeReferenceVideo('video', { videoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4' });
+
+    expect(second.nodeId).toBe(first.nodeId);
+    expect(second.completion).toBe(first.completion);
+    expect(state.addNode).toHaveBeenCalledTimes(1);
+
+    releaseMedia({ media_path: 'freezone/_uploads/clip.mp4', media_hash: 'hash', media_kind: 'video', duration_us: 2_000_000, has_audio: true, url: '/static/projects/demo/freezone/_uploads/clip.mp4' });
+    await first.completion;
+  });
+
   it('reuses an existing manual transcription operation instead of submitting twice', async () => {
     startSourceTranscript.mockImplementation(async () => {
       state.nodes.push({ id: 'transcript', type: 'transcriptNode', data: { words: [], operationId: 'manual-op', sourceMediaHash: 'hash' } });

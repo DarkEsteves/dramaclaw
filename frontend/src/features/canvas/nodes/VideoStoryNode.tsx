@@ -231,7 +231,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeData(id, { sourceVideoUrl: blueprintSource.videoUrl, referenceBlueprintRef: null });
     const videoSource = canvasNodes.find((node) => node.type === CANVAS_NODE_TYPES.video && node.data.videoUrl === blueprintSource.videoUrl);
     if (videoSource) {
-      analyzeReferenceVideo(videoSource.id, { videoUrl: blueprintSource.videoUrl });
+      analyzeReferenceVideo(videoSource.id, { videoUrl: blueprintSource.videoUrl, targetStoryId: id });
     } else {
       reanalyzeVideoStory(id, { durationSec: blueprintSource.durationUs / 1_000_000 });
     }

@@ -141,15 +141,30 @@ async function runAnalysis(sourceId: string, storyId: string, videoUrl: string):
   }
 }
 
-export function analyzeReferenceVideo(sourceId: string, opts: { videoUrl: string }): { nodeId: string; completion: Promise<void> } {
+export function analyzeReferenceVideo(sourceId: string, opts: { videoUrl: string; targetStoryId?: string }): { nodeId: string; completion: Promise<void> } {
   const store = useCanvasStore.getState();
   const source = store.nodes.find((node) => node.id === sourceId);
   if (!source || source.type !== CANVAS_NODE_TYPES.video || source.data.videoUrl !== opts.videoUrl) throw new Error('请选择已上传的视频节点');
-  const existing = store.edges.find((edge) => edge.source === sourceId && store.nodes.some((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.videoStory && node.data.sourceVideoUrl === opts.videoUrl));
-  const storyId = existing?.target ?? store.addNode(CANVAS_NODE_TYPES.videoStory, store.findNodePosition(sourceId, 720, 360), {
+
+  const explicitTarget = opts.targetStoryId
+    ? store.nodes.find((node) => node.id === opts.targetStoryId
+      && node.type === CANVAS_NODE_TYPES.videoStory
+      && store.edges.some((edge) => edge.source === sourceId && edge.target === node.id))
+    : null;
+  if (opts.targetStoryId && !explicitTarget) throw new Error('当前原片拆解节点未连接此视频');
+
+  const runningTarget = !explicitTarget
+    ? store.edges
+      .filter((edge) => edge.source === sourceId)
+      .map((edge) => store.nodes.find((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.videoStory))
+      .find((node) => node && running.has(node.id))
+    : null;
+  if (runningTarget) return { nodeId: runningTarget.id, completion: running.get(runningTarget.id)! };
+
+  const storyId = explicitTarget?.id ?? store.addNode(CANVAS_NODE_TYPES.videoStory, store.findNodePosition(sourceId, 720, 360), {
     displayName: '原片拆解', sourceVideoUrl: opts.videoUrl, rows: [], rawResult: null, isAnalyzing: true, remixAnalysisStage: 'preparing', analysisError: null,
   });
-  if (!existing && !store.addEdge(sourceId, storyId)) { store.deleteNode(storyId); throw new Error('连接原片拆解节点失败'); }
+  if (!explicitTarget && !store.addEdge(sourceId, storyId)) { store.deleteNode(storyId); throw new Error('连接原片拆解节点失败'); }
   const pending = running.get(storyId);
   if (pending) return { nodeId: storyId, completion: pending };
   patch(storyId, { sourceVideoUrl: opts.videoUrl, isAnalyzing: true, analysisError: null, remixAnalysisStage: 'preparing' });

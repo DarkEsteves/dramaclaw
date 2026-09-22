@@ -2280,13 +2280,6 @@ export const NodeActionToolbar = memo(
                   toast.info(t("nodeToolbar.video.extendPickHint"));
                 };
 
-                const handleVideoAnalyze = () => {
-                  if (!hasVideo || !videoUrl || isAnalyzing) {
-                    return;
-                  }
-                  analyzeReferenceVideo(node.id, { videoUrl });
-                };
-
                 const handleVideoDownload = async () => {
                   if (!hasVideo || !videoUrl) {
                     return;
@@ -2418,8 +2411,8 @@ export const NodeActionToolbar = memo(
                       }
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (videoAnalyzeBillingRuleMissing) return;
-                        handleVideoAnalyze();
+                        if (!hasVideo || !videoUrl || isAnalyzing || videoAnalyzeBillingRuleMissing) return;
+                        handleAnalyzeVideo();
                       }}
                     >
                       {isAnalyzing ? (
