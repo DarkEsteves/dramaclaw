@@ -152,7 +152,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
           <button type="button" aria-label={`生成 ${selection.label} 素材`} onClick={() => createVisual(index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button>
           <button type="button" aria-label={`上传 ${selection.label} 素材`} onClick={() => createVisual(index, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button>
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
-          {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">素材节点已创建，生成或上传完成后再保存。</span>}
+          {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">补充画面节点已创建，但素材尚未完成。请先在画布生成或上传素材，再点击右下角「保存脚本版本」。</span>}
         </div>
         {requirement?.required && <p className="col-span-6 text-amber-300">必需补充画面（B-roll）· {requirement.purpose} · {requirement.suggested_query}</p>}
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}

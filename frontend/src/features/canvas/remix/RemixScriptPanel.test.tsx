@@ -122,6 +122,7 @@ describe('RemixScriptPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product');
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }));
+    expect(screen.getByText('补充画面节点已创建，但素材尚未完成。请先在画布生成或上传素材，再点击右下角「保存脚本版本」。')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product');
