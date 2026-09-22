@@ -92,7 +92,8 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
       if (!rule.visual_media_revision || media.media_hash !== rule.visual_media_revision) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);
       const mediaId = `visual-${rule.visual_node_id}`;
       if (!bindings.some((binding) => binding.media_id === mediaId)) bindings.push({ media_id: mediaId, kind: media.media_kind, project_path: media.media_path, media_hash: `sha256:${media.media_hash}` });
-      layers.push({ row_id: `visual:${event.event_id}`, media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
+      const fadeFrames = Math.min(4, Math.floor((event.end_frame - event.start_frame) / 2));
+      layers.push({ row_id: `visual:${event.event_id}`, media_id: mediaId, start_frame: event.start_frame, end_frame: event.end_frame, z_order: 1, fit: 'cover', fade_in_frames: fadeFrames, fade_out_frames: fadeFrames, zoom: { start: 1, end: 1.04 } });
     }
     if (!caption.trim() && !rule.visual_node_id) throw new Error(`事件 ${event.event_id} 没有字幕或画面输出`);
     if (rule.sfx_node_id) {

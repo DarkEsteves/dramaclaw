@@ -107,6 +107,24 @@ describe('buildNodeRemixManifest', () => {
     expect(output.layers).toContainEqual({ row_id: 'visual:product', media_id: 'visual-image-1', start_frame: 12, end_frame: 45, z_order: 1, fit: 'cover', fade_in_frames: 4, fade_out_frames: 4, zoom: { start: 1, end: 1.04 } });
   });
 
+  it.each([
+    { endFrame: 1, fadeFrames: 0 },
+    { endFrame: 6, fadeFrames: 3 },
+    { endFrame: 7, fadeFrames: 3 },
+    { endFrame: 8, fadeFrames: 4 },
+  ])('keeps B-roll fades within a $endFrame-frame event', ({ endFrame, fadeFrames }) => {
+    const output = buildNodeRemixManifest({ reference: video, background, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'flash', start_frame: 0, end_frame: endFrame }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '闪', events: [{ event_id: 'flash', caption: '闪', visual_node_id: 'image-1', visual_media_revision: image.media_hash }] },
+      visuals: { 'image-1': image },
+    });
+    expect(output.layers).toContainEqual(expect.objectContaining({
+      row_id: 'visual:flash',
+      fade_in_frames: fadeFrames,
+      fade_out_frames: fadeFrames,
+    }));
+  });
+
   it('binds an uploaded video by exact project path and selected media revision', () => {
     const output = buildNodeRemixManifest({ reference: video, background, narration: audio,
       timing: { fps: 30, events: [{ event_id: 'product', start_frame: 12, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
