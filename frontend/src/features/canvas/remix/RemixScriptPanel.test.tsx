@@ -18,7 +18,9 @@ describe('RemixScriptPanel', () => {
     expect(await screen.findByText('用早晨疲惫引出咖啡')).toBeTruthy();
     dialogue.focus();
     dialogue.setSelectionRange(2, 4);
-    fireEvent.click(screen.getByRole('button', { name: '标记选中文本' }));
+    expect(screen.getByText('选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
+    expect(screen.getByText('补充画面（B-roll）')).toBeVisible();
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'video-1' } });
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
     await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', expect.objectContaining({ selections: [expect.objectContaining({ start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) })] }), null, { artifactId: 'blueprint-1', revision: 1 }));
@@ -100,7 +102,7 @@ describe('RemixScriptPanel', () => {
   it('shows the Recipe requirement beside the exact B-roll event', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '必须看见产品', suggested_query: '咖啡杯特写' }]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByText('必需 B-roll · 必须看见产品 · 咖啡杯特写')).toBeInTheDocument();
+    expect(screen.getByText('必需补充画面（B-roll）· 必须看见产品 · 咖啡杯特写')).toBeInTheDocument();
   });
 
   it('attaches an existing canvas visual and stores its immutable media revision', async () => {
