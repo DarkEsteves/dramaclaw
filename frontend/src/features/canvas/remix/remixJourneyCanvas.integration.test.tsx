@@ -187,7 +187,7 @@ describe('native canvas remix journey integration', () => {
     await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
     expect(screen.getByText('这些规则只属于当前脚本分支，不会影响原片拆解或其他脚本节点。')).toBeVisible();
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
-    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
+    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
     await screen.findByDisplayValue('新品登场');
     fireEvent.click(await screen.findByRole('button', { name: '上传 产品登场 素材' }));
     const visual = useCanvasStore.getState().nodes.find((node) => node.type === 'uploadNode')!;

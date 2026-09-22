@@ -131,19 +131,8 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       {blueprintSettings}
       {!blueprintSettings && blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
       {!blueprintSettings && blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
-      {(blueprintRef || onEnsureBlueprint) && <>
-        <section className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
-          <h3 className="font-medium text-text-dark">AI 生成改编台词</h3>
-          <p className="mt-1 text-text-muted">输入新主题，AI 会按照上方规则生成台词，并替换下方当前内容。</p>
-          <div className="mt-3 flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '生成改编台词'}</button></div>
-        </section>
-        <div className="flex items-center gap-3 text-[11px] text-text-muted" aria-hidden="true"><span className="h-px flex-1 bg-white/10" /><span>或者</span><span className="h-px flex-1 bg-white/10" /></div>
-      </>}
-      <section>
-        <h3 className="font-medium text-text-dark">手动编辑台词</h3>
-        <p className="mt-1 text-text-muted">也可以直接修改或粘贴完整台词，完成后保存脚本版本。</p>
-        <label className="mt-2 block"><span className="sr-only">改编台词</span><textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
-      </section>
+      {(blueprintRef || onEnsureBlueprint) && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
+      <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>
       <div className="border-t border-white/10 pt-3">

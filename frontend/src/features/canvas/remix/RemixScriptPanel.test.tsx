@@ -60,13 +60,8 @@ describe('RemixScriptPanel', () => {
     const onSave = vi.fn();
     const onDraftChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={onSave} onClose={() => {}} />);
-    expect(screen.getByRole('heading', { name: 'AI 生成改编台词' })).toBeVisible();
-    expect(screen.getByText('输入新主题，AI 会按照上方规则生成台词，并替换下方当前内容。')).toBeVisible();
-    expect(screen.getByText('或者')).toBeVisible();
-    expect(screen.getByRole('heading', { name: '手动编辑台词' })).toBeVisible();
-    expect(screen.getByText('也可以直接修改或粘贴完整台词，完成后保存脚本版本。')).toBeVisible();
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新咖啡' } });
-    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
+    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
 
     await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', { artifactId: 'blueprint-1', revision: 1 }, '新咖啡'));
     expect((await screen.findByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('新主题来了，喝一口咖啡。');
@@ -98,7 +93,7 @@ describe('RemixScriptPanel', () => {
 
     expect(screen.getByText('当前脚本的改编规则')).toBeVisible();
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新品饮料' } });
-    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
+    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
     await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', branchRef, '新品饮料'));
 
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
@@ -112,7 +107,7 @@ describe('RemixScriptPanel', () => {
     const onDraftChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '原稿', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '茶' } });
-    fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
+    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
 
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '模型输出无效');
     expect((screen.getByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('原稿');
