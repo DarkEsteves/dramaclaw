@@ -40,6 +40,19 @@ describe('ReferenceBlueprintPanel', () => {
     expect(container.firstElementChild).toHaveClass('nowheel');
   });
 
+  it('keeps adaptation rules visible and puts technical lineage under generation evidence', () => {
+    render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={() => {}} onReanalyze={() => {}} />);
+    expect(screen.getByLabelText('整体叙事作用')).toBeVisible();
+    expect(screen.getByLabelText('保留规则')).toBeVisible();
+    expect(screen.getByLabelText('替换规则')).toBeVisible();
+    const summary = screen.getByText('查看生成依据');
+    const details = summary.closest('details');
+    expect(details).toBeTruthy();
+    expect(details).not.toHaveAttribute('open');
+    expect(details).toHaveTextContent('原片 reference.mp4');
+    expect(details).toHaveTextContent('证据 evidence-1 · r1');
+  });
+
   it('extracts full-video evidence and persists the resulting reference', async () => {
     const onPatch = vi.fn();
     render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{}} onPatch={onPatch} onReanalyze={() => {}} />);

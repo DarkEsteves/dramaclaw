@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ReactFlow, ReactFlowProvider, type NodeTypes } from '@xyflow/react';
 import { useMemo } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -182,6 +182,8 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
 
     fireEvent.click(await screen.findByRole('button', { name: '生成改编脚本' }));
+    const scriptSettings = await screen.findByRole('dialog', { name: '改编脚本设置' });
+    fireEvent.click(within(scriptSettings).getByRole('button', { name: '生成新脚本' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'scriptNode')).toBe(true));
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));

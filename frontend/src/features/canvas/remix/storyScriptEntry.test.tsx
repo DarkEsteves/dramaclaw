@@ -1,5 +1,5 @@
 import { forwardRef, useImperativeHandle } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { ensureSaved, createScriptFromBlueprint, updateNodeData } = vi.hoisted(() => ({
@@ -13,7 +13,7 @@ vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unkn
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/NodeResizeHandle', () => ({ NodeResizeHandle: () => null }));
 vi.mock('@/features/canvas/ui/nodeFrameStyles', () => ({ CANVAS_NODE_PANEL_SURFACE_CLASS: '', canvasNodeFrameClass: () => '' }));
-vi.mock('@/features/canvas/remix/blueprintPanel', () => ({ ReferenceBlueprintPanel: forwardRef(function MockPanel(_props, ref) { useImperativeHandle(ref, () => ({ ensureSaved })); return null; }) }));
+vi.mock('@/features/canvas/remix/blueprintPanel', () => ({ ReferenceBlueprintPanel: forwardRef(function MockPanel(_props, ref) { useImperativeHandle(ref, () => ({ ensureSaved })); return <div>改编规则内容</div>; }) }));
 vi.mock('@/features/canvas/remix/createScriptFromBlueprint', () => ({ createScriptFromBlueprint }));
 
 import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
@@ -28,20 +28,29 @@ describe('story script entry', () => {
     rerender(<VideoStoryNode {...props} width={810} height={450} />);
     expect(container.firstElementChild).toHaveStyle({ width: '810px', height: '450px' });
   });
-  it('saves the blueprint before opening a connected script', async () => {
+  it('opens adaptation settings and saves them before creating a connected script', async () => {
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
     expect(screen.queryByRole('button', { name: '生成改编脚本' })).toBeNull();
-    canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' });
+    expect(screen.queryByText(/参考蓝图与分析设置/)).toBeNull();
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
+    const dialog = await screen.findByRole('dialog', { name: '改编脚本设置' });
+    expect(within(dialog).getByText('改编规则内容')).toBeTruthy();
+    expect(createScriptFromBlueprint).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '生成新脚本' }));
     await waitFor(() => expect(createScriptFromBlueprint).toHaveBeenCalledWith('story-1'));
     expect(ensureSaved).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();
   });
 
   it('keeps the user on the story node when blueprint save fails', async () => {
     ensureSaved.mockRejectedValueOnce(new Error('原片证据尚未完成'));
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
-    canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' });
-    expect(await screen.findByRole('alert')).toHaveTextContent('原片证据尚未完成');
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
+    const dialog = await screen.findByRole('dialog', { name: '改编脚本设置' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '生成新脚本' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('原片证据尚未完成');
     expect(createScriptFromBlueprint).not.toHaveBeenCalled();
+    expect(dialog).toBeInTheDocument();
   });
 
   it('marks every pending reference event reviewed with one canvas update', () => {

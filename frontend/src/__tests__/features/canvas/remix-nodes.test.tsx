@@ -88,7 +88,7 @@ describe('remix canvas nodes', () => {
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
   });
 
-  it('renders a persisted reference blueprint artifact on the story node', () => {
+  it('keeps a persisted adaptation artifact out of the story analysis view', () => {
     render(
       <VideoStoryNode
         id="blueprint-1"
@@ -110,7 +110,7 @@ describe('remix canvas nodes', () => {
       />,
     );
 
-    expect(screen.getByText('Blueprint blueprint-1 · r3')).toBeTruthy();
+    expect(screen.queryByText('Blueprint blueprint-1 · r3')).toBeNull();
     expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
   });

@@ -154,24 +154,32 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
     onPatch({ [field]: value, blueprintDirty: true });
   };
 
-  return <section className="ui-scrollbar nowheel max-h-[220px] overflow-auto border-b border-white/[0.08] p-3 text-xs text-text-dark">
-    <div className="mb-2 flex items-center gap-2">
-      <strong>参考蓝图</strong>
-      <span className="text-text-muted">{source ? `原片 ${source.mediaPath}` : '请连接已上传的原片视频'}</span>
-      {source?.transcriptRef && <span className="text-text-muted">转写 r{source.transcriptRef.revision}</span>}
+  return <section className="ui-scrollbar nowheel grid gap-4 text-xs text-text-dark">
+    <p className="leading-5 text-text-muted">这些规则只用于生成新的改编脚本，不会改动原片拆解结果。</p>
+    <label className="block">整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className="mt-1.5 w-full rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
+    <div className="grid grid-cols-2 gap-3">
+      <label>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className="mt-1.5 min-h-24 w-full resize-y rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
+      <label>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className="mt-1.5 min-h-24 w-full resize-y rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
     </div>
-    <div className="mb-2 flex flex-wrap gap-2">
-      <button type="button" disabled={!source || busy || Boolean(operationId || draft.managedEvidenceOperationId)} onClick={() => void analyzeEvidence()} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">{operationId || draft.managedEvidenceOperationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
-      <button type="button" disabled={!source || busy} onClick={onReanalyze} className="rounded border border-border-dark px-2 py-1 disabled:opacity-50">重新分析画面</button>
-      {evidenceRef && <span className="text-text-muted">证据 {evidenceRef.artifactId} · r{evidenceRef.revision}</span>}
-    </div>
-    <p className="mb-2 text-text-muted">画面描述来自模型分析，请核对原片；下方规则会在生成改编脚本时自动保存。</p>
-    <label className="mb-1 block">整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
-    <div className="grid grid-cols-2 gap-2">
-      <label>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
-      <label>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className="mt-1 w-full rounded border border-border-dark bg-surface-field p-1" /></label>
-    </div>
-    {draft.referenceBlueprintRef && <div className="mt-2 text-text-muted">蓝图 {draft.referenceBlueprintRef.artifactId} · r{draft.referenceBlueprintRef.revision}</div>}
-    {error && <p role="alert" className="mt-1 text-red-300">{error}</p>}
+    <details className="rounded-[12px] border border-border-dark bg-bg-dark/35">
+      <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">查看生成依据</summary>
+      <div className="grid gap-3 border-t border-white/[0.08] px-3 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <strong className="font-medium">原片与分析产物</strong>
+          <span className="break-all text-text-muted">{source ? `原片 ${source.mediaPath}` : '请连接已上传的原片视频'}</span>
+          {source?.transcriptRef && <span className="text-text-muted">转写 r{source.transcriptRef.revision}</span>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" disabled={!source || busy || Boolean(operationId || draft.managedEvidenceOperationId)} onClick={() => void analyzeEvidence()} className="rounded-[12px] border border-border-dark px-2 py-1 disabled:opacity-50">{operationId || draft.managedEvidenceOperationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
+          <button type="button" disabled={!source || busy} onClick={onReanalyze} className="rounded-[12px] border border-border-dark px-2 py-1 disabled:opacity-50">重新分析画面</button>
+        </div>
+        <div className="flex flex-wrap gap-3 text-text-muted">
+          {evidenceRef && <span>证据 {evidenceRef.artifactId} · r{evidenceRef.revision}</span>}
+          {draft.referenceBlueprintRef && <span>改编规则版本 {draft.referenceBlueprintRef.artifactId} · r{draft.referenceBlueprintRef.revision}</span>}
+        </div>
+        <p className="text-text-muted">画面描述来自模型分析；这里用于查看生成来源，或在证据缺失时重新提取和分析。</p>
+      </div>
+    </details>
+    {error && <p role="alert" className="text-red-300">{error}</p>}
   </section>;
 });

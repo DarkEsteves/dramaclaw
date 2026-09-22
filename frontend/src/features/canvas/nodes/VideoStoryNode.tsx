@@ -351,6 +351,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const canvasNodes = useCanvasStore((state) => state.nodes);
   const canvasEdges = useCanvasStore((state) => state.edges);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isScriptSettingsOpen, setIsScriptSettingsOpen] = useState(false);
   const [isCreatingScript, setIsCreatingScript] = useState(false);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const blueprintPanelRef = useRef<ReferenceBlueprintPanelHandle>(null);
@@ -381,15 +382,17 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeInternals(id);
   }, [id, resolvedHeight, resolvedWidth, updateNodeInternals]);
 
-  // Esc to exit fullscreen.
+  // Esc closes whichever node-level dialog is open.
   useEffect(() => {
-    if (!isFullscreen) return;
+    if (!isFullscreen && !isScriptSettingsOpen) return;
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsFullscreen(false);
+      if (event.key !== 'Escape' || isCreatingScript) return;
+      setIsFullscreen(false);
+      setIsScriptSettingsOpen(false);
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [isFullscreen]);
+  }, [isCreatingScript, isFullscreen, isScriptSettingsOpen]);
 
   const cardToneClass = canvasNodeFrameClass({ selected });
 
@@ -447,6 +450,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
       if (!blueprintPanelRef.current) throw new Error('参考蓝图设置尚未准备好。');
       await blueprintPanelRef.current.ensureSaved();
       createScriptFromBlueprint(id);
+      setIsScriptSettingsOpen(false);
     } catch (cause) {
       setScriptError(cause instanceof Error ? cause.message : '无法生成改编脚本。');
     } finally {
@@ -455,8 +459,11 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   }, [isCreatingScript, id]);
 
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
-    if (nodeId === id && action === 'continue_story') void generateScript();
-  }), [generateScript, id]);
+    if (nodeId === id && action === 'continue_story') {
+      setScriptError(null);
+      setIsScriptSettingsOpen(true);
+    }
+  }), [id]);
 
   return (
     <div
@@ -522,12 +529,6 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             {t(`${V}.fullscreen`)}
           </button>
         </div>
-        {scriptError && <div role="alert" className="px-3 py-1 text-[12px] text-red-300">{scriptError}</div>}
-        <details className="nodrag border-b border-white/[0.08] text-xs text-text-dark">
-          <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">参考蓝图与分析设置{data.referenceBlueprintRef ? ' · 已保存' : ''}</summary>
-          <ReferenceBlueprintPanel ref={blueprintPanelRef} nodeId={id} source={blueprintSource} rows={rows} referenceEvents={referenceEvents} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} suggestedNarrativeRole={suggestedNarrativeRole} />
-        </details>
-        {data.referenceBlueprintRef && <div className="px-3 py-1 text-[11px] text-text-muted">Blueprint {data.referenceBlueprintRef.artifactId} · r{data.referenceBlueprintRef.revision}</div>}
         <div className="min-h-0 flex-1 overflow-hidden p-2">
           {isAnalyzing ? (
             <div className="h-full w-full" />
@@ -589,6 +590,50 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             ) : (
               <StoryTable rows={rows} onCellCommit={handleCellCommit} />
             )}
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {typeof document !== 'undefined' && isScriptSettingsOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[230] flex items-center justify-center bg-black/70 p-6"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isCreatingScript) setIsScriptSettingsOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="改编脚本设置"
+            className="flex max-h-[min(760px,calc(100vh-48px))] w-full max-w-[720px] flex-col overflow-hidden rounded-[var(--ui-radius-xl)] border border-border-dark bg-surface-dark shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex items-start justify-between gap-4 border-b border-white/[0.08] px-5 py-4">
+              <div>
+                <h2 className="text-base font-medium text-text-dark">改编脚本设置</h2>
+                <p className="mt-1 text-xs leading-5 text-text-muted">确认原片结构与改编规则。生成后会在画布上创建一个新的脚本节点。</p>
+              </div>
+              <button
+                type="button"
+                aria-label="关闭改编脚本设置"
+                disabled={isCreatingScript}
+                onClick={() => setIsScriptSettingsOpen(false)}
+                className="rounded p-1 text-text-muted hover:bg-white/[0.06] hover:text-text-dark disabled:opacity-45"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto px-5 py-4">
+              <ReferenceBlueprintPanel ref={blueprintPanelRef} nodeId={id} source={blueprintSource} rows={rows} referenceEvents={referenceEvents} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} suggestedNarrativeRole={suggestedNarrativeRole} />
+              {scriptError && <p role="alert" className="mt-3 text-xs text-red-300">{scriptError}</p>}
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-white/[0.08] px-5 py-4">
+              <button type="button" disabled={isCreatingScript} onClick={() => setIsScriptSettingsOpen(false)} className="tap-button disabled:opacity-45">取消</button>
+              <button type="button" disabled={isCreatingScript} onClick={() => void generateScript()} className="tap-button tap-button-quiet-primary disabled:opacity-45">
+                {isCreatingScript ? '正在生成…' : '生成新脚本'}
+              </button>
+            </footer>
           </div>
         </div>,
         document.body,
