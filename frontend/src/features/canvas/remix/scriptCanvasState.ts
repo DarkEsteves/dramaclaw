@@ -4,7 +4,7 @@ import type { RemixScriptDraft } from './remixScriptModel';
 
 type ArtifactRef = { artifactId?: string; revision?: number };
 export function remixScriptEditorLabel(data: CanvasNode['data'], hasBlueprint: boolean): '编写改编脚本' | '编辑改编脚本' | null {
-  const isRemix = hasBlueprint || Boolean(data.remixScriptRef || data.remixScriptLastSavedRef || data.remixScriptDraft);
+  const isRemix = hasBlueprint || data.remixRole === 'adaptation_script' || Boolean(data.referenceBlueprintRef || data.remixScriptRef || data.remixScriptLastSavedRef || data.remixScriptDraft);
   if (!isRemix) return null;
   const dialogue = (data.remixScriptDraft as RemixScriptDraft | undefined)?.dialogue;
   return (typeof dialogue === 'string' && dialogue.trim()) || data.remixScriptRef || data.remixScriptLastSavedRef

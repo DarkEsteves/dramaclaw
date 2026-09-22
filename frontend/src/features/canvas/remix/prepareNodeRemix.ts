@@ -115,11 +115,12 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const timingNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline && node.data.artifactRef && edges.some((edge) => edge.source === node.id && edge.target === composeId)), '语义时间轴');
   const scriptNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixScriptRef && edges.some((edge) => edge.source === node.id && edge.target === timingNode.id)), '改编脚本');
   const transcriptNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.transcript && node.data.artifactRef && edges.some((edge) => edge.source === node.id && edge.target === timingNode.id)), '对齐转写');
-  const blueprintNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.videoStory && node.data.referenceBlueprintRef && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)), '参考蓝图');
+  const blueprintNode = one(upstream.filter((node) => node.type === CANVAS_NODE_TYPES.videoStory && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)), '原片拆解');
   const timingRef = timingNode.data.artifactRef as RemixArtifactRef;
   const scriptRef = scriptNode.data.remixScriptRef as RemixArtifactRef;
   const transcriptRef = transcriptNode.data.artifactRef as RemixArtifactRef;
-  const blueprintRef = blueprintNode.data.referenceBlueprintRef as RemixArtifactRef;
+  const blueprintRef = (scriptNode.data.remixBlueprintRef ?? blueprintNode.data.referenceBlueprintRef) as RemixArtifactRef;
+  if (!blueprintRef?.artifactId || !blueprintRef.revision) throw new Error('当前脚本缺少改编规则版本');
   const [timingArtifact, scriptArtifact, blueprintArtifact] = await Promise.all([fetchRemixArtifact(project, timingRef), fetchRemixArtifact(project, scriptRef), fetchRemixArtifact(project, blueprintRef)]);
   if (timingArtifact.schema !== 'performance_timing.v1' || scriptArtifact.schema !== 'remix_script.v1' || blueprintArtifact.schema !== 'reference_blueprint.v1') throw new Error('上游产物类型不匹配');
   if (blueprintArtifact.payload.media_hash !== reference.media_hash) throw new Error('参考蓝图不是由当前原片生成');

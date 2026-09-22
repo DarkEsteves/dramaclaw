@@ -82,6 +82,35 @@ describe('ReferenceBlueprintPanel', () => {
     expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ referenceBlueprintRef: { artifactId: 'blueprint-1', revision: 1 } }));
   });
 
+  it('inherits seed rules but saves a separate blueprint for the child branch', async () => {
+    const seed = { artifactId: 'story-blueprint', revision: 2 };
+    vi.mocked(fetchRemixArtifact).mockResolvedValueOnce({
+      id: seed.artifactId,
+      revision: seed.revision,
+      schema: 'reference_blueprint.v1',
+      payload: {
+        ...reviewedPayload(),
+        narrative_role: '提问后展示新品',
+        user_choices: [
+          { type: 'preserve', text: '保留问答节奏' },
+          { type: 'replace', text: '替换产品和画面' },
+        ],
+      },
+    });
+    const onPatch = vi.fn();
+    const panel = createRef<ReferenceBlueprintPanelHandle>();
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="script" seedRef={seed} source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={onPatch} onReanalyze={() => {}} />);
+
+    await waitFor(() => expect(screen.getByLabelText('整体叙事作用')).toHaveValue('提问后展示新品'));
+    expect(screen.getByLabelText('保留规则')).toHaveValue('保留问答节奏');
+    expect(screen.getByLabelText('替换规则')).toHaveValue('替换产品和画面');
+    await panel.current?.ensureSaved();
+
+    expect(createRemixArtifact).toHaveBeenCalledWith('demo', 'reference_blueprint.v1', expect.objectContaining({ narrative_role: '提问后展示新品' }), expect.any(Array));
+    expect(reviseRemixArtifact).not.toHaveBeenCalled();
+    expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ referenceBlueprintRef: { artifactId: 'blueprint-1', revision: 1 } }));
+  });
+
   it('reuses the saved blueprint when the rules have not changed', async () => {
     const panel = createRef<ReferenceBlueprintPanelHandle>();
     const saved = { artifactId: 'already-saved', revision: 3 };

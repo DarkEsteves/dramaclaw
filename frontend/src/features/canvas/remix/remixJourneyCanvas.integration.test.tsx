@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ReactFlow, ReactFlowProvider, type NodeTypes } from '@xyflow/react';
 import { useMemo } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -182,13 +182,15 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
 
     fireEvent.click(await screen.findByRole('button', { name: '生成改编脚本' }));
-    const scriptSettings = await screen.findByRole('dialog', { name: '改编脚本设置' });
-    fireEvent.click(within(scriptSettings).getByRole('button', { name: '生成新脚本' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'scriptNode')).toBe(true));
+    expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).not.toBeInTheDocument();
+    await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
+    expect(screen.getByText('这些规则只属于当前脚本分支，不会影响原片拆解或其他脚本节点。')).toBeVisible();
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
     await screen.findByDisplayValue('新品登场');
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef).toBeTruthy());
 
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 规划 B-roll' }));
     const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;

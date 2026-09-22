@@ -133,11 +133,12 @@ export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[]
   const script = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && ref(node.data.remixScriptRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
   const words = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.transcript && ref(node.data.artifactRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
   if (script.length !== 1 || words.length !== 1 || !sameRef(ref(words[0].data.alignedScriptRef), ref(script[0].data.remixScriptRef))) throw new Error('时间轴需要连接当前脚本和已对齐的转写节点。');
-  const blueprint = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.videoStory && ref(node.data.referenceBlueprintRef) && edges.some((edge) => edge.source === node.id && edge.target === script[0].id));
-  if (blueprint.length !== 1) throw new Error('请先将参考故事蓝图连接到脚本。');
+  const blueprintStory = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.videoStory && edges.some((edge) => edge.source === node.id && edge.target === script[0].id));
+  const blueprintRef = ref(script[0].data.remixBlueprintRef) ?? ref(blueprintStory[0]?.data.referenceBlueprintRef);
+  if (blueprintStory.length !== 1 || !blueprintRef) throw new Error('请先完成当前脚本的改编规则。');
   const reference = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'reference' && node.data.remixMedia);
   if (reference.length !== 1) throw new Error('请先连接一个参考视频素材。');
-  if (!ancestors(nodes, edges, blueprint[0].id).some((node) => node.id === reference[0].id)) throw new Error('请将参考视频连接到参考故事蓝图。');
+  if (!ancestors(nodes, edges, blueprintStory[0].id).some((node) => node.id === reference[0].id)) throw new Error('请将参考视频连接到原片拆解节点。');
   const narrationNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && node.data.remixRole === 'narration');
   if (narrationNodes.length > 1) throw new Error('旁白音频必须且只能有一个。');
   if (narrationNodes.length === 1 && (typeof narrationNodes[0].data.audioUrl !== 'string' || !narrationNodes[0].data.audioUrl)) {

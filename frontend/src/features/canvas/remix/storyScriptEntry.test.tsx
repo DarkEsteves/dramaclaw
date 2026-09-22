@@ -28,32 +28,21 @@ describe('story script entry', () => {
     rerender(<VideoStoryNode {...props} width={810} height={450} />);
     expect(container.firstElementChild).toHaveStyle({ width: '810px', height: '450px' });
   });
-  it('opens adaptation settings and saves them before creating a connected script', async () => {
+  it('creates a connected script immediately without opening story-owned settings', async () => {
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
     expect(screen.queryByRole('button', { name: '生成改编脚本' })).toBeNull();
     expect(screen.queryByText(/参考蓝图与分析设置/)).toBeNull();
     act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
-    const dialog = await screen.findByRole('dialog', { name: '改编脚本设置' });
-    expect(dialog).toHaveClass('bg-[var(--ui-surface-modal)]');
-    expect(within(dialog).getByText('改编规则内容')).toBeTruthy();
-    expect(createScriptFromBlueprint).not.toHaveBeenCalled();
-    const createButton = within(dialog).getByRole('button', { name: '生成新脚本' });
-    expect(createButton).toHaveClass('bg-primary');
-    fireEvent.click(createButton);
     await waitFor(() => expect(createScriptFromBlueprint).toHaveBeenCalledWith('story-1'));
-    expect(ensureSaved).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();
   });
 
-  it('keeps the user on the story node when blueprint save fails', async () => {
-    ensureSaved.mockRejectedValueOnce(new Error('原片证据尚未完成'));
+  it('keeps the user on the story node when creating the child fails', async () => {
+    createScriptFromBlueprint.mockImplementationOnce(() => { throw new Error('改编脚本连线失败'); });
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
     act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
-    const dialog = await screen.findByRole('dialog', { name: '改编脚本设置' });
-    fireEvent.click(within(dialog).getByRole('button', { name: '生成新脚本' }));
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('原片证据尚未完成');
-    expect(createScriptFromBlueprint).not.toHaveBeenCalled();
-    expect(dialog).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('改编脚本连线失败');
+    expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();
   });
 
   it('marks every pending reference event reviewed with one canvas update', () => {

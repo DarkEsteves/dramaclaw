@@ -84,6 +84,9 @@ import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, generateRemixBrollPlan, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
+import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
+import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
+import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
@@ -452,7 +455,26 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (consumeRemixScriptEditorRequest(id)) openEditor();
     return unsubscribe;
   }, [id]);
-  const blueprintRef = remixRef(upstreamNodes.find((node) => node.type === 'videoStoryNode')?.data.referenceBlueprintRef);
+  const blueprintPanelRef = useRef<ReferenceBlueprintPanelHandle>(null);
+  const upstreamStory = upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.videoStory);
+  const blueprintSource = useMemo(
+    () => upstreamStory ? connectedBlueprintSources(upstreamStory.id, canvasNodes, canvasEdges) : null,
+    [canvasEdges, canvasNodes, upstreamStory],
+  );
+  const blueprintRef = remixRef(data.referenceBlueprintRef);
+  const blueprintSeedRef = remixRef(data.remixBlueprintSeedRef) ?? remixRef(upstreamStory?.data.referenceBlueprintRef);
+  const storyRows = Array.isArray(upstreamStory?.data.rows) ? upstreamStory.data.rows : [];
+  const storyReferenceEvents = Array.isArray(upstreamStory?.data.referenceEvents)
+    ? upstreamStory.data.referenceEvents as ReferenceEvent[]
+    : [];
+  const suggestedNarrativeRole = storyReferenceEvents
+    .map((event) => event.narrative_inference?.trim()).filter(Boolean).slice(0, 3).join(' → ')
+    || storyRows.map((row) => typeof row.narrative === 'string' ? row.narrative.trim() : '').filter(Boolean).slice(0, 3).join(' → ');
+  const patchBranchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
+  const ensureBranchBlueprint = useCallback(async () => {
+    if (!blueprintPanelRef.current) throw new Error('当前脚本的改编规则尚未准备好。');
+    return blueprintPanelRef.current.ensureSaved();
+  }, []);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
@@ -855,13 +877,26 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             initialDraft={initialRemixDraft}
             existingRef={savedRemixRef}
             blueprintRef={blueprintRef}
+            blueprintSettings={upstreamStory ? <ReferenceBlueprintPanel
+              ref={blueprintPanelRef}
+              nodeId={id}
+              source={blueprintSource}
+              rows={storyRows}
+              referenceEvents={storyReferenceEvents}
+              draft={data}
+              seedRef={blueprintSeedRef}
+              onPatch={patchBranchBlueprint}
+              onReanalyze={() => canvasEventBus.publish('remix-node/action', { nodeId: upstreamStory.id, action: 'analyze' })}
+              suggestedNarrativeRole={suggestedNarrativeRole}
+            /> : undefined}
+            onEnsureBlueprint={upstreamStory ? ensureBranchBlueprint : undefined}
             visualNodes={remixVisualNodes}
             sfxNodes={remixSfxNodes}
             brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); }}
-            onSave={(ref) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, remixBlueprintRef: blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
+            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

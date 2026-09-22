@@ -94,10 +94,8 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   const hasEvidence = (Array.isArray(story.data.referenceEvents) && story.data.referenceEvents.length > 0)
     || (Array.isArray(story.data.rows) && story.data.rows.length > 0);
   if (!hasEvidence || story.data.analysisError) return { kind: 'action', action: 'analyze_reference', targetNodeId: reference.id, label: '重新分析参考视频' };
-  if (!ref(story.data.referenceBlueprintRef)) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '确认分析并生成脚本', inputHint: '先检查叙事作用和保留/替换规则。' };
-
   const script = directChild(nodes, edges, story.id, CANVAS_NODE_TYPES.script);
-  if (!script) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '填写新主题并生成脚本', inputHint: '输入新主题后生成可编辑台词。' };
+  if (!script) return { kind: 'action', action: 'continue_story', targetNodeId: story.id, label: '确认分析并生成脚本', inputHint: '新脚本节点会继承分析结果，并在自己的编辑弹窗中设置改编规则。' };
   if (!ref(script.data.remixScriptRef)) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '填写新主题并生成脚本', inputHint: '确认台词、语义区间和素材要求后保存。' };
   if (script.data.remixBrollPlanStatus === 'running') return { kind: 'wait', targetNodeId: script.id, label: '等待 B-roll 规划' };
   if (!ref(script.data.remixBrollPlanRef) || !sameRef(script.data.remixBrollScriptRef, script.data.remixScriptRef)) {

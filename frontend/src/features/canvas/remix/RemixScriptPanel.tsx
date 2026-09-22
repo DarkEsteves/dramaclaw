@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fetchRemixArtifact, generateRemixScriptDraft, type RemixArtifactRef } from '@/api/remix';
 import { saveRemixScriptArtifact } from './remixScriptArtifact';
 import { editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
@@ -13,17 +13,19 @@ interface Props {
   initialDraft: RemixScriptDraft;
   existingRef: RemixArtifactRef | null;
   blueprintRef: RemixArtifactRef | null;
+  blueprintSettings?: ReactNode;
+  onEnsureBlueprint?: () => Promise<RemixArtifactRef>;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onDraftChange: (draft: RemixScriptDraft) => void;
-  onSave: (ref: RemixArtifactRef) => void;
+  onSave: (ref: RemixArtifactRef, blueprintRef?: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -36,7 +38,7 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
   const visualBindingRequest = useRef(new Map<string, number>());
   draftRef.current = draft;
   const currentBlueprintRef = useRef(blueprintRef);
-  currentBlueprintRef.current = blueprintRef;
+  if (!onEnsureBlueprint) currentBlueprintRef.current = blueprintRef;
 
   useEffect(() => {
     if (!blueprintRef || !project) return;
@@ -49,11 +51,13 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
 
   const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; draftRef.current = next; setDraft(next); onDraftChange(next); setError(null); };
   const generate = async () => {
-    if (generating || saving || !blueprintRef || !newTopic.trim()) return;
-    const source = blueprintRef;
+    if (generating || saving || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
     const editCount = draftEditCount.current;
     setGenerating(true); setError(null);
     try {
+      const source = onEnsureBlueprint ? await onEnsureBlueprint() : blueprintRef;
+      if (!source) throw new Error('请先完成当前脚本的改编规则。');
+      currentBlueprintRef.current = source;
       const next = await generateRemixScriptDraft(project, source, newTopic.trim());
       const current = currentBlueprintRef.current;
       if (!current || current.artifactId !== source.artifactId || current.revision !== source.revision) throw new Error('参考蓝图已更新，请重新生成脚本');
@@ -75,8 +79,10 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
     setSaving(true);
     setError(null);
     try {
-      const ref = await saveRemixScriptArtifact(project, draft, existingRef, blueprintRef);
-      onSave(ref);
+      const branchRef = onEnsureBlueprint ? await onEnsureBlueprint() : blueprintRef;
+      const ref = await saveRemixScriptArtifact(project, draft, existingRef, branchRef);
+      if (onEnsureBlueprint && branchRef) onSave(ref, branchRef);
+      else onSave(ref);
     } catch (cause) { setError(cause instanceof Error ? cause.message : '保存脚本失败'); }
     finally { setSaving(false); }
   };
@@ -115,12 +121,13 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
       : item) });
   };
 
-  return <div className={`nodrag flex max-h-[82vh] w-[min(720px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
+  return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><h2 className="text-sm font-semibold">改编脚本与语义区间</h2><button type="button" onClick={onClose} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>关闭</button></div>
     <div className="ui-scrollbar space-y-3 overflow-auto p-4 text-xs">
-      {blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
-      {blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
-      {blueprintRef && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => setNewTopic(event.target.value)} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
+      {blueprintSettings}
+      {!blueprintSettings && blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
+      {!blueprintSettings && blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
+      {(blueprintRef || onEnsureBlueprint) && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => setNewTopic(event.target.value)} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>标记选中文本</button>
       <p className="text-text-muted">在台词中选中文字后标记；填写替换画面节点可作为 B-roll 指令。</p>

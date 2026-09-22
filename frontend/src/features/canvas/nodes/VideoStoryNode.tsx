@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Handle,
@@ -28,7 +28,6 @@ import { EditableTableCell } from '@/features/canvas/ui/EditableTableCell';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
-import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
 import { createScriptFromBlueprint } from '@/features/canvas/remix/createScriptFromBlueprint';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
@@ -351,12 +350,8 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const canvasNodes = useCanvasStore((state) => state.nodes);
   const canvasEdges = useCanvasStore((state) => state.edges);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isScriptSettingsOpen, setIsScriptSettingsOpen] = useState(false);
-  const [isCreatingScript, setIsCreatingScript] = useState(false);
   const [scriptError, setScriptError] = useState<string | null>(null);
-  const blueprintPanelRef = useRef<ReferenceBlueprintPanelHandle>(null);
   const blueprintSource = useMemo(() => connectedBlueprintSources(id, canvasNodes, canvasEdges), [id, canvasNodes, canvasEdges]);
-  const patchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
   const reanalyzeBlueprint = useCallback(() => {
     if (!blueprintSource?.videoUrl) return;
     updateNodeData(id, { sourceVideoUrl: blueprintSource.videoUrl, referenceBlueprintRef: null });
@@ -382,17 +377,16 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeInternals(id);
   }, [id, resolvedHeight, resolvedWidth, updateNodeInternals]);
 
-  // Esc closes whichever node-level dialog is open.
+  // Esc closes the node-level detail dialog.
   useEffect(() => {
-    if (!isFullscreen && !isScriptSettingsOpen) return;
+    if (!isFullscreen) return;
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || isCreatingScript) return;
+      if (event.key !== 'Escape') return;
       setIsFullscreen(false);
-      setIsScriptSettingsOpen(false);
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [isCreatingScript, isFullscreen, isScriptSettingsOpen]);
+  }, [isFullscreen]);
 
   const cardToneClass = canvasNodeFrameClass({ selected });
 
@@ -402,8 +396,6 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
   const hasRows = rows.length > 0;
   const referenceEvents = Array.isArray(data.referenceEvents) ? data.referenceEvents as ReferenceEvent[] : [];
   const hasReferenceEvents = referenceEvents.length > 0;
-  const suggestedNarrativeRole = referenceEvents.map((event) => event.narrative_inference?.trim()).filter(Boolean).slice(0, 3).join(' → ')
-    || rows.map((row) => row.narrative?.trim()).filter(Boolean).slice(0, 3).join(' → ');
   const stageLabel: Record<string, string> = { preparing: '准备原片', extracting: '提取画面证据', transcribing: '转写同期台词', analyzing: '对照画面与台词' };
 
   // 表格单元格编辑：把编辑后的值写回 data.rows[idx][colKey]。
@@ -442,26 +434,14 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
-  const generateScript = useCallback(async () => {
-    if (isCreatingScript) return;
-    setIsCreatingScript(true);
-    setScriptError(null);
-    try {
-      if (!blueprintPanelRef.current) throw new Error('参考蓝图设置尚未准备好。');
-      await blueprintPanelRef.current.ensureSaved();
-      createScriptFromBlueprint(id);
-      setIsScriptSettingsOpen(false);
-    } catch (cause) {
-      setScriptError(cause instanceof Error ? cause.message : '无法生成改编脚本。');
-    } finally {
-      setIsCreatingScript(false);
-    }
-  }, [isCreatingScript, id]);
-
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'continue_story') {
       setScriptError(null);
-      setIsScriptSettingsOpen(true);
+      try {
+        createScriptFromBlueprint(id);
+      } catch (cause) {
+        setScriptError(cause instanceof Error ? cause.message : '无法创建改编脚本。');
+      }
     }
   }), [id]);
 
@@ -530,6 +510,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden p-2">
+          {scriptError && <p role="alert" className="mb-2 rounded-[var(--ui-radius-md)] border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-300">{scriptError}</p>}
           {isAnalyzing ? (
             <div className="h-full w-full" />
           ) : hasError ? (
@@ -595,49 +576,6 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
         document.body,
       )}
 
-      {typeof document !== 'undefined' && isScriptSettingsOpen && createPortal(
-        <div
-          className="fixed inset-0 z-[230] flex items-center justify-center bg-black/60 p-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !isCreatingScript) setIsScriptSettingsOpen(false);
-          }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="改编脚本设置"
-            className="relative flex max-h-[82vh] w-[min(680px,calc(100vw-32px))] flex-col overflow-hidden rounded-[var(--ui-radius-xl)] border border-[var(--ui-border-soft)] bg-[var(--ui-surface-modal)] shadow-[var(--ui-shadow-panel)]"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="flex h-16 shrink-0 items-center justify-between gap-4 px-5">
-              <div>
-                <h2 className="text-base font-semibold text-text-dark">改编脚本设置</h2>
-                <p className="mt-0.5 text-xs text-text-muted">确认改编方向，生成后会创建新的脚本节点</p>
-              </div>
-              <button
-                type="button"
-                aria-label="关闭改编脚本设置"
-                disabled={isCreatingScript}
-                onClick={() => setIsScriptSettingsOpen(false)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-white/[0.06] hover:text-text-dark disabled:opacity-40"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto px-5 pb-4">
-              <ReferenceBlueprintPanel ref={blueprintPanelRef} nodeId={id} source={blueprintSource} rows={rows} referenceEvents={referenceEvents} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} suggestedNarrativeRole={suggestedNarrativeRole} />
-              {scriptError && <p role="alert" className="mt-3 text-xs text-red-300">{scriptError}</p>}
-            </div>
-            <footer className="flex h-14 shrink-0 items-center justify-end gap-3 px-5">
-              <button type="button" disabled={isCreatingScript} onClick={() => setIsScriptSettingsOpen(false)} className="tap-button">取消</button>
-              <button type="button" disabled={isCreatingScript} onClick={() => void generateScript()} className="inline-flex h-9 items-center justify-center rounded-[var(--ui-radius-lg)] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40">
-                {isCreatingScript ? '正在生成…' : '生成新脚本'}
-              </button>
-            </footer>
-          </div>
-        </div>,
-        document.body,
-      )}
     </div>
   );
 });

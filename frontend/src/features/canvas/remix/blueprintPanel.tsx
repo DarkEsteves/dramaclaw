@@ -27,13 +27,14 @@ interface Props {
   onPatch: (patch: Partial<BlueprintDraft>) => void;
   onReanalyze: () => void;
   suggestedNarrativeRole?: string;
+  seedRef?: RemixArtifactRef | null;
 }
 
 export interface ReferenceBlueprintPanelHandle {
   ensureSaved: () => Promise<RemixArtifactRef>;
 }
 
-export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole }, ref) {
+export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole, seedRef }, ref) {
   const project = readUrl().project;
   const [operationId, setOperationId] = useState<string | null>(draft.evidenceOperationId ?? null);
   const [role, setRole] = useState(draft.blueprintNarrativeRole ?? '');
@@ -45,9 +46,10 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
 
   useEffect(() => {
-    if (!project || !draft.referenceBlueprintRef || draft.blueprintDirty) return;
+    const restoreRef = draft.referenceBlueprintRef ?? seedRef;
+    if (!project || !restoreRef || draft.blueprintDirty) return;
     let active = true;
-    fetchRemixArtifact(project, draft.referenceBlueprintRef).then((artifact) => {
+    fetchRemixArtifact(project, restoreRef).then((artifact) => {
       if (!active || artifact.schema !== 'reference_blueprint.v1') return;
       const payload = artifact.payload;
       const restoredEvents = referenceEventsFromBlueprint(payload);
@@ -62,7 +64,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
       if (Object.keys(patch).length) onPatch(patch);
     }).catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : String(caught)); });
     return () => { active = false; };
-  }, [draft.blueprintDirty, draft.referenceBlueprintRef?.artifactId, draft.referenceBlueprintRef?.revision, project]);
+  }, [draft.blueprintDirty, draft.referenceBlueprintRef?.artifactId, draft.referenceBlueprintRef?.revision, project, seedRef?.artifactId, seedRef?.revision]);
 
   const analyzeEvidence = async () => {
     if (!project || !source || busy || operationId || draft.managedEvidenceOperationId) return;
@@ -158,7 +160,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
   const fieldClass = 'ui-field w-full px-3 py-2 text-xs font-normal text-text-dark placeholder:text-[var(--canvas-node-input-placeholder)]';
 
   return <section className="ui-scrollbar nowheel grid gap-5 text-xs text-text-dark">
-    <p className="rounded-[var(--ui-radius-lg)] bg-[rgb(var(--accent-rgb)/0.07)] px-3 py-2.5 leading-5 text-text-dark/78">这些设置只用于新脚本，原片拆解和校对结果不会改变。</p>
+    <p className="rounded-[var(--ui-radius-lg)] bg-[rgb(var(--accent-rgb)/0.07)] px-3 py-2.5 leading-5 text-text-dark/78">这些规则只属于当前脚本分支，不会影响原片拆解或其他脚本节点。</p>
     <div className="grid gap-3">
       <div className="text-xs font-semibold text-text-dark">改编规则</div>
       <label className={labelClass}>整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className={fieldClass} /></label>

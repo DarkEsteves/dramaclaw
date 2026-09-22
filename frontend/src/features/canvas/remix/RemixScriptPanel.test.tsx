@@ -44,6 +44,23 @@ describe('RemixScriptPanel', () => {
     expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 });
   });
 
+  it('uses the child branch settings to create a blueprint before generation and save', async () => {
+    const branchRef = { artifactId: 'branch-blueprint', revision: 1 };
+    const onEnsureBlueprint = vi.fn(async () => branchRef);
+    const onSave = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={null} blueprintSettings={<div>当前脚本的改编规则</div>} onEnsureBlueprint={onEnsureBlueprint} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
+
+    expect(screen.getByText('当前脚本的改编规则')).toBeVisible();
+    fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新品饮料' } });
+    fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));
+    await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', branchRef, '新品饮料'));
+
+    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
+    await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', expect.any(Object), null, branchRef));
+    expect(onEnsureBlueprint).toHaveBeenCalledTimes(2);
+    expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 }, branchRef);
+  });
+
   it('keeps the current draft when generation fails', async () => {
     vi.mocked(generateRemixScriptDraft).mockRejectedValueOnce(new Error('模型输出无效'));
     const onDraftChange = vi.fn();
