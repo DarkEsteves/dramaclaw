@@ -75,6 +75,7 @@ describe('story script entry', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'node.videoStory.fullscreen' }));
     const dialog = screen.getByRole('dialog', { name: '原片拆解全屏校对' });
+    expect(within(dialog).getByRole('table', { name: '原片拆解完整字段' })).toHaveClass('table-fixed');
     expect(within(dialog).getByText('人物展示产品')).toBeTruthy();
     expect(within(dialog).getByText('这是产品台词')).toBeTruthy();
     expect(within(dialog).getByText('产品登场')).toBeTruthy();

@@ -53,6 +53,8 @@ interface ColumnDef {
   labelKey: string;
   /** Tailwind min-width class for the table cell. */
   widthClass: string;
+  /** Fixed width used by the fullscreen detail table so long text wraps. */
+  widthPx: number;
   /** True for narrative-style long text columns. */
   wide?: boolean;
 }
@@ -60,22 +62,22 @@ interface ColumnDef {
 const V = 'node.videoStory';
 
 const COLUMNS: ColumnDef[] = [
-  { key: 'shotNumber', labelKey: `${V}.columns.shotNumber`, widthClass: 'min-w-[60px]' },
-  { key: 'startTime', labelKey: `${V}.columns.startTime`, widthClass: 'min-w-[90px]' },
-  { key: 'endTime', labelKey: `${V}.columns.endTime`, widthClass: 'min-w-[90px]' },
-  { key: 'duration', labelKey: `${V}.columns.duration`, widthClass: 'min-w-[70px]' },
-  { key: 'visualDescription', labelKey: `${V}.columns.visualDescription`, widthClass: 'min-w-[220px]', wide: true },
-  { key: 'narrative', labelKey: `${V}.columns.narrative`, widthClass: 'min-w-[220px]', wide: true },
-  { key: 'shotSize', labelKey: `${V}.columns.shotSize`, widthClass: 'min-w-[80px]' },
-  { key: 'cameraAngle', labelKey: `${V}.columns.cameraAngle`, widthClass: 'min-w-[100px]' },
-  { key: 'cameraMovement', labelKey: `${V}.columns.cameraMovement`, widthClass: 'min-w-[120px]' },
-  { key: 'focalAndDof', labelKey: `${V}.columns.focalAndDof`, widthClass: 'min-w-[120px]' },
-  { key: 'lighting', labelKey: `${V}.columns.lighting`, widthClass: 'min-w-[120px]' },
-  { key: 'backgroundMusic', labelKey: `${V}.columns.backgroundMusic`, widthClass: 'min-w-[140px]' },
-  { key: 'voiceAndSfx', labelKey: `${V}.columns.voiceAndSfx`, widthClass: 'min-w-[140px]' },
-  { key: 'imagePrompt', labelKey: `${V}.columns.imagePrompt`, widthClass: 'min-w-[260px]', wide: true },
-  { key: 'videoMotionPrompt', labelKey: `${V}.columns.videoMotionPrompt`, widthClass: 'min-w-[240px]', wide: true },
-  { key: 'keyframeUrl', labelKey: `${V}.columns.keyframeUrl`, widthClass: 'min-w-[120px]' },
+  { key: 'shotNumber', labelKey: `${V}.columns.shotNumber`, widthClass: 'min-w-[60px]', widthPx: 64 },
+  { key: 'startTime', labelKey: `${V}.columns.startTime`, widthClass: 'min-w-[90px]', widthPx: 96 },
+  { key: 'endTime', labelKey: `${V}.columns.endTime`, widthClass: 'min-w-[90px]', widthPx: 96 },
+  { key: 'duration', labelKey: `${V}.columns.duration`, widthClass: 'min-w-[70px]', widthPx: 80 },
+  { key: 'visualDescription', labelKey: `${V}.columns.visualDescription`, widthClass: 'min-w-[220px]', widthPx: 320, wide: true },
+  { key: 'narrative', labelKey: `${V}.columns.narrative`, widthClass: 'min-w-[220px]', widthPx: 280, wide: true },
+  { key: 'shotSize', labelKey: `${V}.columns.shotSize`, widthClass: 'min-w-[80px]', widthPx: 90 },
+  { key: 'cameraAngle', labelKey: `${V}.columns.cameraAngle`, widthClass: 'min-w-[100px]', widthPx: 110 },
+  { key: 'cameraMovement', labelKey: `${V}.columns.cameraMovement`, widthClass: 'min-w-[120px]', widthPx: 120 },
+  { key: 'focalAndDof', labelKey: `${V}.columns.focalAndDof`, widthClass: 'min-w-[120px]', widthPx: 140 },
+  { key: 'lighting', labelKey: `${V}.columns.lighting`, widthClass: 'min-w-[120px]', widthPx: 140 },
+  { key: 'backgroundMusic', labelKey: `${V}.columns.backgroundMusic`, widthClass: 'min-w-[140px]', widthPx: 160 },
+  { key: 'voiceAndSfx', labelKey: `${V}.columns.voiceAndSfx`, widthClass: 'min-w-[140px]', widthPx: 160 },
+  { key: 'imagePrompt', labelKey: `${V}.columns.imagePrompt`, widthClass: 'min-w-[260px]', widthPx: 320, wide: true },
+  { key: 'videoMotionPrompt', labelKey: `${V}.columns.videoMotionPrompt`, widthClass: 'min-w-[240px]', widthPx: 300, wide: true },
+  { key: 'keyframeUrl', labelKey: `${V}.columns.keyframeUrl`, widthClass: 'min-w-[120px]', widthPx: 140 },
 ];
 interface StoryCellProps {
   row: VideoStoryRow;
@@ -190,6 +192,9 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
   const { t } = useTranslation();
   const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
   const itemCount = Math.max(rows.length, events.length);
+  const metaColumnWidths = [150, 360, 300, 300];
+  const tableWidth = metaColumnWidths.reduce((total, width) => total + width, 0)
+    + COLUMNS.reduce((total, column) => total + column.widthPx, 0);
   const headerClass = 'border-b border-[rgba(255,255,255,0.1)] px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-text-muted';
 
   return (
@@ -208,7 +213,11 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
         </div>
       </div>
       <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto">
-        <table className="w-max min-w-full border-collapse text-left text-[12px]">
+        <table aria-label="原片拆解完整字段" className="table-fixed border-collapse text-left text-[12px]" style={{ width: tableWidth }}>
+          <colgroup>
+            {metaColumnWidths.map((width, index) => <col key={`meta-${index}`} style={{ width }} />)}
+            {COLUMNS.map((column) => <col key={column.key as string} style={{ width: column.widthPx }} />)}
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-bg-dark/95 backdrop-blur">
             <tr>
               <th className={`${headerClass} min-w-[150px]`}>核对状态</th>
@@ -245,8 +254,8 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                       </select>
                     ) : <span className="text-text-muted/60">—</span>}
                   </td>
-                  <td className="min-w-[360px] max-w-[420px] px-3 py-3">
-                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap">
+                  <td className="px-3 py-3 align-top">
+                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap break-words">
                       <div className="flex gap-3">
                         {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-24 w-16 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
                         <div className="grid content-start gap-1">
@@ -260,15 +269,15 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                       <span><span className="text-text-muted">证据状态：</span>{event.note_status || '正常'}</span>
                     </div> : <span className="text-text-muted/60">—</span>}
                   </td>
-                  <td className="min-w-[300px] max-w-[380px] px-3 py-3">
-                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap">
+                  <td className="px-3 py-3 align-top">
+                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap break-words">
                       <span>{spokenText || '无同期台词'}</span>
                       <span className="text-[11px] text-text-muted">{event.word_spans?.map((word) => `${word.text} ${eventSeconds(word.start_us)}–${eventSeconds(word.end_us)}`).join('；') || '暂无逐词时间'}</span>
                       {(event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warningIndex}-${warning.transcript_word}`} className="text-amber-300">疑似错词：{warning.transcript_word} → {warning.caption_word}</span>)}
                     </div> : <span className="text-text-muted/60">—</span>}
                   </td>
-                  <td className="min-w-[300px] max-w-[380px] px-3 py-3">
-                    {event ? <div className="grid gap-2 whitespace-pre-wrap">
+                  <td className="px-3 py-3 align-top">
+                    {event ? <div className="grid gap-2 whitespace-pre-wrap break-words">
                       <span>{event.narrative_inference || '待补充模型判断'}</span>
                       <label className="text-[11px] text-text-muted">叙事作用
                         <input
@@ -281,7 +290,7 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                     </div> : <span className="text-text-muted/60">—</span>}
                   </td>
                   {COLUMNS.map((column) => (
-                    <td key={column.key as string} className={`${column.widthClass} px-3 py-3 align-top`}>
+                    <td key={column.key as string} className="overflow-hidden px-3 py-3 align-top break-words">
                       <StoryCell row={row} col={column} onCommit={(nextValue) => onCellCommit(index, column.key, nextValue)} />
                     </td>
                   ))}
