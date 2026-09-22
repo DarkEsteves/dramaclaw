@@ -181,7 +181,7 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 分析参考视频' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
 
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 确认分析并生成脚本' }));
+    fireEvent.click(await screen.findByRole('button', { name: '生成改编脚本' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'scriptNode')).toBe(true));
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '按蓝图生成' }));

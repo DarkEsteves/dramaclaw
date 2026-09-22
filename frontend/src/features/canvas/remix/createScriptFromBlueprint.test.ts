@@ -29,13 +29,13 @@ describe('createScriptFromBlueprint', () => {
     expect(consumeRemixScriptEditorRequest('script-new')).toBe(true);
   });
 
-  it('reuses an already connected script instead of duplicating it', () => {
+  it('creates a fresh connected script when an older script already exists', () => {
     state.nodes = [{ id: 'script-existing', type: 'scriptNode', data: {} }];
     state.edges = [{ source: 'story-1', target: 'script-existing' }];
-    expect(createScriptFromBlueprint('story-1')).toBe('script-existing');
-    expect(addNode).not.toHaveBeenCalled();
-    expect(updateNodeData).not.toHaveBeenCalled();
-    expect(consumeRemixScriptEditorRequest('script-existing')).toBe(true);
+    expect(createScriptFromBlueprint('story-1')).toBe('script-new');
+    expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 });
+    expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
+    expect(consumeRemixScriptEditorRequest('script-new')).toBe(true);
   });
 
   it('removes an unconnected new script and reports a failed connection', () => {

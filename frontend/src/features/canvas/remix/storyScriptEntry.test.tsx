@@ -17,6 +17,7 @@ vi.mock('@/features/canvas/remix/blueprintPanel', () => ({ ReferenceBlueprintPan
 vi.mock('@/features/canvas/remix/createScriptFromBlueprint', () => ({ createScriptFromBlueprint }));
 
 import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 describe('story script entry', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -29,7 +30,8 @@ describe('story script entry', () => {
   });
   it('saves the blueprint before opening a connected script', async () => {
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
-    fireEvent.click(screen.getByRole('button', { name: '生成改编脚本' }));
+    expect(screen.queryByRole('button', { name: '生成改编脚本' })).toBeNull();
+    canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' });
     await waitFor(() => expect(createScriptFromBlueprint).toHaveBeenCalledWith('story-1'));
     expect(ensureSaved).toHaveBeenCalledTimes(1);
   });
@@ -37,7 +39,7 @@ describe('story script entry', () => {
   it('keeps the user on the story node when blueprint save fails', async () => {
     ensureSaved.mockRejectedValueOnce(new Error('原片证据尚未完成'));
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
-    fireEvent.click(screen.getByRole('button', { name: '生成改编脚本' }));
+    canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' });
     expect(await screen.findByRole('alert')).toHaveTextContent('原片证据尚未完成');
     expect(createScriptFromBlueprint).not.toHaveBeenCalled();
   });

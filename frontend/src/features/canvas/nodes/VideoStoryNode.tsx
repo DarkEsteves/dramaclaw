@@ -392,12 +392,6 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             {t(`${V}.fullscreen`)}
           </button>
         </div>
-        <div className="flex items-center gap-2 border-b border-white/[0.08] px-3 py-2">
-          <button type="button" onClick={(event) => { event.stopPropagation(); void generateScript(); }} disabled={isAnalyzing || isCreatingScript || (!hasReferenceEvents && !hasRows)} className="tap-button tap-button-quiet-primary nodrag disabled:cursor-not-allowed disabled:opacity-40">
-            {isCreatingScript ? '准备改编脚本…' : '生成改编脚本'}
-          </button>
-          <span className="text-[12px] text-text-muted">先检查原片分析，需要时展开下方规则</span>
-        </div>
         {scriptError && <div role="alert" className="px-3 py-1 text-[12px] text-red-300">{scriptError}</div>}
         <details className="nodrag border-b border-white/[0.08] text-xs text-text-dark">
           <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">参考蓝图与分析设置{data.referenceBlueprintRef ? ' · 已保存' : ''}</summary>

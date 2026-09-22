@@ -2,18 +2,9 @@ import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { requestRemixScriptEditor } from './remixScriptEditorRequests';
 
-/** Enter script editing directly from a saved reference blueprint. */
+/** Create a new script branch from a saved reference blueprint. */
 export function createScriptFromBlueprint(storyId: string): string {
   const store = useCanvasStore.getState();
-  const existing = store.nodes.find((node) => node.type === CANVAS_NODE_TYPES.script
-    && store.edges.some((edge) => edge.source === storyId && edge.target === node.id));
-  if (existing) {
-    store.setSelectedNode(existing.id);
-    store.requestFocusNode(existing.id);
-    requestRemixScriptEditor(existing.id);
-    return existing.id;
-  }
-
   const childId = store.addNode(CANVAS_NODE_TYPES.script, store.findNodePosition(storyId, 420, 360));
   if (!store.addEdge(storyId, childId)) {
     store.deleteNodes([childId]);
