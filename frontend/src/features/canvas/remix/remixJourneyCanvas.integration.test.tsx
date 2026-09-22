@@ -305,5 +305,8 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
 
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollRequirements)
+      .toEqual([{ event_id: 'product', required: true }]);
   });
 });

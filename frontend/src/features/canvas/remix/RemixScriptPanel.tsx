@@ -24,7 +24,7 @@ interface Props {
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onTopicChange?: (topic: string) => void;
-  onDraftChange: (draft: RemixScriptDraft) => void;
+  onDraftChange: (draft: RemixScriptDraft, changeKind?: 'content' | 'media-binding') => void;
   onSave: (ref: RemixArtifactRef, blueprintRef?: RemixArtifactRef) => void;
   onClose: () => void;
 }
@@ -53,7 +53,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     return () => { active = false; };
   }, [blueprintRef?.artifactId, blueprintRef?.revision, project]);
 
-  const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; draftRef.current = next; setDraft(next); onDraftChange(next); setError(null); };
+  const changeDraft = (next: RemixScriptDraft, changeKind: 'content' | 'media-binding' = 'content') => {
+    draftEditCount.current += 1;
+    draftRef.current = next;
+    setDraft(next);
+    if (changeKind === 'media-binding') onDraftChange(next, changeKind);
+    else onDraftChange(next);
+    setError(null);
+  };
   const generate = async () => {
     if (generating || generationRunning || saving || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
     const editCount = draftEditCount.current;
@@ -102,7 +109,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     visualBindingRequest.current.set(selectionId, request);
     changeDraft({ ...draftRef.current, selections: draftRef.current.selections.map((item) => item.id === selectionId
       ? { ...item, visualNodeId: nodeId || undefined, visualMediaRevision: undefined }
-      : item) });
+      : item) }, 'media-binding');
     try {
       const knownRevision = visualNodes.find((node) => node.id === nodeId)?.mediaRevision;
       const attachment = nodeId && onAttachVisual ? await onAttachVisual(nodeId) : knownRevision;
@@ -114,7 +121,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       if (attachment && typeof attachment !== 'string') attachment.commit();
       changeDraft({ ...latest, selections: latest.selections.map((item) => item.id === selectionId && item.visualNodeId === nodeId
         ? { ...item, visualMediaRevision: nodeId ? mediaRevision : undefined }
-        : item) });
+        : item) }, 'media-binding');
     } catch (cause) {
       if (visualBindingRequest.current.get(selectionId) !== request) return;
       setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');
@@ -126,7 +133,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     if (!created) return;
     changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index
       ? { ...item, visualNodeId: created.id, visualMediaRevision: created.mediaRevision }
-      : item) });
+      : item) }, 'media-binding');
   };
 
   return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
@@ -158,7 +165,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>补充画面（B-roll）<select id={`remix-visual-${selection.id}`} aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => void bindVisual(index, event.target.value)} className={fieldClass}><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待生成/上传'}</option>)}</select></label>
-        <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: event.target.value || undefined } : item) })} className={fieldClass}><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: event.target.value || undefined } : item) }, 'media-binding')} className={fieldClass}><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
         <button type="button" onClick={() => changeDraft({ ...draft, selections: draft.selections.filter((_, position) => position !== index) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>删除</button>
         <p className="col-span-6 rounded-[8px] border border-white/[0.08] bg-surface-field px-3 py-2 leading-5 text-text-muted">对应台词<span className="ml-2 whitespace-pre-wrap break-words text-text-dark">{selectedDialogue || '当前区间没有台词'}</span></p>
         <div className="col-span-6 flex items-center gap-2">

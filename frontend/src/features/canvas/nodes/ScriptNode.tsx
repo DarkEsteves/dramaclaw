@@ -535,7 +535,6 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         remixScriptLastSavedRef: nextRef,
         remixBrollPlanRef: null,
         remixBrollScriptRef: null,
-        remixBrollRequirements: [],
         remixBrollPlanStatus: null,
         remixBrollOperationId: null,
         remixBrollOperationScriptRef: null,
@@ -963,8 +962,21 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onTopicChange={(remixTopic) => updateNodeData(id, { remixTopic })}
-            onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); }}
-            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); setRemixScriptOpen(false); }}
+            onDraftChange={(next, changeKind = 'content') => {
+              applyRemixInvalidation(id, 'script');
+              updateNodeData(id, {
+                remixScriptDraft: next,
+                remixScriptRef: null,
+                remixScriptLastSavedRef: savedRemixRef,
+                remixBrollPlanRef: null,
+                remixBrollScriptRef: null,
+                ...(changeKind === 'content' ? { remixBrollRequirements: [] } : {}),
+                remixBrollPlanStatus: null,
+                remixBrollOperationId: null,
+                remixBrollOperationScriptRef: null,
+              });
+            }}
+            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

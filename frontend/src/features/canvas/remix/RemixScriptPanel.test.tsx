@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./remixScriptArtifact', () => ({ saveRemixScriptArtifact: vi.fn(async () => ({ artifactId: 'script-1', revision: 1 })) }));
 vi.mock('@/api/remix', () => ({
@@ -148,12 +149,51 @@ describe('RemixScriptPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product');
-    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }),
+      'media-binding',
+    );
     expect(screen.getByText('补充画面节点已创建，可以先保存脚本。稍后在画布完成素材后会自动关联。')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product');
-    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }),
+      'media-binding',
+    );
+  });
+
+  it('keeps every B-roll requirement visible when one event creates a visual node', () => {
+    function Harness() {
+      const [requirements, setRequirements] = useState([
+        { event_id: 'first', required: true, purpose: '展示开场环境', suggested_query: '咖啡店外景' },
+        { event_id: 'last', required: true, purpose: '展示结尾产品', suggested_query: '产品特写' },
+      ]);
+      return <RemixScriptPanel
+        project="demo"
+        initialDraft={{ dialogue: '开场台词和结尾台词', selections: [
+          { id: 'first', label: '开场', start: 0, end: 4 },
+          { id: 'last', label: '结尾', start: 5, end: 9 },
+        ] }}
+        existingRef={null}
+        blueprintRef={null}
+        visualNodes={[]}
+        sfxNodes={[]}
+        brollRequirements={requirements}
+        onCreateVisual={() => ({ id: 'generated-last', label: '生成画面' })}
+        onDraftChange={(_draft, changeKind) => {
+          if (changeKind !== 'media-binding') setRequirements([]);
+        }}
+        onSave={() => {}}
+        onClose={() => {}}
+      />;
+    }
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: '生成 结尾 素材' }));
+
+    expect(screen.getByText(/展示开场环境/)).toBeVisible();
+    expect(screen.getByText(/展示结尾产品/)).toBeVisible();
   });
 
   it('shows the Recipe requirement beside the exact B-roll event', () => {
@@ -170,7 +210,7 @@ describe('RemixScriptPanel', () => {
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'image-1' } });
 
     await waitFor(() => expect(onAttachVisual).toHaveBeenCalledWith('image-1'));
-    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })] })));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })] }), 'media-binding'));
   });
 
   it('rechecks an already-bound visual so a replaced node cannot reuse its old revision', async () => {
@@ -181,7 +221,7 @@ describe('RemixScriptPanel', () => {
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'image-1' } });
 
     await waitFor(() => expect(onAttachVisual).toHaveBeenCalledWith('image-1'));
-    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualMediaRevision: 'b'.repeat(64) })] })));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualMediaRevision: 'b'.repeat(64) })] }), 'media-binding'));
   });
 
   it('merges a completed async attachment into the latest draft without reverting newer edits', async () => {
@@ -196,7 +236,7 @@ describe('RemixScriptPanel', () => {
 
     await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({
       selections: [expect.objectContaining({ label: '新品登场', visualNodeId: 'image-1', visualMediaRevision: 'f'.repeat(64) })],
-    })));
+    }), 'media-binding'));
   });
 
   it('commits only the latest visual when attachment successes finish out of order', async () => {
@@ -217,7 +257,7 @@ describe('RemixScriptPanel', () => {
     await waitFor(() => expect(commitB).toHaveBeenCalledOnce());
     releaseA({ mediaRevision: 'a'.repeat(64), commit: commitA });
 
-    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] })));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] }), 'media-binding'));
     expect(commitA).not.toHaveBeenCalled();
   });
 
@@ -237,6 +277,6 @@ describe('RemixScriptPanel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'image-b', visualMediaRevision: 'b'.repeat(64) })] }), 'media-binding');
   });
 });
