@@ -590,6 +590,49 @@ def test_broll_planning_action_rejects_inexact_or_wrong_schema_reference(client,
     assert queued == []
 
 
+def test_script_draft_generation_action_queues_exact_blueprint_and_topic(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    blueprint = api.post(BASE, json={
+        "schema": "reference_blueprint.v1",
+        "payload": {
+            "narrative_role": "提问后反转", "events": [], "preserve_replace_rules": [],
+            "observations": [], "inferences": [], "user_choices": [],
+        },
+        "upstream_refs": [],
+    }).json()["data"]
+
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "generate_script_draft",
+        "payload": {
+            "blueprint_ref": {"artifact_id": blueprint["id"], "revision": blueprint["revision"]},
+            "new_topic": "把肌酸改成薯条",
+        },
+        "idempotency_key": "script-draft-blueprint-1-r1-topic",
+        "node_revision": 3,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "remix_generate_script_draft"
+    assert queued[0]["queue_kind"] == "default"
+    assert queued[0]["payload"]["new_topic"] == "把肌酸改成薯条"
+    operation = RemixOperationStore(tmp_path, "demo").get(response.json()["data"]["operation_id"])
+    assert operation["input_refs"] == [{"artifact_id": blueprint["id"], "revision": 1, "project_id": "demo"}]
+
+
+def test_script_draft_generation_action_rejects_blank_topic(client):
+    api, queued = client
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "generate_script_draft",
+        "payload": {"blueprint_ref": {"artifact_id": "missing", "revision": 1}, "new_topic": "   "},
+        "idempotency_key": "script-draft-blank-topic",
+        "node_revision": 1,
+    })
+    assert response.status_code == 422
+    assert queued == []
+
+
 def test_processing_action_transport_error_is_reconciled_without_resubmission(client, tmp_path, monkeypatch):
     from novelvideo.api.routes import remix as routes
     from novelvideo.freezone.remix.operations import RemixOperationStore

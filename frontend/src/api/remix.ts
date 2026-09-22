@@ -12,6 +12,7 @@ export type RemixProcessRequest =
   | { action: 'transcribe_media'; mediaPath: string; language: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'align_script'; mediaPath: string; scriptRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
   | { action: 'plan_broll'; scriptRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
+  | { action: 'generate_script_draft'; blueprintRef: RemixArtifactRef; newTopic: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'compile_semantic_timeline'; mediaPath: string; scriptRef: RemixArtifactRef; wordTimelineRef: RemixArtifactRef; blueprintRef: RemixArtifactRef; editMap: Record<string, unknown>[]; overrides: Record<string, unknown>[]; fps: number; idempotencyKey: string; nodeRevision: number };
 
 const exactRef = (ref: RemixArtifactRef) => ({ artifact_id: ref.artifactId, revision: ref.revision });
@@ -70,6 +71,8 @@ export function submitRemixProcessAction(project: string, request: RemixProcessR
       ? { media_path: request.mediaPath, script_ref: exactRef(request.scriptRef) }
       : request.action === 'plan_broll'
         ? { script_ref: exactRef(request.scriptRef) }
+      : request.action === 'generate_script_draft'
+        ? { blueprint_ref: exactRef(request.blueprintRef), new_topic: request.newTopic }
       : { media_path: request.mediaPath, script_ref: exactRef(request.scriptRef), word_timeline_ref: exactRef(request.wordTimelineRef), blueprint_ref: exactRef(request.blueprintRef), edit_map: request.editMap, overrides: request.overrides, fps: request.fps };
   return apiCall<RemixTaskRef>(`projects/${project}/freezone/remix/actions`, {
     method: 'POST', json: { action: request.action, payload, idempotency_key: request.idempotencyKey, node_revision: request.nodeRevision },

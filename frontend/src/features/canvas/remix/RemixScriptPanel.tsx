@@ -16,6 +16,8 @@ interface Props {
   blueprintRef: RemixArtifactRef | null;
   blueprintSettings?: ReactNode;
   onEnsureBlueprint?: () => Promise<RemixArtifactRef>;
+  onGenerateDraft?: (blueprintRef: RemixArtifactRef, topic: string) => Promise<RemixScriptDraft>;
+  generationRunning?: boolean;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
@@ -27,7 +29,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onTopicChange, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onTopicChange, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -53,14 +55,16 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
 
   const changeDraft = (next: RemixScriptDraft) => { draftEditCount.current += 1; draftRef.current = next; setDraft(next); onDraftChange(next); setError(null); };
   const generate = async () => {
-    if (generating || saving || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
+    if (generating || generationRunning || saving || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
     const editCount = draftEditCount.current;
     setGenerating(true); setError(null);
     try {
       const source = onEnsureBlueprint ? await onEnsureBlueprint() : blueprintRef;
       if (!source) throw new Error('请先完成当前脚本的改编规则。');
       currentBlueprintRef.current = source;
-      const next = await generateRemixScriptDraft(project, source, newTopic.trim());
+      const next = onGenerateDraft
+        ? await onGenerateDraft(source, newTopic.trim())
+        : await generateRemixScriptDraft(project, source, newTopic.trim());
       const current = currentBlueprintRef.current;
       if (!current || current.artifactId !== source.artifactId || current.revision !== source.revision) throw new Error('参考蓝图已更新，请重新生成脚本');
       if (draftEditCount.current !== editCount) throw new Error('生成期间台词已修改，请确认后重新生成');
@@ -135,7 +139,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         <label htmlFor="remix-new-topic">新主题</label>
         <div className="flex items-center gap-2">
           <input id="remix-new-topic" aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={`${fieldClass} min-w-0 flex-1`} />
-          <button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className="nodrag mt-1 inline-flex h-9 shrink-0 items-center justify-center rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">{generating ? '生成中…' : '生成改编台词'}</button>
+          <button type="button" disabled={generating || generationRunning || saving || !newTopic.trim()} onClick={() => void generate()} className="nodrag mt-1 inline-flex h-9 shrink-0 items-center justify-center rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">{generating || generationRunning ? '生成中…' : '生成改编台词'}</button>
         </div>
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}

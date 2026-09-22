@@ -74,6 +74,55 @@ def test_broll_plan_runner_publishes_plan_for_exact_script_revision(tmp_path, mo
     assert operations.get(operation["operation_id"])["output_refs"] == [result["artifact_ref"]]
 
 
+def test_script_draft_runner_publishes_editable_draft_for_exact_blueprint(tmp_path, monkeypatch):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.task_backend.runners import remix as runner
+
+    store = RemixArtifactStore(tmp_path, "demo")
+    blueprint = store.create("reference_blueprint.v1", {
+        "narrative_role": "提问后反转", "events": [], "preserve_replace_rules": [],
+        "observations": [], "inferences": [], "user_choices": [],
+    }, [])
+    blueprint_ref = {"artifact_id": blueprint["id"], "revision": blueprint["revision"]}
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.start(
+        idempotency_key="script-draft-1",
+        input_refs=[blueprint_ref],
+        producer_version="remix-process.v1",
+        normalized_parameters={"action": "generate_script_draft", "payload": {
+            "blueprint_ref": blueprint_ref, "new_topic": "薯条",
+        }},
+        node_revision=2,
+    )
+
+    monkeypatch.setattr(runner, "reference_blueprint_readiness_errors", lambda payload, refs: [])
+
+    async def generate(*, blueprint, topic, username):
+        assert blueprint["narrative_role"] == "提问后反转"
+        assert topic == "薯条"
+        assert username == "alice"
+        return {"dialogue": "女：薯条。", "selections": [{
+            "id": "generated-1", "label": "产品亮相", "start": 2, "end": 4,
+        }]}
+
+    monkeypatch.setattr(runner, "generate_script_draft", generate)
+    result = runner.run_remix_generate_script_draft(
+        {"payload": {
+            "blueprint_ref": blueprint_ref, "new_topic": "薯条",
+            "operation_id": operation["operation_id"],
+        }},
+        SimpleNamespace(output_dir=str(tmp_path), project_id="demo", requester_username="alice"),
+    )
+
+    artifact = store.read(result["artifact_ref"]["artifact_id"], result["artifact_ref"]["revision"])
+    assert artifact["schema"] == "remix_script.v1"
+    assert artifact["upstream_refs"] == [{**blueprint_ref, "project_id": "demo"}]
+    assert artifact["payload"]["dialogue"] == "女：薯条。"
+    assert artifact["payload"]["selections"][0]["label"] == "产品亮相"
+    assert operations.get(operation["operation_id"])["output_refs"] == [result["artifact_ref"]]
+
+
 def test_transcribe_runner_resolves_project_relative_media_and_publishes_timeline(tmp_path, monkeypatch):
     from novelvideo.task_backend.runners import remix as runner
 

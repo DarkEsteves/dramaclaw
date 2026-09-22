@@ -84,6 +84,7 @@ import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
+import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
@@ -437,6 +438,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (data.remixBrollPlanStatus !== 'running' || !data.remixBrollOperationId) return;
     void resumeBrollPlan(id);
   }, [data.remixBrollOperationId, data.remixBrollPlanStatus, id]);
+  useEffect(() => {
+    if (data.remixScriptGenerationStatus !== 'running' || !data.remixScriptGenerationOperationId) return;
+    void resumeScriptDraftGeneration(id);
+  }, [data.remixScriptGenerationOperationId, data.remixScriptGenerationStatus, id]);
   useEffect(() => {
     const openEditor = () => setRemixScriptOpen(true);
     const unsubscribe = subscribeRemixScriptEditorRequest(id, openEditor);
@@ -944,6 +949,14 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
               suggestedNarrativeRole={suggestedNarrativeRole}
             /> : undefined}
             onEnsureBlueprint={upstreamStory ? ensureBranchBlueprint : undefined}
+            generationRunning={data.remixScriptGenerationStatus === 'running'}
+            onGenerateDraft={async (source, topic) => {
+              const generated = await startScriptDraftGeneration(id, source, topic);
+              if (generated) return generated;
+              const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data;
+              throw new Error(typeof latest?.remixScriptGenerationError === 'string'
+                ? latest.remixScriptGenerationError : '生成改编台词失败，请重试。');
+            }}
             visualNodes={remixVisualNodes}
             sfxNodes={remixSfxNodes}
             brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}

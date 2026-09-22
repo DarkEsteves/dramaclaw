@@ -85,6 +85,17 @@ vi.mock('@/api/remix', async (importOriginal) => {
       backend.submit(request);
       if (action === 'analyze_reference_video') {
         backend.operations.set(operationId, { operation_id: operationId, status: 'completed', output_refs: [{ artifact_id: 'evidence', revision: 1 }] });
+      } else if (action === 'generate_script_draft') {
+        const blueprintRef = request.blueprintRef as { artifactId: string; revision: number };
+        const draft = putArtifact('remix_script.v1', {
+          dialogue: '新品登场', segments: [], blueprint_mappings: [], media_requirements: [],
+          selections: [{ id: 'product', label: '产品登场', start: 0, end: 4 }],
+        }, [blueprintRef]);
+        backend.operations.set(operationId, {
+          operation_id: operationId, status: 'completed',
+          input_refs: [{ artifact_id: blueprintRef.artifactId, revision: blueprintRef.revision }],
+          output_refs: [{ artifact_id: draft.id, revision: draft.revision }],
+        });
       } else if (action === 'plan_broll') {
         const scriptRef = request.scriptRef as { artifactId: string; revision: number };
         const script = backend.artifacts.get(`${scriptRef.artifactId}:${scriptRef.revision}`)!;

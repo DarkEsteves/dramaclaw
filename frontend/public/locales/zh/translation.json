@@ -3544,6 +3544,8 @@
       "episode_scene_planner": "规划场景",
       "episode_prop_planner": "规划道具",
       "content_rewriter": "AI 改写",
+      "remix_generate_script_draft": "生成改编台词",
+      "remix_plan_broll": "规划补充画面",
       "sketch_generation": "草图生成",
       "batch_sketch": "批量草图",
       "sketch_regen": "草图重生成",

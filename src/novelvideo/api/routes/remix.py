@@ -72,7 +72,7 @@ class OperationTransitionBody(BaseModel):
 class ProcessActionBody(BaseModel):
     action: Literal[
         "transcribe_media", "align_script", "compile_semantic_timeline",
-        "analyze_reference_video", "render_manifest", "plan_broll",
+        "analyze_reference_video", "render_manifest", "plan_broll", "generate_script_draft",
     ]
     payload: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
@@ -95,6 +95,7 @@ _PROCESS_TASK_TYPES = {
     "analyze_reference_video": "remix_analyze_reference_video",
     "render_manifest": "remix_render",
     "plan_broll": "remix_plan_broll",
+    "generate_script_draft": "remix_generate_script_draft",
 }
 
 
@@ -384,6 +385,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "analyze_reference_video": ({"media_path"}, set()),
         "render_manifest": ({"manifest_ref"}, set()),
         "plan_broll": ({"script_ref"}, set()),
+        "generate_script_draft": ({"blueprint_ref", "new_topic"}, set()),
     }
     required, optional = expected[action]
     if set(payload) != required | optional:
@@ -405,6 +407,11 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         media_hash = digest.hexdigest()
     if action == "transcribe_media" and (not isinstance(payload["language"], str) or not payload["language"]):
         raise ValueError("language is required")
+    if action == "generate_script_draft" and (
+        not isinstance(payload["new_topic"], str) or not payload["new_topic"].strip()
+        or len(payload["new_topic"]) > 2_000
+    ):
+        raise ValueError("new_topic must be a non-blank string of at most 2000 characters")
     schema_by_ref = {
         "script_ref": "remix_script.v1",
         "word_timeline_ref": "word_timeline.v1",

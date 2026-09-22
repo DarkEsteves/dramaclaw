@@ -72,4 +72,23 @@ describe('remix API contract', () => {
       method: 'POST', json: { script_ref: { artifact_id: 'script-1', revision: 4 } }, timeout: false,
     });
   });
+
+  it('queues script draft generation from an exact blueprint and topic', async () => {
+    await submitRemixProcessAction('demo', {
+      action: 'generate_script_draft',
+      blueprintRef: { artifactId: 'blueprint-1', revision: 3 },
+      newTopic: '把肌酸改成薯条',
+      idempotencyKey: 'draft-key',
+      nodeRevision: 5,
+    });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/actions', {
+      method: 'POST',
+      json: {
+        action: 'generate_script_draft',
+        payload: { blueprint_ref: { artifact_id: 'blueprint-1', revision: 3 }, new_topic: '把肌酸改成薯条' },
+        idempotency_key: 'draft-key',
+        node_revision: 5,
+      },
+    });
+  });
 });

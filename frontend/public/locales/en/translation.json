@@ -3544,6 +3544,8 @@
       "episode_scene_planner": "Plan scenes",
       "episode_prop_planner": "Plan props",
       "content_rewriter": "AI rewrite",
+      "remix_generate_script_draft": "Generate adapted dialogue",
+      "remix_plan_broll": "Plan supplemental visuals",
       "sketch_generation": "Sketch generation",
       "batch_sketch": "Batch sketch",
       "sketch_regen": "Sketch regen",

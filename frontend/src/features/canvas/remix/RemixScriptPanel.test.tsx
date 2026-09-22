@@ -84,18 +84,20 @@ describe('RemixScriptPanel', () => {
   it('generates an editable script from the current blueprint and topic before saving', async () => {
     const onSave = vi.fn();
     const onDraftChange = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={onSave} onClose={() => {}} />);
+    const onGenerateDraft = vi.fn(async () => ({ dialogue: '后台生成的新台词。', selections: [{ id: 'generated-1', label: '产品登场', start: 5, end: 8 }] }));
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onGenerateDraft={onGenerateDraft} onDraftChange={onDraftChange} onSave={onSave} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
 
-    await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', { artifactId: 'blueprint-1', revision: 1 }, '新咖啡'));
-    expect((await screen.findByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('新主题来了，喝一口咖啡。');
+    await waitFor(() => expect(onGenerateDraft).toHaveBeenCalledWith({ artifactId: 'blueprint-1', revision: 1 }, '新咖啡'));
+    expect(generateRemixScriptDraft).not.toHaveBeenCalled();
+    expect((await screen.findByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('后台生成的新台词。');
     expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ label: '产品登场' })] }));
     expect(saveRemixScriptArtifact).not.toHaveBeenCalled();
     expect(onSave).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
     await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', {
-      dialogue: '新主题来了，喝一口咖啡。', selections: [{ id: 'generated-1', label: '产品登场', start: 9, end: 11 }],
+      dialogue: '后台生成的新台词。', selections: [{ id: 'generated-1', label: '产品登场', start: 5, end: 8 }],
     }, null, { artifactId: 'blueprint-1', revision: 1 }));
     expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 });
   });

@@ -3430,6 +3430,8 @@
       "episode_scene_planner": "Lên kế hoạch phân cảnh",
       "episode_prop_planner": "Lên kế hoạch đạo cụ",
       "content_rewriter": "AI viết lại",
+      "remix_generate_script_draft": "Tạo lời thoại chuyển thể",
+      "remix_plan_broll": "Lên kế hoạch cảnh bổ sung",
       "sketch_generation": "Tạo phác thảo",
       "batch_sketch": "Phác thảo hàng loạt",
       "sketch_regen": "Tạo lại phác thảo",

@@ -11,6 +11,8 @@ from novelvideo.freezone.remix.render import render_manifest, validate_manifest
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
 from novelvideo.freezone.remix.evidence import build_reference_evidence
 from novelvideo.freezone.remix.broll_plan import generate_broll_plan
+from novelvideo.freezone.remix.script_draft import generate_script_draft
+from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.timing import compile_timing
 from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
@@ -103,6 +105,46 @@ def run_remix_plan_broll(envelope: dict[str, Any], ctx: ProjectContext) -> dict[
     artifact = store.create(
         "remix_script.v1",
         planned,
+        [{"artifact_id": artifact_id, "revision": revision}],
+    )
+    output = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+    _publish_operation_result(payload, ctx, output)
+    return {"status": "completed", "artifact_ref": output}
+
+
+def run_remix_generate_script_draft(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
+    """Generate an editable script draft from one exact saved blueprint revision."""
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    ref = payload.get("blueprint_ref") if isinstance(payload.get("blueprint_ref"), dict) else {}
+    artifact_id, revision = ref.get("artifact_id"), ref.get("revision")
+    topic = payload.get("new_topic")
+    if not isinstance(artifact_id, str) or type(revision) is not int or revision < 1:
+        raise ValueError("script generation blueprint reference is incomplete")
+    if not isinstance(topic, str) or not topic.strip() or len(topic) > 2_000:
+        raise ValueError("script generation topic is invalid")
+    store = RemixArtifactStore(Path(ctx.output_dir).resolve(), ctx.project_id)
+    blueprint = store.read(artifact_id, revision)
+    if blueprint["schema"] != "reference_blueprint.v1":
+        raise ValueError("script generation requires a reference blueprint")
+    readiness_errors = reference_blueprint_readiness_errors(
+        blueprint["payload"], blueprint.get("upstream_refs", [])
+    )
+    if readiness_errors:
+        raise ValueError("blueprint is not script-ready: " + "; ".join(readiness_errors))
+    draft = asyncio.run(generate_script_draft(
+        blueprint=blueprint["payload"],
+        topic=topic.strip(),
+        username=ctx.requester_username,
+    ))
+    artifact = store.create(
+        "remix_script.v1",
+        {
+            "dialogue": draft["dialogue"],
+            "segments": [],
+            "selections": draft["selections"],
+            "blueprint_mappings": [],
+            "media_requirements": [],
+        },
         [{"artifact_id": artifact_id, "revision": revision}],
     )
     output = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
@@ -268,5 +310,6 @@ register_project_task_runner("remix_render", _with_operation_failure_transition(
 register_project_task_runner("remix_transcribe_media", _with_operation_failure_transition(run_remix_transcribe_media), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_analyze_reference_video", _with_operation_failure_transition(run_remix_analyze_reference_video), requires_home_node=True)
 register_project_task_runner("remix_plan_broll", _with_operation_failure_transition(run_remix_plan_broll), requires_home_node=True)
+register_project_task_runner("remix_generate_script_draft", _with_operation_failure_transition(run_remix_generate_script_draft), requires_home_node=True)
 register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_compile_semantic_timeline", _with_operation_failure_transition(run_remix_compile_semantic_timeline), requires_home_node=True)
