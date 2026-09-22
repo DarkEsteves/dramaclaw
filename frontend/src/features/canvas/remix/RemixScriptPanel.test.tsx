@@ -65,7 +65,10 @@ describe('RemixScriptPanel', () => {
   it('shows the dialogue covered by each event and updates it with the character range', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲乙丙丁戊己', selections: [{ id: 'generated-1', label: '中段事件', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByText('乙丙')).toBeVisible();
+    const eventName = screen.getByLabelText('事件 1 名称');
+    const dialoguePreview = screen.getByText('乙丙');
+    expect(dialoguePreview).toBeVisible();
+    expect(eventName.compareDocumentPosition(dialoguePreview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText('中段事件 结束字'), { target: { value: '5' } });
     expect(screen.getByText('乙丙丁戊')).toBeVisible();
