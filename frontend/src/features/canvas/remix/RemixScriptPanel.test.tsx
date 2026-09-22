@@ -62,6 +62,15 @@ describe('RemixScriptPanel', () => {
     await screen.findByText('用早晨疲惫引出咖啡');
   });
 
+  it('shows the dialogue covered by each event and updates it with the character range', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲乙丙丁戊己', selections: [{ id: 'generated-1', label: '中段事件', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByText('乙丙')).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText('中段事件 结束字'), { target: { value: '5' } });
+    expect(screen.getByText('乙丙丁戊')).toBeVisible();
+  });
+
   it('recognizes manual events saved before source labels were introduced', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧的手动事件', selections: [{ id: 'event-legacy', label: '旧事件', start: 0, end: 2 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
