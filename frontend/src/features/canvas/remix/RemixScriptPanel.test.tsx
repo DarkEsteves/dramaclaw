@@ -21,10 +21,39 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
     expect(screen.getByText('补充画面（B-roll）')).toBeVisible();
+    expect(screen.getByText('手动添加')).toBeVisible();
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'video-1' } });
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
     await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', expect.objectContaining({ selections: [expect.objectContaining({ start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) })] }), null, { artifactId: 'blueprint-1', revision: 1 }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 }));
+  });
+
+  it('labels AI events and inserts a manual event in script order', async () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲乙丙丁戊己', selections: [{ id: 'generated-1', label: '后段事件', start: 4, end: 6 }] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByText('台词事件（1）')).toBeVisible();
+    expect(screen.getByText('AI 已根据台词自动拆分，你也可以选中台词手动补充事件。')).toBeVisible();
+    expect(screen.getByText('AI 生成')).toBeVisible();
+    const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
+    dialogue.focus();
+    dialogue.setSelectionRange(1, 3);
+    fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
+
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [
+      expect.objectContaining({ start: 1, end: 3, source: 'manual' }),
+      expect.objectContaining({ id: 'generated-1', start: 4, end: 6 }),
+    ] }));
+    expect(screen.getByText('台词事件（2）')).toBeVisible();
+    expect(screen.getByText('手动添加')).toBeVisible();
+    await screen.findByText('用早晨疲惫引出咖啡');
+  });
+
+  it('recognizes manual events saved before source labels were introduced', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧的手动事件', selections: [{ id: 'event-legacy', label: '旧事件', start: 0, end: 2 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByText('手动添加')).toBeVisible();
+    expect(screen.queryByText('AI 生成')).not.toBeInTheDocument();
   });
 
   it('generates an editable script from the current blueprint and topic before saving', async () => {

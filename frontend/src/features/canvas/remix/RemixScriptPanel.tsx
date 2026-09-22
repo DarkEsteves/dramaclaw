@@ -74,7 +74,9 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     const start = Array.from(field.value.slice(0, field.selectionStart)).length;
     const end = Array.from(field.value.slice(0, field.selectionEnd)).length;
     const index = draft.selections.length + 1;
-    changeDraft({ ...draft, selections: [...draft.selections, { id: `event-${crypto.randomUUID()}`, label: index === 1 ? '产品登场' : `语义事件 ${index}`, start, end }] });
+    const added = { id: `event-${crypto.randomUUID()}`, label: index === 1 ? '产品登场' : `语义事件 ${index}`, start, end, source: 'manual' as const };
+    const selections = [...draft.selections, added].sort((left, right) => left.start - right.start || left.end - right.end);
+    changeDraft({ ...draft, selections });
   };
   const save = async () => {
     if (saving) return;
@@ -133,10 +135,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>
+      <div className="border-t border-white/10 pt-3">
+        <h3 className="font-medium text-text-dark">台词事件（{draft.selections.length}）</h3>
+        <p className="mt-1 text-text-muted">AI 已根据台词自动拆分，你也可以选中台词手动补充事件。</p>
+      </div>
       {draft.selections.map((selection, index) => {
         const requirement = brollRequirements.find((item) => item.event_id === selection.id);
         return <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
-        <label>事件名称<input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className={fieldClass} /></label>
+        <label><span className="flex items-center justify-between gap-2">事件名称<span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-text-muted">{selection.source === 'manual' || (!selection.source && selection.id.startsWith('event-')) ? '手动添加' : 'AI 生成'}</span></span><input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className={fieldClass} /></label>
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>补充画面（B-roll）<select id={`remix-visual-${selection.id}`} aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => void bindVisual(index, event.target.value)} className={fieldClass}><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待生成/上传'}</option>)}</select></label>

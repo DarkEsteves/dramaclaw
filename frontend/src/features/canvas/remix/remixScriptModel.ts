@@ -5,6 +5,8 @@ export interface RemixSelectionDraft {
   label: string;
   start: number;
   end: number;
+  /** How this script event was created in the editor. Missing means AI-generated for legacy drafts. */
+  source?: 'ai' | 'manual';
   visualNodeId?: string;
   /** Immutable content hash captured when this visual was selected. */
   visualMediaRevision?: string;
