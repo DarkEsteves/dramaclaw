@@ -49,7 +49,7 @@ describe('analyzeReferenceVideo', () => {
     expect(state.edges).toEqual(expect.arrayContaining([
       { source: 'video', target: 'story' }, { source: 'video', target: 'transcript' }, { source: 'transcript', target: 'story' },
     ]));
-    expect(startSourceTranscript).toHaveBeenCalledWith('video', { autoStart: false });
+    expect(startSourceTranscript).toHaveBeenCalledWith('video', { autoStart: false, reuseExisting: true });
     expect(api.submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'analyze_reference_video' }));
     expect(api.submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media' }));
     expect(reanalyzeVideoStory).toHaveBeenCalledWith('story', expect.objectContaining({ evidenceRef: { artifactId: 'evidence', revision: 1 }, transcriptRef: { artifactId: 'words', revision: 1 } }));

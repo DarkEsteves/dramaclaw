@@ -39,22 +39,30 @@ describe('startSourceTranscript', () => {
     expect(state.nodes[1].data.autoStartMode).toBeNull();
   });
 
-  it('reuses an existing transcript instead of creating duplicates', async () => {
+  it('creates a fresh transcript when the toolbar is used after a completed result', async () => {
     state.nodes[0].data.remixMedia = { media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true };
-    state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [], sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });
-    state.edges.push({ source: 'audio-1', target: 'transcript-1' });
-    await expect(startSourceTranscript('audio-1')).resolves.toBe('transcript-1');
-    expect(state.addNode).not.toHaveBeenCalled();
+    state.nodes.push({ id: 'transcript-old', type: 'transcriptNode', data: { words: [{ text: '完成' }], status: 'completed', sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });
+    state.edges.push({ source: 'audio-1', target: 'transcript-old' });
+    state.addNode.mockImplementationOnce((_type: string, _position: unknown, data: Record<string, unknown> = {}) => { state.nodes.push({ id: 'transcript-new', type: 'transcriptNode', data }); return 'transcript-new'; });
+    await expect(startSourceTranscript('audio-1')).resolves.toBe('transcript-new');
+    expect(state.edges).toContainEqual({ source: 'audio-1', target: 'transcript-new' });
     expect(attachRemixMedia).not.toHaveBeenCalled();
   });
 
-  it('retries an empty failed transcript from the source without making another node', async () => {
+  it('reuses a matching transcript when reference analysis explicitly requests reuse', async () => {
     state.nodes[0].data.remixMedia = { media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true };
-    state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [], status: 'failed', operationId: null, sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });
+    state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [{ text: '完成' }], status: 'completed', sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });
+    state.edges.push({ source: 'audio-1', target: 'transcript-1' });
+    await expect(startSourceTranscript('audio-1', { autoStart: false, reuseExisting: true })).resolves.toBe('transcript-1');
+    expect(state.addNode).not.toHaveBeenCalled();
+  });
+
+  it('focuses an already running transcript instead of creating a duplicate task', async () => {
+    state.nodes[0].data.remixMedia = { media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true };
+    state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [], autoStartMode: 'transcribe', sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash' } });
     state.edges.push({ source: 'audio-1', target: 'transcript-1' });
     await expect(startSourceTranscript('audio-1')).resolves.toBe('transcript-1');
     expect(state.addNode).not.toHaveBeenCalled();
-    expect(state.nodes[1].data.autoStartMode).toBe('transcribe');
   });
 
   it('rejects silent video before creating a child', async () => {

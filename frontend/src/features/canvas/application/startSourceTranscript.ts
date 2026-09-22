@@ -7,7 +7,13 @@ import { useCanvasStore } from '@/stores/canvasStore';
 
 const inFlight = new Map<string, Promise<string>>();
 
-async function createTranscript(sourceNodeId: string, autoStart: boolean): Promise<string> {
+function isTranscriptRunning(data: Record<string, unknown>): boolean {
+  return data.autoStartMode === 'transcribe'
+    || (typeof data.operationId === 'string' && Boolean(data.operationId))
+    || (typeof data.managedOperationId === 'string' && Boolean(data.managedOperationId));
+}
+
+async function createTranscript(sourceNodeId: string, autoStart: boolean, reuseExisting: boolean): Promise<string> {
   const project = readUrl().project;
   if (!project) throw new Error('请先打开项目画布');
   const store = useCanvasStore.getState();
@@ -30,7 +36,11 @@ async function createTranscript(sourceNodeId: string, autoStart: boolean): Promi
   if (!media.has_audio) throw new Error('当前视频没有声音，无法转写');
 
   const current = useCanvasStore.getState();
-  const existing = current.edges.find((edge) => edge.source === sourceNodeId && current.nodes.some((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.transcript && node.data.sourceMediaPath === media.media_path && node.data.sourceMediaHash === media.media_hash));
+  const existing = current.edges.find((edge) => edge.source === sourceNodeId && current.nodes.some((node) => node.id === edge.target
+    && node.type === CANVAS_NODE_TYPES.transcript
+    && node.data.sourceMediaPath === media.media_path
+    && node.data.sourceMediaHash === media.media_hash
+    && (reuseExisting || isTranscriptRunning(node.data))));
   if (existing) {
     const child = current.nodes.find((node) => node.id === existing.target);
     if (autoStart && child && Array.isArray(child.data.words) && child.data.words.length === 0 && !child.data.operationId) {
@@ -48,12 +58,13 @@ async function createTranscript(sourceNodeId: string, autoStart: boolean): Promi
 }
 
 /** Create a result node from an audio/video source and start transcription once it mounts. */
-export function startSourceTranscript(sourceNodeId: string, options: { autoStart?: boolean } = {}): Promise<string> {
+export function startSourceTranscript(sourceNodeId: string, options: { autoStart?: boolean; reuseExisting?: boolean } = {}): Promise<string> {
   const autoStart = options.autoStart !== false;
-  const key = `${sourceNodeId}:${autoStart}`;
+  const reuseExisting = options.reuseExisting === true;
+  const key = `${sourceNodeId}:${autoStart}:${reuseExisting}`;
   const pending = inFlight.get(key);
   if (pending) return pending;
-  const started = createTranscript(sourceNodeId, autoStart).finally(() => inFlight.delete(key));
+  const started = createTranscript(sourceNodeId, autoStart, reuseExisting).finally(() => inFlight.delete(key));
   inFlight.set(key, started);
   return started;
 }

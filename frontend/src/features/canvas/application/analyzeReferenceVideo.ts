@@ -68,7 +68,7 @@ async function ensureEvidence(project: string, storyId: string, media: RemixUplo
 
 async function ensureTranscript(project: string, sourceId: string, storyId: string, media: RemixUploadedMedia): Promise<RemixArtifactRef | null> {
   if (!media.has_audio) return null;
-  const transcriptId = await startSourceTranscript(sourceId, { autoStart: false });
+  const transcriptId = await startSourceTranscript(sourceId, { autoStart: false, reuseExisting: true });
   const store = useCanvasStore.getState();
   if (!store.edges.some((edge) => edge.source === transcriptId && edge.target === storyId)) {
     if (!store.addEdge(transcriptId, storyId)) throw new Error('连接原片转写与拆解节点失败');
