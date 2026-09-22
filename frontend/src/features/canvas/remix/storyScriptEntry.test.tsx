@@ -34,9 +34,12 @@ describe('story script entry', () => {
     expect(screen.queryByText(/参考蓝图与分析设置/)).toBeNull();
     act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
     const dialog = await screen.findByRole('dialog', { name: '改编脚本设置' });
+    expect(dialog).toHaveClass('bg-[var(--ui-surface-modal)]');
     expect(within(dialog).getByText('改编规则内容')).toBeTruthy();
     expect(createScriptFromBlueprint).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole('button', { name: '生成新脚本' }));
+    const createButton = within(dialog).getByRole('button', { name: '生成新脚本' });
+    expect(createButton).toHaveClass('bg-primary');
+    fireEvent.click(createButton);
     await waitFor(() => expect(createScriptFromBlueprint).toHaveBeenCalledWith('story-1'));
     expect(ensureSaved).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();

@@ -597,7 +597,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
 
       {typeof document !== 'undefined' && isScriptSettingsOpen && createPortal(
         <div
-          className="fixed inset-0 z-[230] flex items-center justify-center bg-black/70 p-6"
+          className="fixed inset-0 z-[230] flex items-center justify-center bg-black/60 p-4"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !isCreatingScript) setIsScriptSettingsOpen(false);
           }}
@@ -606,31 +606,31 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
             role="dialog"
             aria-modal="true"
             aria-label="改编脚本设置"
-            className="flex max-h-[min(760px,calc(100vh-48px))] w-full max-w-[720px] flex-col overflow-hidden rounded-[var(--ui-radius-xl)] border border-border-dark bg-surface-dark shadow-2xl"
+            className="relative flex max-h-[82vh] w-[min(680px,calc(100vw-32px))] flex-col overflow-hidden rounded-[var(--ui-radius-xl)] border border-[var(--ui-border-soft)] bg-[var(--ui-surface-modal)] shadow-[var(--ui-shadow-panel)]"
             onClick={(event) => event.stopPropagation()}
           >
-            <header className="flex items-start justify-between gap-4 border-b border-white/[0.08] px-5 py-4">
+            <header className="flex h-16 shrink-0 items-center justify-between gap-4 px-5">
               <div>
-                <h2 className="text-base font-medium text-text-dark">改编脚本设置</h2>
-                <p className="mt-1 text-xs leading-5 text-text-muted">确认原片结构与改编规则。生成后会在画布上创建一个新的脚本节点。</p>
+                <h2 className="text-base font-semibold text-text-dark">改编脚本设置</h2>
+                <p className="mt-0.5 text-xs text-text-muted">确认改编方向，生成后会创建新的脚本节点</p>
               </div>
               <button
                 type="button"
                 aria-label="关闭改编脚本设置"
                 disabled={isCreatingScript}
                 onClick={() => setIsScriptSettingsOpen(false)}
-                className="rounded p-1 text-text-muted hover:bg-white/[0.06] hover:text-text-dark disabled:opacity-45"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-white/[0.06] hover:text-text-dark disabled:opacity-40"
               >
                 <X className="h-4 w-4" />
               </button>
             </header>
-            <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto px-5 py-4">
+            <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto px-5 pb-4">
               <ReferenceBlueprintPanel ref={blueprintPanelRef} nodeId={id} source={blueprintSource} rows={rows} referenceEvents={referenceEvents} draft={data} onPatch={patchBlueprint} onReanalyze={reanalyzeBlueprint} suggestedNarrativeRole={suggestedNarrativeRole} />
               {scriptError && <p role="alert" className="mt-3 text-xs text-red-300">{scriptError}</p>}
             </div>
-            <footer className="flex justify-end gap-2 border-t border-white/[0.08] px-5 py-4">
-              <button type="button" disabled={isCreatingScript} onClick={() => setIsScriptSettingsOpen(false)} className="tap-button disabled:opacity-45">取消</button>
-              <button type="button" disabled={isCreatingScript} onClick={() => void generateScript()} className="tap-button tap-button-quiet-primary disabled:opacity-45">
+            <footer className="flex h-14 shrink-0 items-center justify-end gap-3 px-5">
+              <button type="button" disabled={isCreatingScript} onClick={() => setIsScriptSettingsOpen(false)} className="tap-button">取消</button>
+              <button type="button" disabled={isCreatingScript} onClick={() => void generateScript()} className="inline-flex h-9 items-center justify-center rounded-[var(--ui-radius-lg)] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40">
                 {isCreatingScript ? '正在生成…' : '生成新脚本'}
               </button>
             </footer>

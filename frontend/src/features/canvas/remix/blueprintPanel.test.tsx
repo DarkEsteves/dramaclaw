@@ -45,6 +45,9 @@ describe('ReferenceBlueprintPanel', () => {
     expect(screen.getByLabelText('整体叙事作用')).toBeVisible();
     expect(screen.getByLabelText('保留规则')).toBeVisible();
     expect(screen.getByLabelText('替换规则')).toBeVisible();
+    expect(screen.getByLabelText('整体叙事作用')).toHaveClass('ui-field');
+    expect(screen.getByLabelText('保留规则')).toHaveClass('ui-field');
+    expect(screen.getByLabelText('替换规则')).toHaveClass('ui-field');
     const summary = screen.getByText('查看生成依据');
     const details = summary.closest('details');
     expect(details).toBeTruthy();

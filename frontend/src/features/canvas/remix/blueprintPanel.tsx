@@ -154,24 +154,30 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
     onPatch({ [field]: value, blueprintDirty: true });
   };
 
-  return <section className="ui-scrollbar nowheel grid gap-4 text-xs text-text-dark">
-    <p className="leading-5 text-text-muted">这些规则只用于生成新的改编脚本，不会改动原片拆解结果。</p>
-    <label className="block">整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className="mt-1.5 w-full rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
-    <div className="grid grid-cols-2 gap-3">
-      <label>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className="mt-1.5 min-h-24 w-full resize-y rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
-      <label>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className="mt-1.5 min-h-24 w-full resize-y rounded-[12px] border border-border-dark bg-surface-field px-3 py-2" /></label>
+  const labelClass = 'grid gap-1.5 text-[11px] font-medium text-text-muted';
+  const fieldClass = 'ui-field w-full px-3 py-2 text-xs font-normal text-text-dark placeholder:text-[var(--canvas-node-input-placeholder)]';
+
+  return <section className="ui-scrollbar nowheel grid gap-5 text-xs text-text-dark">
+    <p className="rounded-[var(--ui-radius-lg)] bg-[rgb(var(--accent-rgb)/0.07)] px-3 py-2.5 leading-5 text-text-dark/78">这些设置只用于新脚本，原片拆解和校对结果不会改变。</p>
+    <div className="grid gap-3">
+      <div className="text-xs font-semibold text-text-dark">改编规则</div>
+      <label className={labelClass}>整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className={fieldClass} /></label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className={labelClass}>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className={`${fieldClass} min-h-24 resize-y`} /></label>
+        <label className={labelClass}>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className={`${fieldClass} min-h-24 resize-y`} /></label>
+      </div>
     </div>
-    <details className="rounded-[12px] border border-border-dark bg-bg-dark/35">
-      <summary className="cursor-pointer px-3 py-2 text-text-muted hover:text-text-dark">查看生成依据</summary>
-      <div className="grid gap-3 border-t border-white/[0.08] px-3 py-3">
+    <details className="rounded-[var(--ui-radius-lg)] border border-[var(--ui-border-soft)] bg-[rgba(var(--bg-rgb)/0.28)]">
+      <summary className="cursor-pointer px-3 py-2.5 font-medium text-text-muted transition-colors hover:text-text-dark">查看生成依据</summary>
+      <div className="grid gap-3 border-t border-[var(--ui-border-soft)] px-3 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <strong className="font-medium">原片与分析产物</strong>
           <span className="break-all text-text-muted">{source ? `原片 ${source.mediaPath}` : '请连接已上传的原片视频'}</span>
           {source?.transcriptRef && <span className="text-text-muted">转写 r{source.transcriptRef.revision}</span>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={!source || busy || Boolean(operationId || draft.managedEvidenceOperationId)} onClick={() => void analyzeEvidence()} className="rounded-[12px] border border-border-dark px-2 py-1 disabled:opacity-50">{operationId || draft.managedEvidenceOperationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
-          <button type="button" disabled={!source || busy} onClick={onReanalyze} className="rounded-[12px] border border-border-dark px-2 py-1 disabled:opacity-50">重新分析画面</button>
+          <button type="button" disabled={!source || busy || Boolean(operationId || draft.managedEvidenceOperationId)} onClick={() => void analyzeEvidence()} className="tap-button">{operationId || draft.managedEvidenceOperationId ? '提取中…' : evidenceRef ? '重新提取原片证据' : '提取原片证据'}</button>
+          <button type="button" disabled={!source || busy} onClick={onReanalyze} className="tap-button">重新分析画面</button>
         </div>
         <div className="flex flex-wrap gap-3 text-text-muted">
           {evidenceRef && <span>证据 {evidenceRef.artifactId} · r{evidenceRef.revision}</span>}
