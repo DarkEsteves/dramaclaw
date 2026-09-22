@@ -234,4 +234,50 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 导出 MP4' }));
     await waitFor(() => expect(backend.render).toHaveBeenCalledWith(expect.objectContaining({ manifestRef: expect.any(Object), nodeRevision: expect.any(Number) })));
   });
+
+  it('opens the script editor when the next step is to complete required B-roll', async () => {
+    useCanvasStore.setState({
+      nodes: [
+        {
+          id: 'reference',
+          type: 'videoNode',
+          position: { x: -800, y: 0 },
+          data: { videoUrl: '/reference.mp4', remixRole: 'reference' },
+        },
+        {
+          id: 'story',
+          type: 'videoStoryNode',
+          position: { x: -400, y: 0 },
+          data: { referenceEvents: [{ event_id: 'product' }], referenceBlueprintRef: { artifactId: 'blueprint', revision: 1 } },
+        },
+        {
+          id: 'script',
+          type: 'scriptNode',
+          position: { x: 0, y: 0 },
+          data: {
+            remixRole: 'adaptation_script',
+            remixScriptRef: { artifactId: 'script-artifact', revision: 1 },
+            remixBrollPlanRef: { artifactId: 'broll-plan', revision: 1 },
+            remixBrollScriptRef: { artifactId: 'script-artifact', revision: 1 },
+            remixBrollRequirements: [{ event_id: 'product', required: true }],
+            remixScriptDraft: {
+              dialogue: '新品登场',
+              selections: [{ id: 'product', label: '产品登场', start: 0, end: 4 }],
+            },
+          },
+        },
+      ],
+      edges: [
+        { id: 'reference-story', source: 'reference', target: 'story' },
+        { id: 'story-script', source: 'story', target: 'script' },
+      ],
+      selectedNodeId: 'script',
+      history: { past: [], future: [] },
+    });
+
+    render(<JourneyCanvas />);
+    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
+
+    expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+  });
 });

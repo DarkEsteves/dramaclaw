@@ -148,6 +148,7 @@ import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDown
 import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
 import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
 import { advanceRemixJourneyStep } from '@/features/canvas/remix/remixJourneyActions';
+import { requestRemixScriptEditor } from '@/features/canvas/remix/remixScriptEditorRequests';
 import { attachBrollVisualMedia, createBackgroundVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
@@ -1666,7 +1667,13 @@ export const NodeActionToolbar = memo(
           const started = analyzeReferenceVideo(source.id, { videoUrl: source.data.videoUrl });
           setSelectedNode(started.nodeId); requestFocusNode(started.nodeId);
         },
-        publish: (targetNodeId, action) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action }),
+        publish: (targetNodeId, action) => {
+          if (action === 'edit_script') {
+            requestRemixScriptEditor(targetNodeId);
+            return;
+          }
+          canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action });
+        },
         createNarration: (targetNodeId) => { createNarrationFromScript(targetNodeId); },
         alignNarration: (targetNodeId) => createAlignedTranscriptFromAudio(targetNodeId),
         createTimeline: (targetNodeId) => { createTimelineFromScript(targetNodeId); },
@@ -1798,8 +1805,10 @@ export const NodeActionToolbar = memo(
                     } else if (action === 'create_narration' || action === 'create_timeline') {
                       try { action === 'create_narration' ? createNarrationFromScript(node.id) : createTimelineFromScript(node.id); }
                       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建后续节点'); }
+                    } else if (action === 'edit_script') {
+                      requestRemixScriptEditor(node.id);
                     } else {
-                      canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'analyze' | 'edit_script' | 'compile' | 'prepare_compose' | 'create_compose' });
+                      canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'analyze' | 'compile' | 'prepare_compose' | 'create_compose' });
                     }
                   }}
                 ><Icon className="h-3.5 w-3.5" />{label}</UiChipButton>)}
