@@ -29,6 +29,51 @@ def test_reference_evidence_runner_publishes_full_video_evidence(tmp_path, monke
     assert result["artifact_ref"]["artifact_id"]
 
 
+def test_broll_plan_runner_publishes_plan_for_exact_script_revision(tmp_path, monkeypatch):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.task_backend.runners import remix as runner
+
+    store = RemixArtifactStore(tmp_path, "demo")
+    script = store.create("remix_script.v1", {
+        "dialogue": "新品登场", "segments": [], "selections": [],
+        "events": [{"event_id": "product"}], "blueprint_mappings": [],
+        "media_requirements": [],
+    }, [])
+    script_ref = {"artifact_id": script["id"], "revision": script["revision"]}
+    operations = RemixOperationStore(tmp_path, "demo")
+    operation = operations.start(
+        idempotency_key="broll-plan-1",
+        input_refs=[script_ref],
+        producer_version="remix-process.v1",
+        normalized_parameters={"action": "plan_broll", "payload": {"script_ref": script_ref}},
+        node_revision=2,
+    )
+
+    async def generate(*, script, username):
+        assert script["dialogue"] == "新品登场"
+        assert username == "alice"
+        return {
+            **script,
+            "media_requirements": [{
+                "event_id": "product", "required": True,
+                "purpose": "展示产品", "suggested_query": "产品特写",
+            }],
+        }
+
+    monkeypatch.setattr(runner, "generate_broll_plan", generate)
+    result = runner.run_remix_plan_broll(
+        {"payload": {"script_ref": script_ref, "operation_id": operation["operation_id"]}},
+        SimpleNamespace(output_dir=str(tmp_path), project_id="demo", requester_username="alice"),
+    )
+
+    artifact = store.read(result["artifact_ref"]["artifact_id"], result["artifact_ref"]["revision"])
+    assert artifact["schema"] == "remix_script.v1"
+    assert artifact["upstream_refs"] == [{**script_ref, "project_id": "demo"}]
+    assert artifact["payload"]["media_requirements"][0]["required"] is True
+    assert operations.get(operation["operation_id"])["output_refs"] == [result["artifact_ref"]]
+
+
 def test_transcribe_runner_resolves_project_relative_media_and_publishes_timeline(tmp_path, monkeypatch):
     from novelvideo.task_backend.runners import remix as runner
 

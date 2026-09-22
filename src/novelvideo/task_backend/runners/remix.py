@@ -1,6 +1,7 @@
 """Project-bound rendering of immutable remix composition artifacts."""
 from __future__ import annotations
 
+import asyncio
 import re
 import hashlib
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from novelvideo.freezone.remix.render import render_manifest, validate_manifest
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
 from novelvideo.freezone.remix.evidence import build_reference_evidence
+from novelvideo.freezone.remix.broll_plan import generate_broll_plan
 from novelvideo.freezone.remix.timing import compile_timing
 from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
@@ -79,6 +81,33 @@ def run_remix_analyze_reference_video(envelope: dict[str, Any], ctx: ProjectCont
     ref = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
     _publish_operation_result(payload, ctx, ref)
     return {"status": "completed", "artifact_ref": ref}
+
+
+def run_remix_plan_broll(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
+    """Publish B-roll decisions for one exact immutable remix script revision."""
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    ref = payload.get("script_ref") if isinstance(payload.get("script_ref"), dict) else {}
+    artifact_id, revision = ref.get("artifact_id"), ref.get("revision")
+    if not isinstance(artifact_id, str) or type(revision) is not int or revision < 1:
+        raise ValueError("B-roll planning script reference is incomplete")
+    store = RemixArtifactStore(Path(ctx.output_dir).resolve(), ctx.project_id)
+    script = store.read(artifact_id, revision)
+    if script["schema"] != "remix_script.v1":
+        raise ValueError("B-roll planning requires a remix script")
+    planned = asyncio.run(
+        generate_broll_plan(
+            script=script["payload"],
+            username=ctx.requester_username,
+        )
+    )
+    artifact = store.create(
+        "remix_script.v1",
+        planned,
+        [{"artifact_id": artifact_id, "revision": revision}],
+    )
+    output = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+    _publish_operation_result(payload, ctx, output)
+    return {"status": "completed", "artifact_ref": output}
 
 
 def run_remix_align_script(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
@@ -238,5 +267,6 @@ def _with_operation_failure_transition(runner):
 register_project_task_runner("remix_render", _with_operation_failure_transition(run_remix_render), requires_home_node=True, lane="ffmpeg")
 register_project_task_runner("remix_transcribe_media", _with_operation_failure_transition(run_remix_transcribe_media), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_analyze_reference_video", _with_operation_failure_transition(run_remix_analyze_reference_video), requires_home_node=True)
+register_project_task_runner("remix_plan_broll", _with_operation_failure_transition(run_remix_plan_broll), requires_home_node=True)
 register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_compile_semantic_timeline", _with_operation_failure_transition(run_remix_compile_semantic_timeline), requires_home_node=True)
