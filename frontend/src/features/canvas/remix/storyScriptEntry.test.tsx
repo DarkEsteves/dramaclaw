@@ -62,19 +62,26 @@ describe('story script entry', () => {
     });
   });
 
-  it('shows the complete reference-event review UI in fullscreen', () => {
-    render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], sourceVideoUrl: '/clip.mp4', referenceEvents: [{
+  it('shows the complete reference-event review UI in fullscreen', async () => {
+    render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [{
+      shotNumber: 1, startTime: '0', endTime: '1', duration: '1', visualDescription: '完整画面描述', narrative: '旧版叙事内容',
+      shotSize: '中景', cameraAngle: '平视', cameraMovement: '固定', focalAndDof: '中等景深', lighting: '室内柔和光',
+      backgroundMusic: '轻快音乐', voiceAndSfx: '环境音', imagePrompt: '完整图像提示词', videoMotionPrompt: '完整视频提示词', keyframeUrl: '/keyframe.png',
+    }], sourceVideoUrl: '/clip.mp4', referenceEvents: [{
       event_id: 'event-1', start_us: 0, end_us: 1_000_000,
-      visual_observation: '人物展示产品', spoken_text: '这是产品台词', narrative_inference: '产品登场', review_state: 'needs_review',
+      visual_observation: '人物展示产品', visible_text: '画面字幕', spoken_text: '这是产品台词', narrative_inference: '产品登场', review_state: 'needs_review',
       observed_frame: { time_us: 500_000, pts: 7500, time_base: '1/15000', url: '/frame.png' },
     }] }} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'node.videoStory.fullscreen' }));
     const dialog = screen.getByRole('dialog', { name: '原片拆解全屏校对' });
-    expect(within(dialog).getByText('人物展示产品')).not.toHaveClass('line-clamp-2');
+    expect(within(dialog).getByText('人物展示产品')).toBeTruthy();
     expect(within(dialog).getByText('这是产品台词')).toBeTruthy();
     expect(within(dialog).getByText('产品登场')).toBeTruthy();
     expect(within(dialog).getByText(/PTS 7500 · 1\/15000/)).toBeTruthy();
+    const editableValues = () => Array.from(dialog.querySelectorAll<HTMLElement>('.editable-table-cell')).map((cell) => cell.innerText);
+    await waitFor(() => expect(editableValues()).toContain('完整画面描述'));
+    for (const value of ['旧版叙事内容', '中景', '平视', '固定', '中等景深', '室内柔和光', '轻快音乐', '环境音', '完整图像提示词', '完整视频提示词']) expect(editableValues()).toContain(value);
     fireEvent.change(within(dialog).getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed' } });
     expect(updateNodeData).toHaveBeenCalledWith('story-1', expect.objectContaining({
       referenceEvents: [expect.objectContaining({ event_id: 'event-1', review_state: 'reviewed' })],

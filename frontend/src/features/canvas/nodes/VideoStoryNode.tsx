@@ -174,6 +174,127 @@ function StoryTable({ rows, compact, onCellCommit }: StoryTableProps) {
   );
 }
 
+interface FullscreenStoryTableProps {
+  rows: VideoStoryRow[];
+  events: ReferenceEvent[];
+  onCellCommit: (rowIndex: number, colKey: keyof VideoStoryRow, nextValue: string) => void;
+  onOverrideChange: (eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => void;
+  onReviewAll: () => void;
+}
+
+function eventSeconds(timeUs: number | null | undefined): string {
+  return typeof timeUs === 'number' ? `${(timeUs / 1_000_000).toFixed(1)} 秒` : '暂无';
+}
+
+function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, onReviewAll }: FullscreenStoryTableProps) {
+  const { t } = useTranslation();
+  const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
+  const itemCount = Math.max(rows.length, events.length);
+  const headerClass = 'border-b border-[rgba(255,255,255,0.1)] px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-text-muted';
+
+  return (
+    <div className="flex h-full min-h-0 flex-col text-xs text-text-dark">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3 py-2 text-text-muted">
+        <span>完整拆解字段 · {itemCount} 个事件</span>
+        <div className="flex items-center gap-2">
+          <span className={pendingReviewCount > 0 ? 'text-amber-300' : 'text-emerald-300'}>
+            {pendingReviewCount > 0 ? `还剩 ${pendingReviewCount} 项待核对` : '已全部核对'}
+          </span>
+          {pendingReviewCount > 0 && (
+            <button type="button" onClick={onReviewAll} className="tap-button tap-button-quiet-primary nodrag">
+              全部标记为已核对
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto">
+        <table className="w-max min-w-full border-collapse text-left text-[12px]">
+          <thead className="sticky top-0 z-10 bg-bg-dark/95 backdrop-blur">
+            <tr>
+              <th className={`${headerClass} min-w-[150px]`}>核对状态</th>
+              <th className={`${headerClass} min-w-[360px]`}>原片事件证据</th>
+              <th className={`${headerClass} min-w-[300px]`}>同期台词与词语时间</th>
+              <th className={`${headerClass} min-w-[300px]`}>模型判断与叙事作用</th>
+              {COLUMNS.map((column) => (
+                <th key={column.key as string} className={`${headerClass} ${column.widthClass}`}>{t(column.labelKey)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: itemCount }, (_, index) => {
+              const row = rows[index] ?? ({} as VideoStoryRow);
+              const event = events[index];
+              const eventId = event?.event_id ?? `event-${index + 1}`;
+              const observedFrame = event?.observed_frame;
+              const frameUrl = event?.frame_url ?? observedFrame?.url;
+              const reviewState = event?.review_state ?? 'needs_review';
+              const spokenText = event?.spoken_text ?? event?.spoken_range?.text;
+              return (
+                <tr key={eventId} className="border-b border-white/[0.06] align-top hover:bg-bg-dark/40">
+                  <td className="min-w-[150px] px-3 py-3">
+                    {event ? (
+                      <select
+                        aria-label={`事件 ${index + 1} 核对状态`}
+                        value={reviewState}
+                        onChange={(change) => onOverrideChange(eventId, { reviewState: change.target.value as ReferenceEvent['review_state'] })}
+                        className="rounded-[12px] border border-border-dark bg-surface-field px-2 py-1 text-text-dark"
+                      >
+                        <option value="needs_review">待核对</option>
+                        <option value="reviewed">已核对</option>
+                        <option value="reviewed_uncertain">已核对，保留不确定</option>
+                      </select>
+                    ) : <span className="text-text-muted/60">—</span>}
+                  </td>
+                  <td className="min-w-[360px] max-w-[420px] px-3 py-3">
+                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap">
+                      <div className="flex gap-3">
+                        {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-24 w-16 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
+                        <div className="grid content-start gap-1">
+                          <span>{event.visual_observation || '待核对画面'}</span>
+                          <span className="text-text-muted">事件 {eventSeconds(event.start_us)}–{eventSeconds(event.end_us)}</span>
+                          <span className="font-mono text-[11px] text-text-muted">画面 {eventSeconds(observedFrame?.time_us ?? event.analysis_frame_time_us)} · PTS {(observedFrame?.pts ?? event.frame_pts?.join('、')) || '未知'} · {observedFrame?.time_base ?? '未知 time_base'}</span>
+                        </div>
+                      </div>
+                      <span><span className="text-text-muted">画面字幕：</span>{event.visible_text || '未识别'}</span>
+                      <span><span className="text-text-muted">代表帧时间：</span>{event.frame_times_us?.map(eventSeconds).join('、') || '暂无'}</span>
+                      <span><span className="text-text-muted">证据状态：</span>{event.note_status || '正常'}</span>
+                    </div> : <span className="text-text-muted/60">—</span>}
+                  </td>
+                  <td className="min-w-[300px] max-w-[380px] px-3 py-3">
+                    {event ? <div className="grid gap-1.5 whitespace-pre-wrap">
+                      <span>{spokenText || '无同期台词'}</span>
+                      <span className="text-[11px] text-text-muted">{event.word_spans?.map((word) => `${word.text} ${eventSeconds(word.start_us)}–${eventSeconds(word.end_us)}`).join('；') || '暂无逐词时间'}</span>
+                      {(event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warningIndex}-${warning.transcript_word}`} className="text-amber-300">疑似错词：{warning.transcript_word} → {warning.caption_word}</span>)}
+                    </div> : <span className="text-text-muted/60">—</span>}
+                  </td>
+                  <td className="min-w-[300px] max-w-[380px] px-3 py-3">
+                    {event ? <div className="grid gap-2 whitespace-pre-wrap">
+                      <span>{event.narrative_inference || '待补充模型判断'}</span>
+                      <label className="text-[11px] text-text-muted">叙事作用
+                        <input
+                          aria-label={`事件 ${index + 1} 叙事作用`}
+                          value={event.user_narrative_role ?? event.narrative_inference ?? ''}
+                          onChange={(change) => onOverrideChange(eventId, { narrativeRole: change.target.value })}
+                          className="mt-1 w-full rounded-[12px] border border-border-dark bg-surface-field px-2 py-1 text-text-dark"
+                        />
+                      </label>
+                    </div> : <span className="text-text-muted/60">—</span>}
+                  </td>
+                  {COLUMNS.map((column) => (
+                    <td key={column.key as string} className={`${column.widthClass} px-3 py-3 align-top`}>
+                      <StoryCell row={row} col={column} onCommit={(nextValue) => onCellCommit(index, column.key, nextValue)} />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function EmptyStoryState({ rawResult }: { rawResult?: Record<string, unknown> | null }) {
   const { t } = useTranslation();
 
@@ -449,12 +570,12 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
           </div>
           <div className="flex-1 overflow-hidden rounded-lg border border-[rgba(255,255,255,0.12)] bg-surface-dark/95">
             {hasReferenceEvents ? (
-              <ReferenceEventList
+              <FullscreenStoryTable
+                rows={rows}
                 events={referenceEvents}
-                videoUrl={data.sourceVideoUrl}
                 onOverrideChange={handleReferenceOverride}
                 onReviewAll={handleReviewAll}
-                showFullText
+                onCellCommit={handleCellCommit}
               />
             ) : (
               <StoryTable rows={rows} onCellCommit={handleCellCommit} />

@@ -30,10 +30,9 @@ interface Props {
   videoUrl?: string | null;
   onOverrideChange?: (eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => void;
   onReviewAll?: () => void;
-  showFullText?: boolean;
 }
 
-export function ReferenceEventList({ events, videoUrl, onOverrideChange, onReviewAll, showFullText = false }: Props) {
+export function ReferenceEventList({ events, videoUrl, onOverrideChange, onReviewAll }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
   const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
 
@@ -60,10 +59,10 @@ export function ReferenceEventList({ events, videoUrl, onOverrideChange, onRevie
         <span className="w-20 shrink-0 font-mono text-[11px] text-text-muted">{seconds(event.start_us)}–{seconds(event.end_us)} 秒</span>
         {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-14 w-10 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
         <span className="grid min-w-0 flex-1 gap-1">
-          <span className={showFullText || selected === index ? '' : 'line-clamp-2'}><span className="mr-2 text-text-muted">画面</span>{event.note_status === 'missing_frame' ? '画面未核实' : event.visual_observation || '待核对画面'}</span>
-          <span className={showFullText || selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">同期台词</span>{spokenText || '无同期台词'}</span>
+          <span className={selected === index ? '' : 'line-clamp-2'}><span className="mr-2 text-text-muted">画面</span>{event.note_status === 'missing_frame' ? '画面未核实' : event.visual_observation || '待核对画面'}</span>
+          <span className={selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">同期台词</span>{spokenText || '无同期台词'}</span>
           {(event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warning.transcript_word}-${warning.caption_word}-${warningIndex}`} className="text-amber-300">疑似转写错词：{warning.transcript_word} → 画面字幕 {warning.caption_word}</span>)}
-          <span className={showFullText || selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">模型判断</span>{event.narrative_inference || '待补充'}</span>
+          <span className={selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">模型判断</span>{event.narrative_inference || '待补充'}</span>
           {observedFrame && <span className="font-mono text-[11px] text-text-muted">画面 {seconds(observedFrame.time_us)} 秒 · PTS {observedFrame.pts ?? '未知'} · {observedFrame.time_base ?? '未知 time_base'}</span>}
         </span>
         <span className={`shrink-0 text-[11px] ${reviewState === 'reviewed' ? 'text-emerald-300' : 'text-amber-300'}`}>{event.note_status === 'missing_frame' ? '缺少画面' : reviewState === 'reviewed' ? '已核对' : reviewState === 'reviewed_uncertain' ? '已核对 · 保留不确定' : '待核对'}</span>
