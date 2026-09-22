@@ -120,7 +120,27 @@ export function transcriptPlaybackParts(text: string, words: TranscriptWord[]): 
     cursor = position + word.text.length;
   }
   if (cursor < text.length) parts.push({ text: text.slice(cursor) });
-  return parts;
+
+  // A transcript forced through a CJK language hint can contain one timed
+  // entry per Latin character. Keep that artifact editable as-is, but merge
+  // adjacent Latin fragments for playback so the visible highlight follows
+  // a whole spoken word rather than a single letter.
+  const merged: typeof parts = [];
+  let trailingLatinCharacterRun = false;
+  for (const part of parts) {
+    const previous = merged[merged.length - 1];
+    const isTimed = part.startUs !== undefined && part.endUs !== undefined;
+    const previousIsTimed = previous?.startUs !== undefined && previous.endUs !== undefined;
+    const isSingleLatinCharacter = /^[A-Za-z0-9'’\-]$/u.test(part.text);
+    if (isTimed && previousIsTimed && trailingLatinCharacterRun && isSingleLatinCharacter) {
+      previous.text += part.text;
+      previous.endUs = part.endUs;
+    } else {
+      merged.push({ ...part });
+    }
+    trailingLatinCharacterRun = isTimed && isSingleLatinCharacter;
+  }
+  return merged;
 }
 
 /** Keep word timing but regenerate character offsets for a corrected transcript. */

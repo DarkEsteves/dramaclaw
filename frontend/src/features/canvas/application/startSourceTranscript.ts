@@ -53,7 +53,7 @@ async function createTranscript(sourceNodeId: string, autoStart: boolean, reuseE
     current.deleteNode(child);
     throw new Error('连接转写节点失败');
   }
-  current.updateNodeData(child, { sourceMediaPath: media.media_path, sourceMediaHash: media.media_hash, autoStartMode: autoStart ? 'transcribe' : null });
+  current.updateNodeData(child, { sourceMediaPath: media.media_path, sourceMediaHash: media.media_hash, transcriptLanguage: 'auto', autoStartMode: autoStart ? 'transcribe' : null });
   return child;
 }
 

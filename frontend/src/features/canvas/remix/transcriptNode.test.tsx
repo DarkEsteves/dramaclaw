@@ -48,8 +48,17 @@ describe('TranscriptNode', () => {
   it('starts transcription automatically when created by its source node', async () => {
     state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, autoStartMode: 'transcribe' };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
-    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav', language: 'auto' })));
     expect(state.nodes[1].data.autoStartMode).toBeNull();
+  });
+
+  it('offers automatic language detection by default and persists manual language changes', () => {
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const language = screen.getByRole('combobox', { name: '转写语言' }) as HTMLSelectElement;
+    expect(language.value).toBe('auto');
+    expect(screen.getByRole('option', { name: '自动识别' })).toBeTruthy();
+    fireEvent.change(language, { target: { value: 'en' } });
+    expect(state.updateNodeData).toHaveBeenCalledWith('transcript', { transcriptLanguage: 'en' });
   });
 
   it('starts script alignment automatically only with both saved script and narration audio connected', async () => {

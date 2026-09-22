@@ -490,6 +490,7 @@ const transcriptNodeDefinition: CanvasNodeDefinition<TranscriptNodeData> = {
     displayName: 'Transcript',
     artifactRef: null,
     words: [],
+    transcriptLanguage: 'auto',
     status: 'needs_review',
     unresolved: [],
   }),

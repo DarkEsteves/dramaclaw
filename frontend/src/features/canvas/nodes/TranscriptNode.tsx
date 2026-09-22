@@ -14,6 +14,11 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 type Props = NodeProps & { id: string; data: TranscriptNodeData; selected?: boolean };
+type TranscriptLanguage = 'auto' | 'zh' | 'en';
+
+function transcriptLanguage(value: unknown): TranscriptLanguage {
+  return value === 'zh' || value === 'en' || value === 'auto' ? value : 'auto';
+}
 
 function stamp(us: number): string {
   const ms = Math.max(0, Math.floor(us / 1_000));
@@ -38,7 +43,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const source = useMemo(() => sourceMediaForTranscript(id, nodes, edges), [id, nodes, edges]);
   const scriptRef = useMemo(() => sourceScriptForTranscript(id, nodes, edges), [id, nodes, edges]);
   const [operationId, setOperationId] = useState<string | null>(typeof data.operationId === 'string' ? data.operationId : null);
-  const [language, setLanguage] = useState('zh');
+  const [language, setLanguage] = useState<TranscriptLanguage>(() => transcriptLanguage(data.transcriptLanguage));
   const [edited, setEdited] = useState<string[]>(() => data.words.map((word) => word.text));
   const [showWordDetails, setShowWordDetails] = useState(false);
   const [confirmedTiming, setConfirmedTiming] = useState(false);
@@ -268,7 +273,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         <div className="mb-2 truncate" title={source?.path}>{source ? `${source.kind === 'audio' ? '音频' : '视频'}：${source.path.split('/').pop()}` : '请连接上传的音频或带声音视频'}</div>
         {source?.url && (source.kind === 'audio' ? <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} controls className="w-full" /> : <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} controls className="max-h-40 w-full" />)}
         <div className="mt-2 flex items-center gap-2">
-          <select aria-label="转写语言" value={language} onChange={(event) => setLanguage(event.target.value)} className="nodrag h-7 rounded-[12px] border border-white/10 bg-surface-field px-2 text-text-dark"><option value="zh">中文</option><option value="en">English</option></select>
+          <select aria-label="转写语言" value={language} onChange={(event) => { const next = transcriptLanguage(event.target.value); setLanguage(next); updateNodeData(id, { transcriptLanguage: next }); }} className="nodrag h-7 rounded-[12px] border border-white/10 bg-surface-field px-2 text-text-dark"><option value="auto">自动识别</option><option value="zh">中文</option><option value="en">English</option></select>
           <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('transcribe')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{operationId || data.managedOperationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
           {scriptRef && <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>按脚本对齐</button>}
           <span>{artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>

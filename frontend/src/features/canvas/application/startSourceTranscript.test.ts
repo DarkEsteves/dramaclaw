@@ -32,6 +32,7 @@ describe('startSourceTranscript', () => {
     expect(state.addNode).toHaveBeenCalledWith('transcriptNode', { x: 480, y: 220 });
     expect(state.edges).toContainEqual({ source: 'audio-1', target: 'transcript-1' });
     expect(state.nodes[1].data.autoStartMode).toBe('transcribe');
+    expect(state.nodes[1].data.transcriptLanguage).toBe('auto');
   });
 
   it('can create the transcript without starting a second job when analysis coordinates it', async () => {

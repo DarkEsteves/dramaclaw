@@ -27,6 +27,24 @@ describe('transcript node model', () => {
     ]);
   });
 
+  it('groups legacy character-level English timing into word-sized playback parts', () => {
+    expect(transcriptPlaybackParts('flour and water', [
+      { text: 'f', startUs: 0, endUs: 100_000, startChar: 0, endChar: 1 },
+      { text: 'l', startUs: 100_000, endUs: 200_000, startChar: 1, endChar: 2 },
+      { text: 'o', startUs: 200_000, endUs: 300_000, startChar: 2, endChar: 3 },
+      { text: 'u', startUs: 300_000, endUs: 400_000, startChar: 3, endChar: 4 },
+      { text: 'r', startUs: 400_000, endUs: 500_000, startChar: 4, endChar: 5 },
+      { text: 'and', startUs: 600_000, endUs: 900_000, startChar: 6, endChar: 9 },
+      { text: 'water', startUs: 1_000_000, endUs: 1_300_000, startChar: 10, endChar: 15 },
+    ])).toEqual([
+      { text: 'flour', startUs: 0, endUs: 500_000 },
+      { text: ' ' },
+      { text: 'and', startUs: 600_000, endUs: 900_000 },
+      { text: ' ' },
+      { text: 'water', startUs: 1_000_000, endUs: 1_300_000 },
+    ]);
+  });
+
   it('chooses connected narration before video and ignores sources without a remix media path', () => {
     const nodes = [
       { id: 'video', data: { remixMedia: { media_path: 'video.mp4', media_kind: 'video', has_audio: true } } },
