@@ -44,6 +44,16 @@ describe('RemixScriptPanel', () => {
     expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 });
   });
 
+  it('restores and persists the topic owned by the current script branch', async () => {
+    const onTopicChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '已有台词', selections: [] }} initialTopic="冰美式" existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onTopicChange={onTopicChange} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByLabelText('新主题')).toHaveValue('冰美式');
+    fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '无糖气泡水' } });
+    expect(onTopicChange).toHaveBeenCalledWith('无糖气泡水');
+    await screen.findByText('用早晨疲惫引出咖啡');
+  });
+
   it('uses the child branch settings to create a blueprint before generation and save', async () => {
     const branchRef = { artifactId: 'branch-blueprint', revision: 1 };
     const onEnsureBlueprint = vi.fn(async () => branchRef);

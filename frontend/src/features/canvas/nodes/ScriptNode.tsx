@@ -875,6 +875,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
           <RemixScriptPanel
             project={readUrl().project ?? ''}
             initialDraft={initialRemixDraft}
+            initialTopic={typeof data.remixTopic === 'string' ? data.remixTopic : ''}
             existingRef={savedRemixRef}
             blueprintRef={blueprintRef}
             blueprintSettings={upstreamStory ? <ReferenceBlueprintPanel
@@ -895,6 +896,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
+            onTopicChange={(remixTopic) => updateNodeData(id, { remixTopic })}
             onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); }}
             onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}

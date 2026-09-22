@@ -207,6 +207,7 @@ describe('native canvas remix journey integration', () => {
 
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: /继续改编 · 填写新主题并生成脚本/ }));
+    expect(await screen.findByLabelText('新主题')).toHaveValue('新品咖啡');
     fireEvent.click(await screen.findByRole('button', { name: '替换 产品登场 素材' }));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptDraft as { selections: Array<{ visualMediaRevision?: string }> }).selections[0].visualMediaRevision).toBe('c'.repeat(64)));
     fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));

@@ -11,6 +11,7 @@ const fieldClass = 'nodrag mt-1 w-full rounded-[12px] border border-white/10 bg-
 interface Props {
   project: string;
   initialDraft: RemixScriptDraft;
+  initialTopic?: string;
   existingRef: RemixArtifactRef | null;
   blueprintRef: RemixArtifactRef | null;
   blueprintSettings?: ReactNode;
@@ -20,16 +21,17 @@ interface Props {
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
+  onTopicChange?: (topic: string) => void;
   onDraftChange: (draft: RemixScriptDraft) => void;
   onSave: (ref: RemixArtifactRef, blueprintRef?: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onTopicChange, onDraftChange, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [newTopic, setNewTopic] = useState('');
+  const [newTopic, setNewTopic] = useState(initialTopic);
   const [error, setError] = useState<string | null>(null);
   const [blueprintRole, setBlueprintRole] = useState<string | null>(null);
   const dialogueRef = useRef<HTMLTextAreaElement>(null);
@@ -127,7 +129,7 @@ export function RemixScriptPanel({ project, initialDraft, existingRef, blueprint
       {blueprintSettings}
       {!blueprintSettings && blueprintRef && <p className="text-text-muted">已关联参考蓝图 · 版本 {blueprintRef.revision}</p>}
       {!blueprintSettings && blueprintRole && <p className="rounded-[12px] border border-white/10 bg-surface-field p-3 text-text-muted">{blueprintRole}</p>}
-      {(blueprintRef || onEnsureBlueprint) && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => setNewTopic(event.target.value)} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
+      {(blueprintRef || onEnsureBlueprint) && <div className="flex items-end gap-2"><label className="min-w-0 flex-1">新主题<input aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={fieldClass} /></label><button type="button" disabled={generating || saving || !newTopic.trim()} onClick={() => void generate()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mb-1 disabled:opacity-50`}>{generating ? '生成中…' : '按蓝图生成'}</button></div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>标记选中文本</button>
       <p className="text-text-muted">在台词中选中文字后标记；填写替换画面节点可作为 B-roll 指令。</p>
