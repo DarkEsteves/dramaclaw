@@ -539,6 +539,57 @@ def test_reference_analysis_action_queues_project_media_without_speech_engine(cl
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"video").hexdigest()
 
 
+def test_broll_planning_action_queues_exact_script_revision(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    script = api.post(BASE, json={
+        "schema": "remix_script.v1",
+        "payload": {
+            "dialogue": "新品登场", "segments": [], "selections": [],
+            "events": [{"event_id": "product"}], "blueprint_mappings": [],
+            "media_requirements": [],
+        },
+        "upstream_refs": [],
+    }).json()["data"]
+
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "plan_broll",
+        "payload": {"script_ref": {"artifact_id": script["id"], "revision": script["revision"]}},
+        "idempotency_key": "broll-script-1-r1",
+        "node_revision": 2,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "remix_plan_broll"
+    assert queued[0]["queue_kind"] == "default"
+    assert queued[0]["payload"]["script_ref"] == {"artifact_id": script["id"], "revision": 1}
+    operation = RemixOperationStore(tmp_path, "demo").get(response.json()["data"]["operation_id"])
+    assert operation["input_refs"] == [{"artifact_id": script["id"], "revision": 1, "project_id": "demo"}]
+
+
+def test_broll_planning_action_rejects_inexact_or_wrong_schema_reference(client, tmp_path):
+    api, queued = client
+    blueprint = api.post(BASE, json={
+        "schema": "composition_manifest.v1", "payload": manifest(), "upstream_refs": [],
+    }).json()["data"]
+
+    inexact = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "plan_broll",
+        "payload": {"script_ref": {"artifact_id": blueprint["id"]}},
+        "idempotency_key": "broll-inexact", "node_revision": 1,
+    })
+    wrong_schema = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "plan_broll",
+        "payload": {"script_ref": {"artifact_id": blueprint["id"], "revision": 1}},
+        "idempotency_key": "broll-wrong-schema", "node_revision": 1,
+    })
+
+    assert inexact.status_code == 422
+    assert wrong_schema.status_code == 422
+    assert queued == []
+
+
 def test_processing_action_transport_error_is_reconciled_without_resubmission(client, tmp_path, monkeypatch):
     from novelvideo.api.routes import remix as routes
     from novelvideo.freezone.remix.operations import RemixOperationStore

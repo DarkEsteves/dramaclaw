@@ -72,7 +72,7 @@ class OperationTransitionBody(BaseModel):
 class ProcessActionBody(BaseModel):
     action: Literal[
         "transcribe_media", "align_script", "compile_semantic_timeline",
-        "analyze_reference_video", "render_manifest",
+        "analyze_reference_video", "render_manifest", "plan_broll",
     ]
     payload: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
@@ -94,6 +94,7 @@ _PROCESS_TASK_TYPES = {
     "compile_semantic_timeline": "remix_compile_semantic_timeline",
     "analyze_reference_video": "remix_analyze_reference_video",
     "render_manifest": "remix_render",
+    "plan_broll": "remix_plan_broll",
 }
 
 
@@ -382,6 +383,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         ),
         "analyze_reference_video": ({"media_path"}, set()),
         "render_manifest": ({"manifest_ref"}, set()),
+        "plan_broll": ({"script_ref"}, set()),
     }
     required, optional = expected[action]
     if set(payload) != required | optional:
