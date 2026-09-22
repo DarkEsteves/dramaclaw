@@ -18,6 +18,15 @@ describe('RemixJourneyButton', () => {
     expect(screen.getByRole('button', { name: '成片可编辑并可下载 MP4' })).toBeInTheDocument();
   });
 
+  it('renders a wait step as a disabled status instead of a dead action', () => {
+    const onContinue = vi.fn();
+    render(<RemixJourneyButton nodeId="script" step={{ kind: 'wait', targetNodeId: 'script', label: '等待 B-roll 规划' }} onContinue={onContinue} />);
+    const button = screen.getByRole('button', { name: '等待 B-roll 规划' });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onContinue).not.toHaveBeenCalled();
+  });
+
   it('does not put another node\'s next step in the selected node toolbar', () => {
     render(<RemixJourneyButton nodeId="story" step={{ kind: 'input', targetNodeId: 'script', action: 'edit_script', label: '补齐必需 B-roll' }} onContinue={() => {}} />);
     expect(screen.queryByRole('button', { name: '继续改编 · 补齐必需 B-roll' })).toBeNull();

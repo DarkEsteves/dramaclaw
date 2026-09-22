@@ -405,6 +405,8 @@ function useScriptStorySubmit(
   return { submit, isGenerating };
 }
 
+const activeBrollPlans = new Set<string>();
+
 export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNodeProps) => {
   const { t } = useTranslation();
   const updateNodeInternals = useUpdateNodeInternals();
@@ -426,6 +428,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       const scriptRef = remixRef(current?.data.remixScriptRef);
       const project = readUrl().project;
       if (!scriptRef || !project) { toast.error('请先保存改编脚本'); return; }
+      activeBrollPlans.add(id);
       store.updateNodeData(id, { remixBrollPlanStatus: 'running', remixBrollPlanError: null });
       void generateRemixBrollPlan(project, scriptRef).then((artifact) => {
         const latest = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
@@ -441,7 +444,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         if (!sameRemixRef(remixRef(latest?.data.remixScriptRef), scriptRef)) return;
         useCanvasStore.getState().updateNodeData(id, { remixBrollPlanStatus: 'failed', remixBrollPlanError: cause instanceof Error ? cause.message : String(cause) });
         toast.error(cause instanceof Error ? cause.message : 'B-roll 规划失败');
-      });
+      }).finally(() => activeBrollPlans.delete(id));
     }
     if (nodeId === id && action === 'create_narration') {
       try { createNarrationFromScript(id); }
@@ -452,6 +455,13 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建语义时间轴'); }
     }
   }), [id]);
+  useEffect(() => {
+    if (data.remixBrollPlanStatus !== 'running' || activeBrollPlans.has(id)) return;
+    updateNodeData(id, {
+      remixBrollPlanStatus: 'failed',
+      remixBrollPlanError: '上次 B-roll 规划已中断，请重新规划。',
+    });
+  }, [data.remixBrollPlanStatus, id, updateNodeData]);
   useEffect(() => {
     const openEditor = () => setRemixScriptOpen(true);
     const unsubscribe = subscribeRemixScriptEditorRequest(id, openEditor);

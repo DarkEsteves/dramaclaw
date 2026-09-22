@@ -72,6 +72,13 @@ describe('reference video remix canvas journey', () => {
       targetNodeId: 'script-two',
       label: '规划 B-roll',
     });
+
+    graph.nodes[3].data.remixBrollPlanStatus = 'failed';
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script-two')).toMatchObject({
+      action: 'plan_broll',
+      targetNodeId: 'script-two',
+      label: '重新规划 B-roll',
+    });
   });
 
   it('requires the saved B-roll binding to match the live connected visual node', () => {

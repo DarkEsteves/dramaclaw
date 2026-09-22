@@ -130,7 +130,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
   if (!ref(script.data.remixScriptRef)) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '填写新主题并生成脚本', inputHint: '确认台词、语义区间和素材要求后保存。' };
   if (script.data.remixBrollPlanStatus === 'running') return { kind: 'wait', targetNodeId: script.id, label: '等待 B-roll 规划' };
   if (!ref(script.data.remixBrollPlanRef) || !sameRef(script.data.remixBrollScriptRef, script.data.remixScriptRef)) {
-    return { kind: 'action', action: 'plan_broll', targetNodeId: script.id, label: '规划 B-roll' };
+    return { kind: 'action', action: 'plan_broll', targetNodeId: script.id, label: script.data.remixBrollPlanStatus === 'failed' ? '重新规划 B-roll' : '规划 B-roll' };
   }
   if (missingRequiredBroll(script, nodes, edges)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，重新选择当前已连接的替换画面，并确认素材版本。' };
 
