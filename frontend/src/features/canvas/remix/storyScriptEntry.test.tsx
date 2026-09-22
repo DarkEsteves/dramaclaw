@@ -2,13 +2,14 @@ import { forwardRef, useImperativeHandle } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { ensureSaved, createScriptFromBlueprint } = vi.hoisted(() => ({
+const { ensureSaved, createScriptFromBlueprint, updateNodeData } = vi.hoisted(() => ({
   ensureSaved: vi.fn(async () => ({ artifactId: 'blueprint-1', revision: 1 })),
   createScriptFromBlueprint: vi.fn(() => 'script-1'),
+  updateNodeData: vi.fn(),
 }));
 vi.mock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unknown) => unknown) => selector({ nodes: [], edges: [], setSelectedNode: vi.fn(), updateNodeData: vi.fn() }) }));
+vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unknown) => unknown) => selector({ nodes: [], edges: [], setSelectedNode: vi.fn(), updateNodeData }) }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/NodeResizeHandle', () => ({ NodeResizeHandle: () => null }));
 vi.mock('@/features/canvas/ui/nodeFrameStyles', () => ({ CANVAS_NODE_PANEL_SURFACE_CLASS: '', canvasNodeFrameClass: () => '' }));
@@ -39,5 +40,23 @@ describe('story script entry', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成改编脚本' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('原片证据尚未完成');
     expect(createScriptFromBlueprint).not.toHaveBeenCalled();
+  });
+
+  it('marks every pending reference event reviewed with one canvas update', () => {
+    render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [
+      { event_id: 'pending-1', start_us: 0, end_us: 1_000_000 },
+      { event_id: 'uncertain-1', start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
+      { event_id: 'pending-2', start_us: 2_000_000, end_us: 3_000_000, review_state: 'needs_review' },
+    ] }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '全部标记为已核对' }));
+    expect(updateNodeData).toHaveBeenCalledWith('story-1', {
+      referenceEvents: [
+        expect.objectContaining({ event_id: 'pending-1', review_state: 'reviewed' }),
+        expect.objectContaining({ event_id: 'uncertain-1', review_state: 'reviewed_uncertain' }),
+        expect.objectContaining({ event_id: 'pending-2', review_state: 'reviewed' }),
+      ],
+      blueprintDirty: true,
+    });
   });
 });

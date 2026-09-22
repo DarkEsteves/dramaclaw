@@ -29,13 +29,24 @@ interface Props {
   events: ReferenceEvent[];
   videoUrl?: string | null;
   onOverrideChange?: (eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => void;
+  onReviewAll?: () => void;
 }
 
-export function ReferenceEventList({ events, videoUrl, onOverrideChange }: Props) {
+export function ReferenceEventList({ events, videoUrl, onOverrideChange, onReviewAll }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
+  const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
 
   return <div className="ui-scrollbar nowheel h-full overflow-auto text-xs text-text-dark">
-    <div className="border-b border-white/[0.08] px-3 py-2 text-text-muted">按原片时间排列 · {events.length} 个事件 · 模型判断待核对<div className="mt-1">台词有错词时，请到相连的转写节点校对并保存，再重新分析原片。</div></div>
+    <div className="border-b border-white/[0.08] px-3 py-2 text-text-muted">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span>按原片时间排列 · {events.length} 个事件</span>
+        {events.length > 0 && <div className="flex items-center gap-2">
+          <span className={pendingReviewCount > 0 ? 'text-amber-300' : 'text-emerald-300'}>{pendingReviewCount > 0 ? `还剩 ${pendingReviewCount} 项待核对` : '已全部核对'}</span>
+          {pendingReviewCount > 0 && onReviewAll && <button type="button" onClick={onReviewAll} className="tap-button tap-button-quiet-primary nodrag">全部标记为已核对</button>}
+        </div>}
+      </div>
+      <div className="mt-1">台词有错词时，请到相连的转写节点校对并保存，再重新分析原片。</div>
+    </div>
     {events.map((event, index) => {
       const eventId = event.event_id ?? `event-${index + 1}`;
       const observedFrame = event.observed_frame;

@@ -69,4 +69,27 @@ describe('ReferenceEventList', () => {
     expect(onOverrideChange).toHaveBeenNthCalledWith(1, 'event-1', { narrativeRole: '明确产品价值' });
     expect(onOverrideChange).toHaveBeenNthCalledWith(2, 'event-1', { reviewState: 'reviewed_uncertain' });
   });
+
+  it('shows the remaining review count and confirms all pending events in one action', () => {
+    const onReviewAll = vi.fn();
+    render(<ReferenceEventList onReviewAll={onReviewAll} events={[
+      { event_id: 'pending-1', start_us: 0, end_us: 1_000_000, review_state: 'needs_review' },
+      { event_id: 'uncertain-1', start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
+      { event_id: 'pending-2', start_us: 2_000_000, end_us: 3_000_000 },
+    ]} />);
+
+    expect(screen.getByText('还剩 2 项待核对')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '全部标记为已核对' }));
+    expect(onReviewAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the bulk action after every event has been reviewed', () => {
+    render(<ReferenceEventList onReviewAll={vi.fn()} events={[
+      { start_us: 0, end_us: 1_000_000, review_state: 'reviewed' },
+      { start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
+    ]} />);
+
+    expect(screen.getByText('已全部核对')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '全部标记为已核对' })).toBeNull();
+  });
 });

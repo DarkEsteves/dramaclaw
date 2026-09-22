@@ -302,6 +302,13 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
+  const handleReviewAll = useCallback(() => {
+    const nextEvents = referenceEvents.map((event) => (event.review_state ?? 'needs_review') === 'needs_review'
+      ? { ...event, review_state: 'reviewed' as const }
+      : event);
+    updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
+  }, [id, referenceEvents, updateNodeData]);
+
   const generateScript = useCallback(async () => {
     if (isCreatingScript) return;
     setIsCreatingScript(true);
@@ -403,7 +410,7 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
           ) : hasError ? (
             <ErrorStoryState message={data.analysisError ?? t(`${V}.unknownError`)} />
           ) : hasReferenceEvents ? (
-            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} />
+            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} onReviewAll={handleReviewAll} />
           ) : hasRows ? (
             <StoryTable rows={rows} compact onCellCommit={handleCellCommit} />
           ) : (
