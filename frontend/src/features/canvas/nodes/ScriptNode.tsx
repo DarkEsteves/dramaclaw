@@ -81,8 +81,9 @@ import {
 } from '@/features/canvas/ui/NodeGenerationHistory';
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
-import { attachRemixMedia, generateRemixBrollPlan, type RemixArtifactRef } from '@/api/remix';
+import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
+import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
@@ -405,8 +406,6 @@ function useScriptStorySubmit(
   return { submit, isGenerating };
 }
 
-const activeBrollPlans = new Set<string>();
-
 export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNodeProps) => {
   const { t } = useTranslation();
   const updateNodeInternals = useUpdateNodeInternals();
@@ -423,28 +422,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'edit_script') setRemixScriptOpen(true);
     if (nodeId === id && action === 'plan_broll') {
-      const store = useCanvasStore.getState();
-      const current = store.nodes.find((candidate) => candidate.id === id);
-      const scriptRef = remixRef(current?.data.remixScriptRef);
-      const project = readUrl().project;
-      if (!scriptRef || !project) { toast.error('请先保存改编脚本'); return; }
-      activeBrollPlans.add(id);
-      store.updateNodeData(id, { remixBrollPlanStatus: 'running', remixBrollPlanError: null });
-      void generateRemixBrollPlan(project, scriptRef).then((artifact) => {
-        const latest = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-        if (!sameRemixRef(remixRef(latest?.data.remixScriptRef), scriptRef)) return;
-        useCanvasStore.getState().updateNodeData(id, {
-          remixBrollPlanRef: { artifactId: artifact.id, revision: artifact.revision },
-          remixBrollScriptRef: scriptRef,
-          remixBrollRequirements: Array.isArray(artifact.payload.media_requirements) ? artifact.payload.media_requirements : [],
-          remixBrollPlanStatus: 'completed', remixBrollPlanError: null,
-        });
-      }).catch((cause) => {
-        const latest = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-        if (!sameRemixRef(remixRef(latest?.data.remixScriptRef), scriptRef)) return;
-        useCanvasStore.getState().updateNodeData(id, { remixBrollPlanStatus: 'failed', remixBrollPlanError: cause instanceof Error ? cause.message : String(cause) });
-        toast.error(cause instanceof Error ? cause.message : 'B-roll 规划失败');
-      }).finally(() => activeBrollPlans.delete(id));
+      void startBrollPlan(id);
     }
     if (nodeId === id && action === 'create_narration') {
       try { createNarrationFromScript(id); }
@@ -456,12 +434,9 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     }
   }), [id]);
   useEffect(() => {
-    if (data.remixBrollPlanStatus !== 'running' || activeBrollPlans.has(id)) return;
-    updateNodeData(id, {
-      remixBrollPlanStatus: 'failed',
-      remixBrollPlanError: '上次 B-roll 规划已中断，请重新规划。',
-    });
-  }, [data.remixBrollPlanStatus, id, updateNodeData]);
+    if (data.remixBrollPlanStatus !== 'running' || !data.remixBrollOperationId) return;
+    void resumeBrollPlan(id);
+  }, [data.remixBrollOperationId, data.remixBrollPlanStatus, id]);
   useEffect(() => {
     const openEditor = () => setRemixScriptOpen(true);
     const unsubscribe = subscribeRemixScriptEditorRequest(id, openEditor);
@@ -557,6 +532,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         remixBrollScriptRef: null,
         remixBrollRequirements: [],
         remixBrollPlanStatus: null,
+        remixBrollOperationId: null,
+        remixBrollOperationScriptRef: null,
       });
     }).catch((cause) => {
       toast.error(cause instanceof Error ? cause.message : '补充画面自动关联失败');
@@ -973,8 +950,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onTopicChange={(remixTopic) => updateNodeData(id, { remixTopic })}
-            onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); }}
-            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null }); setRemixScriptOpen(false); }}
+            onDraftChange={(next) => { applyRemixInvalidation(id, 'script'); updateNodeData(id, { remixScriptDraft: next, remixScriptRef: null, remixScriptLastSavedRef: savedRemixRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); }}
+            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollRequirements: [], remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

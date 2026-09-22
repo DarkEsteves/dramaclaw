@@ -29,6 +29,18 @@ describe('remix API contract', () => {
         idempotency_key: 'align-once', node_revision: 5,
       },
     });
+
+    await submitRemixProcessAction('demo', {
+      action: 'plan_broll', scriptRef: { artifactId: 'script', revision: 3 },
+      idempotencyKey: 'broll:node:script:3', nodeRevision: 6,
+    });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/actions', {
+      method: 'POST', json: {
+        action: 'plan_broll',
+        payload: { script_ref: { artifact_id: 'script', revision: 3 } },
+        idempotency_key: 'broll:node:script:3', node_revision: 6,
+      },
+    });
   });
 
   it('uploads a media file and retrieves a render operation', async () => {
