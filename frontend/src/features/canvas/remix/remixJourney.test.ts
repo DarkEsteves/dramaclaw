@@ -19,6 +19,29 @@ function completeThroughScript() {
 }
 
 describe('reference video remix canvas journey', () => {
+  it('creates generated primary shots for events without visuals and ignores an empty legacy upload node', () => {
+    const graph = completeThroughScript();
+    const script = graph.nodes[2];
+    script.data.remixBrollPlanRef = ref('broll');
+    script.data.remixBrollScriptRef = ref('script');
+    script.data.remixBrollRequirements = [{ event_id: 'product', required: false, purpose: '保留问答', suggested_query: '无需素材' }];
+    graph.nodes.push(
+      node('audio', 'audioNode', { audioUrl: '/voice.wav', remixRole: 'narration', remixScriptRef: ref('script'), remixMedia: { media_kind: 'audio', media_hash: 'b'.repeat(64), media_path: 'voice.wav', url: '/voice.wav' } }),
+      node('words', 'transcriptNode', { artifactRef: ref('words'), alignedScriptRef: ref('script'), status: 'completed' }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing') }),
+      node('old-background', 'uploadNode', { remixRole: 'background' }),
+    );
+    graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('old-background', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_primary_visuals', label: '创建主画面' });
+    graph.nodes.push(node('primary', 'imageGenNode', { remixRole: 'primary', remixEventId: 'product', remixScriptRef: ref('script'), prompt: '问答主画面' }));
+    graph.edges.push(edge('primary', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'primary')).toMatchObject({ action: 'generate_primary', label: '生成主画面 · 产品登场' });
+    graph.nodes[graph.nodes.length - 1].data.imageUrl = '/primary.png';
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'primary')).toMatchObject({ action: 'bind_primary' });
+    graph.nodes[graph.nodes.length - 1].data.remixMedia = { media_kind: 'image', media_path: 'primary.png', media_hash: 'd'.repeat(64), url: '/primary.png' };
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
+  });
+
   it('does not add remix controls to an ordinary uploaded video', () => {
     expect(nextRemixJourneyStep([node('ordinary', 'videoNode', { videoUrl: '/media/clip.mp4' })], [], 'ordinary')).toBeNull();
   });
@@ -133,14 +156,14 @@ describe('reference video remix canvas journey', () => {
 
     graph.nodes.push(node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing'), compiledMediaHash: `sha256:${'b'.repeat(64)}`, events: [] }));
     graph.edges.push(edge('script', 'timeline'), edge('words', 'timeline'));
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_background' });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
     graph.nodes.push(node('wrong-background', 'uploadNode', { imageUrl: '/wrong.png', remixRole: 'background', remixMedia: { media_kind: 'image', media_path: 'wrong.png', media_hash: 'e'.repeat(64), url: '/wrong.png' } }));
     graph.edges.push(edge('wrong-background', 'timeline'));
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_background' });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
     graph.nodes.pop(); graph.edges.pop();
     graph.nodes.push(node('background', 'uploadNode', { remixRole: 'background' }));
     graph.edges.push(edge('background', 'script'));
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'background')).toMatchObject({ kind: 'input', label: '上传成片背景 / A-roll' });
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'background')).toMatchObject({ action: 'create_compose' });
     Object.assign(graph.nodes[graph.nodes.length - 1].data, { imageUrl: '/background.png' });
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'background')).toMatchObject({ action: 'bind_background' });
     Object.assign(graph.nodes[graph.nodes.length - 1].data, { remixMedia: { media_kind: 'image', media_path: 'background.png', media_hash: 'd'.repeat(64), url: '/background.png' } });

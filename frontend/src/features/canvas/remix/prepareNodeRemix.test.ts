@@ -55,6 +55,37 @@ describe('prepareNodeRemix', () => {
     expect(api.createRemixArtifact).toHaveBeenCalledTimes(1);
   });
 
+  it('prepares a complete primary-shot manifest while ignoring an empty legacy background upload', async () => {
+    const scriptRef = { artifactId: 'script-1', revision: 1 };
+    const timingRef = { artifactId: 'timing-1', revision: 1 };
+    const transcriptRef = { artifactId: 'words-1', revision: 1 };
+    const blueprintRef = { artifactId: 'blueprint-1', revision: 1 };
+    const nodes = [
+      node('video', 'videoNode', { remixRole: 'reference', remixMedia: media('video', 'a') }),
+      node('old-background', 'uploadNode', { remixRole: 'background' }),
+      node('primary', 'imageGenNode', { remixRole: 'primary', remixEventId: 'e1', remixScriptRef: scriptRef, imageUrl: '/image', remixMedia: media('image', 'f') }),
+      node('audio', 'audioNode', { remixRole: 'narration', audioUrl: '/audio', remixMedia: media('audio', 'b') }),
+      node('script', 'scriptNode', { remixScriptRef: scriptRef }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: blueprintRef }),
+      node('words', 'transcriptNode', { artifactRef: transcriptRef }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: timingRef }),
+      node('compose', 'videoComposeNode', {}),
+    ];
+    const edges = [edge('video', 'timeline'), edge('old-background', 'script'), edge('primary', 'script'), edge('audio', 'timeline'), edge('story', 'script'), edge('script', 'timeline'), edge('words', 'timeline'), edge('timeline', 'compose')];
+    api.fetchRemixArtifact.mockImplementation((_project: string, ref: { artifactId: string }) => ref.artifactId === 'timing-1'
+      ? Promise.resolve({ schema: 'performance_timing.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }, { artifact_id: 'words-1', revision: 1 }], payload: { media_hash: `sha256:${'b'.repeat(64)}`, fps: 30, events: [{ event_id: 'e1', start_frame: 5, end_frame: 30 }], unresolved_required_events: [], override_conflicts: [] } })
+      : ref.artifactId === 'script-1' ? Promise.resolve({ schema: 'remix_script.v1', upstream_refs: [{ artifact_id: 'blueprint-1', revision: 1 }], payload: { dialogue: '你好', selections: [{ selection_id: 'e1', start_char: 0, end_char: 2 }], events: [{ event_id: 'e1', selection_id: 'e1', caption: '你好' }] } })
+        : ref.artifactId === 'words-1' ? Promise.resolve({ schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'script-1', revision: 1 }], payload: { status: 'completed', media_hash: `sha256:${'b'.repeat(64)}`, script_revision: 1, transcript: '你好', words: [] } })
+          : Promise.resolve({ schema: 'reference_blueprint.v1', payload: { media_hash: 'a'.repeat(64) } }));
+    api.createRemixArtifact.mockResolvedValue({ id: 'manifest-1', revision: 1 });
+
+    await prepareNodeRemix('demo', nodes, edges, 'compose');
+    expect(api.createRemixArtifact).toHaveBeenCalledWith('demo', 'composition_manifest.v1', expect.objectContaining({
+      media_bindings: expect.arrayContaining([expect.objectContaining({ media_id: 'primary-e1', purpose: 'a-roll' })]),
+      layers: [expect.objectContaining({ row_id: 'primary:e1', start_frame: 0, end_frame: 120, z_order: 0 })],
+    }), [timingRef, scriptRef, blueprintRef, transcriptRef]);
+  });
+
   it('changes the input fingerprint when an upstream artifact revision changes', () => {
     const nodes = [node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 1 } }), node('compose', 'videoComposeNode', {})];
     const edges = [edge('script', 'compose')];

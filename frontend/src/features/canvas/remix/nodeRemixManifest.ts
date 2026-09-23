@@ -20,6 +20,7 @@ interface Inputs {
   script: ScriptPayload;
   wordTimeline?: WordTimeline;
   visuals?: Record<string, UploadedRemixMedia>;
+  primaryVisuals?: Record<string, UploadedRemixMedia>;
   audioTracks?: Array<{ id: string; role: 'bgm' | 'sfx'; media: UploadedRemixMedia }>;
 }
 
@@ -53,9 +54,9 @@ function subtitleWordCues(
   return cues;
 }
 
-export function buildNodeRemixManifest({ reference, background, narration, timing, script, wordTimeline, visuals = {}, audioTracks = [] }: Inputs) {
+export function buildNodeRemixManifest({ reference, background, narration, timing, script, wordTimeline, visuals = {}, primaryVisuals = {}, audioTracks = [] }: Inputs) {
   if (reference.media_kind !== 'video') throw new Error('参考素材必须是视频');
-  if (!background || (background.media_kind !== 'image' && background.media_kind !== 'video')) throw new Error('请选择单独的成片背景或 A-roll');
+  if (background && background.media_kind !== 'image' && background.media_kind !== 'video') throw new Error('成片底画面必须是图片或视频');
   if (narration.media_kind !== 'audio' && !(narration.media_kind === 'video' && narration.has_audio)) throw new Error('需要实际旁白音轨');
   if (timing.unresolved_required_events.length) throw new Error('存在未解析的必需事件');
   if (timing.override_conflicts.length) throw new Error('时间覆盖有冲突');
@@ -64,10 +65,34 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
   const durationFrames = Math.floor(narration.duration_us * fps / 1_000_000);
   if (durationFrames < 1) throw new Error('素材时长无效');
   const bindings: Array<Record<string, unknown>> = [
-    { media_id: 'background', kind: background.media_kind, purpose: 'background', project_path: background.media_path, media_hash: `sha256:${background.media_hash}`, ...(background.media_kind === 'video' && background.duration_us < narration.duration_us ? { loop: true } : {}) },
+    ...(background ? [{ media_id: 'background', kind: background.media_kind, purpose: 'background', project_path: background.media_path, media_hash: `sha256:${background.media_hash}`, ...(background.media_kind === 'video' && background.duration_us < narration.duration_us ? { loop: true } : {}) }] : []),
     { media_id: 'narration', kind: 'audio', project_path: narration.media_path, media_hash: `sha256:${narration.media_hash}` },
   ];
-  const layers: Array<Record<string, unknown>> = [{ row_id: 'background', media_id: 'background', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }];
+  const layers: Array<Record<string, unknown>> = background
+    ? [{ row_id: 'background', media_id: 'background', start_frame: 0, end_frame: durationFrames, z_order: 0, fit: 'cover' }]
+    : [];
+  const sortedEvents = [...timing.events].sort((left, right) => left.start_frame - right.start_frame);
+  const primaryFromBroll = new Set<string>();
+  if (!background) {
+    if (!sortedEvents.length) throw new Error('没有可用于主画面的语义事件');
+    for (let index = 0; index < sortedEvents.length; index += 1) {
+      const event = sortedEvents[index];
+      const rule = script.events.find((item) => item.event_id === event.event_id);
+      if (!rule) throw new Error(`事件 ${event.event_id} 缺少脚本规则`);
+      const main = primaryVisuals[event.event_id];
+      const supporting = rule.visual_node_id ? visuals[rule.visual_node_id] : undefined;
+      if (!main && supporting && rule.visual_media_revision !== supporting.media_hash) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);
+      const media = main ?? supporting;
+      if (!media || (media.media_kind !== 'image' && media.media_kind !== 'video')) throw new Error(`事件 ${event.event_id} 缺少主画面，请先生成或选择素材`);
+      if (!main) primaryFromBroll.add(event.event_id);
+      const start = index ? event.start_frame : 0;
+      const end = index + 1 < sortedEvents.length ? sortedEvents[index + 1].start_frame : durationFrames;
+      if (start >= end) throw new Error(`事件 ${event.event_id} 的主画面时间无效`);
+      const mediaId = `primary-${event.event_id}`;
+      bindings.push({ media_id: mediaId, kind: media.media_kind, purpose: 'a-roll', project_path: media.media_path, media_hash: `sha256:${media.media_hash}`, ...(media.media_kind === 'video' && media.duration_us < (end - start) * 1_000_000 / fps ? { loop: true } : {}) });
+      layers.push({ row_id: `primary:${event.event_id}`, media_id: mediaId, start_frame: start, end_frame: end, z_order: 0, fit: 'cover' });
+    }
+  }
   const subtitles: Array<{ text: string; start_frame: number; end_frame: number; word_cues?: WordCue[] }> = [];
   const audioEvents: Array<Record<string, unknown>> = [{ row_id: 'narration', media_id: 'narration', role: 'narration', start_frame: 0, end_frame: durationFrames, volume: 1 }];
   for (const track of audioTracks) {
@@ -86,7 +111,7 @@ export function buildNodeRemixManifest({ reference, background, narration, timin
       const wordCues = subtitleWordCues(selection, caption.trim(), script, wordTimeline, event.start_frame, event.end_frame, fps);
       subtitles.push({ text: caption.trim(), start_frame: event.start_frame, end_frame: event.end_frame, ...(wordCues.length ? { word_cues: wordCues } : {}) });
     }
-    if (rule.visual_node_id) {
+    if (rule.visual_node_id && !primaryFromBroll.has(event.event_id)) {
       const media = visuals[rule.visual_node_id];
       if (!media || (media.media_kind !== 'image' && media.media_kind !== 'video')) throw new Error(`事件 ${event.event_id} 缺少替换画面`);
       if (!rule.visual_media_revision || media.media_hash !== rule.visual_media_revision) throw new Error(`事件 ${event.event_id} 的替换素材已变化，请重新选择`);

@@ -1,10 +1,11 @@
-import type { CanvasNode, CanvasNodeData, CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
+import type { CanvasEdge, CanvasNode, CanvasNodeData, CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
 import { CANVAS_NODE_TYPES, isExportImageNode, isImageEditNode, isImageGenNode, isUploadNode, isVideoNode } from '@/features/canvas/domain/canvasNodes';
 import type { RemixUploadedMedia } from '@/api/remix';
 import { projectMediaPathFromUrl } from './remixMediaPath';
 
 interface BrollCanvasStore {
   nodes: CanvasNode[];
+  edges?: CanvasEdge[];
   addNode: (type: CanvasNodeType, position: { x: number; y: number }, data?: Partial<CanvasNodeData>) => string;
   addEdge: (source: string, target: string) => string | null;
   setSelectedNode: (id: string | null) => void;
@@ -49,6 +50,50 @@ export function createBackgroundVisualNode(store: BrollCanvasStore, scriptId: st
   return childId;
 }
 
+/** Prepare editable generation requests for the speaking shots absent from B-roll. */
+export function createPrimaryVisualNodes(store: BrollCanvasStore, scriptId: string, storyId: string, eventIds: string[]): string[] {
+  const script = store.nodes.find((node) => node.id === scriptId);
+  const story = store.nodes.find((node) => node.id === storyId);
+  if (!script || !story) return [];
+  const draft = script.data.remixScriptDraft as { dialogue?: string; selections?: Array<{ id: string; label: string; start: number; end: number }> } | undefined;
+  const selections = draft?.selections ?? [];
+  const referenceEvents = Array.isArray(story.data.referenceEvents) ? story.data.referenceEvents as Array<Record<string, unknown>> : [];
+  const scriptRef = script.data.remixScriptRef;
+  const topic = typeof script.data.remixTopic === 'string' ? script.data.remixTopic.trim() : '';
+  const created: string[] = [];
+  for (const eventId of eventIds) {
+    const index = selections.findIndex((selection) => selection.id === eventId);
+    if (index < 0) continue;
+    const selection = selections[index];
+    const existing = store.nodes.find((node) => node.data.remixRole === 'primary' && node.data.remixEventId === eventId
+      && store.edges?.some((edge) => edge.source === node.id && edge.target === scriptId)
+      && (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId === (scriptRef as { artifactId?: string } | undefined)?.artifactId
+      && (node.data.remixScriptRef as { revision?: number } | undefined)?.revision === (scriptRef as { revision?: number } | undefined)?.revision);
+    if (existing) continue;
+    const observed = referenceEvents[index];
+    const model = observed?.model && typeof observed.model === 'object' ? observed.model as Record<string, unknown> : null;
+    const visualObservation = [observed?.visual_observation, model?.visual_observation].find((value) => typeof value === 'string' && value.trim()) as string | undefined;
+    const dialogue = Array.from(draft?.dialogue ?? '').slice(selection.start, selection.end).join('').trim();
+    const prompt = [
+      '竖屏 9:16 短视频主画面，真实摄影质感。根据新主题与当前台词呈现人物、场景和动作。',
+      topic ? `新主题：${topic}。` : '',
+      `当前段落：${selection.label}。${dialogue ? `台词：${dialogue}。` : ''}`,
+      visualObservation ? `参考片镜头观察：${visualObservation}。保留镜头语言和构图节奏，人物、产品及道具按新主题重新呈现。` : '',
+      '不要复制参考片的人物或品牌。画面中不要字幕、文字、水印和标志。',
+    ].filter(Boolean).join('\n');
+    const basePosition = store.findNodePosition(scriptId, 420, 320);
+    const id = store.addNode(CANVAS_NODE_TYPES.imageGen, { x: basePosition.x, y: basePosition.y + created.length * 360 }, {
+      displayName: `主画面 · ${selection.label.trim() || eventId}`,
+      remixRole: 'primary', remixEventId: eventId, remixScriptRef: scriptRef,
+      aspectRatio: '9:16', prompt,
+    });
+    store.addEdge(id, scriptId);
+    created.push(id);
+  }
+  if (created.length) store.setSelectedNode(created[0]);
+  return created;
+}
+
 function visualSourceUrl(node: CanvasNode): string | null {
   if (isVideoNode(node)) return node.data.videoUrl;
   if (isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)) {
@@ -71,7 +116,8 @@ export function boundBrollVisualMedia(project: string, visual: CanvasNode): Remi
   const media = visual.data.remixMedia as RemixUploadedMedia | undefined;
   const currentPath = currentVisualProjectPath(project, visual);
   const sourceUrl = visualSourceUrl(visual);
-  if (!sourceUrl && !media) throw new Error(`${name} 尚未上传，请先上传图片或视频`);
+  if (!sourceUrl && !media) throw new Error(visual.type === CANVAS_NODE_TYPES.imageGen
+    ? `${name} 尚未生成，请先生成画面` : `${name} 尚未上传，请先上传图片或视频`);
   if (sourceUrl && !media) throw new Error(`${name} 尚未绑定，请先绑定素材`);
   const exactUrl = Boolean(media?.url && sourceUrl && media.url === sourceUrl);
   if (!media || typeof media.media_hash !== 'string' || !/^[a-f0-9]{64}$/u.test(media.media_hash)
@@ -87,7 +133,7 @@ export async function attachBrollVisualMedia(
   visual: CanvasNode,
   attach: (project: string, mediaPath: string) => Promise<RemixUploadedMedia>,
   updateNodeData: (nodeId: string, data: Partial<CanvasNodeData>) => void,
-  role: 'visual' | 'background' = 'visual',
+  role: 'visual' | 'background' | 'primary' = 'visual',
 ): Promise<BrollVisualAttachment> {
   const mediaPath = currentVisualProjectPath(project, visual);
   if (!mediaPath) throw new Error('请先在素材节点完成生成或上传');

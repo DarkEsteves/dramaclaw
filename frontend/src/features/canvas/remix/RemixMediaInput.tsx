@@ -4,7 +4,7 @@ import type { UploadedRemixMedia } from './workbenchModel';
 import { projectMediaPathFromUrl } from './remixMediaPath';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 
-type VideoRole = 'reference' | 'visual' | 'background' | 'speech_clock';
+type VideoRole = 'reference' | 'visual' | 'background' | 'primary' | 'speech_clock';
 type AudioRole = 'narration' | 'bgm' | 'sfx';
 
 interface Props {
@@ -19,6 +19,7 @@ interface Props {
 const videoRoles: Array<{ value: VideoRole; label: string }> = [
   { value: 'reference', label: '待分析原片' },
   { value: 'background', label: '成片背景 / A-roll' },
+  { value: 'primary', label: '事件主画面' },
   { value: 'visual', label: '替换画面' },
   { value: 'speech_clock', label: '视频原声' },
 ];

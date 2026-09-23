@@ -51,10 +51,10 @@ describe('VideoComposeNode automatic preparation', () => {
     reconcileRemixOperation.mockReset();
   });
 
-  it('directs a remix user to the empty background node after preparation fails', async () => {
+  it('directs a remix user to the script when a legacy empty background node remains', async () => {
     graphState.upstreamNodes = [
       { id: 'timing', type: 'semanticTimelineNode', data: {} },
-      { id: 'script', type: 'scriptNode', data: {} },
+      { id: 'script', type: 'scriptNode', data: { remixRole: 'adaptation_script' } },
       { id: 'background', type: 'uploadNode', data: { displayName: '成片背景 / A-roll', remixRole: 'background' } },
     ];
     prepareNodeRemix.mockRejectedValueOnce(new Error('画面素材 background 已变化，请重新选择'));
@@ -62,11 +62,11 @@ describe('VideoComposeNode automatic preparation', () => {
     const view = render(<VideoComposeNode {...props} data={{ displayName: 'Compose', autoPrepareRequested: true }} />);
 
     await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
-    expect(screen.getByText(/成片背景尚未上传/)).toBeTruthy();
+    expect(screen.getByText(/从改编脚本继续创建主画面/)).toBeTruthy();
     expect(screen.queryByText('videoCompose.node.hint')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '前往背景节点' }));
-    expect(canvasActions.setSelectedNode).toHaveBeenCalledWith('background');
-    expect(canvasActions.requestFocusNode).toHaveBeenCalledWith('background');
+    fireEvent.click(screen.getByRole('button', { name: '前往脚本节点' }));
+    expect(canvasActions.setSelectedNode).toHaveBeenCalledWith('script');
+    expect(canvasActions.requestFocusNode).toHaveBeenCalledWith('script');
 
     graphState.upstreamNodes = [
       { id: 'timing', type: 'semanticTimelineNode', data: {} },
@@ -93,6 +93,17 @@ describe('VideoComposeNode automatic preparation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '生成合成清单' }));
     await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
+  });
+
+  it('offers manifest generation when every script event already has bound B-roll', async () => {
+    graphState.upstreamNodes = [
+      { id: 'timing', type: 'semanticTimelineNode', data: {} },
+      { id: 'script', type: 'scriptNode', data: { remixRole: 'adaptation_script', remixScriptRef: { artifactId: 'script', revision: 1 }, remixScriptDraft: { selections: [{ id: 'event-1', label: '产品镜头', visualNodeId: 'visual', visualMediaRevision: 'a'.repeat(64) }] } } },
+      { id: 'visual', type: 'uploadNode', data: { remixRole: 'visual', imageUrl: '/static/projects/demo/freezone/image/visual.png', remixMedia: { url: '/static/projects/demo/freezone/image/visual.png', media_path: 'freezone/image/visual.png', media_hash: 'a'.repeat(64), media_kind: 'image' } } },
+    ];
+    graphState.edges = [{ id: 'visual-script', source: 'visual', target: 'script' }];
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose' }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(screen.getByRole('button', { name: '生成合成清单' })).toBeEnabled();
   });
 
   it('offers reconciliation and force regeneration while provider outcome is unknown', async () => {

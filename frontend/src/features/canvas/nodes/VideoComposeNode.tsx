@@ -59,6 +59,7 @@ import { canExportManifest, manifestToSrt, previewStatus, resolveManifestOverrid
 import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, reconcileRemixOperation, renderRemixManifest, reviseRemixArtifact, transitionRemixOperation, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
 import { boundBrollVisualMedia } from "@/features/canvas/remix/brollCanvasBinding";
+import { primaryVisualEventsForScript } from "@/features/canvas/remix/remixJourney";
 import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
 import { applyRemixInvalidation } from "@/features/canvas/remix/spawnRemixDownstream";
 import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
@@ -85,6 +86,7 @@ export const VideoComposeNode = memo(
     const requestFocusNode = useCanvasStore((state) => state.requestFocusNode);
     const updateNodeData = useCanvasStore((state) => state.updateNodeData);
     const currentRemixInputFingerprint = useCanvasStore((state) => remixGraphFingerprint(state.nodes, state.edges, id));
+    const canvasEdges = useCanvasStore((state) => state.edges);
     const upstreamNodes = useUpstreamNodes(id);
     const [isEditorOpen, setEditorOpen] = useState(false);
     const [isRemixWorkbenchOpen, setRemixWorkbenchOpen] = useState(false);
@@ -131,18 +133,36 @@ export const VideoComposeNode = memo(
 
     const project = readUrl().project;
     const canvasId = readUrl().canvas ?? "default";
-    const remixBackgrounds = showRemixStaging ? upstreamNodes.filter((node) => node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') : [];
+    const remixBackgrounds = showRemixStaging ? upstreamNodes.filter((node) => (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll')
+      && (node.data.imageUrl || node.data.previewImageUrl || node.data.videoUrl)) : [];
     const remixBackground = remixBackgrounds.length === 1 ? remixBackgrounds[0] : null;
     const remixScript = showRemixStaging ? upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'adaptation_script') : null;
+    const currentScriptRef = remixScript?.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined;
+    const remixPrimaryNodes = showRemixStaging ? upstreamNodes.filter((node) => node.data.remixRole === 'primary'
+      && (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId === currentScriptRef?.artifactId
+      && (node.data.remixScriptRef as { revision?: number } | undefined)?.revision === currentScriptRef?.revision) : [];
     const backgroundHasSource = Boolean(remixBackground?.data.imageUrl || remixBackground?.data.previewImageUrl || remixBackground?.data.videoUrl);
     let backgroundBound = false;
     if (project && remixBackground && backgroundHasSource) {
       try { boundBrollVisualMedia(project, remixBackground); backgroundBound = true; }
       catch { /* The staging card points to the background node for binding. */ }
     }
+    const neededPrimaryEvents = remixScript ? primaryVisualEventsForScript(remixScript, upstreamNodes, canvasEdges) : [];
+    const requiredPrimaryNodes = remixPrimaryNodes.filter((node) => neededPrimaryEvents.some((event) => event.id === node.data.remixEventId));
+    const primaryNeedsAttention = requiredPrimaryNodes.find((node) => {
+      if (!project) return true;
+      try { boundBrollVisualMedia(project, node); return false; }
+      catch { return true; }
+    });
+    const scriptSelections = (remixScript?.data.remixScriptDraft as { selections?: unknown[] } | undefined)?.selections;
+    const primaryReady = Array.isArray(scriptSelections) && scriptSelections.length > 0
+      && neededPrimaryEvents.every((event) => requiredPrimaryNodes.some((node) => node.data.remixEventId === event.id))
+      && !primaryNeedsAttention;
+    const canPrepareRemix = backgroundBound || (!remixBackground && primaryReady);
+    const primaryStateKey = JSON.stringify(remixPrimaryNodes.map((node) => [node.id, node.data.imageUrl, node.data.videoUrl, node.data.remixMedia]));
     useEffect(() => {
       setRemixError(null);
-    }, [remixBackground?.id, remixBackground?.data.imageUrl, remixBackground?.data.previewImageUrl, remixBackground?.data.videoUrl, remixBackground?.data.remixMedia]);
+    }, [remixBackground?.id, remixBackground?.data.imageUrl, remixBackground?.data.previewImageUrl, remixBackground?.data.videoUrl, remixBackground?.data.remixMedia, primaryStateKey]);
     const manifestRefKey = data.remixManifestRef ? `${data.remixManifestRef.artifactId}:${data.remixManifestRef.revision}` : null;
     const manifestReady = Boolean(manifestRefKey && loadedManifestRefKey === manifestRefKey
       && manifestArtifact
@@ -539,26 +559,26 @@ export const VideoComposeNode = memo(
           {showRemixStaging ? <div className="flex h-full flex-col justify-center gap-2 px-4 py-3">
             <div className="text-[13px] font-semibold text-text-dark">准备合成清单</div>
             <p className="text-[12px] leading-5 text-text-dark/70">
-              {remixBackgrounds.length > 1 ? '当前有多个成片背景，请在脚本前只保留一个。'
-                : !remixBackground ? '先为改编脚本添加一张图片或一段视频，作为整段成片的背景。'
-                : !backgroundHasSource ? '成片背景尚未上传，请在背景节点上传图片或视频。'
-                : !backgroundBound ? '背景已上传，请在背景节点绑定这份素材。'
-                : '背景素材已就绪，可以生成清单并检查画面与字幕。'}
+              {remixBackgrounds.length > 1 ? '当前有多个成片底画面，请只保留一个。'
+                : remixBackground && !backgroundBound ? '成片底画面已选择，请先关联这份素材。'
+                : primaryNeedsAttention ? '主画面尚未完成，请先生成并关联对应事件的画面。'
+                : !canPrepareRemix ? '从改编脚本继续创建主画面，画面就绪后即可合成。'
+                : '主画面已就绪，可以生成清单并检查画面与字幕。'}
             </p>
             {remixBackgrounds.length <= 1 && <button
               type="button"
-              disabled={isRemixPreparing || (!remixBackground && !remixScript)}
+              disabled={isRemixPreparing || (!canPrepareRemix && !remixBackground && !primaryNeedsAttention && !remixScript)}
               onClick={(event) => {
                 event.stopPropagation();
-                if (backgroundBound) { void handlePrepareRemix(); return; }
-                const target = remixBackground?.id ?? remixScript?.id;
+                if (canPrepareRemix) { void handlePrepareRemix(); return; }
+                const target = remixBackground?.id ?? primaryNeedsAttention?.id ?? remixScript?.id;
                 if (target) { setSelectedNode(target); requestFocusNode(target); }
               }}
               className="nodrag h-8 self-start rounded-[10px] border border-white/15 bg-white/[0.06] px-3 text-[12px] font-medium text-text-dark transition-colors hover:bg-white/[0.1] disabled:opacity-45"
             >
-              {isRemixPreparing ? '正在生成清单…' : backgroundBound ? '生成合成清单' : remixBackground ? '前往背景节点' : '前往脚本节点'}
+              {isRemixPreparing ? '正在生成清单…' : canPrepareRemix ? '生成合成清单' : remixBackground ? '前往底画面节点' : primaryNeedsAttention ? '前往主画面节点' : '前往脚本节点'}
             </button>}
-            {remixError && backgroundBound ? <p role="alert" className="line-clamp-2 text-[11px] text-red-300">{remixError}</p> : null}
+            {remixError && canPrepareRemix ? <p role="alert" className="line-clamp-2 text-[11px] text-red-300">{remixError}</p> : null}
           </div> : <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-5 py-4 text-center">
             <button
               type="button"

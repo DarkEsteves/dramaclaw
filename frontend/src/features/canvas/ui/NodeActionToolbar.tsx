@@ -147,11 +147,11 @@ import { transcriptToolbarState } from '@/features/canvas/remix/transcriptToolba
 import { semanticTimelineToolbarState } from '@/features/canvas/remix/semanticTimelineToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
-import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
+import { nextRemixJourneyStep, primaryVisualEventsForScript } from '@/features/canvas/remix/remixJourney';
 import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
 import { advanceRemixJourneyStep } from '@/features/canvas/remix/remixJourneyActions';
 import { requestRemixScriptEditor } from '@/features/canvas/remix/remixScriptEditorRequests';
-import { attachBrollVisualMedia, createBackgroundVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
+import { attachBrollVisualMedia, createBackgroundVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1695,6 +1695,30 @@ export const NodeActionToolbar = memo(
           const background = store.nodes.find((candidate) => candidate.id === targetNodeId);
           if (!project || !background) throw new Error('无法找到成片背景素材');
           const attachment = await attachBrollVisualMedia(project, background, attachRemixMedia, store.updateNodeData, 'background');
+          attachment.commit();
+        },
+        createPrimaryVisuals: (targetNodeId) => {
+          const store = useCanvasStore.getState();
+          const script = store.nodes.find((candidate) => candidate.id === targetNodeId);
+          const storyId = store.edges.find((edge) => edge.target === targetNodeId
+            && store.nodes.some((candidate) => candidate.id === edge.source && candidate.type === CANVAS_NODE_TYPES.videoStory))?.source;
+          if (!script || !storyId) throw new Error('找不到当前脚本的参考片分析');
+          const eventIds = primaryVisualEventsForScript(script, store.nodes, store.edges).map((event) => event.id);
+          const created = createPrimaryVisualNodes(store, targetNodeId, storyId, eventIds);
+          if (!created.length) throw new Error('没有可生成的主画面事件');
+          requestFocusNode(created[0]);
+        },
+        generatePrimary: (targetNodeId) => {
+          if (!dispatchNodeAction({ nodeId: targetNodeId, action: 'generate_image', executionMode: 'single', requestId: crypto.randomUUID() })) {
+            throw new Error('画面生成节点尚未就绪，请稍后重试');
+          }
+        },
+        bindPrimary: async (targetNodeId) => {
+          const project = readUrl().project;
+          const store = useCanvasStore.getState();
+          const primary = store.nodes.find((candidate) => candidate.id === targetNodeId);
+          if (!project || !primary) throw new Error('无法找到主画面素材');
+          const attachment = await attachBrollVisualMedia(project, primary, attachRemixMedia, store.updateNodeData, 'primary');
           attachment.commit();
         },
         createCompose: (targetNodeId) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action: 'create_compose' }),

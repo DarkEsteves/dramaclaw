@@ -10,7 +10,7 @@ const node = (id: string, type: CanvasNode['type'], data: Record<string, unknown
 const edge = (source: string, target: string): CanvasEdge => ({ id: `${source}-${target}`, source, target });
 
 describe('browser remix journey', () => {
-  it('clicks the visible toolbar journey from Recipe B-roll output through manual audio and render', async () => {
+  it('clicks the visible toolbar journey from planned B-roll through narration and render without a manual background', async () => {
     const nodes = [
       node('reference', 'videoNode', { videoUrl: '/reference.mp4', remixRole: 'reference' }),
       node('story', 'videoStoryNode', { referenceBlueprintRef: ref('blueprint'), referenceEvents: [{ event_id: 'hook' }] }),
@@ -35,8 +35,8 @@ describe('browser remix journey', () => {
       createNarration: vi.fn(() => { nodes.push(node('audio', 'audioNode', { remixRole: 'narration', remixScriptRef: ref('script'), text: '新品登场' })); edges.push(edge('script', 'audio')); }),
       alignNarration: vi.fn(async () => { nodes.push(node('words', 'transcriptNode', { artifactRef: ref('words'), alignedScriptRef: ref('script'), status: 'completed', sourceMediaPath: 'voice.wav', sourceMediaHash: 'b'.repeat(64) })); edges.push(edge('script', 'words'), edge('audio', 'words')); }),
       createTimeline: vi.fn(() => { nodes.push(node('timeline', 'semanticTimelineNode', { events: [] })); edges.push(edge('script', 'timeline'), edge('words', 'timeline')); }),
-      createBackground: vi.fn(() => { nodes.push(node('background', 'uploadNode', { remixRole: 'background' })); edges.push(edge('background', 'script')); }),
-      bindBackground: vi.fn(async () => { Object.assign(nodes.find((item) => item.id === 'background')!.data, { imageUrl: '/background.png', remixMedia: { media_kind: 'image', media_path: 'background.png', media_hash: 'd'.repeat(64), url: '/background.png' } }); }),
+      createBackground: vi.fn(), bindBackground: vi.fn(),
+      createPrimaryVisuals: vi.fn(), generatePrimary: vi.fn(), bindPrimary: vi.fn(),
       createCompose: vi.fn(() => { nodes.push(node('compose', 'videoComposeNode', {})); edges.push(edge('timeline', 'compose')); }),
     };
     const view = render(<div />);
@@ -60,10 +60,6 @@ describe('browser remix journey', () => {
     expect((await clickNext('audio')).action).toBe('align_narration');
     expect((await clickNext('script')).action).toBe('create_timeline');
     expect((await clickNext('timeline')).action).toBe('compile_timeline');
-    expect((await clickNext('script')).action).toBe('create_background');
-    expect((await clickNext('background')).label).toBe('上传成片背景 / A-roll');
-    Object.assign(nodes.find((item) => item.id === 'background')!.data, { imageUrl: '/background.png' });
-    expect((await clickNext('background')).action).toBe('bind_background');
     expect((await clickNext('timeline')).action).toBe('create_compose');
     expect((await clickNext('compose')).action).toBe('prepare_manifest');
     expect((await clickNext('compose')).action).toBe('render_export');

@@ -159,6 +159,63 @@ def test_v2_manifest_requires_vertical_hd_safe_area_and_continuous_narration() -
         validate_manifest(broken)
 
 
+def test_v2_accepts_contiguous_generated_primary_shots_without_uploaded_background() -> None:
+    manifest = _manifest()
+    manifest["manifest_version"] = 2
+    manifest["output_spec"].update({
+        "width": 1080, "height": 1920,
+        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180},
+    })
+    manifest["media_bindings"][0]["purpose"] = "a-roll"
+    manifest["media_bindings"][1]["purpose"] = "a-roll"
+    manifest["layers"] = [
+        {"media_id": "background", "start_frame": 0, "end_frame": 30, "z_order": 0, "fit": "cover"},
+        {"media_id": "product", "start_frame": 30, "end_frame": 60, "z_order": 0, "fit": "cover"},
+    ]
+    validate_manifest(manifest)
+
+    manifest["layers"][1]["start_frame"] = 31
+    with pytest.raises(ValueError, match="continuous primary visual coverage"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+    reason="FFmpeg required",
+)
+def test_v2_renders_generated_primary_shots_without_uploaded_background(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    voice = tmp_path / "voice.wav"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(first))
+    _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=180x320", "-frames:v", "1", str(second))
+    _ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", str(voice))
+    paths = {"first": first, "second": second, "voice": voice}
+    manifest = {
+        "manifest_version": 2,
+        "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 60,
+                        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180}},
+        "media_bindings": [
+            {"media_id": "first", "kind": "image", "purpose": "a-roll", "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "second", "kind": "image", "purpose": "a-roll", "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "voice", "kind": "audio", "media_hash": "sha256:" + "0" * 64},
+        ],
+        "layers": [
+            {"media_id": "first", "start_frame": 0, "end_frame": 30, "z_order": 0, "fit": "cover"},
+            {"media_id": "second", "start_frame": 30, "end_frame": 60, "z_order": 0, "fit": "cover"},
+        ],
+        "subtitle_events": [],
+        "audio_events": [{"media_id": "voice", "role": "narration", "start_frame": 0, "end_frame": 60, "volume": 1}],
+        "manual_overrides": [], "source_versions": [],
+    }
+    output = render_manifest(
+        _bind_media_hashes(manifest, paths), media_paths=paths,
+        output_path=tmp_path / "out.mp4",
+    )
+    assert _pixel(output, 0.25, x=540, y=960)[2] > 100
+    assert _pixel(output, 1.25, x=540, y=960)[0] > 100
+
+
 def test_manifest_versions_route_without_removing_the_legacy_composer() -> None:
     assert manifest_renderer(_manifest()) == "legacy_v1"
     current = _manifest()

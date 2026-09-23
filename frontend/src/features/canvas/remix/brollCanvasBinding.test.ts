@@ -1,10 +1,29 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CanvasNode } from '@/features/canvas/domain/canvasNodes';
-import { attachBrollVisualMedia, boundBrollVisualMedia, createBrollVisualNode } from './brollCanvasBinding';
+import { attachBrollVisualMedia, boundBrollVisualMedia, createBrollVisualNode, createPrimaryVisualNodes } from './brollCanvasBinding';
 
 const node = (id: string, type: string, data: Record<string, unknown>) => ({ id, type, data, position: { x: 0, y: 0 } }) as CanvasNode;
 
 describe('B-roll canvas binding', () => {
+  it('prefills generated primary shots from the adapted dialogue and reference shot observations', () => {
+    const addNode = vi.fn().mockReturnValueOnce('first').mockReturnValueOnce('second');
+    const store = {
+      nodes: [node('script', 'scriptNode', { remixTopic: '把咖啡改成茶', remixScriptRef: { artifactId: 'script', revision: 2 }, remixScriptDraft: { dialogue: '男：喝茶吗？女：每天都喝。', selections: [
+        { id: 'question', label: '开场提问', start: 2, end: 6 }, { id: 'answer', label: '回答', start: 8, end: 13 },
+      ] } }), node('story', 'videoStoryNode', { referenceEvents: [{ visual_observation: '双人中景' }, { visual_observation: '回答者特写' }] })],
+      addNode, addEdge: vi.fn(() => 'edge'), setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 100, y: 200 })),
+    };
+    const created = createPrimaryVisualNodes(store, 'script', 'story', ['question', 'answer']);
+    expect(created).toEqual(['first', 'second']);
+    expect(addNode).toHaveBeenNthCalledWith(1, 'imageGenNode', expect.any(Object), expect.objectContaining({
+      remixRole: 'primary', remixEventId: 'question', aspectRatio: '9:16', prompt: expect.stringContaining('双人中景'),
+    }));
+    expect(addNode.mock.calls[0][2].prompt).toContain('把咖啡改成茶');
+    expect(addNode.mock.calls[0][2].prompt).toContain('喝茶吗？');
+    expect(addNode.mock.calls[0][1]).toEqual({ x: 100, y: 200 });
+    expect(addNode.mock.calls[1][1]).toEqual({ x: 100, y: 560 });
+  });
+
   it('reattaches a replacement when the current node URL no longer matches saved remix media', async () => {
     const current = node('visual', 'imageGenNode', {
       imageUrl: '/static/projects/demo/freezone/image/new.png',

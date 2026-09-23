@@ -138,15 +138,27 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const transcriptMediaHash = transcriptArtifact.payload.media_hash;
   if (transcriptMediaHash !== narration.media_hash && transcriptMediaHash !== `sha256:${narration.media_hash}`) throw new Error('对齐转写对应的语音已变化');
   const visualTypes = new Set<string>([CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.upload, CANVAS_NODE_TYPES.imageEdit, CANVAS_NODE_TYPES.imageGen, CANVAS_NODE_TYPES.exportImage]);
-  const backgroundNode = one(upstream.filter((node) => visualTypes.has(node.type)
+  const backgroundNodes = upstream.filter((node) => visualTypes.has(node.type)
     && (node.data.remixRole === 'background' || node.data.remixRole === 'a-roll')
-    && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)), '成片背景');
-  const background = boundBrollVisualMedia(project, backgroundNode);
-  const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual').map((node) => [node.id, boundBrollVisualMedia(project, node)]));
+    && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)
+    && (node.data.videoUrl || node.data.imageUrl || node.data.previewImageUrl));
+  if (backgroundNodes.length > 1) throw new Error('成片底画面只能选择一个');
+  const background = backgroundNodes.length ? boundBrollVisualMedia(project, backgroundNodes[0]) : undefined;
+  const eventRules = (scriptArtifact.payload.events as Array<{ event_id: string; visual_node_id?: string }> | undefined) ?? [];
+  const referencedVisualIds = new Set(eventRules.map((event) => event.visual_node_id).filter(Boolean));
+  const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual' && referencedVisualIds.has(node.id))
+    .map((node) => [node.id, boundBrollVisualMedia(project, node)]));
+  const primaryNodes = upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'primary'
+    && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)
+    && (node.data.remixScriptRef as RemixArtifactRef | undefined)?.artifactId === scriptRef.artifactId
+    && (node.data.remixScriptRef as RemixArtifactRef | undefined)?.revision === scriptRef.revision
+    && eventRules.some((event) => event.event_id === node.data.remixEventId && !event.visual_node_id));
+  if (new Set(primaryNodes.map((node) => node.data.remixEventId)).size !== primaryNodes.length) throw new Error('同一台词事件存在多个主画面节点');
+  const primaryVisuals = Object.fromEntries(primaryNodes.map((node) => [String(node.data.remixEventId), boundBrollVisualMedia(project, node)]));
   const audioTracks = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.audio && (node.data.remixRole === 'bgm' || node.data.remixRole === 'sfx') && node.data.remixMedia)
     .map((node) => ({ id: node.id, role: node.data.remixRole as 'bgm' | 'sfx', media: node.data.remixMedia as UploadedRemixMedia }));
   const payload = buildNodeRemixManifest({
-    reference, background, narration, visuals, audioTracks,
+    reference, background, narration, visuals, primaryVisuals, audioTracks,
     timing: timingArtifact.payload as unknown as CompiledTiming,
     script: scriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['script'],
     wordTimeline: transcriptArtifact.payload as unknown as Parameters<typeof buildNodeRemixManifest>[0]['wordTimeline'],

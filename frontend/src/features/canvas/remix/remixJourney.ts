@@ -4,7 +4,8 @@ import { boundBrollVisualMedia } from './brollCanvasBinding';
 export type RemixJourneyAction =
   | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
   | 'plan_broll' | 'align_narration' | 'create_timeline' | 'compile_timeline'
-  | 'create_background' | 'bind_background' | 'create_compose' | 'prepare_manifest'
+  | 'create_background' | 'bind_background' | 'create_primary_visuals' | 'generate_primary' | 'bind_primary'
+  | 'create_compose' | 'prepare_manifest'
   | 'save_manifest' | 'resolve_manifest_conflicts' | 'render_export';
 
 export type RemixJourneyStep = {
@@ -109,6 +110,16 @@ function missingRequiredBroll(node: CanvasNode, nodes: CanvasNode[], edges: Canv
   });
 }
 
+export function primaryVisualEventsForScript(script: CanvasNode, nodes: CanvasNode[], edges: CanvasEdge[]): Array<{ id: string; label: string }> {
+  const draft = script.data.remixScriptDraft as { selections?: Array<{ id: string; label: string; visualNodeId?: string; visualMediaRevision?: string }> } | undefined;
+  return (draft?.selections ?? []).filter((selection) => {
+    const selected = nodes.find((candidate) => candidate.id === selection.visualNodeId && candidate.data.remixRole === 'visual');
+    return typeof selection.visualMediaRevision !== 'string'
+      || !edges.some((edge) => edge.source === selected?.id && edge.target === script.id)
+      || !validBoundVisual(selected, selection.visualMediaRevision);
+  });
+}
+
 /** Resolve exactly one visible next step from the selected remix graph. */
 export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], selectedNodeId: string): RemixJourneyStep | null {
   const component = connectedIds(edges, selectedNodeId);
@@ -162,11 +173,23 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
 
   const backgrounds = graph.filter((node) => VISUAL_NODE_TYPES.has(node.type) && node.data.remixRole === 'background'
     && node.id !== reference.id && edges.some((edge) => edge.source === node.id && edge.target === script.id));
-  if (!backgrounds.length) return { kind: 'action', action: 'create_background', targetNodeId: script.id, label: '添加成片背景 / A-roll', inputHint: '参考片仅用于分析；请上传或选择单独的成片画面。' };
-  const background = backgrounds[0];
-  const hasBackgroundSource = Boolean(background.data.videoUrl || background.data.imageUrl || background.data.previewImageUrl);
-  if (!hasBackgroundSource) return { kind: 'input', targetNodeId: background.id, label: '上传成片背景 / A-roll', inputHint: '在新建素材节点上传用于最终成片的图片或视频。' };
-  if (!validBoundVisual(background)) return { kind: 'action', action: 'bind_background', targetNodeId: background.id, label: '绑定成片背景 / A-roll' };
+  const background = backgrounds.find((candidate) => candidate.data.videoUrl || candidate.data.imageUrl || candidate.data.previewImageUrl);
+  if (background) {
+    if (!validBoundVisual(background)) return { kind: 'action', action: 'bind_background', targetNodeId: background.id, label: '绑定成片底画面' };
+  } else {
+    const needsPrimary = primaryVisualEventsForScript(script, graph, edges);
+    const primaryNodes = graph.filter((candidate) => VISUAL_NODE_TYPES.has(candidate.type) && candidate.data.remixRole === 'primary'
+      && sameRef(candidate.data.remixScriptRef, scriptRef)
+      && edges.some((edge) => edge.source === candidate.id && edge.target === script.id));
+    const missing = needsPrimary.filter((selection) => !primaryNodes.some((candidate) => candidate.data.remixEventId === selection.id));
+    if (missing.length) return { kind: 'action', action: 'create_primary_visuals', targetNodeId: script.id, label: '创建主画面', inputHint: `为 ${missing.length} 个台词事件准备生成节点。` };
+    for (const selection of needsPrimary) {
+      const primary = primaryNodes.find((candidate) => candidate.data.remixEventId === selection.id)!;
+      if (primary.data.isGenerating || primary.data.workflowActionRunning) return { kind: 'wait', targetNodeId: primary.id, label: `等待主画面 · ${selection.label}` };
+      if (!primary.data.imageUrl && !primary.data.videoUrl) return { kind: 'action', action: 'generate_primary', targetNodeId: primary.id, label: `生成主画面 · ${selection.label}` };
+      if (!validBoundVisual(primary)) return { kind: 'action', action: 'bind_primary', targetNodeId: primary.id, label: `关联主画面 · ${selection.label}` };
+    }
+  }
 
   const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
   if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };

@@ -8,6 +8,37 @@ const visualVideo = { ...video, media_path: 'freezone/remix_media/product.mp4', 
 const background = { ...image, media_path: 'freezone/remix_media/background.png', media_hash: 'f'.repeat(64) };
 
 describe('buildNodeRemixManifest', () => {
+  it('builds continuous primary shots without an uploaded full-length background', () => {
+    const second = { ...image, media_path: 'freezone/remix_media/second.png', media_hash: 'e'.repeat(64) };
+    const output = buildNodeRemixManifest({
+      reference: video, narration: audio,
+      timing: { fps: 30, events: [
+        { event_id: 'opening', start_frame: 12, end_frame: 36 },
+        { event_id: 'answer', start_frame: 50, end_frame: 88 },
+      ], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '开场回答', events: [
+        { event_id: 'opening', caption: '开场' },
+        { event_id: 'answer', caption: '回答' },
+      ] },
+      primaryVisuals: { opening: image, answer: second },
+    });
+    expect(output.media_bindings).not.toContainEqual(expect.objectContaining({ purpose: 'background' }));
+    expect(output.layers.filter((layer) => layer.z_order === 0)).toEqual([
+      expect.objectContaining({ start_frame: 0, end_frame: 50, media_id: 'primary-opening' }),
+      expect.objectContaining({ start_frame: 50, end_frame: 120, media_id: 'primary-answer' }),
+    ]);
+  });
+
+  it('uses an already generated B-roll shot as primary coverage when that event has no separate main shot', () => {
+    const output = buildNodeRemixManifest({
+      reference: video, narration: audio,
+      timing: { fps: 30, events: [{ event_id: 'product', start_frame: 10, end_frame: 45 }], unresolved_required_events: [], override_conflicts: [] },
+      script: { dialogue: '产品', events: [{ event_id: 'product', caption: '产品', visual_node_id: 'visual', visual_media_revision: image.media_hash }] },
+      visuals: { visual: image },
+    });
+    expect(output.layers).toEqual([expect.objectContaining({ row_id: 'primary:product', start_frame: 0, end_frame: 120, z_order: 0 })]);
+  });
+
   it('binds compiled timing to project media and script captions', () => {
     const output = buildNodeRemixManifest({
       reference: video, background,
@@ -159,10 +190,10 @@ describe('buildNodeRemixManifest', () => {
     })).toThrow(/素材已变化/);
   });
 
-  it('requires an explicit selected background instead of rendering the analysis reference', () => {
+  it('requires planned primary coverage instead of rendering the analysis reference', () => {
     expect(() => buildNodeRemixManifest({ reference: video, narration: audio,
       timing: { fps: 30, events: [], unresolved_required_events: [], override_conflicts: [] },
       script: { dialogue: '', events: [] },
-    })).toThrow(/背景/);
+    })).toThrow(/主画面/);
   });
 });

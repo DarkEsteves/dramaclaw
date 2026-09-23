@@ -226,14 +226,22 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(
                         "layer zoom must contain bounded start and end scales"
                     )
-    if version == 2 and not any(
-        layer.get("start_frame") == 0
-        and layer.get("end_frame") == duration_frames
-        and layer.get("z_order") == 0
-        and binding_purposes.get(layer.get("media_id")) in {"background", "a-roll"}
-        for layer in layers
-    ):
-        raise ValueError("version 2 requires an explicit selected background or A-roll")
+    if version == 2:
+        primary_layers = sorted((layer for layer in layers
+            if layer.get("z_order") == 0
+            and binding_purposes.get(layer.get("media_id")) in {"background", "a-roll"}
+            and layer.get("x", 0) == 0 and layer.get("y", 0) == 0
+            and layer.get("width", width) == width and layer.get("height", height) == height
+            and layer.get("opacity", 1) == 1
+            and not layer.get("fade_in_frames", 0) and not layer.get("fade_out_frames", 0)
+        ), key=lambda layer: layer["start_frame"])
+        covered_until = 0
+        for layer in primary_layers:
+            if layer["start_frame"] > covered_until:
+                break
+            covered_until = max(covered_until, layer["end_frame"])
+        if covered_until < duration_frames:
+            raise ValueError("version 2 requires continuous primary visual coverage")
     for event in manifest.get("subtitle_events", []):
         _interval(event, duration_frames)
         if not isinstance(event.get("text"), str) or not event["text"].strip():
