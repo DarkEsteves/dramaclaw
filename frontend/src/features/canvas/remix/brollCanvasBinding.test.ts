@@ -30,12 +30,15 @@ describe('B-roll canvas binding', () => {
     const created = createBrollVisualNode({
       nodes: [node('script', 'scriptNode', {})], addNode, addEdge, setSelectedNode,
       findNodePosition: vi.fn(() => ({ x: 100, y: 200 })),
-    }, 'script', 'upload', 'product');
+    }, 'script', 'upload', 'product', '产品登场');
 
     expect(addNode).toHaveBeenCalledWith('uploadNode', { x: 100, y: 200 }, expect.not.objectContaining({ imageOnly: true }));
-    expect(addNode).toHaveBeenCalledWith('uploadNode', { x: 100, y: 200 }, expect.objectContaining({ remixRole: 'visual' }));
+    expect(addNode).toHaveBeenCalledWith('uploadNode', { x: 100, y: 200 }, expect.objectContaining({
+      displayName: '上传画面 · 产品登场',
+      remixRole: 'visual',
+    }));
     expect(addEdge).toHaveBeenCalledWith('upload-1', 'script');
-    expect(created).toEqual({ id: 'upload-1', label: '上传画面' });
+    expect(created).toEqual({ id: 'upload-1', label: '上传画面 · 产品登场' });
   });
 
   it('rejects manifest preparation when the displayed visual replaced the saved media binding', () => {

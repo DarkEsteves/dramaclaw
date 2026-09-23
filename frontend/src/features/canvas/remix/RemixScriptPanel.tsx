@@ -21,7 +21,7 @@ interface Props {
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
-  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
+  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string, eventName: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
   onTopicChange?: (topic: string) => void;
@@ -165,7 +165,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
   };
   const createVisual = (index: number, mode: 'generate' | 'upload') => {
     const selection = draft.selections[index];
-    const created = selection && onCreateVisual?.(mode, selection.id);
+    const created = selection && onCreateVisual?.(mode, selection.id, selection.label);
     if (!created) return;
     const next = { ...draft, selections: draft.selections.map((item, position) => position === index
       ? { ...item, visualNodeId: created.id, visualMediaRevision: created.mediaRevision }

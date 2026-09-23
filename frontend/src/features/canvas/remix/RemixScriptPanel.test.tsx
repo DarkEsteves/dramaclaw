@@ -163,7 +163,7 @@ describe('RemixScriptPanel', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onCreateVisual={onCreateVisual} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
-    expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product');
+    expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product', '产品登场');
     expect(onDraftChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }),
       'media-binding',
@@ -172,7 +172,7 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
-    expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product');
+    expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product', '产品登场');
     expect(onDraftChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }),
       'media-binding',

@@ -16,17 +16,24 @@ export interface BrollVisualAttachment {
   commit: () => void;
 }
 
-export function createBrollVisualNode(store: BrollCanvasStore, scriptId: string, mode: 'generate' | 'upload', selectionId: string) {
+export function createBrollVisualNode(
+  store: BrollCanvasStore,
+  scriptId: string,
+  mode: 'generate' | 'upload',
+  selectionId: string,
+  eventName: string,
+) {
   if (!store.nodes.some((node) => node.id === scriptId)) return null;
   const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
   const label = mode === 'generate' ? '生成画面' : '上传画面';
+  const displayName = `${label} · ${eventName.trim() || selectionId}`;
   const childId = store.addNode(type, store.findNodePosition(scriptId, 420, 320), {
-    displayName: `${label} · ${selectionId}`,
+    displayName,
     remixRole: 'visual',
   });
   store.addEdge(childId, scriptId);
   store.setSelectedNode(childId);
-  return { id: childId, label };
+  return { id: childId, label: displayName };
 }
 
 export function createBackgroundVisualNode(store: BrollCanvasStore, scriptId: string) {
