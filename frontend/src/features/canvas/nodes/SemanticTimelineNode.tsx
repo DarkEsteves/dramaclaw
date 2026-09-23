@@ -1,11 +1,12 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { ScrollText } from 'lucide-react';
+import { ChevronDown, ChevronRight, ScrollText } from 'lucide-react';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import { useUpstreamNodes } from '@/features/canvas/application/useUpstreamGraph';
 import type { SemanticTimelineNodeData } from '@/features/canvas/domain/canvasNodes';
 import { buildTimelineEditMap, buildTimelineOverrides, operationMatchesTimelineInputs, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
+import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
@@ -33,6 +34,37 @@ function asRef(value: unknown): RemixArtifactRef | null {
 
 function sleep(ms: number) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); }
 
+type ScriptSelection = {
+  id?: unknown;
+  label?: unknown;
+  start?: unknown;
+  end?: unknown;
+};
+
+function formatFrameTime(frame: number | undefined, fps: number): string | null {
+  if (frame === undefined || !Number.isFinite(frame)) return null;
+  const seconds = Math.max(0, frame / fps);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = (seconds % 60).toFixed(1).padStart(4, '0');
+  return `${String(minutes).padStart(2, '0')}:${remainder}`;
+}
+
+function readScriptPresentation(draft: unknown, selectionId: string, fallbackLabel: string, index: number) {
+  if (!draft || typeof draft !== 'object') return { label: fallbackLabel === selectionId ? `片段 ${index + 1}` : fallbackLabel, dialogue: '' };
+  const item = draft as { dialogue?: unknown; selections?: unknown };
+  const selection = Array.isArray(item.selections)
+    ? (item.selections as ScriptSelection[]).find((candidate) => candidate?.id === selectionId)
+    : undefined;
+  const label = typeof selection?.label === 'string' && selection.label.trim()
+    ? selection.label.trim()
+    : fallbackLabel === selectionId ? `片段 ${index + 1}` : fallbackLabel;
+  if (typeof item.dialogue !== 'string' || !Number.isFinite(selection?.start) || !Number.isFinite(selection?.end)) return { label, dialogue: '' };
+  const characters = Array.from(item.dialogue);
+  const start = Math.max(0, Math.floor(Number(selection?.start)));
+  const end = Math.max(start, Math.floor(Number(selection?.end)));
+  return { label, dialogue: characters.slice(start, end).join('').trim() };
+}
+
 export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { id: string; data: TimelineData; selected?: boolean }) => {
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
@@ -46,6 +78,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, TimelineEventOverride>>(data.eventOverrides ?? {});
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
   const project = readUrl().project;
   const currentOperationRef = useRef(data.compileOperationId ?? null);
   const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? 0 });
@@ -198,23 +231,58 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
     <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
     <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<ScrollText className="h-4 w-4" />} titleText={data.displayName || '语义时间轴'} editable={false} />
-    <div className={`max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
-      <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted">
-        <span>{busy || data.compileOperationId ? '正在计算时间区间…' : data.artifactRef ? `时间轴 r${data.artifactRef.revision}` : '待计算时间区间'}</span>
+    <div className={`ui-scrollbar nowheel max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
+      <div className="mb-3 flex items-center justify-between gap-2 border-b border-white/[0.06] pb-3 text-[12px]">
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-[11px] ${busy || data.compileOperationId ? 'bg-amber-300/10 text-amber-300' : data.artifactRef ? 'bg-emerald-300/10 text-emerald-300' : 'bg-white/[0.06] text-text-muted'}`}>
+            {busy || data.compileOperationId ? '正在计算…' : data.artifactRef ? '已计算' : '待计算'}
+          </span>
+          <span className="font-medium text-text-dark">{data.events.length} 个片段</span>
+        </div>
+        {data.artifactRef ? <span className="text-[11px] text-text-muted">版本 {data.artifactRef.revision}</span> : null}
       </div>
       {!asRef(scriptRef) || !asRef(wordRef) ? <p className="mb-2 text-[12px] text-amber-300">连接脚本和已对齐语音的转写节点后可编译。</p> : null}
       {(error || data.compileError) && <p role="alert" className="mb-2 text-[12px] text-red-300">{error || data.compileError}</p>}
       {data.events.map((event, index) => {
         const override = overrides[event.selectionId] ?? {};
-        return <div key={`${event.selectionId}-${index}`} className="border-b border-white/[0.06] py-2 text-[12px] text-text-dark">
-          <div>{event.label}</div>
-          {event.invalidReason ? <div className="text-amber-300">未解决：{event.invalidReason}</div> : <div className="text-text-muted">{event.startFrame !== undefined ? `帧 ${event.startFrame}–${event.endFrame}` : '等待编译'}</div>}
-          <div className="mt-1 grid grid-cols-4 gap-1">
-            {([['offsetMs', '语义偏移毫秒'], ['minimumDurationFrames', '最短帧数'], ['startFrame', '固定起始帧'], ['endFrame', '固定结束帧']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${event.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 h-8 w-full rounded-[12px] border border-white/10 bg-surface-field px-2 text-[11px] text-text-dark outline-none focus:border-white/25" /></label>)}
+        const presentation = readScriptPresentation(scriptNode?.data?.remixScriptDraft, event.selectionId, event.label, index);
+        const startTime = formatFrameTime(event.startFrame, data.fps ?? 30);
+        const endTime = formatFrameTime(event.endFrame, data.fps ?? 30);
+        const expanded = expandedEventId === event.selectionId;
+        return <section key={`${event.selectionId}-${index}`} className="border-b border-white/[0.06] py-3 last:border-b-0">
+          <div className="flex items-start gap-3">
+            <span className="mt-0.5 flex h-6 min-w-6 items-center justify-center rounded-full bg-white/[0.06] px-1 text-[10px] font-medium tabular-nums text-text-muted">{String(index + 1).padStart(2, '0')}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 font-medium text-[13px] leading-5 text-text-dark">{presentation.label}</div>
+                <div className="shrink-0 rounded-md bg-white/[0.05] px-2 py-1 text-[10px] tabular-nums text-text-muted">
+                  {startTime && endTime ? `${startTime} – ${endTime}` : '等待计算'}
+                </div>
+              </div>
+              {presentation.dialogue ? <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-text-muted">{presentation.dialogue}</p> : null}
+              {event.invalidReason ? <p className="mt-1 rounded-md bg-amber-300/10 px-2 py-1 text-[11px] text-amber-300">需要处理：{event.invalidReason}</p> : null}
+              <button
+                type="button"
+                aria-label={`微调 ${presentation.label}`}
+                aria-expanded={expanded}
+                onClick={() => setExpandedEventId(expanded ? null : event.selectionId)}
+                className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} nodrag mt-2 !h-7 !gap-1 !px-2 !text-[11px]`}
+              >
+                {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                微调
+              </button>
+            </div>
           </div>
-        </div>;
+          {expanded ? <div className="nodrag ml-9 mt-2 rounded-[10px] border border-white/[0.07] bg-black/10 p-2">
+            <div className="mb-2 text-[10px] leading-4 text-text-muted">正数向后移动，负数向前移动；固定开始和结束需同时填写。</div>
+            <div className="grid grid-cols-2 gap-2">
+              {([['offsetMs', '整体移动（毫秒）'], ['minimumDurationFrames', '最短时长（帧）'], ['startFrame', '固定开始（帧）'], ['endFrame', '固定结束（帧）']] as const).map(([key, label]) => <label key={key} className="text-[10px] text-text-muted">{label}<input aria-label={`${presentation.label} ${label}`} type="number" value={override[key] ?? ''} onChange={(change) => changeOverride(event.selectionId, key, change.target.value)} className="nodrag mt-1 h-8 w-full rounded-[10px] border border-white/10 bg-surface-field px-2 text-[11px] text-text-dark outline-none focus:border-white/25" /></label>)}
+            </div>
+            {event.startFrame !== undefined && event.endFrame !== undefined ? <div className="mt-2 text-[10px] text-text-muted">当前帧：{event.startFrame}–{event.endFrame} · {data.fps ?? 30} fps</div> : null}
+          </div> : null}
+        </section>;
       })}
-      {data.events.length === 0 && <div className="text-[12px] text-text-muted">没有时间事件；先从脚本节点定义 Selection。</div>}
+      {data.events.length === 0 && <div className="rounded-[10px] border border-dashed border-white/10 px-3 py-6 text-center text-[12px] text-text-muted">还没有可计算的片段，请先在脚本节点添加语义事件。</div>}
     </div>
   </div>;
 });

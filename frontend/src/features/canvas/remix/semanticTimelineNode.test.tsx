@@ -4,7 +4,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const updateNodeData = vi.fn();
 const upstreamNodes = [
-  { id: 'script-1', type: 'scriptNode', data: { remixScriptRef: { artifactId: 'script-art', revision: 1 }, remixBlueprintRef: { artifactId: 'blueprint-art', revision: 2 } } },
+  { id: 'script-1', type: 'scriptNode', data: {
+    remixScriptRef: { artifactId: 'script-art', revision: 1 },
+    remixBlueprintRef: { artifactId: 'blueprint-art', revision: 2 },
+    remixScriptDraft: {
+      dialogue: '男：看看这杯黑咖啡。',
+      selections: [{ id: 'product', label: '产品亮相', start: 0, end: 100 }],
+    },
+  } },
   { id: 'transcript-1', type: 'transcriptNode', data: { artifactRef: { artifactId: 'words-art', revision: 1 }, sourceMediaPath: 'media/voice.wav' } },
 ];
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' } }));
@@ -31,8 +38,9 @@ describe('SemanticTimelineNode', () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     expect(document.querySelector('[data-handle="target"]')).toBeTruthy();
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
-    expect(screen.getByLabelText('产品登场 最短帧数')).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('产品登场 语义偏移毫秒'), { target: { value: '250' } });
+    fireEvent.click(screen.getByRole('button', { name: '微调 产品亮相' }));
+    expect(screen.getByLabelText('产品亮相 最短时长（帧）')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('产品亮相 整体移动（毫秒）'), { target: { value: '250' } });
     act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'timeline-1', action: 'compile' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({
       action: 'compile_semantic_timeline',
@@ -48,12 +56,24 @@ describe('SemanticTimelineNode', () => {
 
   it('keeps an incomplete fixed-frame edit visible and reports it before submitting', async () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
-    const start = screen.getByLabelText('产品登场 固定起始帧') as HTMLInputElement;
+    fireEvent.click(screen.getByRole('button', { name: '微调 产品亮相' }));
+    const start = screen.getByLabelText('产品亮相 固定开始（帧）') as HTMLInputElement;
     fireEvent.change(start, { target: { value: '12' } });
     act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'timeline-1', action: 'compile' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('同时填写'));
     expect(start.value).toBe('12');
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('presents events as readable script sections and hides advanced controls by default', () => {
+    render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', artifactRef: { artifactId: 'timing-art', revision: 1 }, events: [{ selectionId: 'product', label: 'product', startFrame: 60, endFrame: 150 }], eventOverrides: {}, fps: 30 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+
+    expect(screen.getByText('1 个片段')).toBeTruthy();
+    expect(screen.getByText('产品亮相')).toBeTruthy();
+    expect(screen.getByText('男：看看这杯黑咖啡。')).toBeTruthy();
+    expect(screen.getByText('00:02.0 – 00:05.0')).toBeTruthy();
+    expect(screen.queryByText('product')).toBeNull();
+    expect(screen.queryByLabelText('产品亮相 整体移动（毫秒）')).toBeNull();
   });
 
   it('resumes a persisted compile operation after mounting without submitting another task', async () => {
@@ -72,7 +92,7 @@ describe('SemanticTimelineNode', () => {
     view.rerender(<SemanticTimelineNode {...props} data={stale} />);
     view.rerender(<SemanticTimelineNode {...props} data={{ ...stale, compileOperationId: null, artifactRef: { artifactId: 'timing-art', revision: 1 } }} />);
 
-    expect(screen.getByText('时间轴 r1')).toBeTruthy();
+    expect(screen.getByText('版本 1')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '继续检查' })).toBeNull();
     expect(screen.queryByText('正在计算时间区间…')).toBeNull();
   });
