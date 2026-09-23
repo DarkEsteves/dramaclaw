@@ -284,7 +284,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
           <span>{operationId || data.managedOperationId ? '处理中…' : artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
         </div>
       </div>
-      <div className="ui-scrollbar overflow-auto p-2">
+      <div className="ui-scrollbar nowheel overflow-auto p-2">
         {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.unresolved?.[0] || (data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐')}</p>}
         {hasSpeechReview && <div className="mx-2 mb-2 rounded-[12px] border border-white/10 bg-surface-field p-2 text-xs text-text-muted">
           <ul className="space-y-1">{(speechReview.length ? speechReview : ['对齐覆盖不完整，请核对台词']).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>

@@ -60,6 +60,11 @@ describe('TranscriptNode', () => {
     expect(screen.queryByRole('button', { name: '按脚本对齐' })).toBeNull();
   });
 
+  it('keeps wheel scrolling inside the transcript content area', () => {
+    const { container } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    expect(container.querySelector('.ui-scrollbar')).toHaveClass('nowheel');
+  });
+
   it('starts script alignment automatically only with both saved script and narration audio connected', async () => {
     state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 3 } } });
     state.edges.push({ source: 'script', target: 'transcript' });
