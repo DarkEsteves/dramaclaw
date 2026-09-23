@@ -12,6 +12,7 @@ const ref = (artifactId: string) => ({ artifactId, revision: 1 });
 describe('source-first remix graph plans', () => {
   it.each([
     ['style', ['render']],
+    ['media_binding', ['render']],
     ['visual_prompt', ['generate_visual', 'render']],
     ['script', ['align_script', 'compile_timeline', 'render']],
     ['voice', ['align_script', 'compile_timeline', 'render']],

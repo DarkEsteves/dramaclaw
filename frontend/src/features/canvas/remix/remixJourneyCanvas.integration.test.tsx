@@ -334,7 +334,16 @@ describe('native canvas remix journey integration', () => {
       ]);
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixScriptRef)
       .toEqual({ artifactId: 'script-artifact', revision: 2 }));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollPlanRef)
+      .toEqual({ artifactId: 'broll-plan', revision: 1 });
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollScriptRef)
+      .toEqual({ artifactId: 'script-artifact', revision: 2 });
     expect(screen.getByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    act(() => useCanvasStore.getState().setSelectedNode('script'));
+    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
+    expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    expect(backend.submit).not.toHaveBeenCalled();
   });
 
   it('shows clear empty states in an adaptation script summary', async () => {

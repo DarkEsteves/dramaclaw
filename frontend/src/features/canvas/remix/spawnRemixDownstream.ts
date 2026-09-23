@@ -4,12 +4,13 @@ import { visualGenerationRequestMutationPatches } from './visualGenerationReques
 
 type Ref = { artifactId: string; revision: number };
 
-export type RemixChangeKind = 'style' | 'visual_prompt' | 'script' | 'voice';
+export type RemixChangeKind = 'style' | 'visual_prompt' | 'media_binding' | 'script' | 'voice';
 export type RemixInvalidatedJob = 'generate_visual' | 'align_script' | 'compile_timeline' | 'render';
 
 /** Ordered minimal paid/local work needed after one user edit. */
 export function planRemixInvalidation(change: RemixChangeKind): RemixInvalidatedJob[] {
   if (change === 'style') return ['render'];
+  if (change === 'media_binding') return ['render'];
   if (change === 'visual_prompt') return ['generate_visual', 'render'];
   return ['align_script', 'compile_timeline', 'render'];
 }
