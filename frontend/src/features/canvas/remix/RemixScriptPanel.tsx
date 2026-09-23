@@ -209,6 +209,5 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       </div>})}
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div>
-    <div className="flex justify-end border-t border-white/10 px-4 py-3 text-xs text-text-muted">{autoSaving ? '正在自动保存…' : '修改会自动保存'}</div>
   </div>;
 }
