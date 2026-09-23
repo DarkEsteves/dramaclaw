@@ -21,7 +21,7 @@ interface Props {
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
-  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
+  onCreateVisual?: (mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
   onTopicChange?: (topic: string) => void;
@@ -163,9 +163,9 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');
     }
   };
-  const createVisual = (index: number, mode: 'generate' | 'upload') => {
+  const createVisual = (index: number, mode: 'generate' | 'generateVideo' | 'upload') => {
     const selection = draft.selections[index];
-    const suggestedPrompt = mode === 'generate'
+    const suggestedPrompt = mode === 'generate' || mode === 'generateVideo'
       ? brollRequirements.find((item) => item.event_id === selection?.id)?.suggested_query
       : undefined;
     const created = selection && onCreateVisual?.(mode, selection.id, selection.label, suggestedPrompt);
@@ -213,7 +213,8 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
         <button type="button" onClick={() => changeDraft({ ...draft, selections: draft.selections.filter((_, position) => position !== index) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>删除</button>
         <p className="col-span-6 rounded-[8px] border border-white/[0.08] bg-surface-field px-3 py-2 leading-5 text-text-muted">对应台词<span className="ml-2 whitespace-pre-wrap break-words text-text-dark">{selectedDialogue || '当前区间没有台词'}</span></p>
         <div className="col-span-6 flex items-center gap-2">
-          <button type="button" aria-label={`生成 ${selection.label} 素材`} onClick={() => createVisual(index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button>
+          <button type="button" aria-label={`生成 ${selection.label} 图片素材`} onClick={() => createVisual(index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成图片</button>
+          <button type="button" aria-label={`生成 ${selection.label} 视频素材`} onClick={() => createVisual(index, 'generateVideo')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成视频</button>
           <button type="button" aria-label={`上传 ${selection.label} 素材`} onClick={() => createVisual(index, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button>
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
           {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">{autoSaving ? '补充画面节点已创建，正在自动保存脚本…' : '补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。'}</span>}

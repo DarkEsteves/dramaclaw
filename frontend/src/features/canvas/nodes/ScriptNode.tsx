@@ -505,14 +505,15 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
           : remixNextAction === 'create_narration'
             ? '下一步：制作配音'
             : '脚本已就绪');
-  const remixVisualNodes = upstreamNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)).map((node) => ({
+  const remixVisualNodes = upstreamNodes.filter((node) => node.data.remixRole === 'visual'
+    && (isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))).map((node) => ({
     id: node.id,
     label: String(node.data.displayName || node.id),
     mediaRevision: typeof node.data.remixMedia === 'object' && node.data.remixMedia && 'media_hash' in node.data.remixMedia
       ? String(node.data.remixMedia.media_hash) : undefined,
   }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
-  const createRemixVisual = useCallback((mode: 'generate' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => {
+  const createRemixVisual = useCallback((mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => {
     return createBrollVisualNode(useCanvasStore.getState(), id, mode, selectionId, eventName, suggestedPrompt);
   }, [id]);
   const attachRemixVisual = useCallback(async (nodeId: string) => {

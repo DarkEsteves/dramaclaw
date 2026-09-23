@@ -10,18 +10,19 @@ describe('B-roll canvas binding', () => {
     const store = {
       nodes: [node('script', 'scriptNode', { remixTopic: '把咖啡改成茶', remixScriptRef: { artifactId: 'script', revision: 2 }, remixScriptDraft: { dialogue: '男：喝茶吗？女：每天都喝。', selections: [
         { id: 'question', label: '开场提问', start: 2, end: 6 }, { id: 'answer', label: '回答', start: 8, end: 13 },
-      ] } }), node('story', 'videoStoryNode', { referenceEvents: [{ visual_observation: '双人中景' }, { visual_observation: '回答者特写' }] })],
+      ] } }), node('story', 'videoStoryNode', { referenceEvents: [{ visual_observation: '双人中景', start_us: 0, end_us: 7_000_000 }, { visual_observation: '回答者特写' }] })],
       addNode, addEdge: vi.fn(() => 'edge'), setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 100, y: 200 })),
     };
     const created = createPrimaryVisualNodes(store, 'script', 'story', ['question', 'answer']);
     expect(created).toEqual(['first', 'second']);
-    expect(addNode).toHaveBeenNthCalledWith(1, 'imageGenNode', expect.any(Object), expect.objectContaining({
-      remixRole: 'primary', remixEventId: 'question', aspectRatio: '9:16', prompt: expect.stringContaining('双人中景'),
+    expect(addNode).toHaveBeenNthCalledWith(1, 'videoNode', expect.any(Object), expect.objectContaining({
+      remixRole: 'primary', remixEventId: 'question', aspectRatio: '9:16', genMode: 'textToVideo',
+      durationSec: 7, generateAudio: false, prompt: expect.stringContaining('双人中景'),
     }));
     expect(addNode.mock.calls[0][2].prompt).toContain('把咖啡改成茶');
     expect(addNode.mock.calls[0][2].prompt).toContain('喝茶吗？');
     expect(addNode.mock.calls[0][1]).toEqual({ x: 100, y: 200 });
-    expect(addNode.mock.calls[1][1]).toEqual({ x: 100, y: 560 });
+    expect(addNode.mock.calls[1][1]).toEqual({ x: 100, y: 620 });
   });
 
   it('reattaches a replacement when the current node URL no longer matches saved remix media', async () => {
@@ -68,9 +69,21 @@ describe('B-roll canvas binding', () => {
     }, 'script', 'generate', 'product', '产品登场', '咖啡杯产品特写，柔和侧光');
 
     expect(addNode).toHaveBeenCalledWith('imageGenNode', { x: 100, y: 200 }, expect.objectContaining({
-      displayName: '生成画面 · 产品登场',
+      displayName: '生成图片 · 产品登场',
       prompt: '咖啡杯产品特写，柔和侧光',
       remixRole: 'visual',
+    }));
+  });
+
+  it('offers a generated video B-roll node with the planned motion prompt', () => {
+    const addNode = vi.fn(() => 'video-1');
+    createBrollVisualNode({
+      nodes: [node('script', 'scriptNode', {})], addNode, addEdge: vi.fn(() => 'edge-1'), setSelectedNode: vi.fn(),
+      findNodePosition: vi.fn(() => ({ x: 100, y: 200 })),
+    }, 'script', 'generateVideo', 'product', '产品登场', '镜头推进咖啡杯，杯中蒸汽缓缓升起');
+    expect(addNode).toHaveBeenCalledWith('videoNode', { x: 100, y: 200 }, expect.objectContaining({
+      displayName: '生成视频 · 产品登场', remixRole: 'visual', genMode: 'textToVideo', generateAudio: false,
+      prompt: expect.stringContaining('镜头推进咖啡杯，杯中蒸汽缓缓升起'),
     }));
   });
 

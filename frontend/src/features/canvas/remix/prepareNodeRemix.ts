@@ -148,7 +148,7 @@ export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edg
   const referencedVisualIds = new Set(eventRules.map((event) => event.visual_node_id).filter(Boolean));
   const visuals = Object.fromEntries(upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'visual' && referencedVisualIds.has(node.id))
     .map((node) => [node.id, boundBrollVisualMedia(project, node)]));
-  const primaryNodes = upstream.filter((node) => visualTypes.has(node.type) && node.data.remixRole === 'primary'
+  const primaryNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'primary'
     && edges.some((edge) => edge.source === node.id && edge.target === scriptNode.id)
     && (node.data.remixScriptRef as RemixArtifactRef | undefined)?.artifactId === scriptRef.artifactId
     && (node.data.remixScriptRef as RemixArtifactRef | undefined)?.revision === scriptRef.revision

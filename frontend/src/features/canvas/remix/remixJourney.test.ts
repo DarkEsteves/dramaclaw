@@ -33,12 +33,15 @@ describe('reference video remix canvas journey', () => {
     );
     graph.edges.push(edge('script', 'audio'), edge('script', 'words'), edge('audio', 'words'), edge('script', 'timeline'), edge('words', 'timeline'), edge('old-background', 'script'));
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_primary_visuals', label: '创建主画面' });
-    graph.nodes.push(node('primary', 'imageGenNode', { remixRole: 'primary', remixEventId: 'product', remixScriptRef: ref('script'), prompt: '问答主画面' }));
+    graph.nodes.push(node('legacy-still', 'imageGenNode', { remixRole: 'primary', remixEventId: 'product', remixScriptRef: ref('script'), imageUrl: '/still.png' }));
+    graph.edges.push(edge('legacy-still', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_primary_visuals' });
+    graph.nodes.push(node('primary', 'videoNode', { remixRole: 'primary', remixEventId: 'product', remixScriptRef: ref('script'), prompt: '问答主画面' }));
     graph.edges.push(edge('primary', 'script'));
-    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'primary')).toMatchObject({ action: 'generate_primary', label: '生成主画面 · 产品登场' });
-    graph.nodes[graph.nodes.length - 1].data.imageUrl = '/primary.png';
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'primary')).toMatchObject({ action: 'generate_primary', label: '生成主画面视频 · 产品登场' });
+    graph.nodes[graph.nodes.length - 1].data.videoUrl = '/primary.mp4';
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'primary')).toMatchObject({ action: 'bind_primary' });
-    graph.nodes[graph.nodes.length - 1].data.remixMedia = { media_kind: 'image', media_path: 'primary.png', media_hash: 'd'.repeat(64), url: '/primary.png' };
+    graph.nodes[graph.nodes.length - 1].data.remixMedia = { media_kind: 'video', media_path: 'primary.mp4', media_hash: 'd'.repeat(64), url: '/primary.mp4' };
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
   });
 

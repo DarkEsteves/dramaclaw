@@ -20,19 +20,23 @@ export interface BrollVisualAttachment {
 export function createBrollVisualNode(
   store: BrollCanvasStore,
   scriptId: string,
-  mode: 'generate' | 'upload',
+  mode: 'generate' | 'generateVideo' | 'upload',
   selectionId: string,
   eventName: string,
   suggestedPrompt?: string,
 ) {
   if (!store.nodes.some((node) => node.id === scriptId)) return null;
-  const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
-  const label = mode === 'generate' ? '生成画面' : '上传画面';
+  const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : mode === 'generateVideo' ? CANVAS_NODE_TYPES.video : CANVAS_NODE_TYPES.upload;
+  const label = mode === 'generate' ? '生成图片' : mode === 'generateVideo' ? '生成视频' : '上传画面';
   const displayName = `${label} · ${eventName.trim() || selectionId}`;
   const childId = store.addNode(type, store.findNodePosition(scriptId, 420, 320), {
     displayName,
     remixRole: 'visual',
     ...(mode === 'generate' && suggestedPrompt?.trim() ? { prompt: suggestedPrompt.trim() } : {}),
+    ...(mode === 'generateVideo' ? {
+      genMode: 'textToVideo', aspectRatio: '9:16', durationSec: 5, generateAudio: false,
+      prompt: [suggestedPrompt?.trim(), '动态短视频镜头；主体和镜头有自然运动，不要字幕、文字、水印或背景音乐。'].filter(Boolean).join('\n'),
+    } : {}),
   });
   store.addEdge(childId, scriptId);
   store.setSelectedNode(childId);
@@ -50,7 +54,7 @@ export function createBackgroundVisualNode(store: BrollCanvasStore, scriptId: st
   return childId;
 }
 
-/** Prepare editable generation requests for the speaking shots absent from B-roll. */
+/** Prepare editable video generation requests for speaking shots absent from B-roll. */
 export function createPrimaryVisualNodes(store: BrollCanvasStore, scriptId: string, storyId: string, eventIds: string[]): string[] {
   const script = store.nodes.find((node) => node.id === scriptId);
   const story = store.nodes.find((node) => node.id === storyId);
@@ -65,7 +69,7 @@ export function createPrimaryVisualNodes(store: BrollCanvasStore, scriptId: stri
     const index = selections.findIndex((selection) => selection.id === eventId);
     if (index < 0) continue;
     const selection = selections[index];
-    const existing = store.nodes.find((node) => node.data.remixRole === 'primary' && node.data.remixEventId === eventId
+    const existing = store.nodes.find((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'primary' && node.data.remixEventId === eventId
       && store.edges?.some((edge) => edge.source === node.id && edge.target === scriptId)
       && (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId === (scriptRef as { artifactId?: string } | undefined)?.artifactId
       && (node.data.remixScriptRef as { revision?: number } | undefined)?.revision === (scriptRef as { revision?: number } | undefined)?.revision);
@@ -75,17 +79,21 @@ export function createPrimaryVisualNodes(store: BrollCanvasStore, scriptId: stri
     const visualObservation = [observed?.visual_observation, model?.visual_observation].find((value) => typeof value === 'string' && value.trim()) as string | undefined;
     const dialogue = Array.from(draft?.dialogue ?? '').slice(selection.start, selection.end).join('').trim();
     const prompt = [
-      '竖屏 9:16 短视频主画面，真实摄影质感。根据新主题与当前台词呈现人物、场景和动作。',
+      '生成竖屏 9:16 动态口播视频镜头，真实摄影质感。人物在镜头前自然说话，有连贯的表情、手势和镜头运动。根据新主题与当前台词呈现人物、场景和动作。',
       topic ? `新主题：${topic}。` : '',
       `当前段落：${selection.label}。${dialogue ? `台词：${dialogue}。` : ''}`,
       visualObservation ? `参考片镜头观察：${visualObservation}。保留镜头语言和构图节奏，人物、产品及道具按新主题重新呈现。` : '',
-      '不要复制参考片的人物或品牌。画面中不要字幕、文字、水印和标志。',
+      '不要复制参考片的人物或品牌。画面中不要字幕、文字、水印和标志。不要生成背景音乐，成片使用已对齐的旁白音轨。',
     ].filter(Boolean).join('\n');
     const basePosition = store.findNodePosition(scriptId, 420, 320);
-    const id = store.addNode(CANVAS_NODE_TYPES.imageGen, { x: basePosition.x, y: basePosition.y + created.length * 360 }, {
+    const observedStart = typeof observed?.start_us === 'number' ? observed.start_us : 0;
+    const observedEnd = typeof observed?.end_us === 'number' ? observed.end_us : 0;
+    const observedSeconds = (observedEnd - observedStart) / 1_000_000;
+    const durationSec = observedSeconds > 0 ? Math.max(4, Math.min(12, Math.round(observedSeconds))) : 5;
+    const id = store.addNode(CANVAS_NODE_TYPES.video, { x: basePosition.x, y: basePosition.y + created.length * 420 }, {
       displayName: `主画面 · ${selection.label.trim() || eventId}`,
       remixRole: 'primary', remixEventId: eventId, remixScriptRef: scriptRef,
-      aspectRatio: '9:16', prompt,
+      aspectRatio: '9:16', genMode: 'textToVideo', durationSec, generateAudio: false, prompt,
     });
     store.addEdge(id, scriptId);
     created.push(id);

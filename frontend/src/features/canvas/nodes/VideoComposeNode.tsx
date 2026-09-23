@@ -138,7 +138,7 @@ export const VideoComposeNode = memo(
     const remixBackground = remixBackgrounds.length === 1 ? remixBackgrounds[0] : null;
     const remixScript = showRemixStaging ? upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'adaptation_script') : null;
     const currentScriptRef = remixScript?.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined;
-    const remixPrimaryNodes = showRemixStaging ? upstreamNodes.filter((node) => node.data.remixRole === 'primary'
+    const remixPrimaryNodes = showRemixStaging ? upstreamNodes.filter((node) => node.type === CANVAS_NODE_TYPES.video && node.data.remixRole === 'primary'
       && (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId === currentScriptRef?.artifactId
       && (node.data.remixScriptRef as { revision?: number } | undefined)?.revision === currentScriptRef?.revision) : [];
     const backgroundHasSource = Boolean(remixBackground?.data.imageUrl || remixBackground?.data.previewImageUrl || remixBackground?.data.videoUrl);

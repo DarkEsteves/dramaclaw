@@ -9,7 +9,7 @@ const background = { ...image, media_path: 'freezone/remix_media/background.png'
 
 describe('buildNodeRemixManifest', () => {
   it('builds continuous primary shots without an uploaded full-length background', () => {
-    const second = { ...image, media_path: 'freezone/remix_media/second.png', media_hash: 'e'.repeat(64) };
+    const second = { ...visualVideo, media_path: 'freezone/remix_media/second.mp4', media_hash: 'e'.repeat(64) };
     const output = buildNodeRemixManifest({
       reference: video, narration: audio,
       timing: { fps: 30, events: [
@@ -20,8 +20,9 @@ describe('buildNodeRemixManifest', () => {
         { event_id: 'opening', caption: '开场' },
         { event_id: 'answer', caption: '回答' },
       ] },
-      primaryVisuals: { opening: image, answer: second },
+      primaryVisuals: { opening: visualVideo, answer: second },
     });
+    expect(output.media_bindings).toContainEqual(expect.objectContaining({ media_id: 'primary-opening', kind: 'video', purpose: 'a-roll' }));
     expect(output.media_bindings).not.toContainEqual(expect.objectContaining({ purpose: 'background' }));
     expect(output.layers.filter((layer) => layer.z_order === 0)).toEqual([
       expect.objectContaining({ start_frame: 0, end_frame: 50, media_id: 'primary-opening' }),

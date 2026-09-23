@@ -1709,8 +1709,8 @@ export const NodeActionToolbar = memo(
           requestFocusNode(created[0]);
         },
         generatePrimary: (targetNodeId) => {
-          if (!dispatchNodeAction({ nodeId: targetNodeId, action: 'generate_image', executionMode: 'single', requestId: crypto.randomUUID() })) {
-            throw new Error('画面生成节点尚未就绪，请稍后重试');
+          if (!dispatchNodeAction({ nodeId: targetNodeId, action: 'generate_video', executionMode: 'single', requestId: crypto.randomUUID() })) {
+            throw new Error('视频生成节点尚未就绪，请稍后重试');
           }
         },
         bindPrimary: async (targetNodeId) => {

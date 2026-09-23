@@ -157,12 +157,12 @@ describe('RemixScriptPanel', () => {
   });
 
   it('creates generated or uploaded visual nodes from the semantic selection affordance', async () => {
-    const onCreateVisual = vi.fn((mode: 'generate' | 'upload') => ({ id: `${mode}-1`, label: mode === 'generate' ? '生成画面' : '上传画面' }));
+    const onCreateVisual = vi.fn((mode: 'generate' | 'generateVideo' | 'upload') => ({ id: `${mode}-1`, label: mode === 'generate' ? '生成画面' : '上传画面' }));
     const onDraftChange = vi.fn();
     const onAutoSave = vi.fn(async () => {});
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '展示产品', suggested_query: '咖啡杯产品特写，柔和侧光' }]} onCreateVisual={onCreateVisual} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
 
-    fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 图片素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product', '产品登场', '咖啡杯产品特写，柔和侧光');
     expect(onDraftChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }),
@@ -170,6 +170,13 @@ describe('RemixScriptPanel', () => {
     );
     await waitFor(() => expect(onAutoSave).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] })));
     expect(screen.getByText('补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 视频素材' }));
+    expect(onCreateVisual).toHaveBeenCalledWith('generateVideo', 'product', '产品登场', '咖啡杯产品特写，柔和侧光');
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generateVideo-1' })] }),
+      'media-binding',
+    );
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product', '产品登场', undefined);
@@ -207,7 +214,7 @@ describe('RemixScriptPanel', () => {
     }
 
     render(<Harness />);
-    fireEvent.click(screen.getByRole('button', { name: '生成 结尾 素材' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成 结尾 图片素材' }));
 
     expect(screen.getByText(/展示开场环境/)).toBeVisible();
     expect(screen.getByText(/展示结尾产品/)).toBeVisible();

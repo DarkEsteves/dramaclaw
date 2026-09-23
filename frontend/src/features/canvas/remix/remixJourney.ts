@@ -178,7 +178,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
     if (!validBoundVisual(background)) return { kind: 'action', action: 'bind_background', targetNodeId: background.id, label: '绑定成片底画面' };
   } else {
     const needsPrimary = primaryVisualEventsForScript(script, graph, edges);
-    const primaryNodes = graph.filter((candidate) => VISUAL_NODE_TYPES.has(candidate.type) && candidate.data.remixRole === 'primary'
+    const primaryNodes = graph.filter((candidate) => candidate.type === CANVAS_NODE_TYPES.video && candidate.data.remixRole === 'primary'
       && sameRef(candidate.data.remixScriptRef, scriptRef)
       && edges.some((edge) => edge.source === candidate.id && edge.target === script.id));
     const missing = needsPrimary.filter((selection) => !primaryNodes.some((candidate) => candidate.data.remixEventId === selection.id));
@@ -186,7 +186,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
     for (const selection of needsPrimary) {
       const primary = primaryNodes.find((candidate) => candidate.data.remixEventId === selection.id)!;
       if (primary.data.isGenerating || primary.data.workflowActionRunning) return { kind: 'wait', targetNodeId: primary.id, label: `等待主画面 · ${selection.label}` };
-      if (!primary.data.imageUrl && !primary.data.videoUrl) return { kind: 'action', action: 'generate_primary', targetNodeId: primary.id, label: `生成主画面 · ${selection.label}` };
+      if (!primary.data.imageUrl && !primary.data.videoUrl) return { kind: 'action', action: 'generate_primary', targetNodeId: primary.id, label: `生成主画面视频 · ${selection.label}` };
       if (!validBoundVisual(primary)) return { kind: 'action', action: 'bind_primary', targetNodeId: primary.id, label: `关联主画面 · ${selection.label}` };
     }
   }
