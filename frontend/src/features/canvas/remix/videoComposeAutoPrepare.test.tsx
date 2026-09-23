@@ -2,7 +2,7 @@ import { StrictMode, useSyncExternalStore } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const canvasActions = vi.hoisted(() => ({ updateNodeData: vi.fn(), setSelectedNode: vi.fn() }));
+const canvasActions = vi.hoisted(() => ({ updateNodeData: vi.fn(), setSelectedNode: vi.fn(), requestFocusNode: vi.fn() }));
 const prepareNodeRemix = vi.hoisted(() => vi.fn());
 const remixGraphFingerprint = vi.hoisted(() => vi.fn(() => 'current-fingerprint'));
 const renderRemixManifest = vi.hoisted(() => vi.fn());
@@ -10,17 +10,17 @@ const fetchRemixArtifact = vi.hoisted(() => vi.fn());
 const reviseRemixArtifact = vi.hoisted(() => vi.fn());
 const fetchRemixOperation = vi.hoisted(() => vi.fn());
 const reconcileRemixOperation = vi.hoisted(() => vi.fn());
-const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[], listeners: new Set<() => void>() }));
+const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[], upstreamNodes: [] as unknown[], listeners: new Set<() => void>() }));
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores/canvasStore', () => {
-  const state = { get nodes() { return graphState.nodes; }, get edges() { return graphState.edges; }, updateNodeData: canvasActions.updateNodeData, setSelectedNode: canvasActions.setSelectedNode };
+  const state = { get nodes() { return graphState.nodes; }, get edges() { return graphState.edges; }, updateNodeData: canvasActions.updateNodeData, setSelectedNode: canvasActions.setSelectedNode, requestFocusNode: canvasActions.requestFocusNode };
   return { useCanvasStore: Object.assign((selector: (value: typeof state) => unknown) => useSyncExternalStore(
     (listener) => { graphState.listeners.add(listener); return () => graphState.listeners.delete(listener); },
     () => selector(state),
   ), { getState: () => state }) };
 });
-vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNodes: () => [{ id: 'timing', type: 'semanticTimelineNode', data: {} }] }));
+vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNodes: () => graphState.upstreamNodes }));
 vi.mock('@/features/canvas/domain/nodeDisplay', () => ({ localizeNodeDisplayName: () => 'Compose' }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/AddNodeToChatButton', () => ({ AddNodeToChatButton: () => null }));
@@ -41,12 +41,58 @@ describe('VideoComposeNode automatic preparation', () => {
     vi.clearAllMocks();
     graphState.nodes = [];
     graphState.edges = [];
+    graphState.upstreamNodes = [{ id: 'timing', type: 'semanticTimelineNode', data: {} }];
     graphState.listeners.clear();
     remixGraphFingerprint.mockReturnValue('current-fingerprint');
+    prepareNodeRemix.mockReset();
     fetchRemixArtifact.mockReset();
     reviseRemixArtifact.mockReset();
     fetchRemixOperation.mockReset();
     reconcileRemixOperation.mockReset();
+  });
+
+  it('directs a remix user to the empty background node after preparation fails', async () => {
+    graphState.upstreamNodes = [
+      { id: 'timing', type: 'semanticTimelineNode', data: {} },
+      { id: 'script', type: 'scriptNode', data: {} },
+      { id: 'background', type: 'uploadNode', data: { displayName: '成片背景 / A-roll', remixRole: 'background' } },
+    ];
+    prepareNodeRemix.mockRejectedValueOnce(new Error('画面素材 background 已变化，请重新选择'));
+    const props = { id: 'compose', type: 'videoComposeNode', selected: false, draggable: true, dragging: false, selectable: true, deletable: true, zIndex: 0, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 } as const;
+    const view = render(<VideoComposeNode {...props} data={{ displayName: 'Compose', autoPrepareRequested: true }} />);
+
+    await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
+    expect(screen.getByText(/成片背景尚未上传/)).toBeTruthy();
+    expect(screen.queryByText('videoCompose.node.hint')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '前往背景节点' }));
+    expect(canvasActions.setSelectedNode).toHaveBeenCalledWith('background');
+    expect(canvasActions.requestFocusNode).toHaveBeenCalledWith('background');
+
+    graphState.upstreamNodes = [
+      { id: 'timing', type: 'semanticTimelineNode', data: {} },
+      { id: 'background', type: 'uploadNode', data: {
+        remixRole: 'background', imageUrl: '/static/projects/demo/freezone/image/background.png',
+        remixMedia: { url: '/static/projects/demo/freezone/image/background.png', media_path: 'freezone/image/background.png', media_hash: 'a'.repeat(64), media_kind: 'image' },
+      } },
+    ];
+    view.rerender(<VideoComposeNode {...props} data={{ displayName: 'Compose' }} />);
+    await waitFor(() => expect(screen.queryByText('画面素材 background 已变化，请重新选择')).toBeNull());
+    expect(screen.getByRole('button', { name: '生成合成清单' })).toBeEnabled();
+  });
+
+  it('offers manifest generation once the background is uploaded and bound', async () => {
+    graphState.upstreamNodes = [
+      { id: 'timing', type: 'semanticTimelineNode', data: {} },
+      { id: 'background', type: 'uploadNode', data: {
+        displayName: '成片背景 / A-roll', remixRole: 'background', imageUrl: '/static/projects/demo/freezone/image/background.png',
+        remixMedia: { url: '/static/projects/demo/freezone/image/background.png', media_path: 'freezone/image/background.png', media_hash: 'a'.repeat(64), media_kind: 'image' },
+      } },
+    ];
+    prepareNodeRemix.mockResolvedValueOnce({ manifestRef: { artifactId: 'manifest', revision: 1 }, events: [], selections: [], unresolvedRequiredEvents: [] });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: 'Compose' }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '生成合成清单' }));
+    await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
   });
 
   it('offers reconciliation and force regeneration while provider outcome is unknown', async () => {

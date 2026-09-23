@@ -63,17 +63,21 @@ function currentVisualProjectPath(project: string, visual: CanvasNode): string |
 }
 
 export function boundBrollVisualMedia(project: string, visual: CanvasNode): RemixUploadedMedia {
+  const name = typeof visual.data.displayName === 'string' && visual.data.displayName.trim()
+    ? visual.data.displayName.trim() : `画面素材 ${visual.id}`;
   if (visual.data.remixVisualOutputCurrent === false) {
-    throw new Error(`画面素材 ${visual.id} 的生成提示已变化，请重新生成`);
+    throw new Error(`${name} 的生成提示已变化，请重新生成`);
   }
   const media = visual.data.remixMedia as RemixUploadedMedia | undefined;
   const currentPath = currentVisualProjectPath(project, visual);
   const sourceUrl = visualSourceUrl(visual);
+  if (!sourceUrl && !media) throw new Error(`${name} 尚未上传，请先上传图片或视频`);
+  if (sourceUrl && !media) throw new Error(`${name} 尚未绑定，请先绑定素材`);
   const exactUrl = Boolean(media?.url && sourceUrl && media.url === sourceUrl);
   if (!media || typeof media.media_hash !== 'string' || !/^[a-f0-9]{64}$/u.test(media.media_hash)
     || (!exactUrl && (!currentPath || media.media_path !== currentPath))
     || (media.media_kind !== 'image' && media.media_kind !== 'video')) {
-    throw new Error(`画面素材 ${visual.id} 已变化，请重新选择`);
+    throw new Error(`${name} 已变化，请重新选择`);
   }
   return media;
 }

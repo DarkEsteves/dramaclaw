@@ -25,6 +25,7 @@ import {
 } from "@/features/canvas/ui/NodeHeader";
 import {
   CANVAS_NODE_INPUT_SURFACE_CLASS,
+  CANVAS_NODE_PANEL_SURFACE_CLASS,
   canvasNodeFrameClass,
 } from "@/features/canvas/ui/nodeFrameStyles";
 import { AddNodeToChatButton } from "@/features/canvas/ui/AddNodeToChatButton";
@@ -57,6 +58,7 @@ import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from "@/features/canvas/ui/nodeCon
 import { canExportManifest, manifestToSrt, previewStatus, resolveManifestOverrideConflict, textDownloadUrl, type ManifestOverrideConflict, type ManifestPayload } from "@/features/canvas/remix/manifestEditor";
 import { confirmRemixOperation, fetchRemixArtifact, fetchRemixOperation, listRemixOperations, reconcileRemixOperation, renderRemixManifest, reviseRemixArtifact, transitionRemixOperation, type RemixArtifact, type RemixTaskRef } from "@/api/remix";
 import { RemixWorkbench } from "@/features/canvas/remix/RemixWorkbench";
+import { boundBrollVisualMedia } from "@/features/canvas/remix/brollCanvasBinding";
 import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
 import { applyRemixInvalidation } from "@/features/canvas/remix/spawnRemixDownstream";
 import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
@@ -80,6 +82,7 @@ export const VideoComposeNode = memo(
     const { t } = useTranslation();
     const updateNodeInternals = useUpdateNodeInternals();
     const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
+    const requestFocusNode = useCanvasStore((state) => state.requestFocusNode);
     const updateNodeData = useCanvasStore((state) => state.updateNodeData);
     const currentRemixInputFingerprint = useCanvasStore((state) => remixGraphFingerprint(state.nodes, state.edges, id));
     const upstreamNodes = useUpstreamNodes(id);
@@ -118,6 +121,7 @@ export const VideoComposeNode = memo(
     const canAutoCompose =
       videoCount >= MIN_AUTO_COMPOSE_VIDEOS && seedNodeIds.length >= MIN_AUTO_COMPOSE_MEDIA;
     const hasSemanticTimeline = upstreamNodes.some((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline);
+    const showRemixStaging = hasSemanticTimeline && !data.remixWorkbenchDraft;
 
     const resolvedTitle = useMemo(
       () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoCompose, data, t),
@@ -127,6 +131,18 @@ export const VideoComposeNode = memo(
 
     const project = readUrl().project;
     const canvasId = readUrl().canvas ?? "default";
+    const remixBackgrounds = showRemixStaging ? upstreamNodes.filter((node) => node.data.remixRole === 'background' || node.data.remixRole === 'a-roll') : [];
+    const remixBackground = remixBackgrounds.length === 1 ? remixBackgrounds[0] : null;
+    const remixScript = showRemixStaging ? upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'adaptation_script') : null;
+    const backgroundHasSource = Boolean(remixBackground?.data.imageUrl || remixBackground?.data.previewImageUrl || remixBackground?.data.videoUrl);
+    let backgroundBound = false;
+    if (project && remixBackground && backgroundHasSource) {
+      try { boundBrollVisualMedia(project, remixBackground); backgroundBound = true; }
+      catch { /* The staging card points to the background node for binding. */ }
+    }
+    useEffect(() => {
+      setRemixError(null);
+    }, [remixBackground?.id, remixBackground?.data.imageUrl, remixBackground?.data.previewImageUrl, remixBackground?.data.videoUrl, remixBackground?.data.remixMedia]);
     const manifestRefKey = data.remixManifestRef ? `${data.remixManifestRef.artifactId}:${data.remixManifestRef.revision}` : null;
     const manifestReady = Boolean(manifestRefKey && loadedManifestRefKey === manifestRefKey
       && manifestArtifact
@@ -491,7 +507,7 @@ export const VideoComposeNode = memo(
     return (
       <div
         className="group relative h-full w-full overflow-visible"
-        style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
+        style={{ width: showRemixStaging ? 340 : NODE_WIDTH, height: showRemixStaging ? 190 : NODE_HEIGHT }}
         onClick={() => setSelectedNode(id)}
       >
         <Handle
@@ -518,10 +534,32 @@ export const VideoComposeNode = memo(
         />
 
         <div
-          className={`relative flex h-full w-full flex-col overflow-hidden rounded-[var(--node-radius)] border ${CANVAS_NODE_INPUT_SURFACE_CLASS} transition-colors ${cardToneClass}`}
+          className={`relative flex h-full w-full flex-col overflow-hidden rounded-[var(--node-radius)] border ${showRemixStaging ? CANVAS_NODE_PANEL_SURFACE_CLASS : CANVAS_NODE_INPUT_SURFACE_CLASS} transition-colors ${cardToneClass}`}
         >
-          {/* 入口节点只负责打开时间线编辑器；合成结果在下游视频节点承载。 */}
-          <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-5 py-4 text-center">
+          {showRemixStaging ? <div className="flex h-full flex-col justify-center gap-2 px-4 py-3">
+            <div className="text-[13px] font-semibold text-text-dark">准备合成清单</div>
+            <p className="text-[12px] leading-5 text-text-dark/70">
+              {remixBackgrounds.length > 1 ? '当前有多个成片背景，请在脚本前只保留一个。'
+                : !remixBackground ? '先为改编脚本添加一张图片或一段视频，作为整段成片的背景。'
+                : !backgroundHasSource ? '成片背景尚未上传，请在背景节点上传图片或视频。'
+                : !backgroundBound ? '背景已上传，请在背景节点绑定这份素材。'
+                : '背景素材已就绪，可以生成清单并检查画面与字幕。'}
+            </p>
+            {remixBackgrounds.length <= 1 && <button
+              type="button"
+              disabled={isRemixPreparing || (!remixBackground && !remixScript)}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (backgroundBound) { void handlePrepareRemix(); return; }
+                const target = remixBackground?.id ?? remixScript?.id;
+                if (target) { setSelectedNode(target); requestFocusNode(target); }
+              }}
+              className="nodrag h-8 self-start rounded-[10px] border border-white/15 bg-white/[0.06] px-3 text-[12px] font-medium text-text-dark transition-colors hover:bg-white/[0.1] disabled:opacity-45"
+            >
+              {isRemixPreparing ? '正在生成清单…' : backgroundBound ? '生成合成清单' : remixBackground ? '前往背景节点' : '前往脚本节点'}
+            </button>}
+            {remixError && backgroundBound ? <p role="alert" className="line-clamp-2 text-[11px] text-red-300">{remixError}</p> : null}
+          </div> : <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-5 py-4 text-center">
             <button
               type="button"
               disabled={!canOpen}
@@ -545,7 +583,7 @@ export const VideoComposeNode = memo(
             </button>}
             {!hasSemanticTimeline && <span className="text-center text-[11px] text-text-muted">参考改编：先连接语义时间轴节点</span>}
             {remixError && <span role="alert" className="text-[11px] text-red-300">{remixError}</span>}
-          </div>
+          </div>}
         </div>
 
         {isEditorOpen && project && (

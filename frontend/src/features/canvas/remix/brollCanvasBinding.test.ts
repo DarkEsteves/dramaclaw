@@ -64,6 +64,11 @@ describe('B-roll canvas binding', () => {
     expect(() => boundBrollVisualMedia('demo', current)).toThrow(/已变化/);
   });
 
+  it('explains that a new background needs an upload before manifest preparation', () => {
+    const current = node('background', 'uploadNode', { displayName: '成片背景 / A-roll', remixRole: 'background' });
+    expect(() => boundBrollVisualMedia('demo', current)).toThrow('成片背景 / A-roll 尚未上传，请先上传图片或视频');
+  });
+
   it('rejects the old generated image after its prompt changes until regeneration finishes', () => {
     const current = node('visual', 'imageGenNode', {
       prompt: 'new prompt', imageUrl: '/static/projects/demo/freezone/image/old.png', remixRole: 'visual',
