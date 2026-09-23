@@ -214,8 +214,8 @@ describe('native canvas remix journey integration', () => {
     await screen.findByDisplayValue('新品登场');
     fireEvent.click(await screen.findByRole('button', { name: '上传 产品登场 素材' }));
     const visual = useCanvasStore.getState().nodes.find((node) => node.type === 'uploadNode')!;
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
     const scriptNode = useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')!;
     const visualInput = document.querySelector(`input[type="file"]`) as HTMLInputElement;
@@ -259,6 +259,14 @@ describe('native canvas remix journey integration', () => {
   });
 
   it('opens the script editor when the next step is to complete required B-roll', async () => {
+    backend.artifacts.set('script-artifact:1', {
+      id: 'script-artifact', revision: 1, schema: 'remix_script.v1', upstream_refs: [],
+      payload: { dialogue: '新品登场', selections: [{ id: 'product', label: '产品登场', start: 0, end: 4 }] },
+    });
+    backend.artifacts.set('blueprint:1', {
+      id: 'blueprint', revision: 1, schema: 'reference_blueprint.v1', upstream_refs: [],
+      payload: { narrative_role: '产品问答', preserve_rule: '保留问答结构', replace_rule: '替换产品信息' },
+    });
     useCanvasStore.setState({
       nodes: [
         {
@@ -279,6 +287,7 @@ describe('native canvas remix journey integration', () => {
           position: { x: 0, y: 0 },
           data: {
             remixRole: 'adaptation_script',
+            referenceBlueprintRef: { artifactId: 'blueprint', revision: 1 },
             remixScriptRef: { artifactId: 'script-artifact', revision: 1 },
             remixBrollPlanRef: { artifactId: 'broll-plan', revision: 1 },
             remixBrollScriptRef: { artifactId: 'script-artifact', revision: 1 },
@@ -308,5 +317,8 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
     expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollRequirements)
       .toEqual([{ event_id: 'product', required: true }]);
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixScriptRef)
+      .toEqual({ artifactId: 'script-artifact', revision: 2 }));
+    expect(screen.getByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
   });
 });

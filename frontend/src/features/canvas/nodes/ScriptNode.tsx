@@ -500,6 +500,28 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (!visual) throw new Error('画面素材节点不存在');
     return attachBrollVisualMedia(project, visual, attachRemixMedia, state.updateNodeData);
   }, []);
+  const remixAutoSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveRemixDraft = useCallback((nextDraft: RemixScriptDraft) => {
+    const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
+      const project = readUrl().project;
+      if (!project) throw new Error('缺少项目，无法自动保存脚本');
+      const currentNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+      const savedBlueprintRef = remixRef(currentNode?.data.referenceBlueprintRef) ?? blueprintRef;
+      const branchRef = savedBlueprintRef ?? (upstreamStory ? await ensureBranchBlueprint() : null);
+      const currentRef = remixRef(currentNode?.data.remixScriptRef) ?? remixRef(currentNode?.data.remixScriptLastSavedRef);
+      const nextRef = await saveRemixScriptArtifact(project, nextDraft, currentRef, branchRef);
+      const latestNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+      const draftIsCurrent = latestNode?.data.remixScriptDraft === nextDraft;
+      useCanvasStore.getState().updateNodeData(id, {
+        ...(draftIsCurrent ? { remixScriptRef: nextRef } : {}),
+        remixScriptLastSavedRef: nextRef,
+        referenceBlueprintRef: branchRef ?? blueprintRef,
+        remixBlueprintRef: branchRef ?? blueprintRef,
+      });
+    });
+    remixAutoSaveQueueRef.current = operation;
+    return operation;
+  }, [blueprintRef, ensureBranchBlueprint, id, upstreamStory]);
   const pendingBrollSyncRef = useRef<string | null>(null);
   useEffect(() => {
     const activeScriptRef = remixRef(data.remixScriptRef);
@@ -961,6 +983,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
+            onAutoSave={autoSaveRemixDraft}
             onTopicChange={(remixTopic) => updateNodeData(id, { remixTopic })}
             onDraftChange={(next, changeKind = 'content') => {
               applyRemixInvalidation(id, 'script');

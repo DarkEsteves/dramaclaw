@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fetchRemixArtifact, generateRemixScriptDraft, type RemixArtifactRef } from '@/api/remix';
-import { saveRemixScriptArtifact } from './remixScriptArtifact';
 import { editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
@@ -23,15 +22,16 @@ interface Props {
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
+  onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
   onTopicChange?: (topic: string) => void;
   onDraftChange: (draft: RemixScriptDraft, changeKind?: 'content' | 'media-binding') => void;
   onSave: (ref: RemixArtifactRef, blueprintRef?: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onTopicChange, onDraftChange, onSave, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
-  const [saving, setSaving] = useState(false);
+  const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [newTopic, setNewTopic] = useState(initialTopic);
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +40,11 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
   const draftEditCount = useRef(0);
   const draftRef = useRef(draft);
   const visualBindingRequest = useRef(new Map<string, number>());
+  const autoSaveTimer = useRef<number | null>(null);
+  const pendingAutoSaveDraft = useRef<RemixScriptDraft | null>(null);
+  const activeAutoSaves = useRef(0);
+  const onAutoSaveRef = useRef(onAutoSave);
+  onAutoSaveRef.current = onAutoSave;
   draftRef.current = draft;
   const currentBlueprintRef = useRef(blueprintRef);
   if (!onEnsureBlueprint) currentBlueprintRef.current = blueprintRef;
@@ -53,16 +58,47 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     return () => { active = false; };
   }, [blueprintRef?.artifactId, blueprintRef?.revision, project]);
 
+  const persistDraft = async (next: RemixScriptDraft) => {
+    const persist = onAutoSaveRef.current;
+    if (!persist) return;
+    pendingAutoSaveDraft.current = null;
+    activeAutoSaves.current += 1;
+    try { await persist(next); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : '自动保存脚本失败'); }
+    finally {
+      activeAutoSaves.current -= 1;
+      if (activeAutoSaves.current === 0 && !pendingAutoSaveDraft.current) setAutoSaving(false);
+    }
+  };
+  const scheduleAutoSave = (next: RemixScriptDraft, immediate: boolean) => {
+    if (!onAutoSaveRef.current) return;
+    pendingAutoSaveDraft.current = next;
+    setAutoSaving(true);
+    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = null;
+    if (immediate) void persistDraft(next);
+    else autoSaveTimer.current = window.setTimeout(() => {
+      autoSaveTimer.current = null;
+      const pending = pendingAutoSaveDraft.current;
+      if (pending) void persistDraft(pending);
+    }, 450);
+  };
+  useEffect(() => () => {
+    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
+    const pending = pendingAutoSaveDraft.current;
+    if (pending && onAutoSaveRef.current) void onAutoSaveRef.current(pending);
+  }, []);
   const changeDraft = (next: RemixScriptDraft, changeKind: 'content' | 'media-binding' = 'content') => {
     draftEditCount.current += 1;
     draftRef.current = next;
     setDraft(next);
     if (changeKind === 'media-binding') onDraftChange(next, changeKind);
     else onDraftChange(next);
+    scheduleAutoSave(next, changeKind === 'media-binding');
     setError(null);
   };
   const generate = async () => {
-    if (generating || generationRunning || saving || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
+    if (generating || generationRunning || (!blueprintRef && !onEnsureBlueprint) || !newTopic.trim()) return;
     const editCount = draftEditCount.current;
     setGenerating(true); setError(null);
     try {
@@ -89,18 +125,6 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     const selections = [...draft.selections, added].sort((left, right) => left.start - right.start || left.end - right.end);
     changeDraft({ ...draft, selections });
   };
-  const save = async () => {
-    if (saving) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const branchRef = onEnsureBlueprint ? await onEnsureBlueprint() : blueprintRef;
-      const ref = await saveRemixScriptArtifact(project, draft, existingRef, branchRef);
-      if (onEnsureBlueprint && branchRef) onSave(ref, branchRef);
-      else onSave(ref);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '保存脚本失败'); }
-    finally { setSaving(false); }
-  };
   const bindVisual = async (index: number, nodeId: string) => {
     setError(null);
     const selectionId = draft.selections[index]?.id;
@@ -119,9 +143,10 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       if (!selectionStillUsesNode) return;
       const mediaRevision = typeof attachment === 'string' ? attachment : attachment?.mediaRevision;
       if (attachment && typeof attachment !== 'string') attachment.commit();
-      changeDraft({ ...latest, selections: latest.selections.map((item) => item.id === selectionId && item.visualNodeId === nodeId
+      const next = { ...latest, selections: latest.selections.map((item) => item.id === selectionId && item.visualNodeId === nodeId
         ? { ...item, visualMediaRevision: nodeId ? mediaRevision : undefined }
-        : item) }, 'media-binding');
+        : item) };
+      changeDraft(next, 'media-binding');
     } catch (cause) {
       if (visualBindingRequest.current.get(selectionId) !== request) return;
       setError(cause instanceof Error ? cause.message : '无法引用当前画面素材');
@@ -131,9 +156,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     const selection = draft.selections[index];
     const created = selection && onCreateVisual?.(mode, selection.id);
     if (!created) return;
-    changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index
+    const next = { ...draft, selections: draft.selections.map((item, position) => position === index
       ? { ...item, visualNodeId: created.id, visualMediaRevision: created.mediaRevision }
-      : item) }, 'media-binding');
+      : item) };
+    changeDraft(next, 'media-binding');
+  };
+  const bindSfx = (index: number, nodeId: string) => {
+    const next = { ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: nodeId || undefined } : item) };
+    changeDraft(next, 'media-binding');
   };
 
   return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
@@ -146,7 +176,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         <label htmlFor="remix-new-topic">新主题</label>
         <div className="flex items-center gap-2">
           <input id="remix-new-topic" aria-label="新主题" value={newTopic} onChange={(event) => { const next = event.target.value; setNewTopic(next); onTopicChange?.(next); }} placeholder="例如：把咖啡改编为新品饮料" className={`${fieldClass} min-w-0 flex-1`} />
-          <button type="button" disabled={generating || generationRunning || saving || !newTopic.trim()} onClick={() => void generate()} className="nodrag mt-1 inline-flex h-9 shrink-0 items-center justify-center rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">{generating || generationRunning ? '生成中…' : '生成改编台词'}</button>
+          <button type="button" disabled={generating || generationRunning || !newTopic.trim()} onClick={() => void generate()} className="nodrag mt-1 inline-flex h-9 shrink-0 items-center justify-center rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">{generating || generationRunning ? '生成中…' : '生成改编台词'}</button>
         </div>
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}
@@ -165,20 +195,20 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>补充画面（B-roll）<select id={`remix-visual-${selection.id}`} aria-label={`${selection.label}画面`} value={selection.visualNodeId ?? ''} onChange={(event) => void bindVisual(index, event.target.value)} className={fieldClass}><option value="">仅字幕</option>{visualNodes.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待生成/上传'}</option>)}</select></label>
-        <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: event.target.value || undefined } : item) }, 'media-binding')} className={fieldClass}><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <label>音效<select aria-label={`${selection.label}音效`} value={selection.sfxNodeId ?? ''} onChange={(event) => bindSfx(index, event.target.value)} className={fieldClass}><option value="">无音效</option>{sfxNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
         <button type="button" onClick={() => changeDraft({ ...draft, selections: draft.selections.filter((_, position) => position !== index) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>删除</button>
         <p className="col-span-6 rounded-[8px] border border-white/[0.08] bg-surface-field px-3 py-2 leading-5 text-text-muted">对应台词<span className="ml-2 whitespace-pre-wrap break-words text-text-dark">{selectedDialogue || '当前区间没有台词'}</span></p>
         <div className="col-span-6 flex items-center gap-2">
           <button type="button" aria-label={`生成 ${selection.label} 素材`} onClick={() => createVisual(index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button>
           <button type="button" aria-label={`上传 ${selection.label} 素材`} onClick={() => createVisual(index, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button>
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
-          {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">补充画面节点已创建，可以先保存脚本。稍后在画布完成素材后会自动关联。</span>}
+          {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">{autoSaving ? '补充画面节点已创建，正在自动保存脚本…' : '补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。'}</span>}
         </div>
         {requirement?.required && <p className="col-span-6 text-amber-300">必需补充画面（B-roll）· {requirement.purpose} · {requirement.suggested_query}</p>}
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
       </div>})}
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div>
-    <div className="flex justify-end border-t border-white/10 px-4 py-3"><button type="button" disabled={saving || !project} onClick={() => void save()} className="nodrag h-9 rounded-[12px] bg-primary px-4 text-xs font-semibold text-primary-foreground disabled:opacity-50">{saving ? '保存中…' : '保存脚本版本'}</button></div>
+    <div className="flex justify-end border-t border-white/10 px-4 py-3 text-xs text-text-muted">{autoSaving ? '正在自动保存…' : '修改会自动保存'}</div>
   </div>;
 }

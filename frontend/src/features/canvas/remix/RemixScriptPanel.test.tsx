@@ -1,12 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-vi.mock('./remixScriptArtifact', () => ({ saveRemixScriptArtifact: vi.fn(async () => ({ artifactId: 'script-1', revision: 1 })) }));
 vi.mock('@/api/remix', () => ({
   fetchRemixArtifact: vi.fn(async () => ({ schema: 'reference_blueprint.v1', payload: { narrative_role: '用早晨疲惫引出咖啡', events: [], preserve_replace_rules: [], observations: [], inferences: [], user_choices: [] } })),
   generateRemixScriptDraft: vi.fn(async () => ({ dialogue: '新主题来了，喝一口咖啡。', selections: [{ id: 'generated-1', label: '产品登场', start: 9, end: 11 }] })),
 }));
-import { saveRemixScriptArtifact } from './remixScriptArtifact';
 import { generateRemixScriptDraft } from '@/api/remix';
 import { RemixScriptPanel } from './RemixScriptPanel';
 
@@ -25,9 +23,9 @@ describe('RemixScriptPanel', () => {
     expect(generateButton).toBeEnabled();
   });
 
-  it('marks a selected phrase and saves a versioned script artifact', async () => {
-    const onSave = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
+  it('marks a selected phrase and automatically saves its media binding', async () => {
+    const onAutoSave = vi.fn(async () => {});
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onAutoSave={onAutoSave} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
     const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
     expect(await screen.findByText('用早晨疲惫引出咖啡')).toBeTruthy();
     dialogue.focus();
@@ -37,9 +35,8 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('补充画面（B-roll）')).toBeVisible();
     expect(screen.getByText('手动添加')).toBeVisible();
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'video-1' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
-    await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', expect.objectContaining({ selections: [expect.objectContaining({ start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) })] }), null, { artifactId: 'blueprint-1', revision: 1 }));
-    await waitFor(() => expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 }));
+    await waitFor(() => expect(onAutoSave).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) })] })));
+    expect(screen.queryByRole('button', { name: '保存脚本版本' })).not.toBeInTheDocument();
   });
 
   it('labels AI events and inserts a manual event in script order', async () => {
@@ -82,11 +79,11 @@ describe('RemixScriptPanel', () => {
     expect(screen.queryByText('AI 生成')).not.toBeInTheDocument();
   });
 
-  it('generates an editable script from the current blueprint and topic before saving', async () => {
-    const onSave = vi.fn();
+  it('generates an editable script from the current blueprint and automatically saves it', async () => {
+    const onAutoSave = vi.fn(async () => {});
     const onDraftChange = vi.fn();
     const onGenerateDraft = vi.fn(async () => ({ dialogue: '后台生成的新台词。', selections: [{ id: 'generated-1', label: '产品登场', start: 5, end: 8 }] }));
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onGenerateDraft={onGenerateDraft} onDraftChange={onDraftChange} onSave={onSave} onClose={() => {}} />);
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onGenerateDraft={onGenerateDraft} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
 
@@ -94,13 +91,9 @@ describe('RemixScriptPanel', () => {
     expect(generateRemixScriptDraft).not.toHaveBeenCalled();
     expect((await screen.findByLabelText('改编台词') as HTMLTextAreaElement).value).toBe('后台生成的新台词。');
     expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ label: '产品登场' })] }));
-    expect(saveRemixScriptArtifact).not.toHaveBeenCalled();
-    expect(onSave).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
-    await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', {
+    await waitFor(() => expect(onAutoSave).toHaveBeenCalledWith({
       dialogue: '后台生成的新台词。', selections: [{ id: 'generated-1', label: '产品登场', start: 5, end: 8 }],
-    }, null, { artifactId: 'blueprint-1', revision: 1 }));
-    expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 });
+    }));
   });
 
   it('restores and persists the topic owned by the current script branch', async () => {
@@ -113,21 +106,29 @@ describe('RemixScriptPanel', () => {
     await screen.findByText('用早晨疲惫引出咖啡');
   });
 
-  it('uses the child branch settings to create a blueprint before generation and save', async () => {
+  it('flushes a pending text edit when the editor closes', () => {
+    const onAutoSave = vi.fn(async () => {});
+    const view = render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onAutoSave={onAutoSave} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('改编台词'), { target: { value: '关闭前的新台词' } });
+    expect(onAutoSave).not.toHaveBeenCalled();
+    view.unmount();
+
+    expect(onAutoSave).toHaveBeenCalledWith({ dialogue: '关闭前的新台词', selections: [] });
+  });
+
+  it('uses the child branch settings to create a blueprint before generation', async () => {
     const branchRef = { artifactId: 'branch-blueprint', revision: 1 };
     const onEnsureBlueprint = vi.fn(async () => branchRef);
-    const onSave = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={null} blueprintSettings={<div>当前脚本的改编规则</div>} onEnsureBlueprint={onEnsureBlueprint} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={onSave} onClose={() => {}} />);
+    const onAutoSave = vi.fn(async () => {});
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={null} blueprintSettings={<div>当前脚本的改编规则</div>} onEnsureBlueprint={onEnsureBlueprint} visualNodes={[]} sfxNodes={[]} onAutoSave={onAutoSave} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
     expect(screen.getByText('当前脚本的改编规则')).toBeVisible();
     fireEvent.change(screen.getByLabelText('新主题'), { target: { value: '新品饮料' } });
     fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
     await waitFor(() => expect(generateRemixScriptDraft).toHaveBeenCalledWith('demo', branchRef, '新品饮料'));
-
-    fireEvent.click(screen.getByRole('button', { name: '保存脚本版本' }));
-    await waitFor(() => expect(saveRemixScriptArtifact).toHaveBeenCalledWith('demo', expect.any(Object), null, branchRef));
-    expect(onEnsureBlueprint).toHaveBeenCalledTimes(2);
-    expect(onSave).toHaveBeenCalledWith({ artifactId: 'script-1', revision: 1 }, branchRef);
+    await waitFor(() => expect(onAutoSave).toHaveBeenCalled());
+    expect(onEnsureBlueprint).toHaveBeenCalledOnce();
   });
 
   it('keeps the current draft when generation fails', async () => {
@@ -142,10 +143,11 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).not.toHaveBeenCalled();
   });
 
-  it('creates generated or uploaded visual nodes from the semantic selection affordance', () => {
+  it('creates generated or uploaded visual nodes from the semantic selection affordance', async () => {
     const onCreateVisual = vi.fn((mode: 'generate' | 'upload') => ({ id: `${mode}-1`, label: mode === 'generate' ? '生成画面' : '上传画面' }));
     const onDraftChange = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onCreateVisual={onCreateVisual} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    const onAutoSave = vi.fn(async () => {});
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onCreateVisual={onCreateVisual} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product');
@@ -153,7 +155,8 @@ describe('RemixScriptPanel', () => {
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }),
       'media-binding',
     );
-    expect(screen.getByText('补充画面节点已创建，可以先保存脚本。稍后在画布完成素材后会自动关联。')).toBeVisible();
+    await waitFor(() => expect(onAutoSave).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] })));
+    expect(screen.getByText('补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
     expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product');
@@ -161,6 +164,7 @@ describe('RemixScriptPanel', () => {
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }),
       'media-binding',
     );
+    await waitFor(() => expect(onAutoSave).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] })));
   });
 
   it('keeps every B-roll requirement visible when one event creates a visual node', () => {
