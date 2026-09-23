@@ -144,6 +144,7 @@ import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/rem
 import { storyScriptToolbarState } from '@/features/canvas/remix/storyScriptToolbarState';
 import { audioToolbarState } from './audioToolbarState';
 import { transcriptToolbarState } from '@/features/canvas/remix/transcriptToolbarState';
+import { semanticTimelineToolbarState } from '@/features/canvas/remix/semanticTimelineToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
@@ -1658,6 +1659,8 @@ export const NodeActionToolbar = memo(
       ? storyScriptToolbarState(nodes, edges, node.id) : null;
     const transcriptActions = node.type === CANVAS_NODE_TYPES.transcript
       ? transcriptToolbarState(nodes, edges, node.id) : null;
+    const semanticTimelineAction = node.type === CANVAS_NODE_TYPES.semanticTimeline
+      ? semanticTimelineToolbarState({ compileOperationId: node.data.compileOperationId }) : null;
 
     const advanceRemixJourney = useCallback(() => {
       if (!remixJourneyStep) return;
@@ -1816,6 +1819,18 @@ export const NodeActionToolbar = memo(
                 </DropdownMenuContent>
               </DropdownMenu>}
             </>}
+            {semanticTimelineAction && <UiChipButton
+              className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+              disabled={semanticTimelineAction.disabled}
+              title={semanticTimelineAction.title}
+              onClick={(event) => {
+                event.stopPropagation();
+                canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'compile' });
+              }}
+            >
+              {semanticTimelineAction.disabled ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Workflow className="h-3.5 w-3.5" />}
+              {semanticTimelineAction.label}
+            </UiChipButton>}
             {(isVideoNode(node) || isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
               <>
                 {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
@@ -1836,7 +1851,7 @@ export const NodeActionToolbar = memo(
                       ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
                       : !remixJourneyBlocksScriptDownstream && node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
                   ] : []
-                  : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'compile', label: '重新编译', Icon: Workflow }, { action: 'create_compose', label: '生成合成清单', Icon: Film }]
+                  : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]
                 ).map(({ action, label, Icon }) => <UiChipButton
                   key={`remix-${action}`}

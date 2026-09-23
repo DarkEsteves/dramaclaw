@@ -7,7 +7,6 @@ import type { SemanticTimelineNodeData } from '@/features/canvas/domain/canvasNo
 import { buildTimelineEditMap, buildTimelineOverrides, operationMatchesTimelineInputs, readTimingEvents, type TimelineEventOverride } from '@/features/canvas/remix/semanticTimelineModel';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { CANVAS_NODE_PANEL_SURFACE_CLASS, canvasNodeFrameClass } from '@/features/canvas/ui/nodeFrameStyles';
-import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
@@ -53,7 +52,6 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const watchingRef = useRef<string | null>(null);
   const compileClaimRef = useRef(false);
   const mountedRef = useRef(true);
-  currentOperationRef.current = data.compileOperationId ?? currentOperationRef.current;
   currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? currentInputsRef.current.revision };
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -202,8 +200,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<ScrollText className="h-4 w-4" />} titleText={data.displayName || '语义时间轴'} editable={false} />
     <div className={`max-h-[500px] overflow-auto rounded-[var(--node-radius)] border p-3 ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-text-muted">
-        <span>{data.artifactRef ? `时间轴 r${data.artifactRef.revision}` : '待编译'}</span>
-        <button type="button" disabled={busy || !project} onClick={(event) => { event.stopPropagation(); void compile(); }} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{busy ? '编译中…' : currentOperationRef.current ? '继续检查' : '重新编译'}</button>
+        <span>{busy || data.compileOperationId ? '正在计算时间区间…' : data.artifactRef ? `时间轴 r${data.artifactRef.revision}` : '待计算时间区间'}</span>
       </div>
       {!asRef(scriptRef) || !asRef(wordRef) ? <p className="mb-2 text-[12px] text-amber-300">连接脚本和已对齐语音的转写节点后可编译。</p> : null}
       {(error || data.compileError) && <p role="alert" className="mb-2 text-[12px] text-red-300">{error || data.compileError}</p>}

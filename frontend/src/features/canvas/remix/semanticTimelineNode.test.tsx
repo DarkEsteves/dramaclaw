@@ -1,5 +1,5 @@
 import { StrictMode } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const updateNodeData = vi.fn();
@@ -23,6 +23,7 @@ vi.mock('@/api/remix', () => ({
 
 import { fetchRemixOperation, submitRemixProcessAction } from '@/api/remix';
 import { SemanticTimelineNode } from '../nodes/SemanticTimelineNode';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 describe('SemanticTimelineNode', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -32,7 +33,7 @@ describe('SemanticTimelineNode', () => {
     expect(document.querySelector('[data-handle="source"]')).toBeTruthy();
     expect(screen.getByLabelText('产品登场 最短帧数')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('产品登场 语义偏移毫秒'), { target: { value: '250' } });
-    fireEvent.click(screen.getByRole('button', { name: '重新编译' }));
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'timeline-1', action: 'compile' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({
       action: 'compile_semantic_timeline',
       scriptRef: { artifactId: 'script-art', revision: 1 },
@@ -49,7 +50,7 @@ describe('SemanticTimelineNode', () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [{ selectionId: 'product', label: '产品登场' }], eventOverrides: {} }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     const start = screen.getByLabelText('产品登场 固定起始帧') as HTMLInputElement;
     fireEvent.change(start, { target: { value: '12' } });
-    fireEvent.click(screen.getByRole('button', { name: '重新编译' }));
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'timeline-1', action: 'compile' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('同时填写'));
     expect(start.value).toBe('12');
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
@@ -60,6 +61,20 @@ describe('SemanticTimelineNode', () => {
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 }, compileOperationId: null })));
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
+  });
+
+  it('clears the completed operation even after a stale operation render', async () => {
+    const props = { id: 'timeline-1', type: 'semanticTimelineNode', selected: false, draggable: true, dragging: false, selectable: true, deletable: true, zIndex: 0, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 } as const;
+    const stale = { displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 };
+    const view = render(<SemanticTimelineNode {...props} data={stale} />);
+
+    await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ compileOperationId: null })));
+    view.rerender(<SemanticTimelineNode {...props} data={stale} />);
+    view.rerender(<SemanticTimelineNode {...props} data={{ ...stale, compileOperationId: null, artifactRef: { artifactId: 'timing-art', revision: 1 } }} />);
+
+    expect(screen.getByText('时间轴 r1')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '继续检查' })).toBeNull();
+    expect(screen.queryByText('正在计算时间区间…')).toBeNull();
   });
 
   it('does not publish an operation compiled for an older script revision', async () => {
@@ -76,7 +91,7 @@ describe('SemanticTimelineNode', () => {
       .mockResolvedValueOnce({ operation_id: 'op-1', task_id: null, status: 'needs_confirmation', node_revision: 1, input_refs: [{ artifact_id: 'script-art', revision: 1 }, { artifact_id: 'words-art', revision: 1 }, { artifact_id: 'blueprint-art', revision: 2 }], output_refs: [{ artifact_id: 'timing-art', revision: 1 }] });
     render(<SemanticTimelineNode id="timeline-1" type="semanticTimelineNode" data={{ displayName: 'Semantic timeline', events: [], compileOperationId: 'op-1', nodeRevision: 1 }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('网络暂时不可用'));
-    fireEvent.click(screen.getByRole('button', { name: '继续检查' }));
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'timeline-1', action: 'compile' }));
     await waitFor(() => expect(updateNodeData).toHaveBeenCalledWith('timeline-1', expect.objectContaining({ artifactRef: { artifactId: 'timing-art', revision: 1 } })));
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
   });
