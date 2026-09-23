@@ -108,7 +108,7 @@ export interface NodeDisplayData {
 export interface NodeImageData extends NodeDisplayData {
   /** Project-owned still image selected for a reference remix event. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
-  remixRole?: 'visual' | 'background' | 'primary';
+  remixRole?: 'visual' | 'background' | 'primary' | 'identity';
   imageUrl: string | null;
   previewImageUrl?: string | null;
   aspectRatio: string;
@@ -195,7 +195,7 @@ export interface DepthCaptureState {
 export interface VideoNodeData extends NodeDisplayData {
   /** Project-owned source media for the reference remix workflow. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
-  remixRole?: 'reference' | 'visual' | 'background' | 'primary' | 'speech_clock';
+  remixRole?: 'reference' | 'visual' | 'background' | 'primary' | 'speech_clock' | 'identity' | 'performance';
   videoUrl: string | null;
   previewImageUrl?: string | null;
   /**
@@ -697,7 +697,7 @@ export interface VoiceDesignDraft {
 export interface AudioNodeData extends NodeDisplayData {
   /** Project-owned audio actually used by transcription and rendering. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
-  remixRole?: 'narration' | 'bgm' | 'sfx';
+  remixRole?: 'narration' | 'bgm' | 'sfx' | 'take_audio';
   /** Optional speech mode; absent keeps the historical single-voice behavior. */
   dialogueVoiceMode?: 'single' | 'dialogue';
   /** Present only on an audio node created from role-labelled remix dialogue. */

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fetchRemixArtifact, generateRemixScriptDraft, type RemixArtifactRef } from '@/api/remix';
-import { editRemixDialogue, type RemixScriptDraft } from './remixScriptModel';
+import { editRemixDialogue, seedPerformanceSegments, type RemixPerformanceSegment, type RemixScriptDraft } from './remixScriptModel';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeControlStyles';
 import type { BrollVisualAttachment } from './brollCanvasBinding';
@@ -19,6 +19,14 @@ interface Props {
   generationRunning?: boolean;
   generationPersistsDraft?: boolean;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
+  performanceNodes?: Array<{ id: string; label: string; kind: 'video' | 'audio'; mediaRevision?: string }>;
+  referenceNodes?: Array<{ id: string; label: string }>;
+  voiceNodes?: Array<{ id: string; label: string }>;
+  motionNodes?: Array<{ id: string; label: string }>;
+  onCreateReference?: (kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') => string;
+  onConnectReference?: (nodeId: string) => void;
+  onCreateTake?: (segment: RemixPerformanceSegment) => string;
+  onAttachTake?: (nodeId: string, source: RemixPerformanceSegment['source']) => Promise<string>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
@@ -30,7 +38,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -179,6 +187,42 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
     const next = { ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, sfxNodeId: nodeId || undefined } : item) };
     changeDraft(next, 'media-binding');
   };
+  const updateSegment = (segmentId: string, patch: Partial<RemixPerformanceSegment>) => {
+    const latest = draftRef.current;
+    changeDraft({ ...latest, segments: latest.segments?.map((item) => item.id === segmentId ? { ...item, ...patch } : item) }, 'media-binding');
+  };
+  const chooseReference = (segment: RemixPerformanceSegment, key: 'personNodeId' | 'productNodeId' | 'settingNodeId' | 'motionNodeId' | 'voiceNodeId', nodeId: string) => {
+    if (nodeId) onConnectReference?.(nodeId);
+    updateSegment(segment.id, { [key]: nodeId || undefined, takeNodeId: undefined, takeMediaRevision: undefined });
+  };
+  const createReference = (segment: RemixPerformanceSegment, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') => {
+    const id = onCreateReference?.(kind, mode);
+    if (!id) return;
+    updateSegment(segment.id, { [`${kind}NodeId`]: id, takeNodeId: undefined, takeMediaRevision: undefined });
+  };
+  const chooseTake = async (segment: RemixPerformanceSegment, nodeId: string) => {
+    updateSegment(segment.id, { takeNodeId: nodeId || undefined, takeMediaRevision: undefined });
+    if (!nodeId || !onAttachTake) return;
+    try {
+      const revision = await onAttachTake(nodeId, segment.source);
+      if (draftRef.current.segments?.find((item) => item.id === segment.id)?.takeNodeId === nodeId) updateSegment(segment.id, { takeMediaRevision: revision });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '片段还未准备好，请生成后再试'); }
+  };
+  const createTake = (segment: RemixPerformanceSegment) => {
+    const id = onCreateTake?.(segment);
+    if (id) updateSegment(segment.id, { takeNodeId: id, takeMediaRevision: undefined });
+  };
+  const choosePrimary = async (segment: RemixPerformanceSegment, nodeId: string) => {
+    updateSegment(segment.id, { primaryNodeId: nodeId || undefined, primaryMediaRevision: undefined });
+    if (!nodeId || !onAttachVisual) return;
+    try {
+      onConnectReference?.(nodeId);
+      const attachment = await onAttachVisual(nodeId);
+      if (typeof attachment !== 'string') attachment.commit();
+      if (draftRef.current.segments?.find((item) => item.id === segment.id)?.primaryNodeId === nodeId)
+        updateSegment(segment.id, { primaryMediaRevision: typeof attachment === 'string' ? attachment : attachment.mediaRevision });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '主画面尚未完成'); }
+  };
 
   return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><h2 className="text-sm font-semibold">改编脚本与语义区间</h2><button type="button" onClick={onClose} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>关闭</button></div>
@@ -195,6 +239,45 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
+      <section className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
+        <div className="flex items-center justify-between gap-3"><div><h3 className="font-medium">表演与素材</h3><p className="mt-1 text-text-muted">逐段选择人物、产品、场景与声音来源。口播视频使用视频自身的声音；独立旁白需要主画面。</p></div>
+          {!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: seedPerformanceSegments(draft.dialogue) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按台词拆段</button>}
+          {!!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: [] })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改用整段旁白流程</button>}
+        </div>
+        {draft.segments?.map((segment, index) => {
+          const text = Array.from(draft.dialogue).slice(segment.start, segment.end).join('').trim();
+          const choices = performanceNodes.filter((node) => node.kind === (segment.source === 'voiceover' ? 'audio' : 'video'));
+          return <div key={segment.id} className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
+            <div className="flex items-center justify-between gap-2"><strong>{String(index + 1).padStart(2, '0')} · {segment.speaker}</strong><span className="text-text-muted">{segment.start}–{segment.end} 字</span></div>
+            <p className="mt-2 whitespace-pre-wrap break-words text-text-dark/80">{text || '当前段落没有台词'}</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <label>声音与画面来源<select aria-label={`${segment.speaker} 声音来源`} value={segment.source} onChange={(event) => updateSegment(segment.id, { source: event.target.value as RemixPerformanceSegment['source'], takeNodeId: undefined, takeMediaRevision: undefined })} className={fieldClass}>
+                <option value="speaking_video">人物口播视频（视频自带声音）</option><option value="voiceover">独立旁白（另选主画面）</option><option value="original_sound">保留原声视频</option>
+              </select></label>
+              <label>采用片段<select aria-label={`${segment.speaker} 采用片段`} value={segment.takeNodeId ?? ''} onChange={(event) => void chooseTake(segment, event.target.value)} className={fieldClass}>
+                <option value="">请选择已生成或上传的片段</option>{choices.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待完成'}</option>)}
+              </select></label>
+            </div>
+            {segment.source === 'speaking_video' && <div className="mt-2 grid gap-2 sm:grid-cols-3">{([['personNodeId', '人物', 'person'], ['productNodeId', '产品', 'product'], ['settingNodeId', '场景', 'setting']] as const).map(([key, label, kind]) => <div key={key}>
+              <label>{label}参考<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+              <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
+            </div>)}</div>}
+            {segment.source === 'speaking_video' && <label className="mt-2 block">声音参考（可选）<select aria-label={`${segment.speaker} 声音参考`} value={segment.voiceNodeId ?? ''} onChange={(event) => chooseReference(segment, 'voiceNodeId', event.target.value)} className={fieldClass}>
+              <option value="">不指定</option>{voiceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+            </select></label>}
+            {segment.source === 'speaking_video' && <label className="mt-2 block">原片镜头参考（可选，建议先裁出对应片段）<select aria-label={`${segment.speaker} 镜头参考`} value={segment.motionNodeId ?? ''} onChange={(event) => chooseReference(segment, 'motionNodeId', event.target.value)} className={fieldClass}>
+              <option value="">只用镜头描述</option>{motionNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+            </select></label>}
+            {segment.source === 'voiceover' && <label className="mt-2 block">旁白主画面<select aria-label={`${segment.speaker} 主画面`} value={segment.primaryNodeId ?? ''} onChange={(event) => void choosePrimary(segment, event.target.value)} className={fieldClass}>
+              <option value="">请选择生成或上传的视频／图片</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+            </select></label>}
+            <div className="mt-2 flex flex-wrap items-center gap-2"><button type="button" onClick={() => createTake(segment)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{segment.source === 'voiceover' ? '创建旁白节点' : segment.source === 'original_sound' ? '创建原声上传节点' : '创建口播视频节点'}</button>
+              {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
+              <span className={segment.takeMediaRevision ? 'text-emerald-300' : 'text-text-muted'}>{segment.takeMediaRevision ? '素材已绑定' : '等待片段生成或上传'}</span>
+            </div>
+          </div>;
+        })}
+      </section>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>
       <div className="border-t border-white/10 pt-3">

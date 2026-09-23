@@ -45,7 +45,7 @@ describe('script draft generation task controller', () => {
       id: 'draft-1', revision: 1, schema: 'remix_script.v1',
       upstream_refs: [{ artifact_id: 'blueprint-1', revision: 2 }],
       payload: {
-        dialogue: '女：薯条。', segments: [], blueprint_mappings: [], media_requirements: [],
+        dialogue: '女：薯条。', segments: [{ segment_id: 'segment-1', start_char: 2, end_char: 5, speaker: '女', source: 'speaking_video' }], blueprint_mappings: [], media_requirements: [],
         selections: [{ id: 'generated-1', label: '产品亮相', start: 2, end: 4 }],
       },
     });
@@ -62,6 +62,7 @@ describe('script draft generation task controller', () => {
     }));
     expect(result).toEqual({
       dialogue: '女：薯条。', selections: [{ id: 'generated-1', label: '产品亮相', start: 2, end: 4 }],
+      segments: [{ id: 'segment-1', start: 2, end: 5, speaker: '女', source: 'speaking_video' }],
     });
     expect(state.nodes[0].data).toMatchObject({
       remixScriptGenerationOperationId: null,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from novelvideo.freezone.recipe_runtime import (
@@ -10,6 +11,37 @@ from novelvideo.freezone.recipe_runtime import (
     get_recipe_for_runtime,
     validate_structured_recipe_output,
 )
+
+
+_SPEAKER_LINE = re.compile(r"^\s*([^：:\n]{1,24})[：:]\s*(\S.*)$")
+
+
+def performance_segments_from_dialogue(dialogue: str) -> list[dict[str, Any]]:
+    """Seed editable performance takes from spoken lines, independent of B-roll."""
+    lines = dialogue.splitlines(keepends=True)
+    nonblank = [line.rstrip("\r\n") for line in lines if line.strip()]
+    matches = [_SPEAKER_LINE.match(line) for line in nonblank]
+    if not matches or not all(matches):
+        return [{
+            "segment_id": "segment-1", "start_char": 0,
+            "end_char": len(dialogue), "speaker": "旁白", "source": "voiceover",
+        }]
+    segments: list[dict[str, Any]] = []
+    offset = 0
+    for line in lines:
+        if line.strip():
+            content = line.rstrip("\r\n")
+            match = _SPEAKER_LINE.match(content)
+            assert match is not None
+            segments.append({
+                "segment_id": f"segment-{len(segments) + 1}",
+                "start_char": offset + match.start(2),
+                "end_char": offset + match.end(2),
+                "speaker": match.group(1).strip(),
+                "source": "speaking_video",
+            })
+        offset += len(line)
+    return segments
 
 
 def draft_from_recipe_output(payload: dict[str, Any]) -> dict[str, Any]:
@@ -47,7 +79,7 @@ def draft_from_recipe_output(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("生成脚本的关键句区间重叠")
         used.append((start, end))
         selections.append({"id": f"generated-{index}", "label": label.strip(), "start": start, "end": end})
-    return {"dialogue": dialogue, "selections": selections}
+    return {"dialogue": dialogue, "selections": selections, "segments": performance_segments_from_dialogue(dialogue)}
 
 
 async def generate_script_draft(*, blueprint: dict[str, Any], topic: str, username: str) -> dict[str, Any]:

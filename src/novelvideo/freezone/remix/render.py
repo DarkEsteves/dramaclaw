@@ -105,7 +105,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be an object")
     version = manifest.get("manifest_version", 1)
-    if type(version) is not int or version not in {1, 2}:
+    if type(version) is not int or version not in {1, 2, 3}:
         raise ValueError("unsupported composition manifest version")
     spec = manifest.get("output_spec")
     if not isinstance(spec, dict):
@@ -126,7 +126,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if fps > 60 or duration_frames > 60 * fps:
         raise ValueError("output duration or fps exceeds the remix MVP limit")
     safe_area = spec.get("subtitle_safe_area")
-    if version == 2:
+    if version in {2, 3}:
         if (width, height, fps) != (1080, 1920, 30):
             raise ValueError("version 2 output must be 1080x1920 at 30 fps")
         if not isinstance(safe_area, dict) or any(
@@ -142,6 +142,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     bindings: dict[str, str] = {}
     binding_purposes: dict[str, str | None] = {}
+    binding_has_audio: dict[str, bool] = {}
     for row in manifest.get("media_bindings", []):
         media_id, kind = row.get("media_id"), row.get("kind")
         if not isinstance(media_id, str) or not media_id or media_id in bindings:
@@ -154,6 +155,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"media_hash is required for {media_id}")
         bindings[media_id] = kind
         binding_purposes[media_id] = row.get("purpose")
+        binding_has_audio[media_id] = row.get("has_audio") is True
 
     layers = manifest.get("layers", [])
     if not layers:
@@ -190,7 +192,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("layer opacity must be between 0 and 1")
         if layer.get("fit", "stretch") not in {"stretch", "cover", "contain"}:
             raise ValueError("unsupported layer fit mode")
-        if version == 2:
+        if version in {2, 3}:
             crop = layer.get("crop")
             if crop is not None:
                 if not isinstance(crop, dict) or any(
@@ -226,7 +228,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(
                         "layer zoom must contain bounded start and end scales"
                     )
-    if version == 2:
+    if version in {2, 3}:
         primary_layers = sorted((layer for layer in layers
             if layer.get("z_order") == 0
             and binding_purposes.get(layer.get("media_id")) in {"background", "a-roll"}
@@ -263,14 +265,16 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("subtitle word cue exceeds its text or time interval")
             previous_frame, previous_char = end_frame, end_char
     audio_events = manifest.get("audio_events", [])
-    if not any(row.get("role") == "narration" for row in audio_events):
+    if version in {1, 2} and not any(row.get("role") == "narration" for row in audio_events):
         raise ValueError("narration audio event is required")
     for event in audio_events:
         media_id = event.get("media_id")
-        if bindings.get(media_id) != "audio":
+        if bindings.get(media_id) != "audio" and not (version == 3 and bindings.get(media_id) == "video" and binding_has_audio.get(media_id)):
+            if version == 3 and bindings.get(media_id) == "video":
+                raise ValueError(f"video speech media requires an audio stream: {media_id}")
             raise ValueError(f"missing or invalid audio media binding: {media_id}")
         _interval(event, duration_frames)
-        if event.get("role") not in {"narration", "bgm", "sfx"}:
+        if event.get("role") not in ({"narration", "bgm", "sfx", "speech"} if version == 3 else {"narration", "bgm", "sfx"}):
             raise ValueError("unsupported audio role")
         volume = event.get("volume", 1)
         if (
@@ -279,7 +283,14 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             or not 0 <= volume <= 2
         ):
             raise ValueError("audio volume must be between 0 and 2")
-        ducking = event.get("duck_under_narration") if version == 2 else None
+        if version == 3 and event.get("role") == "speech" and bindings.get(media_id) == "video" and not any(
+            layer.get("media_id") == media_id
+            and layer.get("start_frame") == event.get("start_frame")
+            and layer.get("end_frame") == event.get("end_frame")
+            and layer.get("z_order") == 0 for layer in layers
+        ):
+            raise ValueError("speaking video speech and visual spans must match")
+        ducking = event.get("duck_under_narration") if version in {2, 3} else None
         if ducking is not None and (
             event.get("role") != "bgm"
             or isinstance(ducking, bool)
@@ -308,6 +319,8 @@ def manifest_renderer(manifest: dict[str, Any]) -> str:
         return "legacy_v1"
     if version == 2:
         return "layered_v2"
+    if version == 3:
+        return "layered_v3"
     raise ValueError("unsupported composition manifest version")
 
 

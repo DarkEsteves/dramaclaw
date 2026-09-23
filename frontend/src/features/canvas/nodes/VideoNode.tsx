@@ -2962,7 +2962,7 @@ export const VideoNode = memo(
                 references.push({
                   type: "audio",
                   url,
-                  role: "配乐参考", // i18n-exempt —— references[].role 是发给后端的协议字段
+                  role: data.remixRole === 'performance' ? '人物声音参考' : '配乐参考', // i18n-exempt —— references[].role 是发给后端的协议字段
                   label: rawLabel,
                 });
                 audioRefs.push({

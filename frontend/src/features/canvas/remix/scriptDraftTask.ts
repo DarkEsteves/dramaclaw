@@ -8,7 +8,7 @@ import {
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { applyRemixInvalidation } from './spawnRemixDownstream';
-import type { RemixScriptDraft } from './remixScriptModel';
+import { seedPerformanceSegments, type RemixScriptDraft, type RemixPerformanceSegment } from './remixScriptModel';
 
 const observers = new Map<string, Promise<RemixScriptDraft | null>>();
 const POLL_INTERVAL_MS = 1_000;
@@ -74,7 +74,25 @@ function draftFromPayload(payload: Record<string, unknown>): RemixScriptDraft {
   if (typeof payload.dialogue !== 'string' || !Array.isArray(payload.selections)) {
     throw new Error('改编台词任务返回了无效结果。');
   }
-  return { dialogue: payload.dialogue, selections: payload.selections as RemixScriptDraft['selections'] };
+  const segments = Array.isArray(payload.segments) && payload.segments.length
+    ? payload.segments.map((raw) => {
+      const row = raw as Record<string, unknown>;
+      return {
+        id: row.segment_id, start: row.start_char, end: row.end_char,
+        speaker: row.speaker, source: row.source,
+        ...(row.person_node_id ? { personNodeId: row.person_node_id } : {}),
+        ...(row.product_node_id ? { productNodeId: row.product_node_id } : {}),
+        ...(row.setting_node_id ? { settingNodeId: row.setting_node_id } : {}),
+        ...(row.motion_node_id ? { motionNodeId: row.motion_node_id } : {}),
+        ...(row.voice_node_id ? { voiceNodeId: row.voice_node_id } : {}),
+        ...(row.take_node_id ? { takeNodeId: row.take_node_id } : {}),
+        ...(row.take_media_revision ? { takeMediaRevision: row.take_media_revision } : {}),
+        ...(row.primary_node_id ? { primaryNodeId: row.primary_node_id } : {}),
+        ...(row.primary_media_revision ? { primaryMediaRevision: row.primary_media_revision } : {}),
+      } as RemixPerformanceSegment;
+    })
+    : seedPerformanceSegments(payload.dialogue);
+  return { dialogue: payload.dialogue, selections: payload.selections as RemixScriptDraft['selections'], segments };
 }
 
 async function observe(

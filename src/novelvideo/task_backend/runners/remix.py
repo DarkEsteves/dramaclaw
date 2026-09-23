@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import re
 import hashlib
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +13,10 @@ from novelvideo.freezone.remix.render import render_manifest, validate_manifest
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
 from novelvideo.freezone.remix.evidence import build_reference_evidence
 from novelvideo.freezone.remix.broll_plan import generate_broll_plan
-from novelvideo.freezone.remix.script_draft import generate_script_draft
+from novelvideo.freezone.remix.script_draft import generate_script_draft, performance_segments_from_dialogue
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.timing import compile_timing
+from novelvideo.freezone.remix.take_timing import compile_take_timing
 from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.project_context import ProjectContext
@@ -140,7 +143,7 @@ def run_remix_generate_script_draft(envelope: dict[str, Any], ctx: ProjectContex
         "remix_script.v1",
         {
             "dialogue": draft["dialogue"],
-            "segments": [],
+            "segments": draft.get("segments") or performance_segments_from_dialogue(draft["dialogue"]),
             "selections": draft["selections"],
             "blueprint_mappings": [],
             "media_requirements": [],
@@ -221,6 +224,57 @@ def run_remix_compile_semantic_timeline(envelope: dict[str, Any], ctx: ProjectCo
     _publish_operation_result(payload, ctx, {"artifact_id": artifact["id"], "revision": artifact["revision"]})
     status = "needs_review" if timing["unresolved_required_events"] else "completed"
     return {"status": status, "artifact_ref": {"artifact_id": artifact["id"], "revision": artifact["revision"]}, "unresolved_required_events": timing["unresolved_required_events"]}
+
+
+def _media_duration_us(path: Path) -> int:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    duration = float(json.loads(result.stdout)["format"]["duration"])
+    if not 0 < duration <= 60:
+        raise ValueError("accepted take duration must be within 60 seconds")
+    return round(duration * 1_000_000)
+
+
+def run_remix_compile_take_timeline(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
+    """Align each accepted take against its own text and publish one joined clock."""
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    ref = payload.get("script_ref") if isinstance(payload.get("script_ref"), dict) else {}
+    project_dir = Path(ctx.output_dir).resolve()
+    store = RemixArtifactStore(project_dir, ctx.project_id)
+    script_artifact = store.read(ref.get("artifact_id"), ref.get("revision"))
+    if script_artifact["schema"] != "remix_script.v1":
+        raise ValueError("take timeline requires a saved remix script")
+    script = {**script_artifact["payload"], "revision": script_artifact["revision"]}
+    bindings = payload.get("take_bindings")
+    if not script.get("segments") or any(not isinstance(segment, dict) or not segment.get("segment_id") for segment in script["segments"]):
+        raise ValueError("take timeline requires performance segments")
+    if not isinstance(bindings, list) or len(bindings) != len(script["segments"]):
+        raise ValueError("one accepted media binding is required per performance segment")
+    takes: list[dict[str, Any]] = []
+    refs = [{"artifact_id": script_artifact["id"], "revision": script_artifact["revision"]}]
+    for segment, binding in zip(script["segments"], bindings, strict=True):
+        if not isinstance(binding, dict) or binding.get("segment_id") != segment["segment_id"]:
+            raise ValueError("take binding order does not match the script")
+        path = _verified_project_media_path(project_dir, binding)
+        media_hash = "sha256:" + binding["media_sha256"]
+        if segment.get("take_media_revision") and segment["take_media_revision"] != binding["media_sha256"]:
+            raise ValueError("selected take media revision has changed")
+        text = script["dialogue"][segment["start_char"]:segment["end_char"]]
+        aligned = align_script(path, {"revision": script_artifact["revision"], "dialogue": text})
+        if aligned.get("status") != "completed" or aligned.get("media_hash") != media_hash:
+            raise ValueError(f"take {segment['segment_id']} does not match its spoken script or media")
+        word_artifact = store.create("word_timeline.v1", {**aligned, "segment_id": segment["segment_id"]}, refs[:1])
+        refs.append({"artifact_id": word_artifact["id"], "revision": word_artifact["revision"]})
+        takes.append({"segment_id": segment["segment_id"], "media_hash": media_hash,
+                      "duration_us": _media_duration_us(path), "alignment": aligned})
+    timing = compile_take_timing(script, takes, fps=payload.get("fps"))
+    artifact = store.create("performance_timing.v2", timing, refs)
+    output = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+    _publish_operation_result(payload, ctx, output)
+    return {"status": "needs_review" if timing["unresolved_required_events"] else "completed", "artifact_ref": output,
+            "unresolved_required_events": timing["unresolved_required_events"]}
 
 
 def _project_media_paths(project_dir: Path, manifest: dict[str, Any]) -> dict[str, Path]:
@@ -313,3 +367,4 @@ register_project_task_runner("remix_plan_broll", _with_operation_failure_transit
 register_project_task_runner("remix_generate_script_draft", _with_operation_failure_transition(run_remix_generate_script_draft), requires_home_node=True)
 register_project_task_runner("remix_align_script", _with_operation_failure_transition(run_remix_align_script), requires_home_node=True, lane="speech")
 register_project_task_runner("remix_compile_semantic_timeline", _with_operation_failure_transition(run_remix_compile_semantic_timeline), requires_home_node=True)
+register_project_task_runner("remix_compile_take_timeline", _with_operation_failure_transition(run_remix_compile_take_timeline), requires_home_node=True, lane="speech")

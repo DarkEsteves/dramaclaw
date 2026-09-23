@@ -83,6 +83,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
+import { attachPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, performanceSourceUrl, takeReferenceSnapshot, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
@@ -494,6 +495,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         : `下一步：${remixJourneyStep.label}`
     : null;
   const remixNodeStatus = remixJourneyStatus
+    ?? (initialRemixDraft.segments?.length ? (remixJourneyStep?.label ? `下一步：${remixJourneyStep.label}` : '表演片段已就绪') : null)
     ?? (remixNextAction === 'edit_script'
       ? '下一步：编辑改编脚本'
       : remixNextAction === 'create_timeline'
@@ -513,6 +515,49 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       ? String(node.data.remixMedia.media_hash) : undefined,
   }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const performanceNodes = canvasNodes.filter((node) => isVideoNode(node) || isAudioNode(node)).map((node) => ({
+    id: node.id, label: String(node.data.displayName || node.id), kind: isAudioNode(node) ? 'audio' as const : 'video' as const,
+    mediaRevision: typeof node.data.remixMedia === 'object' && node.data.remixMedia && 'media_hash' in node.data.remixMedia
+      ? String(node.data.remixMedia.media_hash) : undefined,
+  }));
+  const performanceReferenceNodes = canvasNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))
+    .filter((node) => node.id !== id && node.data.remixRole !== 'reference' && node.data.remixRole !== 'performance')
+    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const performanceVoiceNodes = canvasNodes.filter((node) => isAudioNode(node) && Boolean(node.data.audioUrl))
+    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const performanceMotionNodes = canvasNodes.filter((node) => isVideoNode(node) && Boolean(node.data.videoUrl))
+    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const connectPerformanceReference = useCallback((nodeId: string) => {
+    const state = useCanvasStore.getState();
+    if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接参考素材到脚本');
+  }, [id]);
+  const createPerformanceReference = useCallback((kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') =>
+    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode), [id]);
+  const createPerformanceTake = useCallback((segment: NonNullable<RemixScriptDraft['segments']>[number]) => {
+    const index = initialRemixDraft.segments?.findIndex((item) => item.id === segment.id) ?? -1;
+    const observed = index >= 0 ? storyReferenceEvents[index] : undefined;
+    return createPerformanceTakeNode(useCanvasStore.getState(), id, segment, initialRemixDraft.dialogue,
+      String(data.remixTopic || ''), observed?.visual_observation || '');
+  }, [id, initialRemixDraft.dialogue, initialRemixDraft.segments, data.remixTopic, storyReferenceEvents]);
+  const attachPerformanceTake = useCallback(async (nodeId: string, source: NonNullable<RemixScriptDraft['segments']>[number]['source']) => {
+    const project = readUrl().project;
+    if (!project) throw new Error('缺少项目');
+    const state = useCanvasStore.getState();
+    const node = state.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) throw new Error('片段节点不存在');
+    if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接片段到脚本');
+    if (Array.isArray(node.data.remixReferenceNodeIds) && Array.isArray(node.data.remixReferenceSnapshot)
+      && !takeReferencesCurrent(state.nodes, node.data.remixReferenceNodeIds.filter((value): value is string => typeof value === 'string'), node.data.remixReferenceSnapshot)
+      && performanceSourceUrl(node) === (node.data.remixMedia as { url?: unknown } | undefined)?.url) {
+      throw new Error('人物、产品、场景或声音参考已变化，请重新生成口播片段');
+    }
+    const media = await attachPerformanceTakeMedia(project, node, attachRemixMedia, state.updateNodeData, source);
+    if (Array.isArray(node.data.remixReferenceNodeIds) && node.data.remixReferenceNodeIds.length) {
+      state.updateNodeData(nodeId, { remixReferenceSnapshot: takeReferenceSnapshot(useCanvasStore.getState().nodes,
+        node.data.remixReferenceNodeIds.filter((value): value is string => typeof value === 'string')) });
+    }
+    return media.media_hash;
+  }, [id]);
   const createRemixVisual = useCallback((mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => {
     return createBrollVisualNode(useCanvasStore.getState(), id, mode, selectionId, eventName, suggestedPrompt);
   }, [id]);
@@ -552,6 +597,59 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     return operation;
   }, [blueprintRef, ensureBranchBlueprint, id, upstreamStory]);
   const pendingBrollSyncRef = useRef<string | null>(null);
+  const pendingTakeSyncRef = useRef<string | null>(null);
+  useEffect(() => {
+    const project = readUrl().project;
+    const activeScriptRef = remixRef(data.remixScriptRef);
+    const draft = data.remixScriptDraft as RemixScriptDraft | undefined;
+    if (!project || !activeScriptRef || !draft?.segments?.length) return;
+    const pendingTake = draft.segments.find((segment) => segment.takeNodeId
+      && upstreamNodes.some((node) => {
+        if (node.id !== segment.takeNodeId) return false;
+        const url = isAudioNode(node) ? node.data.audioUrl : isVideoNode(node) ? node.data.videoUrl : null;
+        const media = node.data.remixMedia as { media_hash?: string; url?: string } | undefined;
+        return Boolean(url && (segment.takeMediaRevision !== media?.media_hash || url !== media?.url));
+      }));
+    const pendingPrimary = pendingTake ? undefined : draft.segments.find((segment) => segment.source === 'voiceover' && segment.primaryNodeId
+      && upstreamNodes.some((node) => {
+        if (node.id !== segment.primaryNodeId) return false;
+        const url = isVideoNode(node) ? node.data.videoUrl : node.data.imageUrl || node.data.previewImageUrl;
+        const media = node.data.remixMedia as { media_hash?: string; url?: string } | undefined;
+        return Boolean(url && (segment.primaryMediaRevision !== media?.media_hash || url !== media?.url));
+      }));
+    const pending = pendingTake ?? pendingPrimary;
+    const sourceId = pendingTake?.takeNodeId ?? pendingPrimary?.primaryNodeId;
+    if (!pending || !sourceId) return;
+    const syncKey = `${activeScriptRef.artifactId}:${activeScriptRef.revision}:${pending.id}:${sourceId}`;
+    if (pendingTakeSyncRef.current === syncKey) return;
+    pendingTakeSyncRef.current = syncKey;
+    const attach = pendingTake ? attachPerformanceTake(sourceId, pending.source) : attachRemixVisual(sourceId).then((attachment) => {
+      if (typeof attachment !== 'string') attachment.commit();
+      return typeof attachment === 'string' ? attachment : attachment.mediaRevision;
+    });
+    void attach.then((revision) => {
+      const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
+        const current = useCanvasStore.getState().nodes.find((node) => node.id === id);
+        const currentRef = remixRef(current?.data.remixScriptRef);
+        const latest = current?.data.remixScriptDraft as RemixScriptDraft | undefined;
+        if (!currentRef || !latest?.segments?.some((segment) => segment.id === pending.id
+          && (pendingTake ? segment.takeNodeId === sourceId && segment.takeMediaRevision !== revision
+            : segment.primaryNodeId === sourceId && segment.primaryMediaRevision !== revision))) return;
+        const next = { ...latest, segments: latest.segments.map((segment) => segment.id === pending.id
+          ? { ...segment, ...(pendingTake ? { takeMediaRevision: revision } : { primaryMediaRevision: revision }) } : segment) };
+        const blueprint = remixRef(current?.data.referenceBlueprintRef) ?? blueprintRef;
+        const nextRef = await saveRemixScriptArtifact(project, next, currentRef, blueprint);
+        const after = useCanvasStore.getState().nodes.find((node) => node.id === id);
+        if (!sameRemixRef(remixRef(after?.data.remixScriptRef), currentRef)) return;
+        applyRemixInvalidation(id, 'media_binding');
+        useCanvasStore.getState().updateNodeData(id, { remixScriptDraft: next, remixScriptRef: nextRef, remixScriptLastSavedRef: nextRef,
+          ...(sameRemixRef(remixRef(current?.data.remixBrollScriptRef), currentRef) ? { remixBrollScriptRef: nextRef } : {}) });
+      });
+      remixAutoSaveQueueRef.current = operation;
+      return operation;
+    }).catch((cause) => toast.error(cause instanceof Error ? cause.message : '表演素材自动关联失败'))
+      .finally(() => { if (pendingTakeSyncRef.current === syncKey) pendingTakeSyncRef.current = null; });
+  }, [attachPerformanceTake, attachRemixVisual, blueprintRef, data.remixScriptDraft, data.remixScriptRef, id, upstreamNodes]);
   useEffect(() => {
     const activeScriptRef = remixRef(data.remixScriptRef);
     const draft = data.remixScriptDraft as RemixScriptDraft | undefined;
@@ -571,18 +669,21 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     const syncKey = `${activeScriptRef.artifactId}:${activeScriptRef.revision}:${pendingReadyIds.sort().join(',')}`;
     if (pendingBrollSyncRef.current === syncKey) return;
     pendingBrollSyncRef.current = syncKey;
-    void resolvePendingBrollDraft(draft, readyVisualIds, attachRemixVisual).then(async (nextDraft) => {
-      if (!nextDraft) return;
+    const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
       const currentNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-      if (!sameRemixRef(remixRef(currentNode?.data.remixScriptRef), activeScriptRef)) return;
+      const currentRef = remixRef(currentNode?.data.remixScriptRef);
+      const currentDraft = currentNode?.data.remixScriptDraft as RemixScriptDraft | undefined;
+      if (!currentRef || !currentDraft) return;
+      const nextDraft = await resolvePendingBrollDraft(currentDraft, readyVisualIds, attachRemixVisual);
+      if (!nextDraft) return;
       const currentBlueprintRef = remixRef(currentNode?.data.referenceBlueprintRef) ?? blueprintRef;
       const carryBrollPlan = Boolean(
         remixRef(currentNode?.data.remixBrollPlanRef)
-        && sameRemixRef(remixRef(currentNode?.data.remixBrollScriptRef), activeScriptRef),
+        && sameRemixRef(remixRef(currentNode?.data.remixBrollScriptRef), currentRef),
       );
-      const nextRef = await saveRemixScriptArtifact(project, nextDraft, activeScriptRef, currentBlueprintRef);
+      const nextRef = await saveRemixScriptArtifact(project, nextDraft, currentRef, currentBlueprintRef);
       const latestNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-      if (!sameRemixRef(remixRef(latestNode?.data.remixScriptRef), activeScriptRef)) return;
+      if (!sameRemixRef(remixRef(latestNode?.data.remixScriptRef), currentRef)) return;
       applyRemixInvalidation(id, 'media_binding');
       useCanvasStore.getState().updateNodeData(id, {
         remixScriptDraft: nextDraft,
@@ -592,7 +693,9 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         remixBrollOperationId: null,
         remixBrollOperationScriptRef: null,
       });
-    }).catch((cause) => {
+    });
+    remixAutoSaveQueueRef.current = operation;
+    void operation.catch((cause) => {
       toast.error(cause instanceof Error ? cause.message : '补充画面自动关联失败');
     }).finally(() => {
       if (pendingBrollSyncRef.current === syncKey) pendingBrollSyncRef.current = null;
@@ -1020,6 +1123,14 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
                 ? latest.remixScriptGenerationError : '生成改编台词失败，请重试。');
             }}
             visualNodes={remixVisualNodes}
+            performanceNodes={performanceNodes}
+            referenceNodes={performanceReferenceNodes}
+            voiceNodes={performanceVoiceNodes}
+            motionNodes={performanceMotionNodes}
+            onCreateReference={createPerformanceReference}
+            onConnectReference={connectPerformanceReference}
+            onCreateTake={createPerformanceTake}
+            onAttachTake={attachPerformanceTake}
             sfxNodes={remixSfxNodes}
             brollRequirements={remixBrollRequirements}
             onCreateVisual={createRemixVisual}

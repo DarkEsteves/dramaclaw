@@ -71,7 +71,7 @@ class OperationTransitionBody(BaseModel):
 
 class ProcessActionBody(BaseModel):
     action: Literal[
-        "transcribe_media", "align_script", "compile_semantic_timeline",
+        "transcribe_media", "align_script", "compile_semantic_timeline", "compile_take_timeline",
         "analyze_reference_video", "render_manifest", "plan_broll", "generate_script_draft",
     ]
     payload: dict[str, Any]
@@ -92,6 +92,7 @@ _PROCESS_TASK_TYPES = {
     "transcribe_media": "remix_transcribe_media",
     "align_script": "remix_align_script",
     "compile_semantic_timeline": "remix_compile_semantic_timeline",
+    "compile_take_timeline": "remix_compile_take_timeline",
     "analyze_reference_video": "remix_analyze_reference_video",
     "render_manifest": "remix_render",
     "plan_broll": "remix_plan_broll",
@@ -382,6 +383,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
             {"media_path", "script_ref", "word_timeline_ref", "blueprint_ref", "edit_map", "overrides", "fps"},
             set(),
         ),
+        "compile_take_timeline": ({"script_ref", "take_bindings", "fps"}, set()),
         "analyze_reference_video": ({"media_path"}, set()),
         "render_manifest": ({"manifest_ref"}, set()),
         "plan_broll": ({"script_ref"}, set()),
@@ -393,6 +395,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     refs: list[dict[str, Any]] = []
     media_hash = None
     manifest_media_bindings: list[dict[str, Any]] | None = None
+    take_media_bindings: list[dict[str, str]] | None = None
     if "media_path" in payload:
         relative = payload["media_path"]
         if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
@@ -436,7 +439,35 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     if action == "compile_semantic_timeline":
         if not isinstance(payload["edit_map"], list) or not isinstance(payload["overrides"], list) or type(payload["fps"]) is not int or payload["fps"] <= 0:
             raise ValueError("compile action requires edit_map, overrides, and positive fps")
+    if action == "compile_take_timeline":
+        bindings = payload["take_bindings"]
+        if type(payload["fps"]) is not int or payload["fps"] <= 0 or not isinstance(bindings, list) or not bindings:
+            raise ValueError("take timeline requires bindings and positive fps")
+        script = store.read(payload["script_ref"]["artifact_id"], payload["script_ref"]["revision"])["payload"]
+        segments = script.get("segments", [])
+        if not segments or any(not isinstance(segment, dict) or not segment.get("segment_id") for segment in segments):
+            raise ValueError("take timeline requires performance segments in the saved script")
+        if len(bindings) != len(segments):
+            raise ValueError("take timeline requires one binding per script segment")
+        hashed: list[dict[str, str]] = []
+        for segment, binding in zip(segments, bindings, strict=True):
+            if not isinstance(binding, dict) or set(binding) != {"segment_id", "media_path"} or binding["segment_id"] != segment["segment_id"]:
+                raise ValueError("take binding must match its script segment")
+            relative = binding["media_path"]
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+                raise ValueError("take media_path must be project relative")
+            path = (store.project_dir / relative).resolve()
+            if not path.is_relative_to(store.project_dir) or not path.is_file():
+                raise ValueError("take media_path must name a project file")
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1_048_576), b""):
+                    digest.update(chunk)
+            hashed.append({**binding, "media_sha256": digest.hexdigest()})
+        take_media_bindings = hashed
     parameters = {"action": action, "payload": payload}
+    if take_media_bindings is not None:
+        parameters["take_media_bindings"] = take_media_bindings
     if media_hash is not None:
         parameters["media_sha256"] = media_hash
     if manifest_media_bindings is not None:
@@ -460,6 +491,8 @@ def prepare_registered_action(
     task_payload = dict(payload)
     if "media_sha256" in parameters:
         task_payload["media_sha256"] = parameters["media_sha256"]
+    if "take_media_bindings" in parameters:
+        task_payload["take_bindings"] = parameters["take_media_bindings"]
     if action == "render_manifest":
         ref = payload["manifest_ref"]
         job_id = hashlib.sha256(
@@ -478,7 +511,7 @@ def prepare_registered_action(
         }
     else:
         scope = ""
-        queue_kind = "speech" if action in {"transcribe_media", "align_script"} else "default"
+        queue_kind = "speech" if action in {"transcribe_media", "align_script", "compile_take_timeline"} else "default"
         producer_version = "remix-process.v1"
     task_payload["node_revision"] = node_revision
     return {
@@ -496,7 +529,7 @@ def prepare_registered_action(
 @router.post("/actions")
 async def enqueue_process_action(project: str, body: ProcessActionBody, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "editor")
-    if body.action in {"transcribe_media", "align_script"} and not await run_in_threadpool(
+    if body.action in {"transcribe_media", "align_script", "compile_take_timeline"} and not await run_in_threadpool(
         _speech_engine_ready
     ):
         raise HTTPException(503, "Speech alignment engine is not configured")

@@ -499,7 +499,7 @@ export const AudioNode = memo(({ id, data, selected, width, height }: AudioNodeP
         <AudioOperationsPanel
           nodeId={id}
           data={data}
-          onImportAudio={data.remixRole === 'narration' && readUrl().project ? () => setRemixMediaOpen(true) : undefined}
+          onImportAudio={(data.remixRole === 'narration' || data.remixRole === 'take_audio') && readUrl().project ? () => setRemixMediaOpen(true) : undefined}
         />
       )}
       {data.audioKind !== 'music' && (

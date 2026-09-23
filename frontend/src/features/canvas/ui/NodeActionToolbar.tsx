@@ -1867,6 +1867,11 @@ export const NodeActionToolbar = memo(
                     ...(!remixJourneyBlocksScriptDownstream && node.data.remixScriptRef
                       ? [{ action: 'edit_script', label: '编辑改编脚本', Icon: PenLine }]
                       : []),
+                    ...(Array.isArray((node.data.remixScriptDraft as { segments?: unknown } | undefined)?.segments)
+                      && (node.data.remixScriptDraft as { segments: unknown[] }).segments.length > 0
+                      ? (!remixJourneyBlocksScriptDownstream && remixJourneyStep?.action === 'create_timeline'
+                        ? [{ action: 'create_timeline', label: '生成表演时间轴', Icon: Workflow }] : [])
+                      : [
                     ...(!remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
                       : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'view_alignment'
@@ -1874,6 +1879,7 @@ export const NodeActionToolbar = memo(
                       : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'align_narration'
                       ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
                       : !remixJourneyBlocksScriptDownstream && node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
+                    ]),
                   ] : []
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]

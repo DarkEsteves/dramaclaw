@@ -65,6 +65,19 @@ describe('source-first remix graph plans', () => {
     expect(planTimelineFromScript(nodes, [edge('script', 'words')], 'script')).toEqual({ sourceIds: ['script', 'words'] });
   });
 
+  it('uses each accepted speaking take as a timeline input without a global narration', () => {
+    const digest = 'a'.repeat(64);
+    const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s'), remixScriptDraft: { dialogue: '男：你好', segments: [{ id: 'segment-1', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: digest }] } }),
+      node('take', 'videoNode', { videoUrl: '/static/projects/demo/freezone/take.mp4', remixRole: 'performance', remixMedia: { url: '/static/projects/demo/freezone/take.mp4', media_path: 'freezone/take.mp4', media_kind: 'video', media_hash: digest, has_audio: true } })];
+    expect(planTimelineFromScript(nodes, [edge('take', 'script')], 'script')).toEqual({ sourceIds: ['script', 'take'] });
+  });
+
+  it('refuses a silent speaking take before compiling', () => {
+    const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s'), remixScriptDraft: { segments: [{ id: 'segment-1', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64) }] } }),
+      node('take', 'videoNode', { videoUrl: '/take.mp4', remixMedia: { url: '/take.mp4', media_kind: 'video', media_hash: 'a'.repeat(64), has_audio: false } })];
+    expect(() => planTimelineFromScript(nodes, [edge('take', 'script')], 'script')).toThrow(/声音/);
+  });
+
   it('rejects missing or stale alignment before creating a timeline', () => {
     const nodes = [node('script', 'scriptNode', { remixScriptRef: ref('s') }), node('words', 'transcriptNode', { artifactRef: ref('w'), alignedScriptRef: ref('old'), status: 'completed' })];
     expect(() => planTimelineFromScript(nodes, [edge('script', 'words')], 'script')).toThrow('按当前脚本对齐');

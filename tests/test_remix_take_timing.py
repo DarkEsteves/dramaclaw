@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+import pytest
+
+from novelvideo.freezone.remix.take_timing import compile_take_timing
+
+
+def test_take_timing_joins_exact_media_and_maps_broll_to_spoken_words() -> None:
+    script = {
+        "dialogue": "男：你好。\n女：咖啡来了。", "revision": 4,
+        "segments": [
+            {"segment_id": "one", "start_char": 2, "end_char": 5, "speaker": "男", "source": "speaking_video"},
+            {"segment_id": "two", "start_char": 8, "end_char": 13, "speaker": "女", "source": "speaking_video"},
+        ],
+        "selections": [{"selection_id": "coffee", "start_char": 8, "end_char": 10, "script_revision": 4}],
+        "events": [{"event_id": "coffee", "selection_id": "coffee", "required": True}],
+    }
+    takes = [
+        {"segment_id": "one", "media_hash": "sha256:" + "a" * 64, "duration_us": 1_000_000,
+         "alignment": {"status": "completed", "transcript": "你好。", "media_hash": "sha256:" + "a" * 64, "script_revision": 4,
+                       "words": [{"text": "你好", "start_char": 0, "end_char": 2, "start_us": 100_000, "end_us": 600_000}]}},
+        {"segment_id": "two", "media_hash": "sha256:" + "b" * 64, "duration_us": 2_000_000,
+         "alignment": {"status": "completed", "transcript": "咖啡来了。", "media_hash": "sha256:" + "b" * 64, "script_revision": 4,
+                       "words": [{"text": "咖啡", "start_char": 0, "end_char": 2, "start_us": 200_000, "end_us": 800_000}]}},
+    ]
+    result = compile_take_timing(script, takes, fps=30)
+    assert [(row["segment_id"], row["start_frame"], row["end_frame"]) for row in result["takes"]] == [
+        ("one", 0, 30), ("two", 30, 90),
+    ]
+    assert result["events"] == [{"event_id": "coffee", "start_frame": 36, "end_frame": 54}]
+    assert result["takes"][1]["word_cues"] == [{"text": "咖啡", "start_char": 0, "end_char": 2, "start_frame": 36, "end_frame": 54}]
+
+
+def test_take_timing_rejects_alignment_for_a_different_media_hash() -> None:
+    script = {"dialogue": "你好", "revision": 1, "segments": [{"segment_id": "one", "start_char": 0, "end_char": 2, "speaker": "甲", "source": "voiceover"}], "selections": [], "events": []}
+    take = {"segment_id": "one", "media_hash": "sha256:" + "a" * 64, "duration_us": 1_000_000,
+            "alignment": {"status": "completed", "transcript": "你好", "media_hash": "sha256:" + "b" * 64,
+                          "script_revision": 1, "words": [{"text": "你好", "start_char": 0, "end_char": 2, "start_us": 0, "end_us": 500_000}]}}
+    with pytest.raises(ValueError, match="media hash"):
+        compile_take_timing(script, [take], fps=30)

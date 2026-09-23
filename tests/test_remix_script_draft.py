@@ -10,6 +10,26 @@ import pytest
 from novelvideo.freezone.remix.store import RemixArtifactStore
 
 
+def test_performance_segments_cover_spoken_lines_without_speaker_labels() -> None:
+    from novelvideo.freezone.remix.script_draft import performance_segments_from_dialogue
+
+    dialogue = "男：你每天喝什么？\n女：我喝新咖啡。"
+    segments = performance_segments_from_dialogue(dialogue)
+    assert [(row["segment_id"], row["speaker"], row["source"], dialogue[row["start_char"]:row["end_char"]]) for row in segments] == [
+        ("segment-1", "男", "speaking_video", "你每天喝什么？"),
+        ("segment-2", "女", "speaking_video", "我喝新咖啡。"),
+    ]
+
+
+def test_unlabelled_script_defaults_to_one_voiceover_segment() -> None:
+    from novelvideo.freezone.remix.script_draft import performance_segments_from_dialogue
+
+    dialogue = "开场。\n继续介绍产品。"
+    assert performance_segments_from_dialogue(dialogue) == [
+        {"segment_id": "segment-1", "start_char": 0, "end_char": len(dialogue), "speaker": "旁白", "source": "voiceover"},
+    ]
+
+
 def blueprint_payload() -> dict:
     return {
         "narrative_role": "问题开场，演示产品，结尾行动号召",

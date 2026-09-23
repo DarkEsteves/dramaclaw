@@ -11,6 +11,28 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 describe('RemixScriptPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('lets the editor choose person, product, setting and a speaking take', () => {
+    const onDraftChange = vi.fn();
+    const onCreateTake = vi.fn(() => 'take-1');
+    const onConnectReference = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[
+      { id: 'person', label: '新人像' }, { id: 'product', label: '新咖啡' }, { id: 'setting', label: '新场景' },
+    ]} voiceNodes={[{ id: 'voice', label: '男声样本' }]} sfxNodes={[]} onConnectReference={onConnectReference}
+      motionNodes={[{ id: 'shot', label: '原片裁出镜头' }]}
+      onCreateTake={onCreateTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText('男 人物参考'), { target: { value: 'person' } });
+    fireEvent.change(screen.getByLabelText('男 产品参考'), { target: { value: 'product' } });
+    fireEvent.change(screen.getByLabelText('男 场景参考'), { target: { value: 'setting' } });
+    fireEvent.change(screen.getByLabelText('男 声音参考'), { target: { value: 'voice' } });
+    fireEvent.change(screen.getByLabelText('男 镜头参考'), { target: { value: 'shot' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建口播视频节点' }));
+    expect(onConnectReference.mock.calls.map(([id]) => id)).toEqual(['person', 'product', 'setting', 'voice', 'shot']);
+    expect(onCreateTake).toHaveBeenCalledWith(expect.objectContaining({ personNodeId: 'person', productNodeId: 'product', settingNodeId: 'setting', voiceNodeId: 'voice', motionNodeId: 'shot' }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
+  });
+
   it('makes script generation the clear primary action after entering a topic', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 

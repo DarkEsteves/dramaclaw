@@ -212,6 +212,7 @@ describe('native canvas remix journey integration', () => {
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
     await screen.findByDisplayValue('新品登场');
+    fireEvent.click(screen.getByRole('button', { name: '改用整段旁白流程' }));
     fireEvent.click(await screen.findByRole('button', { name: '上传 产品登场 素材' }));
     const visual = useCanvasStore.getState().nodes.find((node) => node.type === 'uploadNode')!;
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef).toBeTruthy());

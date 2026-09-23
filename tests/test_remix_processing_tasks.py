@@ -119,8 +119,52 @@ def test_script_draft_runner_publishes_editable_draft_for_exact_blueprint(tmp_pa
     assert artifact["schema"] == "remix_script.v1"
     assert artifact["upstream_refs"] == [{**blueprint_ref, "project_id": "demo"}]
     assert artifact["payload"]["dialogue"] == "女：薯条。"
+    assert artifact["payload"]["segments"] == [{
+        "segment_id": "segment-1", "start_char": 2, "end_char": 5,
+        "speaker": "女", "source": "speaking_video",
+    }]
     assert artifact["payload"]["selections"][0]["label"] == "产品亮相"
     assert operations.get(operation["operation_id"])["output_refs"] == [result["artifact_ref"]]
+
+
+def test_take_timeline_runner_aligns_each_selected_video_to_its_own_text(tmp_path, monkeypatch):
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.task_backend.runners import remix as runner
+
+    store = RemixArtifactStore(tmp_path, "demo")
+    script = store.create("remix_script.v1", {
+        "dialogue": "男：你好。\n女：再见。", "segments": [
+            {"segment_id": "one", "start_char": 2, "end_char": 5, "speaker": "男", "source": "speaking_video"},
+            {"segment_id": "two", "start_char": 8, "end_char": 11, "speaker": "女", "source": "speaking_video"},
+        ], "selections": [], "events": [], "blueprint_mappings": [], "media_requirements": [],
+    }, [])
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    (media_dir / "one.mp4").write_bytes(b"video one")
+    (media_dir / "two.mp4").write_bytes(b"video two")
+    seen = []
+
+    def align(path, source):
+        seen.append((path.name, source["dialogue"]))
+        text = source["dialogue"]
+        return {"schema": "word_timeline.v1", "status": "completed", "script_revision": source["revision"],
+                "transcript": text, "media_hash": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+                "language": "zh", "words": [{"text": text, "start_char": 0, "end_char": len(text), "start_us": 0, "end_us": 500_000}]}
+
+    monkeypatch.setattr(runner, "align_script", align)
+    monkeypatch.setattr(runner, "_media_duration_us", lambda path: 1_000_000)
+    result = runner.run_remix_compile_take_timeline({"payload": {
+        "script_ref": {"artifact_id": script["id"], "revision": 1}, "fps": 30,
+        "take_bindings": [
+            {"segment_id": "one", "media_path": "media/one.mp4", "media_sha256": hashlib.sha256(b"video one").hexdigest()},
+            {"segment_id": "two", "media_path": "media/two.mp4", "media_sha256": hashlib.sha256(b"video two").hexdigest()},
+        ],
+    }}, SimpleNamespace(output_dir=str(tmp_path), project_id="demo"))
+    artifact = store.read(result["artifact_ref"]["artifact_id"], result["artifact_ref"]["revision"])
+    assert seen == [("one.mp4", "你好。"), ("two.mp4", "再见。")]
+    assert artifact["schema"] == "performance_timing.v2"
+    assert [(row["start_frame"], row["end_frame"]) for row in artifact["payload"]["takes"]] == [(0, 30), (30, 60)]
+    assert len(artifact["upstream_refs"]) == 3  # exact script and two word timelines
 
 
 def test_transcribe_runner_resolves_project_relative_media_and_publishes_timeline(tmp_path, monkeypatch):

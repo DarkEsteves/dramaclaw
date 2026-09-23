@@ -25,6 +25,33 @@ describe('prepareNodeRemix', () => {
   });
   beforeEach(() => { api.fetchRemixArtifact.mockReset(); api.createRemixArtifact.mockReset(); });
 
+  it('builds a versioned composition from native speaking video sound without narration', async () => {
+    const scriptRef = { artifactId: 'script', revision: 2 };
+    const blueprintRef = { artifactId: 'blueprint', revision: 1 };
+    const timingRef = { artifactId: 'timing', revision: 1 };
+    const takeMedia = media('video', 'b');
+    const nodes = [node('reference', 'videoNode', { remixRole: 'reference', videoUrl: '/video', remixMedia: media('video', 'a') }),
+      node('story', 'videoStoryNode', { referenceBlueprintRef: blueprintRef }),
+      node('take', 'videoNode', { remixRole: 'performance', videoUrl: '/video', remixMedia: takeMedia }),
+      node('script', 'scriptNode', { remixScriptRef: scriptRef, remixBlueprintRef: blueprintRef,
+        remixScriptDraft: { dialogue: '男：你好', segments: [{ id: 'one', start: 2, end: 4, speaker: '男', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: takeMedia.media_hash }] } }),
+      node('timeline', 'semanticTimelineNode', { artifactRef: timingRef, remixTimingSchema: 'performance_timing.v2' }),
+      node('compose', 'videoComposeNode', {})];
+    const edges = [edge('reference', 'story'), edge('story', 'script'), edge('take', 'script'), edge('script', 'timeline'), edge('take', 'timeline'), edge('timeline', 'compose')];
+    api.fetchRemixArtifact.mockImplementation((_project: string, ref: { artifactId: string }) => ref.artifactId === 'timing'
+      ? Promise.resolve({ schema: 'performance_timing.v2', upstream_refs: [{ artifact_id: 'script', revision: 2 }], payload: { script_revision: 2, fps: 30, duration_frames: 120,
+        takes: [{ segment_id: 'one', source: 'speaking_video', media_hash: `sha256:${takeMedia.media_hash}`, start_frame: 0, end_frame: 120, caption: '你好', word_cues: [{ start_char: 0, end_char: 2, start_frame: 5, end_frame: 90 }] }],
+        events: [], unresolved_required_events: [], override_conflicts: [] } })
+      : ref.artifactId === 'script' ? Promise.resolve({ schema: 'remix_script.v1', upstream_refs: [{ artifact_id: 'blueprint', revision: 1 }], payload: { dialogue: '男：你好',
+        segments: [{ segment_id: 'one', source: 'speaking_video', take_node_id: 'take', take_media_revision: takeMedia.media_hash }], selections: [], events: [] } })
+        : Promise.resolve({ schema: 'reference_blueprint.v1', payload: { media_hash: 'a'.repeat(64) } }));
+    api.createRemixArtifact.mockResolvedValue({ id: 'manifest', revision: 1 });
+    await prepareNodeRemix('demo', nodes, edges, 'compose');
+    expect(api.createRemixArtifact).toHaveBeenCalledWith('demo', 'composition_manifest.v1', expect.objectContaining({ manifest_version: 3,
+      audio_events: [expect.objectContaining({ media_id: 'take-one', role: 'speech' })],
+      layers: [expect.objectContaining({ media_id: 'take-one', z_order: 0 })] }), [timingRef, scriptRef, blueprintRef]);
+  });
+
   it('walks connected nodes and publishes a versioned manifest from timing and media', async () => {
     const scriptRef = { artifactId: 'script-1', revision: 1 };
     const timingRef = { artifactId: 'timing-1', revision: 1 };

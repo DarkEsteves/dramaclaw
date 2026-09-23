@@ -1,5 +1,6 @@
 import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { boundBrollVisualMedia } from './brollCanvasBinding';
+import { boundPerformanceTakeMedia, selectedPerformanceTakes } from './takeCanvasBinding';
 
 export type RemixJourneyAction =
   | 'analyze_reference' | 'continue_story' | 'edit_script' | 'create_narration'
@@ -110,6 +111,25 @@ function missingRequiredBroll(node: CanvasNode, nodes: CanvasNode[], edges: Canv
   });
 }
 
+function composeJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], timeline: CanvasNode): RemixJourneyStep {
+  const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
+  if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };
+  if (!ref(compose.data.remixManifestRef)) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '生成合成清单' };
+  if (compose.data.remixManifestLoadState === 'failed') return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '重新生成合成清单', inputHint: '旧清单加载失败；将使用当前画布上游重新生成。' };
+  if (compose.data.remixManifestLoadState !== 'ready' || !sameRef(compose.data.remixManifestLoadedRef, compose.data.remixManifestRef)) return { kind: 'wait', targetNodeId: compose.id, label: '加载合成清单', inputHint: '清单加载完成后才能检查并导出。' };
+  const conflicts = Array.isArray(compose.data.remixManifestConflicts) ? compose.data.remixManifestConflicts : [];
+  if (conflicts.length) return { kind: 'action', action: 'resolve_manifest_conflicts', targetNodeId: compose.id, label: '处理清单冲突', inputHint: '逐项选择保留手工值或采用上游值。' };
+  if (compose.data.remixManifestDirty === true) return { kind: 'action', action: 'save_manifest', targetNodeId: compose.id, label: '保存合成清单修改' };
+  if (compose.data.remixManifestDirty !== false) return { kind: 'input', targetNodeId: compose.id, label: '确认合成清单状态', inputHint: '打开合成节点，等待清单状态同步后再导出。' };
+  const unresolved = Array.isArray(compose.data.unresolvedRequiredEvents) ? compose.data.unresolvedRequiredEvents : [];
+  if (unresolved.length) return { kind: 'input', targetNodeId: timeline.id, label: '修正未解析事件', inputHint: `仍需修正：${unresolved.join('、')}` };
+  if (typeof compose.data.remixInputFingerprint !== 'string' || !compose.data.remixInputFingerprint || compose.data.remixInputsCurrent !== true) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '上游已变化，更新清单' };
+  if (!Number.isInteger(compose.data.remixNodeRevision) || Number(compose.data.remixNodeRevision) < 1) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '更新合成清单版本' };
+  if (compose.data.remixOperationId && !compose.data.resultVideoUrl) return { kind: 'wait', targetNodeId: compose.id, label: '等待成片导出' };
+  if (!compose.data.resultVideoUrl) return { kind: 'action', action: 'render_export', targetNodeId: compose.id, label: '导出 MP4' };
+  return { kind: 'complete', targetNodeId: compose.id, label: '成片可编辑并可下载 MP4' };
+}
+
 export function primaryVisualEventsForScript(script: CanvasNode, nodes: CanvasNode[], edges: CanvasEdge[]): Array<{ id: string; label: string }> {
   const draft = script.data.remixScriptDraft as { selections?: Array<{ id: string; label: string; visualNodeId?: string; visualMediaRevision?: string }> } | undefined;
   return (draft?.selections ?? []).filter((selection) => {
@@ -144,6 +164,40 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
     return { kind: 'action', action: 'plan_broll', targetNodeId: script.id, label: script.data.remixBrollPlanStatus === 'failed' ? '重新规划 B-roll' : '规划 B-roll' };
   }
   if (missingRequiredBroll(script, nodes, edges)) return { kind: 'input', action: 'edit_script', targetNodeId: script.id, label: '补齐必需 B-roll', inputHint: '打开脚本，重新选择当前已连接的替换画面，并确认素材版本。' };
+
+  const performance = (script.data.remixScriptDraft as { segments?: Array<{ id: string; speaker: string; source: 'speaking_video' | 'voiceover' | 'original_sound'; takeNodeId?: string; takeMediaRevision?: string; primaryNodeId?: string; primaryMediaRevision?: string }> } | undefined)?.segments;
+  if (performance?.length) {
+    const takeBindings: Array<{ segment_id: string; media_path: string; media_hash: string }> = [];
+    for (const segment of performance) {
+      const take = nodes.find((node) => node.id === segment.takeNodeId && edges.some((edge) => edge.source === node.id && edge.target === script.id));
+      if (!take) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: `选择 ${segment.speaker} 的表演片段` };
+      if (take.data.isGenerating || take.data.workflowActionRunning) return { kind: 'wait', targetNodeId: take.id, label: `等待 ${segment.speaker} 的片段` };
+      if (!take.data.videoUrl && !take.data.audioUrl) return { kind: 'input', targetNodeId: take.id, label: `制作 ${segment.speaker} 的${segment.source === 'voiceover' ? '旁白' : '口播视频'}` };
+      try {
+        const media = boundPerformanceTakeMedia('', take, segment.source);
+        if (media.media_hash !== segment.takeMediaRevision) throw new Error('素材未绑定');
+        takeBindings.push({ segment_id: segment.id, media_path: media.media_path, media_hash: media.media_hash });
+      } catch { return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: `绑定 ${segment.speaker} 的片段` }; }
+      if (segment.source === 'voiceover') {
+        const primary = nodes.find((node) => node.id === segment.primaryNodeId && edges.some((edge) => edge.source === node.id && edge.target === script.id));
+        if (!primary) return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: `选择 ${segment.speaker} 的旁白主画面` };
+        try { if (boundBrollVisualMedia('', primary).media_hash !== segment.primaryMediaRevision) throw new Error('主画面未绑定'); }
+        catch { return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: `绑定 ${segment.speaker} 的旁白主画面` }; }
+      }
+    }
+    try { selectedPerformanceTakes('', nodes, edges, script); }
+    catch { return { kind: 'action', action: 'edit_script', targetNodeId: script.id, label: '检查表演片段和参考素材版本' }; }
+    const timeline = nodes.find((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline
+      && edges.some((edge) => edge.source === script.id && edge.target === node.id)
+      && performance.every((segment) => edges.some((edge) => edge.source === segment.takeNodeId && edge.target === node.id)));
+    if (!timeline) return { kind: 'action', action: 'create_timeline', targetNodeId: script.id, label: '按表演片段生成时间轴' };
+    if (timeline.data.compileOperationId) return { kind: 'wait', targetNodeId: timeline.id, label: '等待表演时间轴编译' };
+    if (!ref(timeline.data.artifactRef) || timeline.data.remixTimingSchema !== 'performance_timing.v2'
+      || !sameRef(timeline.data.compiledScriptRef, script.data.remixScriptRef)
+      || timeline.data.compiledTakeSignature !== JSON.stringify(takeBindings)) return { kind: 'action', action: 'compile_timeline', targetNodeId: timeline.id, label: '按片段对齐时间轴' };
+    if (Array.isArray(timeline.data.events) && timeline.data.events.some((event) => event.invalidReason)) return { kind: 'input', targetNodeId: timeline.id, label: '修正未解析事件' };
+    return composeJourneyStep(nodes, edges, timeline);
+  }
 
   const scriptRef = script.data.remixScriptRef;
   const audio = directChild(nodes, edges, script.id, CANVAS_NODE_TYPES.audio);
@@ -191,20 +245,5 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
     }
   }
 
-  const compose = directChild(nodes, edges, timeline.id, CANVAS_NODE_TYPES.videoCompose);
-  if (!compose) return { kind: 'action', action: 'create_compose', targetNodeId: timeline.id, label: '创建成片清单' };
-  if (!ref(compose.data.remixManifestRef)) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '生成合成清单' };
-  if (compose.data.remixManifestLoadState === 'failed') return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '重新生成合成清单', inputHint: '旧清单加载失败；将使用当前画布上游重新生成。' };
-  if (compose.data.remixManifestLoadState !== 'ready' || !sameRef(compose.data.remixManifestLoadedRef, compose.data.remixManifestRef)) return { kind: 'wait', targetNodeId: compose.id, label: '加载合成清单', inputHint: '清单加载完成后才能检查并导出。' };
-  const conflicts = Array.isArray(compose.data.remixManifestConflicts) ? compose.data.remixManifestConflicts : [];
-  if (conflicts.length) return { kind: 'action', action: 'resolve_manifest_conflicts', targetNodeId: compose.id, label: '处理清单冲突', inputHint: '逐项选择保留手工值或采用上游值。' };
-  if (compose.data.remixManifestDirty === true) return { kind: 'action', action: 'save_manifest', targetNodeId: compose.id, label: '保存合成清单修改' };
-  if (compose.data.remixManifestDirty !== false) return { kind: 'input', targetNodeId: compose.id, label: '确认合成清单状态', inputHint: '打开合成节点，等待清单状态同步后再导出。' };
-  const unresolved = Array.isArray(compose.data.unresolvedRequiredEvents) ? compose.data.unresolvedRequiredEvents : [];
-  if (unresolved.length) return { kind: 'input', targetNodeId: timeline.id, label: '修正未解析事件', inputHint: `仍需修正：${unresolved.join('、')}` };
-  if (typeof compose.data.remixInputFingerprint !== 'string' || !compose.data.remixInputFingerprint || compose.data.remixInputsCurrent !== true) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '上游已变化，更新清单' };
-  if (!Number.isInteger(compose.data.remixNodeRevision) || Number(compose.data.remixNodeRevision) < 1) return { kind: 'action', action: 'prepare_manifest', targetNodeId: compose.id, label: '更新合成清单版本' };
-  if (compose.data.remixOperationId && !compose.data.resultVideoUrl) return { kind: 'wait', targetNodeId: compose.id, label: '等待成片导出' };
-  if (!compose.data.resultVideoUrl) return { kind: 'action', action: 'render_export', targetNodeId: compose.id, label: '导出 MP4' };
-  return { kind: 'complete', targetNodeId: compose.id, label: '成片可编辑并可下载 MP4' };
+  return composeJourneyStep(nodes, edges, timeline);
 }

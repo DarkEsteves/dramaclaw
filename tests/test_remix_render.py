@@ -179,6 +179,78 @@ def test_v2_accepts_contiguous_generated_primary_shots_without_uploaded_backgrou
         validate_manifest(manifest)
 
 
+def test_v3_accepts_sequential_speaking_videos_and_rejects_silent_speech() -> None:
+    manifest = {
+        "manifest_version": 3,
+        "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 60,
+                        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180}},
+        "media_bindings": [
+            {"media_id": "first", "kind": "video", "purpose": "a-roll", "has_audio": True, "media_hash": "sha256:" + "a" * 64},
+            {"media_id": "second", "kind": "video", "purpose": "a-roll", "has_audio": True, "media_hash": "sha256:" + "b" * 64},
+        ],
+        "layers": [
+            {"media_id": "first", "start_frame": 0, "end_frame": 30, "z_order": 0, "fit": "cover"},
+            {"media_id": "second", "start_frame": 30, "end_frame": 60, "z_order": 0, "fit": "cover"},
+        ],
+        "audio_events": [
+            {"media_id": "first", "role": "speech", "start_frame": 0, "end_frame": 30, "volume": 1},
+            {"media_id": "second", "role": "speech", "start_frame": 30, "end_frame": 60, "volume": 1},
+        ],
+        "subtitle_events": [], "manual_overrides": [], "source_versions": [],
+    }
+    assert validate_manifest(manifest) == manifest
+    assert manifest_renderer(manifest) == "layered_v3"
+    silent = deepcopy(manifest)
+    silent["media_bindings"][1]["has_audio"] = False
+    with pytest.raises(ValueError, match="audio stream"):
+        validate_manifest(silent)
+    drift = deepcopy(manifest)
+    drift["audio_events"][1]["start_frame"] = 31
+    with pytest.raises(ValueError, match="speech and visual spans"):
+        validate_manifest(drift)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required")
+def test_v3_renders_each_speaking_videos_own_sound(tmp_path: Path) -> None:
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    for color, frequency, target in (("blue", 440, first), ("red", 880, second)):
+        _ffmpeg("-f", "lavfi", "-i", f"color=c={color}:s=180x320:r=30:d=1",
+                "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration=1",
+                "-shortest", "-c:v", "libx264", "-c:a", "aac", str(target))
+    manifest = {
+        "manifest_version": 3,
+        "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 60,
+                        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180}},
+        "media_bindings": [
+            {"media_id": "first", "kind": "video", "purpose": "a-roll", "has_audio": True, "media_hash": "sha256:" + "0" * 64},
+            {"media_id": "second", "kind": "video", "purpose": "a-roll", "has_audio": True, "media_hash": "sha256:" + "0" * 64},
+        ],
+        "layers": [
+            {"media_id": "first", "start_frame": 0, "end_frame": 30, "z_order": 0, "fit": "cover"},
+            {"media_id": "second", "start_frame": 30, "end_frame": 60, "z_order": 0, "fit": "cover"},
+        ],
+        "audio_events": [
+            {"media_id": "first", "role": "speech", "start_frame": 0, "end_frame": 30, "volume": 1},
+            {"media_id": "second", "role": "speech", "start_frame": 30, "end_frame": 60, "volume": 1},
+        ], "subtitle_events": [], "manual_overrides": [], "source_versions": [],
+    }
+    output = render_manifest(_bind_media_hashes(manifest, {"first": first, "second": second}),
+                             media_paths={"first": first, "second": second}, output_path=tmp_path / "out.mp4")
+    assert _pixel(output, 0.25, x=540, y=960)[2] > 100
+    assert _pixel(output, 1.25, x=540, y=960)[0] > 100
+    counts = []
+    for start in (0.2, 1.2):
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(start), "-t", "0.2", "-i", str(output),
+                              "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"],
+                             check=True, capture_output=True).stdout
+        samples = array("h")
+        samples.frombytes(raw)
+        counts.append(sum(left <= 0 < right for left, right in zip(samples, samples[1:])))
+    assert counts[0] > 50
+    assert counts[1] > counts[0] * 1.7
+
+
 @pytest.mark.skipif(
     not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
     reason="FFmpeg required",

@@ -11,6 +11,7 @@ import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createComposeFromTimeline } from '@/features/canvas/remix/spawnRemixDownstream';
+import { selectedPerformanceTakes } from '@/features/canvas/remix/takeCanvasBinding';
 import { toast } from 'sonner';
 
 type TimelineData = SemanticTimelineNodeData & {
@@ -22,6 +23,10 @@ type TimelineData = SemanticTimelineNodeData & {
   autoCompileRequested?: boolean;
   editMap?: Record<string, number>[];
   compiledMediaHash?: string;
+  remixTimingSchema?: string;
+  compilingTakeSignature?: string | null;
+  compiledTakeSignature?: string | null;
+  compiledTakes?: Array<{ segment_id: string; speaker: string; source: string; start_frame: number; end_frame: number; caption: string }>;
 };
 
 function asRef(value: unknown): RemixArtifactRef | null {
@@ -32,6 +37,12 @@ function asRef(value: unknown): RemixArtifactRef | null {
 }
 
 function sleep(ms: number) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); }
+
+function timelineErrorMessage(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : '时间轴编译失败。';
+  return /Speech alignment engine is not configured|no speech aligner is configured/u.test(message)
+    ? '语音对齐服务尚未配置；需要启用语音对齐后才能按实际片段声音生成时间轴。' : message;
+}
 
 type ScriptSelection = {
   id?: unknown;
@@ -79,12 +90,22 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   const [overrides, setOverrides] = useState<Record<string, TimelineEventOverride>>(data.eventOverrides ?? {});
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
   const project = readUrl().project;
+  const takeMode = Array.isArray((scriptNode?.data?.remixScriptDraft as { segments?: unknown } | undefined)?.segments)
+    && (scriptNode?.data?.remixScriptDraft as { segments: unknown[] }).segments.length > 0;
+  const takeBindings = (() => {
+    if (!takeMode || !scriptNode || !project) return null;
+    try { return selectedPerformanceTakes(project, useCanvasStore.getState().nodes, useCanvasStore.getState().edges, scriptNode)
+      .map((take) => ({ segment_id: take.segment.id, media_path: take.media.media_path, media_hash: take.media.media_hash })); }
+    catch { return null; }
+  })();
+  const takeSignature = takeBindings ? JSON.stringify(takeBindings) : null;
   const currentOperationRef = useRef(data.compileOperationId ?? null);
-  const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? 0 });
+  const currentInputsRef = useRef({ script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, takeSignature, revision: data.nodeRevision ?? 0 });
   const watchingRef = useRef<string | null>(null);
+  const compilingTakeSignatureRef = useRef<string | null>(data.compilingTakeSignature ?? null);
   const compileClaimRef = useRef(false);
   const mountedRef = useRef(true);
-  currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, revision: data.nodeRevision ?? currentInputsRef.current.revision };
+  currentInputsRef.current = { script: asRef(scriptRef), words: asRef(wordRef), blueprint: asRef(blueprintRef), narrationPath, takeSignature, revision: data.nodeRevision ?? currentInputsRef.current.revision };
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -114,7 +135,11 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
         const operation = await fetchRemixOperation(project, operationId);
         if (!mountedRef.current || currentOperationRef.current !== operationId) return;
         const inputs = currentInputsRef.current;
-        if (!operationMatchesTimelineInputs(operation, inputs.script, inputs.words, inputs.blueprint, inputs.revision)) {
+        const matches = compilingTakeSignatureRef.current
+          ? operation.node_revision === inputs.revision && inputs.takeSignature === compilingTakeSignatureRef.current
+            && operation.input_refs?.some((item) => item.artifact_id === inputs.script?.artifactId && item.revision === inputs.script.revision)
+          : operationMatchesTimelineInputs(operation, inputs.script, inputs.words, inputs.blueprint, inputs.revision);
+        if (!matches) {
           currentOperationRef.current = null;
           updateNodeData(id, { artifactRef: null, compileOperationId: null, compileError: '上游脚本或语音版本已变化，请重新编译。' });
           setError('上游脚本或语音版本已变化，请重新编译。');
@@ -125,16 +150,25 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           if (!ref?.artifact_id || !ref.revision) throw new Error('编译完成，但没有返回时间轴产物。');
           const artifactRef = { artifactId: ref.artifact_id, revision: ref.revision };
           const timing = await fetchRemixArtifact(project, artifactRef);
-          if (timing.schema !== 'performance_timing.v1') throw new Error('时间轴产物格式不正确。');
+          if (timing.schema !== (compilingTakeSignatureRef.current ? 'performance_timing.v2' : 'performance_timing.v1')) throw new Error('时间轴产物格式不正确。');
           const current = currentInputsRef.current;
-          if (!mountedRef.current || currentOperationRef.current !== operationId || !operationMatchesTimelineInputs(operation, current.script, current.words, current.blueprint, current.revision)) return;
+          const stillMatches = compilingTakeSignatureRef.current
+            ? current.takeSignature === compilingTakeSignatureRef.current && current.revision === operation.node_revision
+            : operationMatchesTimelineInputs(operation, current.script, current.words, current.blueprint, current.revision);
+          if (!mountedRef.current || currentOperationRef.current !== operationId || !stillMatches) return;
           currentOperationRef.current = null;
+          const completedTakeSignature = compilingTakeSignatureRef.current;
+          compilingTakeSignatureRef.current = null;
           updateNodeData(id, {
             artifactRef,
             events: readTimingEvents(timing.payload),
             compiledMediaHash: typeof timing.payload.media_hash === 'string' ? timing.payload.media_hash : undefined,
             compiledScriptRef: current.script,
             compiledAlignmentRef: current.words,
+            remixTimingSchema: timing.schema,
+            compiledTakeSignature: completedTakeSignature,
+            compilingTakeSignature: null,
+            compiledTakes: timing.schema === 'performance_timing.v2' && Array.isArray(timing.payload.takes) ? timing.payload.takes : [],
             compileOperationId: null,
             compileError: null,
           });
@@ -158,7 +192,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       throw new Error('编译仍在运行，请稍后继续检查。');
     } catch (cause) {
       if (!mountedRef.current) return;
-      const message = cause instanceof Error ? cause.message : '时间轴编译状态暂时不可用。';
+      const message = timelineErrorMessage(cause);
       setError(message);
       updateNodeData(id, { compileError: message });
     } finally {
@@ -180,6 +214,27 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     const exactScriptRef = asRef(scriptRef);
     const exactWordRef = asRef(wordRef);
     const exactBlueprintRef = asRef(blueprintRef);
+    if (takeMode) {
+      if (!exactScriptRef || !takeBindings?.length || !takeSignature) { setError('请在脚本中为每个表演段落绑定带声音的视频或旁白。'); return; }
+      compileClaimRef.current = true; setBusy(true); setError(null);
+      try {
+        const nodeRevision = currentInputsRef.current.revision + 1;
+        const task = await submitRemixProcessAction(project, { action: 'compile_take_timeline', scriptRef: exactScriptRef,
+          takeBindings: takeBindings.map(({ segment_id, media_path }) => ({ segment_id, media_path })),
+          fps: data.fps ?? 30, idempotencyKey: crypto.randomUUID(), nodeRevision });
+        currentInputsRef.current.revision = nodeRevision;
+        currentOperationRef.current = task.operation_id;
+        compilingTakeSignatureRef.current = takeSignature;
+        updateNodeData(id, { nodeRevision, compileOperationId: task.operation_id, artifactRef: null,
+          compilingTakeSignature: takeSignature, remixTimingSchema: 'performance_timing.v2' });
+        await watchOperation(task.operation_id);
+      } catch (cause) {
+        const message = timelineErrorMessage(cause);
+        setError(message); updateNodeData(id, { compileError: message, compileOperationId: null });
+      } finally { compileClaimRef.current = false; if (!watchingRef.current && mountedRef.current) setBusy(false); }
+      return;
+    }
+    compilingTakeSignatureRef.current = null;
     if (!exactScriptRef || !exactWordRef || !exactBlueprintRef || !narrationPath) {
       setError('请先连接脚本、参考蓝图和已对齐旁白的转写节点。');
       return;
@@ -204,7 +259,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       updateNodeData(id, { nodeRevision, compileOperationId: task.operation_id, artifactRef: null });
       await watchOperation(task.operation_id);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : '时间轴编译失败。';
+      const message = timelineErrorMessage(cause);
       setError(message);
       updateNodeData(id, { compileError: message });
     } finally {
@@ -221,10 +276,10 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
   }), [id, compile]);
 
   useEffect(() => {
-    if (!data.autoCompileRequested || !asRef(scriptRef) || !asRef(wordRef)) return;
+    if (!data.autoCompileRequested || !asRef(scriptRef) || (!takeMode && !asRef(wordRef))) return;
     updateNodeData(id, { autoCompileRequested: false });
     void compile();
-  }, [data.autoCompileRequested, scriptRef, wordRef, id]);
+  }, [data.autoCompileRequested, scriptRef, wordRef, takeMode, takeSignature, id]);
 
   return <div className="group relative w-[480px]" onClick={() => setSelectedNode(id)}>
     <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
@@ -233,7 +288,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
     <div className={`flex max-h-[400px] flex-col overflow-hidden rounded-[var(--node-radius)] border ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/[0.08] px-4 py-3">
         <div className="flex items-center gap-2.5">
-          <span className="text-[15px] font-semibold text-text-dark">{data.events.length} 个片段</span>
+          <span className="text-[15px] font-semibold text-text-dark">{takeMode ? data.compiledTakes?.length ?? 0 : data.events.length} 个片段</span>
           <span className={`text-[12px] ${busy || data.compileOperationId ? 'text-amber-300' : data.artifactRef ? 'text-emerald-300' : 'text-text-muted'}`}>
             {busy || data.compileOperationId ? '正在计算…' : data.artifactRef ? '已计算' : '待计算'}
           </span>
@@ -241,9 +296,13 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
         {data.artifactRef ? <span className="text-[12px] text-text-dark/55">版本 {data.artifactRef.revision}</span> : null}
       </div>
       <div className="ui-scrollbar nowheel min-h-0 overflow-y-auto px-4">
-      {!asRef(scriptRef) || !asRef(wordRef) ? <p className="py-2 text-[12px] text-amber-300">连接脚本和已对齐语音的转写节点后可编译。</p> : null}
+      {!asRef(scriptRef) || (takeMode ? !takeBindings?.length : !asRef(wordRef)) ? <p className="py-2 text-[12px] text-amber-300">{takeMode ? '请在脚本中为每段选择已完成的表演视频或独立旁白。' : '连接脚本和已对齐语音的转写节点后可编译。'}</p> : null}
       {(error || data.compileError) && <p role="alert" className="py-2 text-[12px] text-red-300">{error || data.compileError}</p>}
-      {data.events.map((event, index) => {
+      {takeMode && data.compiledTakes?.map((take, index) => <section key={take.segment_id} className="border-b border-white/[0.07] py-2.5 last:border-b-0">
+        <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="text-[13px] font-medium text-text-dark">{String(index + 1).padStart(2, '0')} · {take.speaker} · {take.source === 'voiceover' ? '独立旁白' : '口播原声'}</div><p className="mt-1 line-clamp-2 text-[11px] text-text-muted">{take.caption}</p></div>
+        <span className="shrink-0 font-mono text-[11px] text-text-muted">{formatFrameTime(take.start_frame, data.fps ?? 30)} – {formatFrameTime(take.end_frame, data.fps ?? 30)}</span></div>
+      </section>)}
+      {!takeMode && data.events.map((event, index) => {
         const override = overrides[event.selectionId] ?? {};
         const presentation = readScriptPresentation(scriptNode?.data?.remixScriptDraft, event.selectionId, event.label, index);
         const startTime = formatFrameTime(event.startFrame, data.fps ?? 30);
@@ -283,7 +342,7 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
           </div> : null}
         </section>;
       })}
-      {data.events.length === 0 && <div className="rounded-[10px] border border-dashed border-white/10 px-3 py-6 text-center text-[12px] text-text-muted">还没有可计算的片段，请先在脚本节点添加语义事件。</div>}
+      {!takeMode && data.events.length === 0 && <div className="rounded-[10px] border border-dashed border-white/10 px-3 py-6 text-center text-[12px] text-text-muted">还没有可计算的片段，请先在脚本节点添加语义事件。</div>}
       </div>
     </div>
   </div>;

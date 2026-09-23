@@ -1,6 +1,7 @@
 import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { visualGenerationRequestMutationPatches } from './visualGenerationRequest';
+import { selectedPerformanceTakes } from './takeCanvasBinding';
 
 type Ref = { artifactId: string; revision: number };
 
@@ -91,6 +92,11 @@ export function planTimelineFromScript(nodes: CanvasNode[], edges: CanvasEdge[],
   const script = nodes.find((node) => node.id === scriptId && node.type === CANVAS_NODE_TYPES.script);
   const scriptRef = ref(script?.data.remixScriptRef);
   if (!scriptRef) throw new Error('请先保存改编脚本。');
+  if (Array.isArray((script?.data.remixScriptDraft as { segments?: unknown } | undefined)?.segments)
+    && (script?.data.remixScriptDraft as { segments: unknown[] }).segments.length > 0) {
+    const takes = selectedPerformanceTakes('', nodes, edges, script!);
+    return { sourceIds: [scriptId, ...new Set(takes.map((take) => take.node.id))] };
+  }
   const narration = nodes.find((node) => node.type === CANVAS_NODE_TYPES.audio
     && node.data.remixRole === 'narration'
     && sameRef(ref(node.data.remixScriptRef), scriptRef)
@@ -131,6 +137,15 @@ export function planComposeFromTimeline(nodes: CanvasNode[], edges: CanvasEdge[]
     throw new Error('语义时间轴仍有未解决的必需事件，请先修正后重新编译。');
   }
   const upstream = ancestors(nodes, edges, timelineId);
+  if (timeline?.data.remixTimingSchema === 'performance_timing.v2') {
+    const script = upstream.find((node) => node.type === CANVAS_NODE_TYPES.script && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
+    if (!script || !sameRef(ref(script.data.remixScriptRef), ref(timeline.data.compiledScriptRef))) throw new Error('时间轴对应的脚本版本已变化，请重新编译');
+    const takes = selectedPerformanceTakes('', nodes, edges, script);
+    if (!takes.every((take) => edges.some((edge) => edge.source === take.node.id && edge.target === timelineId))) throw new Error('时间轴缺少表演片段连接');
+    const signature = JSON.stringify(takes.map((take) => ({ segment_id: take.segment.id, media_path: take.media.media_path, media_hash: take.media.media_hash })));
+    if (timeline.data.compiledTakeSignature !== signature) throw new Error('表演片段已变化，请重新编译时间轴');
+    return { sourceIds: [timelineId] };
+  }
   const script = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && ref(node.data.remixScriptRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
   const words = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.transcript && ref(node.data.artifactRef) && edges.some((edge) => edge.source === node.id && edge.target === timelineId));
   if (script.length !== 1 || words.length !== 1 || !sameRef(ref(words[0].data.alignedScriptRef), ref(script[0].data.remixScriptRef))) throw new Error('时间轴需要连接当前脚本和已对齐的转写节点。');

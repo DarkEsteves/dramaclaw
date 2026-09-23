@@ -203,12 +203,61 @@ class ReferenceBlueprint(_Contract):
         return self
 
 
+class PerformanceSegment(_Contract):
+    segment_id: str = Field(min_length=1, max_length=128)
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=1)
+    speaker: str = Field(min_length=1, max_length=80)
+    source: Literal["speaking_video", "voiceover", "original_sound"]
+    person_node_id: str | None = None
+    product_node_id: str | None = None
+    setting_node_id: str | None = None
+    motion_node_id: str | None = None
+    voice_node_id: str | None = None
+    take_node_id: str | None = None
+    take_media_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    primary_node_id: str | None = None
+    primary_media_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "PerformanceSegment":
+        if self.end_char <= self.start_char:
+            raise ValueError("performance segment range must be non-empty")
+        if self.take_media_revision and not self.take_node_id:
+            raise ValueError("performance segment media revision requires a take node")
+        if self.primary_media_revision and not self.primary_node_id:
+            raise ValueError("performance segment primary media revision requires a node")
+        return self
+
+
 class RemixScript(_Contract):
     dialogue: str
     segments: list[dict[str, Any]]
     selections: list[dict[str, Any]]
     blueprint_mappings: list[dict[str, Any]]
     media_requirements: list[dict[str, Any]]
+
+    @model_validator(mode="after")
+    def _validate_segments(self) -> "RemixScript":
+        if not self.segments or all("segment_id" not in segment for segment in self.segments):
+            return self  # Historical remix_script.v1 scene snippets remain readable.
+        if any("segment_id" not in segment for segment in self.segments):
+            raise ValueError("performance segments cannot mix with legacy scene snippets")
+        seen: set[str] = set()
+        previous_end = 0
+        normalized: list[dict[str, Any]] = []
+        for raw in self.segments:
+            try:
+                segment = PerformanceSegment.model_validate(raw)
+            except ValidationError as exc:
+                raise ValueError(f"performance segment is invalid: {exc}") from exc
+            if segment.segment_id in seen or segment.start_char < previous_end or segment.end_char > len(self.dialogue):
+                raise ValueError("performance segments must be unique, ordered, and inside dialogue")
+            seen.add(segment.segment_id)
+            previous_end = segment.end_char
+            normalized.append(segment.model_dump(mode="json", exclude_none=True))
+        self.segments = normalized
+        return self
 
 
 class OutputFrameEvent(_Contract):
@@ -238,9 +287,44 @@ class PerformanceTiming(_Contract):
     override_conflicts: list[dict[str, Any]]
 
 
+class TimedTake(_Contract):
+    segment_id: str = Field(min_length=1)
+    source: Literal["speaking_video", "voiceover", "original_sound"]
+    speaker: str = Field(min_length=1)
+    media_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(ge=1)
+    caption: str = Field(min_length=1)
+    word_cues: list[dict[str, Any]]
+
+
+class TakePerformanceTiming(_Contract):
+    schema_name: Literal["performance_timing.v2"] = Field(alias="schema")
+    script_revision: int = Field(ge=1)
+    fps: int = Field(gt=0)
+    duration_frames: int = Field(gt=0)
+    takes: list[TimedTake] = Field(min_length=1)
+    events: list[OutputFrameEvent]
+    unresolved_required_events: list[dict[str, Any]]
+    override_conflicts: list[dict[str, Any]]
+
+    @model_validator(mode="after")
+    def _validate_take_clock(self) -> "TakePerformanceTiming":
+        cursor = 0
+        seen: set[str] = set()
+        for take in self.takes:
+            if take.segment_id in seen or take.start_frame != cursor or take.end_frame <= cursor:
+                raise ValueError("take timeline must be unique and contiguous")
+            seen.add(take.segment_id)
+            cursor = take.end_frame
+        if cursor != self.duration_frames or any(event.end_frame > cursor for event in self.events):
+            raise ValueError("take timeline exceeds its duration")
+        return self
+
+
 class CompositionManifest(_Contract):
     # Missing stays missing so persisted v1 artifacts retain byte-for-byte payloads.
-    manifest_version: Literal[1, 2] | None = None
+    manifest_version: Literal[1, 2, 3] | None = None
     output_spec: dict[str, Any]
     media_bindings: list[dict[str, Any]]
     layers: list[dict[str, Any]]
@@ -262,6 +346,7 @@ PayloadModel = (
     | ReferenceBlueprint
     | RemixScript
     | PerformanceTiming
+    | TakePerformanceTiming
     | CompositionManifest
 )
 
@@ -271,6 +356,7 @@ SCHEMA_MODELS: dict[str, type[PayloadModel]] = {
     "reference_blueprint.v1": ReferenceBlueprint,
     "remix_script.v1": RemixScript,
     "performance_timing.v1": PerformanceTiming,
+    "performance_timing.v2": TakePerformanceTiming,
     "composition_manifest.v1": CompositionManifest,
 }
 V1_SCHEMAS = frozenset(SCHEMA_MODELS)
@@ -363,6 +449,7 @@ class RemixArtifactEnvelope(_Contract):
         "reference_blueprint.v1",
         "remix_script.v1",
         "performance_timing.v1",
+        "performance_timing.v2",
         "composition_manifest.v1",
     ] = Field(alias="schema")
     revision: int = Field(ge=1)

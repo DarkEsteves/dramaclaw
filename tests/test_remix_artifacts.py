@@ -9,6 +9,30 @@ from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifact
 from novelvideo.freezone.remix.timing import compile_timing
 
 
+def test_script_rejects_overlapping_or_out_of_bounds_performance_segments(tmp_path: Path) -> None:
+    base = {"dialogue": "你好世界", "segments": [], "selections": [], "blueprint_mappings": [], "media_requirements": []}
+    segment = {"segment_id": "take-1", "start_char": 0, "end_char": 2, "speaker": "甲", "source": "speaking_video"}
+    store = RemixArtifactStore(tmp_path, "project-a")
+    store.create("remix_script.v1", {**base, "segments": [segment]}, [])
+    with pytest.raises(ValueError, match="segment"):
+        store.create("remix_script.v1", {**base, "segments": [segment, {**segment, "segment_id": "take-2", "start_char": 1, "end_char": 4}]}, [])
+    with pytest.raises(ValueError, match="segment"):
+        store.create("remix_script.v1", {**base, "segments": [{**segment, "end_char": 5}]}, [])
+    with pytest.raises(ValueError, match="segment"):
+        store.create("remix_script.v1", {**base, "segments": [{**segment, "source": "silent_video"}]}, [])
+
+
+def test_take_timing_artifact_requires_exact_ordered_spans(tmp_path: Path) -> None:
+    payload = {"schema": "performance_timing.v2", "script_revision": 1, "fps": 30, "duration_frames": 60,
+               "takes": [{"segment_id": "one", "source": "speaking_video", "speaker": "甲", "media_hash": "sha256:" + "a" * 64,
+                          "start_frame": 0, "end_frame": 60, "caption": "你好", "word_cues": []}],
+               "events": [], "unresolved_required_events": [], "override_conflicts": []}
+    store = RemixArtifactStore(tmp_path, "project-a")
+    assert store.create("performance_timing.v2", payload, [])["payload"] == payload
+    with pytest.raises(ValueError, match="take"):
+        store.create("performance_timing.v2", {**payload, "takes": [{**payload["takes"][0], "start_frame": 1}]}, [])
+
+
 def evidence_payload() -> dict:
     return {
         "media_hash": "sha256:reference",

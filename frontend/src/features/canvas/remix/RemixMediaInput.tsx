@@ -4,8 +4,8 @@ import type { UploadedRemixMedia } from './workbenchModel';
 import { projectMediaPathFromUrl } from './remixMediaPath';
 import { CANVAS_NODE_OPS_PANEL_CLASS } from '@/features/canvas/ui/nodeFrameStyles';
 
-type VideoRole = 'reference' | 'visual' | 'background' | 'primary' | 'speech_clock';
-type AudioRole = 'narration' | 'bgm' | 'sfx';
+type VideoRole = 'reference' | 'visual' | 'background' | 'primary' | 'speech_clock' | 'identity' | 'performance';
+type AudioRole = 'narration' | 'bgm' | 'sfx' | 'take_audio';
 
 interface Props {
   project: string;
@@ -22,11 +22,14 @@ const videoRoles: Array<{ value: VideoRole; label: string }> = [
   { value: 'primary', label: '事件主画面' },
   { value: 'visual', label: '替换画面' },
   { value: 'speech_clock', label: '视频原声' },
+  { value: 'identity', label: '人物／产品／场景参考' },
+  { value: 'performance', label: '人物口播片段' },
 ];
 const audioRoles: Array<{ value: AudioRole; label: string }> = [
   { value: 'narration', label: '旁白' },
   { value: 'bgm', label: '背景音乐' },
   { value: 'sfx', label: '音效' },
+  { value: 'take_audio', label: '独立旁白片段' },
 ];
 
 export function RemixMediaInput({ project, kind, media, sourceUrl, role, onChange }: Props) {

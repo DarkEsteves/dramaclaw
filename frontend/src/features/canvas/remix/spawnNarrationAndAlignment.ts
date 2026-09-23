@@ -13,14 +13,14 @@ type Ref = { artifactId: string; revision: number };
 export function applyNarrationMediaChange(
   audioId: string,
   media: UploadedRemixMedia,
-  role: 'narration' | 'bgm' | 'sfx',
+  role: 'narration' | 'bgm' | 'sfx' | 'take_audio',
 ): void {
   const store = useCanvasStore.getState();
   const audio = store.nodes.find((node) => node.id === audioId && node.type === CANVAS_NODE_TYPES.audio);
   const previous = audio?.data.remixMedia as UploadedRemixMedia | undefined;
   const changed = audio?.data.audioUrl !== media.url || previous?.media_hash !== media.media_hash;
   store.updateNodeData(audioId, { audioUrl: media.url, remixMedia: media, remixRole: role });
-  if (!changed || role !== 'narration') return;
+  if (!changed || (role !== 'narration' && role !== 'take_audio')) return;
   applyRemixInvalidation(audioId, 'voice');
   for (const edge of store.edges) {
     if (edge.source !== audioId) continue;

@@ -521,6 +521,28 @@ def test_alignment_action_uses_the_same_bounded_speech_lane(client, tmp_path):
     assert queued[0]["queue_kind"] == "speech"
 
 
+def test_take_timeline_action_hashes_all_project_media_and_uses_speech_lane(client, tmp_path):
+    api, queued = client
+    media = tmp_path / "media" / "speaker.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"speaker video")
+    script = api.post(BASE, json={"schema": "remix_script.v1", "payload": {
+        "dialogue": "男：你好", "segments": [{"segment_id": "one", "start_char": 2, "end_char": 4,
+                                           "speaker": "男", "source": "speaking_video"}],
+        "selections": [], "blueprint_mappings": [], "media_requirements": [],
+    }, "upstream_refs": []}).json()["data"]
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "compile_take_timeline",
+        "payload": {"script_ref": {"artifact_id": script["id"], "revision": 1}, "fps": 30,
+                    "take_bindings": [{"segment_id": "one", "media_path": "media/speaker.mp4"}]},
+        "idempotency_key": "take-timeline-1", "node_revision": 2,
+    })
+    assert response.status_code == 200
+    assert queued[0]["task_type"] == "remix_compile_take_timeline"
+    assert queued[0]["queue_kind"] == "speech"
+    assert queued[0]["payload"]["take_bindings"][0]["media_sha256"] == hashlib.sha256(b"speaker video").hexdigest()
+
+
 def test_reference_analysis_action_queues_project_media_without_speech_engine(client, tmp_path, monkeypatch):
     api, queued = client
     from novelvideo.api.routes import remix as routes

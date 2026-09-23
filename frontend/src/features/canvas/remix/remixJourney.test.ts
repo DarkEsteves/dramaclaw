@@ -19,6 +19,22 @@ function completeThroughScript() {
 }
 
 describe('reference video remix canvas journey', () => {
+  it('guides native speaking takes directly into a take timeline and composition', () => {
+    const graph = completeThroughScript();
+    const digest = 'b'.repeat(64);
+    graph.nodes[2].data.remixBrollPlanRef = ref('broll');
+    graph.nodes[2].data.remixBrollScriptRef = ref('script');
+    graph.nodes[2].data.remixScriptDraft = { dialogue: '男：你好', selections: [], segments: [
+      { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: digest },
+    ] };
+    graph.nodes.push(node('take', 'videoNode', { remixRole: 'performance', videoUrl: '/take.mp4', remixMedia: { url: '/take.mp4', media_path: 'take.mp4', media_hash: digest, media_kind: 'video', has_audio: true } }));
+    graph.edges.push(edge('take', 'script'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ action: 'create_timeline', label: '按表演片段生成时间轴' });
+    graph.nodes.push(node('timeline', 'semanticTimelineNode', { artifactRef: ref('timing'), remixTimingSchema: 'performance_timing.v2', compiledScriptRef: ref('script'),
+      compiledTakeSignature: JSON.stringify([{ segment_id: 'segment-1', media_path: 'take.mp4', media_hash: digest }]) }));
+    graph.edges.push(edge('script', 'timeline'), edge('take', 'timeline'));
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'timeline')).toMatchObject({ action: 'create_compose' });
+  });
   it('creates generated primary shots for events without visuals and ignores an empty legacy upload node', () => {
     const graph = completeThroughScript();
     const script = graph.nodes[2];
