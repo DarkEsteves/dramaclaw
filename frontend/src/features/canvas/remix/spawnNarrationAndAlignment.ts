@@ -70,19 +70,27 @@ export function createNarrationFromScript(scriptId: string): string {
   const dialogue = (script.data.remixScriptDraft as { dialogue?: unknown } | undefined)?.dialogue;
   if (typeof dialogue !== 'string' || !dialogue.trim()) throw new Error('已保存脚本缺少台词，请重新打开脚本确认。');
   const parsed = parseDialogueTurns(dialogue);
-  const existing = store.nodes.find((node) => node.type === CANVAS_NODE_TYPES.audio
-    && node.data.remixRole === 'narration' && sameRef(validRef(node.data.remixScriptRef), scriptRef)
+  const connectedNarrations = store.nodes.filter((node) => node.type === CANVAS_NODE_TYPES.audio
+    && node.data.remixRole === 'narration'
     && store.edges.some((edge) => edge.source === scriptId && edge.target === node.id));
-  if (existing) {
-    if (parsed && !existing.data.audioUrl && !existing.data.remixDialogueTurns) {
-      store.updateNodeData(existing.id, {
+  const existing = connectedNarrations.find((node) => sameRef(validRef(node.data.remixScriptRef), scriptRef));
+  const revisionCompatible = existing ?? connectedNarrations.find((node) => {
+    const previousRef = validRef(node.data.remixScriptRef);
+    return previousRef?.artifactId === scriptRef.artifactId && node.data.text === dialogue;
+  });
+  if (revisionCompatible) {
+    const patch: Record<string, unknown> = {};
+    if (!sameRef(validRef(revisionCompatible.data.remixScriptRef), scriptRef)) patch.remixScriptRef = scriptRef;
+    if (parsed && !revisionCompatible.data.audioUrl && !revisionCompatible.data.remixDialogueTurns) {
+      Object.assign(patch, {
         remixDialogueTurns: parsed.turns,
         remixSpeakerVoices: {},
       });
     }
-    store.setSelectedNode(existing.id);
-    store.requestFocusNode(existing.id);
-    return existing.id;
+    if (Object.keys(patch).length) store.updateNodeData(revisionCompatible.id, patch);
+    store.setSelectedNode(revisionCompatible.id);
+    store.requestFocusNode(revisionCompatible.id);
+    return revisionCompatible.id;
   }
   const childId = store.addNode(CANVAS_NODE_TYPES.audio, store.findNodePosition(scriptId, 480, 210), {
     audioKind: 'speech', remixRole: 'narration', remixScriptRef: scriptRef, text: dialogue,

@@ -74,6 +74,31 @@ describe('remix narration and alignment continuation', () => {
     expect(addNode).not.toHaveBeenCalled();
   });
 
+  it('reuses and relinks a narration when only the saved script revision advanced', () => {
+    const addNode = vi.fn();
+    const updateNodeData = vi.fn();
+    const setSelectedNode = vi.fn();
+    const requestFocusNode = vi.fn();
+    graphStore.getState.mockReturnValue({
+      nodes: [
+        node('script', 'scriptNode', { remixScriptRef: scriptRef, remixScriptDraft: { dialogue: '新的旁白。' } }),
+        node('audio', 'audioNode', {
+          remixRole: 'narration',
+          remixScriptRef: { ...scriptRef, revision: 2 },
+          text: '新的旁白。',
+          isGenerating: true,
+        }),
+      ],
+      edges: [edge('script', 'audio')], addNode, updateNodeData, setSelectedNode, requestFocusNode,
+    });
+
+    expect(createNarrationFromScript('script')).toBe('audio');
+    expect(addNode).not.toHaveBeenCalled();
+    expect(updateNodeData).toHaveBeenCalledWith('audio', expect.objectContaining({ remixScriptRef: scriptRef }));
+    expect(setSelectedNode).toHaveBeenCalledWith('audio');
+    expect(requestFocusNode).toHaveBeenCalledWith('audio');
+  });
+
   it('upgrades an empty pre-existing narration node to speaker mode for the same saved script', () => {
     const updateNodeData = vi.fn();
     graphStore.getState.mockReturnValue({
