@@ -21,7 +21,7 @@ interface Props {
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
-  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string, eventName: string) => { id: string; label: string; mediaRevision?: string } | null;
+  onCreateVisual?: (mode: 'generate' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
   onTopicChange?: (topic: string) => void;
@@ -165,7 +165,10 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
   };
   const createVisual = (index: number, mode: 'generate' | 'upload') => {
     const selection = draft.selections[index];
-    const created = selection && onCreateVisual?.(mode, selection.id, selection.label);
+    const suggestedPrompt = mode === 'generate'
+      ? brollRequirements.find((item) => item.event_id === selection?.id)?.suggested_query
+      : undefined;
+    const created = selection && onCreateVisual?.(mode, selection.id, selection.label, suggestedPrompt);
     if (!created) return;
     const next = { ...draft, selections: draft.selections.map((item, position) => position === index
       ? { ...item, visualNodeId: created.id, visualMediaRevision: created.mediaRevision }
@@ -215,7 +218,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
           {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">{autoSaving ? '补充画面节点已创建，正在自动保存脚本…' : '补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。'}</span>}
         </div>
-        {requirement?.required && <p className="col-span-6 text-amber-300">必需补充画面（B-roll）· {requirement.purpose} · {requirement.suggested_query}</p>}
+        {requirement?.required && <p className="col-span-6 text-amber-300">必需补充画面（B-roll）· {requirement.purpose} · 建议提示词：{requirement.suggested_query}</p>}
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
       </div>})}
       {error && <p role="alert" className="text-red-300">{error}</p>}

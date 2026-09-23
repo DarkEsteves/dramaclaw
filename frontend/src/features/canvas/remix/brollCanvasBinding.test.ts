@@ -41,6 +41,20 @@ describe('B-roll canvas binding', () => {
     expect(created).toEqual({ id: 'upload-1', label: '上传画面 · 产品登场' });
   });
 
+  it('prefills a generated image node with the planned B-roll prompt', () => {
+    const addNode = vi.fn(() => 'image-1');
+    createBrollVisualNode({
+      nodes: [node('script', 'scriptNode', {})], addNode, addEdge: vi.fn(() => 'edge-1'), setSelectedNode: vi.fn(),
+      findNodePosition: vi.fn(() => ({ x: 100, y: 200 })),
+    }, 'script', 'generate', 'product', '产品登场', '咖啡杯产品特写，柔和侧光');
+
+    expect(addNode).toHaveBeenCalledWith('imageGenNode', { x: 100, y: 200 }, expect.objectContaining({
+      displayName: '生成画面 · 产品登场',
+      prompt: '咖啡杯产品特写，柔和侧光',
+      remixRole: 'visual',
+    }));
+  });
+
   it('rejects manifest preparation when the displayed visual replaced the saved media binding', () => {
     const current = node('visual', 'videoNode', {
       videoUrl: '/static/projects/demo/freezone/video/new.mp4',

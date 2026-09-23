@@ -22,6 +22,7 @@ export function createBrollVisualNode(
   mode: 'generate' | 'upload',
   selectionId: string,
   eventName: string,
+  suggestedPrompt?: string,
 ) {
   if (!store.nodes.some((node) => node.id === scriptId)) return null;
   const type = mode === 'generate' ? CANVAS_NODE_TYPES.imageGen : CANVAS_NODE_TYPES.upload;
@@ -30,6 +31,7 @@ export function createBrollVisualNode(
   const childId = store.addNode(type, store.findNodePosition(scriptId, 420, 320), {
     displayName,
     remixRole: 'visual',
+    ...(mode === 'generate' && suggestedPrompt?.trim() ? { prompt: suggestedPrompt.trim() } : {}),
   });
   store.addEdge(childId, scriptId);
   store.setSelectedNode(childId);

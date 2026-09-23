@@ -160,10 +160,10 @@ describe('RemixScriptPanel', () => {
     const onCreateVisual = vi.fn((mode: 'generate' | 'upload') => ({ id: `${mode}-1`, label: mode === 'generate' ? '生成画面' : '上传画面' }));
     const onDraftChange = vi.fn();
     const onAutoSave = vi.fn(async () => {});
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onCreateVisual={onCreateVisual} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '展示产品', suggested_query: '咖啡杯产品特写，柔和侧光' }]} onCreateVisual={onCreateVisual} onAutoSave={onAutoSave} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
 
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
-    expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product', '产品登场');
+    expect(onCreateVisual).toHaveBeenCalledWith('generate', 'product', '产品登场', '咖啡杯产品特写，柔和侧光');
     expect(onDraftChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'generate-1' })] }),
       'media-binding',
@@ -172,7 +172,7 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '上传 产品登场 素材' }));
-    expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product', '产品登场');
+    expect(onCreateVisual).toHaveBeenCalledWith('upload', 'product', '产品登场', undefined);
     expect(onDraftChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ selections: [expect.objectContaining({ visualNodeId: 'upload-1' })] }),
       'media-binding',
@@ -216,7 +216,7 @@ describe('RemixScriptPanel', () => {
   it('shows the Recipe requirement beside the exact B-roll event', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '必须看见产品', suggested_query: '咖啡杯特写' }]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByText('必需补充画面（B-roll）· 必须看见产品 · 咖啡杯特写')).toBeInTheDocument();
+    expect(screen.getByText('必需补充画面（B-roll）· 必须看见产品 · 建议提示词：咖啡杯特写')).toBeInTheDocument();
   });
 
   it('attaches an existing canvas visual and stores its immutable media revision', async () => {

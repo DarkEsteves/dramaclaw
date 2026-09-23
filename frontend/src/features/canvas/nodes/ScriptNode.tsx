@@ -512,8 +512,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       ? String(node.data.remixMedia.media_hash) : undefined,
   }));
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
-  const createRemixVisual = useCallback((mode: 'generate' | 'upload', selectionId: string, eventName: string) => {
-    return createBrollVisualNode(useCanvasStore.getState(), id, mode, selectionId, eventName);
+  const createRemixVisual = useCallback((mode: 'generate' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => {
+    return createBrollVisualNode(useCanvasStore.getState(), id, mode, selectionId, eventName, suggestedPrompt);
   }, [id]);
   const attachRemixVisual = useCallback(async (nodeId: string) => {
     const project = readUrl().project;
