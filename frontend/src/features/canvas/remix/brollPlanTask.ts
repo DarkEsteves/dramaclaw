@@ -9,6 +9,7 @@ import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 
 const observers = new Map<string, Promise<void>>();
+const submissions = new Map<string, Promise<void>>();
 const POLL_INTERVAL_MS = 1_000;
 const POLL_TIMEOUT_MS = 30 * 60_000;
 
@@ -113,7 +114,7 @@ async function observe(nodeId: string, project: string, operationId: string, sou
   return pending;
 }
 
-export async function startBrollPlan(nodeId: string): Promise<void> {
+async function submitBrollPlan(nodeId: string): Promise<void> {
   const project = readUrl().project;
   const data = nodeData(nodeId);
   const scriptRef = exactRef(data?.remixScriptRef);
@@ -128,7 +129,7 @@ export async function startBrollPlan(nodeId: string): Promise<void> {
     const task = await submitRemixProcessAction(project, {
       action: 'plan_broll',
       scriptRef,
-      idempotencyKey: `broll:${nodeId}:${scriptRef.artifactId}:${scriptRef.revision}`,
+      idempotencyKey: `broll:${nodeId}:${scriptRef.artifactId}:${scriptRef.revision}:${nodeRevision}`,
       nodeRevision,
     });
     const latest = nodeData(nodeId);
@@ -151,6 +152,16 @@ export async function startBrollPlan(nodeId: string): Promise<void> {
       remixBrollPlanError: cause instanceof Error ? cause.message : String(cause),
     });
   }
+}
+
+export function startBrollPlan(nodeId: string): Promise<void> {
+  const current = submissions.get(nodeId);
+  if (current) return current;
+  const submission = submitBrollPlan(nodeId);
+  submissions.set(nodeId, submission);
+  const clear = () => { if (submissions.get(nodeId) === submission) submissions.delete(nodeId); };
+  void submission.then(clear, clear);
+  return submission;
 }
 
 export async function resumeBrollPlan(nodeId: string): Promise<void> {

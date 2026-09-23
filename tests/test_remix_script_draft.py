@@ -188,6 +188,103 @@ async def test_broll_plan_records_optional_events_as_required_false(monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_broll_plan_does_not_treat_saved_media_bindings_as_complete_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    script = {
+        "dialogue": "起床，喝咖啡。",
+        "segments": [],
+        "selections": [],
+        "events": [
+            {"event_id": "hook", "caption": "起床", "required": True, "sfx_node_id": "sfx-1"},
+            {"event_id": "product", "caption": "喝咖啡", "required": True, "visual_node_id": "image-1", "visual_media_revision": "a" * 64},
+        ],
+        "blueprint_mappings": [],
+        "media_requirements": [{"event_id": "product", "visual_node_id": "image-1"}],
+    }
+    calls: list[dict[str, object]] = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({key: value for key, value in script.items() if key not in {"events", "media_requirements"}} | {
+            "media_requirements": [
+                {"event_id": "hook", "required": False, "purpose": "保留人物", "suggested_query": "无需补充素材"},
+                {"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "咖啡特写"},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    plan = await broll_plan.generate_broll_plan(script=script, username="alice")
+
+    planning_input = json.loads(str(calls[0]["upstream_text"]))
+    assert "media_requirements" not in planning_input
+    assert planning_input["events"] == [
+        {"event_id": "hook", "caption": "起床"},
+        {"event_id": "product", "caption": "喝咖啡"},
+    ]
+    assert "每一个 event_id" in str(calls[0]["node_prompt"])
+    assert len(plan["media_requirements"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_broll_plan_retries_once_when_model_omits_saved_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    script = {
+        "dialogue": "起床，喝咖啡。", "segments": [], "selections": [],
+        "events": [{"event_id": "hook"}, {"event_id": "product"}],
+        "blueprint_mappings": [], "media_requirements": [],
+    }
+    calls: list[dict[str, object]] = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        requirements = [{"event_id": "hook", "required": False, "purpose": "保留人物", "suggested_query": "无需补充素材"}]
+        if len(calls) == 2:
+            requirements.append({"event_id": "product", "required": True, "purpose": "展示产品", "suggested_query": "咖啡特写"})
+        return json.dumps({key: value for key, value in script.items() if key != "events"} | {"media_requirements": requirements}, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    plan = await broll_plan.generate_broll_plan(script=script, username="alice")
+
+    assert len(calls) == 2
+    assert "遗漏" in str(calls[1]["node_prompt"])
+    assert {item["event_id"] for item in plan["media_requirements"]} == {"hook", "product"}
+
+
+@pytest.mark.asyncio
+async def test_broll_plan_batches_large_event_sets_without_losing_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import broll_plan
+
+    events = [{"event_id": f"event-{index}", "caption": f"第 {index} 段" + "长台词" * 900} for index in range(8)]
+    script = {
+        "dialogue": "完整长脚本", "segments": [], "selections": [], "events": events,
+        "blueprint_mappings": [], "media_requirements": [],
+    }
+    calls: list[dict[str, object]] = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        batch = json.loads(str(kwargs["upstream_text"]))["events"]
+        return json.dumps({
+            "dialogue": "", "segments": [], "selections": [], "blueprint_mappings": [],
+            "media_requirements": [
+                {"event_id": event["event_id"], "required": False, "purpose": "保留原画", "suggested_query": "无需补充素材"}
+                for event in batch
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(broll_plan, "generate_recipe_text", generate)
+    plan = await broll_plan.generate_broll_plan(script=script, username="alice")
+
+    assert len(calls) > 1
+    assert all(len(str(call["upstream_text"])) < 16_000 for call in calls)
+    assert [item["event_id"] for item in plan["media_requirements"]] == [event["event_id"] for event in events]
+
+
+@pytest.mark.asyncio
 async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
     from novelvideo.freezone.remix import script_draft
 

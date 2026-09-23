@@ -63,7 +63,7 @@ describe('B-roll planning task controller', () => {
     expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', {
       action: 'plan_broll',
       scriptRef: { artifactId: 'script-1', revision: 1 },
-      idempotencyKey: 'broll:script:script-1:1',
+      idempotencyKey: 'broll:script:script-1:1:5',
       nodeRevision: 5,
     });
     expect(state.updateNodeData).toHaveBeenCalledWith('script', expect.objectContaining({
@@ -77,6 +77,38 @@ describe('B-roll planning task controller', () => {
       remixBrollScriptRef: { artifactId: 'script-1', revision: 1 },
       remixBrollPlanStatus: 'completed',
     });
+  });
+
+  it('uses a fresh idempotency key when retrying the same script revision', async () => {
+    vi.mocked(fetchRemixOperation).mockResolvedValueOnce({
+      operation_id: 'operation-1', status: 'failed', input_refs: [{ artifact_id: 'script-1', revision: 1 }], output_refs: [],
+    } as never);
+
+    await startBrollPlan('script');
+
+    vi.mocked(submitRemixProcessAction).mockResolvedValueOnce({
+      operation_id: 'operation-2', task_id: 'task-2', task_key: 'key-2', task_type: 'remix_plan_broll',
+    });
+    vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ ...completedOperation, operation_id: 'operation-2' } as never);
+    await startBrollPlan('script');
+
+    expect(vi.mocked(submitRemixProcessAction).mock.calls.map(([, request]) => request.idempotencyKey)).toEqual([
+      'broll:script:script-1:1:5',
+      'broll:script:script-1:1:6',
+    ]);
+  });
+
+  it('deduplicates repeated clicks while the first submission is pending', async () => {
+    let release: ((value: { operation_id: string; task_id: string; task_key: string; task_type: string }) => void) | undefined;
+    vi.mocked(submitRemixProcessAction).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+
+    const first = startBrollPlan('script');
+    const second = startBrollPlan('script');
+
+    expect(submitRemixProcessAction).toHaveBeenCalledOnce();
+    release?.({ operation_id: 'operation-1', task_id: 'task-1', task_key: 'key', task_type: 'remix_plan_broll' });
+    await Promise.all([first, second]);
+    expect(state.nodes[0].data.remixBrollPlanStatus).toBe('completed');
   });
 
   it('resumes a persisted operation after remount', async () => {
