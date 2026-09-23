@@ -150,6 +150,49 @@ def test_align_script_marks_sequential_text_mismatch_without_guessing_repeated_w
     assert result["mismatch"] == {"reason": "aligned token does not match script at character 3"}
 
 
+def test_align_script_infers_chinese_when_script_omits_language(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+
+    class RecordingAligner:
+        language: str | None = None
+
+        def align(self, media_path: Path, script: str, language: str) -> dict:
+            self.language = language
+            return {
+                "status": "completed",
+                "language": "zh",
+                "words": [
+                    {
+                        "text": "你",
+                        "start_char": 0,
+                        "end_char": 1,
+                        "start": 0.0,
+                        "end": 0.2,
+                    },
+                    {
+                        "text": "好",
+                        "start_char": 1,
+                        "end_char": 2,
+                        "start": 0.2,
+                        "end": 0.4,
+                    },
+                ],
+            }
+
+    aligner = RecordingAligner()
+    result = align_script(
+        media,
+        {"revision": 1, "dialogue": "你好"},
+        aligner=aligner,
+    )
+
+    assert aligner.language == "zh"
+    assert result["language"] == "zh"
+
+
 def test_align_script_uses_engine_character_spans_for_repeated_words(tmp_path: Path) -> None:
     media = tmp_path / "voice.wav"
     media.write_bytes(b"voice")

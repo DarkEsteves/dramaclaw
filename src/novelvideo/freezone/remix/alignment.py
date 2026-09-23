@@ -58,20 +58,20 @@ def align_script(
     """Force-align a versioned script and return its normalized word timeline.
 
     ``script`` requires ``revision`` and either ``dialogue`` or ``text``; its
-    optional ``language`` defaults to ``en``. Engine character spans are checked
-    against the exact script slice. Engines without spans are matched only in
-    forward sequence after whitespace, which prevents a repeated word from being
-    rebound to the first occurrence. Mismatches are returned as a
-    ``script_mismatch`` status rather than fabricated timings.
+    optional ``language`` is inferred from the script when absent. Engine
+    character spans are checked against the exact script slice. Engines without
+    spans are matched only in forward sequence after whitespace, which prevents
+    a repeated word from being rebound to the first occurrence. Mismatches are
+    returned as a ``script_mismatch`` status rather than fabricated timings.
     """
-    language = script.get("language", "en")
-    _validate_media_and_language(media_path, language)
     revision = script.get("revision")
     if not isinstance(revision, int) or revision < 1:
         raise ValueError("script revision must be a positive integer")
     text = script.get("dialogue", script.get("text"))
     if not isinstance(text, str):
         raise ValueError("script dialogue or text is required")
+    language = _script_language(script.get("language"), text)
+    _validate_media_and_language(media_path, language)
     spoken, original_positions = _spoken_script_positions(text)
     with _SPEECH_ENGINE_SLOT:
         raw = _require_aligner(aligner).align(media_path, spoken, language)
@@ -91,6 +91,20 @@ def align_script(
     if original_positions is not None:
         _map_match_report_to_original_script(result, original_positions)
     return result
+
+
+_HAN_SCRIPT = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_LATIN_SCRIPT = re.compile(r"[A-Za-z]")
+
+
+def _script_language(value: object, text: str) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if _HAN_SCRIPT.search(text):
+        return "zh"
+    if _LATIN_SCRIPT.search(text):
+        return "en"
+    return "auto"
 
 
 def _map_match_report_to_original_script(

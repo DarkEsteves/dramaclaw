@@ -143,6 +143,46 @@ def test_configured_adapter_detects_language_for_one_click_analysis(tmp_path: Pa
     assert "language" not in next(options for name, options in fake.calls if name == "load_model")
 
 
+def test_alignment_uses_detected_language_when_language_is_auto(
+    tmp_path: Path, monkeypatch
+) -> None:
+    media = tmp_path / "voice.wav"
+    media.write_bytes(b"audio")
+    cache = tmp_path / "models"
+    cache.mkdir()
+
+    class DetectingChineseWhisperX(FakeWhisperX):
+        def load_model(self, name, device, **kwargs):
+            self.calls.append(("load_model", kwargs))
+            return SimpleNamespace(
+                transcribe=lambda audio, **options: {
+                    "language": "zh",
+                    "segments": [{"text": "你好", "start": 0.0, "end": 1.0}],
+                }
+            )
+
+    fake = DetectingChineseWhisperX(
+        transcript="你好",
+        chars=[
+            {"char": "你", "start": 0.0, "end": 0.4},
+            {"char": "好", "start": 0.4, "end": 0.8},
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "whisperx", fake)
+    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
+    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
+
+    result = alignment.align_script(
+        media, {"revision": 1, "text": "你好"}
+    )
+
+    assert result["status"] == "completed"
+    assert result["language"] == "zh"
+    assert next(
+        options for name, options in fake.calls if name == "load_align_model"
+    )["language_code"] == "zh"
+
+
 def test_configured_adapter_reports_script_mismatch_before_forced_alignment(tmp_path: Path, monkeypatch):
     media = tmp_path / "voice.wav"
     media.write_bytes(b"audio")

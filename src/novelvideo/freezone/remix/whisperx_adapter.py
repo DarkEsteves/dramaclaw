@@ -231,7 +231,7 @@ class WhisperXSpeechAligner:
         return result
 
     def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
-        whisperx, audio, segments, _ = self._recognize(media_path, language)
+        whisperx, audio, segments, detected_language = self._recognize(media_path, language)
         transcript = "".join(str(row.get("text", "")) for row in segments)
         if not transcript.strip():
             return {"status": "no_speech", "words": []}
@@ -255,8 +255,9 @@ class WhisperXSpeechAligner:
                 },
             }
         result = self._force_align_characters(
-            whisperx, audio, script, language, segments
+            whisperx, audio, script, detected_language, segments
         )
+        result["language"] = detected_language
         result["match_report"] = serialized_report
         if result["status"] == "script_mismatch":
             result.setdefault("mismatch", {})["report"] = serialized_report
