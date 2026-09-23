@@ -67,7 +67,8 @@ describe('script draft generation task controller', () => {
       remixScriptGenerationOperationId: null,
       remixScriptGenerationStatus: 'completed',
       remixScriptDraft: result,
-      remixScriptRef: null,
+      remixScriptRef: { artifactId: 'draft-1', revision: 1 },
+      remixScriptLastSavedRef: { artifactId: 'draft-1', revision: 1 },
     });
   });
 
@@ -85,6 +86,7 @@ describe('script draft generation task controller', () => {
     expect(submitRemixProcessAction).not.toHaveBeenCalled();
     expect(fetchRemixOperation).toHaveBeenCalledWith('demo', 'operation-1');
     expect(state.nodes[0].data.remixScriptDraft).toEqual(expect.objectContaining({ dialogue: '女：薯条。' }));
+    expect(state.nodes[0].data.remixScriptRef).toEqual({ artifactId: 'draft-1', revision: 1 });
   });
 
   it('does not apply an old result after the topic changes', async () => {

@@ -96,6 +96,19 @@ describe('RemixScriptPanel', () => {
     }));
   });
 
+  it('refreshes the open editor when a background generation finishes', async () => {
+    const common = { project: 'demo', existingRef: null, blueprintRef: { artifactId: 'blueprint-1', revision: 1 }, visualNodes: [], sfxNodes: [], onDraftChange: () => {}, onSave: () => {}, onClose: () => {} };
+    const view = render(<RemixScriptPanel {...common} generationRunning initialDraft={{ dialogue: '', selections: [] }} />);
+
+    view.rerender(<RemixScriptPanel {...common} generationRunning={false} initialDraft={{
+      dialogue: '后台任务生成的新台词',
+      selections: [{ id: 'generated-1', label: '产品登场', start: 0, end: 4 }],
+    }} />);
+
+    await waitFor(() => expect(screen.getByLabelText('改编台词')).toHaveValue('后台任务生成的新台词'));
+    expect(screen.getByText('台词事件（1）')).toBeVisible();
+  });
+
   it('restores and persists the topic owned by the current script branch', async () => {
     const onTopicChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '已有台词', selections: [] }} initialTopic="冰美式" existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onTopicChange={onTopicChange} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);

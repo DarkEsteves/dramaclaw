@@ -971,6 +971,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             /> : undefined}
             onEnsureBlueprint={upstreamStory ? ensureBranchBlueprint : undefined}
             generationRunning={data.remixScriptGenerationStatus === 'running'}
+            generationPersistsDraft
             onGenerateDraft={async (source, topic) => {
               const generated = await startScriptDraftGeneration(id, source, topic);
               if (generated) return generated;

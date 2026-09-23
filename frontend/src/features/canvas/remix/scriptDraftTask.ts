@@ -116,6 +116,7 @@ async function observe(
           if (!linked) throw new Error('改编台词任务对应的蓝图版本不一致。');
           if (!matchesRequest(nodeData(nodeId), blueprintRef, topic)) return null;
           const draft = draftFromPayload(artifact.payload);
+          const scriptRef = { artifactId: artifact.id, revision: artifact.revision };
           applyRemixInvalidation(nodeId, 'script');
           patch(nodeId, {
             remixScriptGenerationOperationId: null,
@@ -124,7 +125,8 @@ async function observe(
             remixScriptGenerationStatus: 'completed',
             remixScriptGenerationError: null,
             remixScriptDraft: draft,
-            remixScriptRef: null,
+            remixScriptRef: scriptRef,
+            remixScriptLastSavedRef: scriptRef,
             remixBrollPlanRef: null,
             remixBrollScriptRef: null,
             remixBrollRequirements: [],

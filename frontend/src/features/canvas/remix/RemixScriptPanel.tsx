@@ -17,6 +17,7 @@ interface Props {
   onEnsureBlueprint?: () => Promise<RemixArtifactRef>;
   onGenerateDraft?: (blueprintRef: RemixArtifactRef, topic: string) => Promise<RemixScriptDraft>;
   generationRunning?: boolean;
+  generationPersistsDraft?: boolean;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
@@ -29,7 +30,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -57,6 +58,12 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
     }).catch(() => { if (active) setBlueprintRole(null); });
     return () => { active = false; };
   }, [blueprintRef?.artifactId, blueprintRef?.revision, project]);
+
+  useEffect(() => {
+    if (draftRef.current === initialDraft) return;
+    draftRef.current = initialDraft;
+    setDraft(initialDraft);
+  }, [initialDraft]);
 
   const persistDraft = async (next: RemixScriptDraft) => {
     const persist = onAutoSaveRef.current;
@@ -111,7 +118,11 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       const current = currentBlueprintRef.current;
       if (!current || current.artifactId !== source.artifactId || current.revision !== source.revision) throw new Error('参考蓝图已更新，请重新生成脚本');
       if (draftEditCount.current !== editCount) throw new Error('生成期间台词已修改，请确认后重新生成');
-      changeDraft(next);
+      if (generationPersistsDraft) {
+        draftRef.current = next;
+        setDraft(next);
+        setError(null);
+      } else changeDraft(next);
     } catch (cause) { setError(cause instanceof Error ? cause.message : '生成脚本失败'); }
     finally { setGenerating(false); }
   };
