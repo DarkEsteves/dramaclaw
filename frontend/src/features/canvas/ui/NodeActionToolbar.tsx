@@ -1781,6 +1781,9 @@ export const NodeActionToolbar = memo(
                   ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
                   : node.type === CANVAS_NODE_TYPES.script ? remixScriptLabel ? [
+                    ...(!remixJourneyBlocksScriptDownstream && node.data.remixScriptRef
+                      ? [{ action: 'edit_script', label: '编辑改编脚本', Icon: PenLine }]
+                      : []),
                     ...(!remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
                       : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'view_alignment'

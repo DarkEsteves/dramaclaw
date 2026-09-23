@@ -237,6 +237,13 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === audio.id)?.data.audioUrl).toContain('voice.wav'));
     expect(backend.upload).toHaveBeenCalledWith(voice);
 
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
+    expect(await screen.findByRole('button', { name: '编辑改编脚本' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
+    expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    act(() => useCanvasStore.getState().setSelectedNode(audio.id));
+
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 按脚本对齐旁白' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'transcriptNode')?.data.status).toBe('completed'));
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
