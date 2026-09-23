@@ -143,6 +143,7 @@ import { startSourceTranscript } from "@/features/canvas/application/startSource
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
 import { storyScriptToolbarState } from '@/features/canvas/remix/storyScriptToolbarState';
 import { audioToolbarState } from './audioToolbarState';
+import { transcriptToolbarState } from '@/features/canvas/remix/transcriptToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
@@ -1655,6 +1656,8 @@ export const NodeActionToolbar = memo(
       && (remixJourneyStep.kind === 'wait' || remixJourneyStep.action === 'plan_broll' || remixJourneyStep.action === 'edit_script');
     const storyScriptAction = node.type === CANVAS_NODE_TYPES.videoStory
       ? storyScriptToolbarState(nodes, edges, node.id) : null;
+    const transcriptActions = node.type === CANVAS_NODE_TYPES.transcript
+      ? transcriptToolbarState(nodes, edges, node.id) : null;
 
     const advanceRemixJourney = useCallback(() => {
       if (!remixJourneyStep) return;
@@ -1772,6 +1775,47 @@ export const NodeActionToolbar = memo(
                 }}
               ><PenLine className="h-3.5 w-3.5" />{storyScriptAction.label}</UiChipButton>
             )}
+            {transcriptActions && <>
+              <select
+                aria-label="转写语言"
+                value={node.data.transcriptLanguage === 'zh' || node.data.transcriptLanguage === 'en' ? node.data.transcriptLanguage : 'auto'}
+                disabled={transcriptActions.busy}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => updateNodeData(node.id, { transcriptLanguage: event.target.value })}
+                className={`nodrag h-9 ${TOOLBAR_BUTTON_RADIUS_CLASS} border border-white/10 bg-transparent px-3 text-sm text-text-dark outline-none hover:bg-white/[0.06] disabled:opacity-40`}
+              >
+                <option value="auto">自动识别</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+              <UiChipButton
+                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                disabled={!transcriptActions.canTranscribe || transcriptActions.busy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'transcribe' });
+                }}
+              ><PenLine className="h-3.5 w-3.5" />{transcriptActions.busy ? '处理中…' : transcriptActions.transcribeLabel}</UiChipButton>
+              {transcriptActions.canAlign && <UiChipButton
+                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                disabled={transcriptActions.busy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'align' });
+                }}
+              ><Workflow className="h-3.5 w-3.5" />按脚本对齐</UiChipButton>}
+              {transcriptActions.canExport && <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <UiChipButton className={TOOLBAR_TEXT_BUTTON_CLASS} onClick={(event) => event.stopPropagation()}>
+                    <Download className="h-3.5 w-3.5" />导出<ChevronDown className="h-3 w-3" />
+                  </UiChipButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" sideOffset={6} className={`${TOOLBAR_MENU_CONTENT_CLASS} min-w-[140px]`} onClick={(event) => event.stopPropagation()}>
+                  <DropdownMenuItem className={TOOLBAR_MENU_ITEM_CLASS} onSelect={() => canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'export_transcript_json' })}>导出 JSON</DropdownMenuItem>
+                  <DropdownMenuItem className={TOOLBAR_MENU_ITEM_CLASS} onSelect={() => canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'export_transcript_srt' })}>导出 SRT 字幕</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>}
+            </>}
             {(isVideoNode(node) || isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
               <>
                 {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]

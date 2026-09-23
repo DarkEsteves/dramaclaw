@@ -33,6 +33,7 @@ vi.mock('./transcriptArtifactApi', () => ({ reviseTranscriptArtifact: vi.fn(asyn
 import { TranscriptNode } from '../nodes/TranscriptNode';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction } from '@/api/remix';
 import { reviseTranscriptArtifact } from './transcriptArtifactApi';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 const flowProps = { type: 'transcriptNode', zIndex: 0, draggable: true, dragging: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
 
@@ -52,13 +53,11 @@ describe('TranscriptNode', () => {
     expect(state.nodes[1].data.autoStartMode).toBeNull();
   });
 
-  it('offers automatic language detection by default and persists manual language changes', () => {
+  it('keeps transcription controls out of the node card', () => {
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
-    const language = screen.getByRole('combobox', { name: '转写语言' }) as HTMLSelectElement;
-    expect(language.value).toBe('auto');
-    expect(screen.getByRole('option', { name: '自动识别' })).toBeTruthy();
-    fireEvent.change(language, { target: { value: 'en' } });
-    expect(state.updateNodeData).toHaveBeenCalledWith('transcript', { transcriptLanguage: 'en' });
+    expect(screen.queryByRole('combobox', { name: '转写语言' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '开始转写' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '按脚本对齐' })).toBeNull();
   });
 
   it('starts script alignment automatically only with both saved script and narration audio connected', async () => {
@@ -83,7 +82,7 @@ describe('TranscriptNode', () => {
 
   it('transcribes the connected audio and persists a word timeline reference', async () => {
     const { container, rerender } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
-    fireEvent.click(screen.getByRole('button', { name: '开始转写' }));
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'transcribe_media', mediaPath: 'narration.wav' })));
     await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
     rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
@@ -208,7 +207,7 @@ describe('TranscriptNode', () => {
     state.nodes.push({ id: 'script', data: { remixScriptRef: { artifactId: 'script-1', revision: 2 } } });
     state.edges.push({ source: 'script', target: 'transcript' });
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
-    fireEvent.click(screen.getByRole('button', { name: '按脚本对齐' }));
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'align' }));
     await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', expect.objectContaining({ action: 'align_script', mediaPath: 'narration.wav', scriptRef: { artifactId: 'script-1', revision: 2 } })));
   });
 

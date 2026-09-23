@@ -54,6 +54,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const autoStartConsumed = useRef(false);
   useEffect(() => updateNodeInternals(id), [id, updateNodeInternals]);
   useEffect(() => setEdited(data.words.map((word) => word.text)), [data.words]);
+  useEffect(() => setLanguage(transcriptLanguage(data.transcriptLanguage)), [data.transcriptLanguage]);
 
   const project = readUrl().project;
   const artifactRef = data.artifactRef as RemixArtifactRef | null | undefined;
@@ -262,6 +263,11 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
       else download(`${name}.srt`, transcriptSrt(timelineWords(artifact.payload as TranscriptTimeline)), 'text/plain');
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
   };
+  useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
+    if (nodeId !== id) return;
+    if (action === 'export_transcript_json') void exportResult('json');
+    if (action === 'export_transcript_srt') void exportResult('srt');
+  }), [artifactRef?.artifactId, artifactRef?.revision, id, project]);
 
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
     <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
@@ -273,10 +279,9 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         <div className="mb-2 truncate" title={source?.path}>{source ? `${source.kind === 'audio' ? '音频' : '视频'}：${source.path.split('/').pop()}` : '请连接上传的音频或带声音视频'}</div>
         {source?.url && (source.kind === 'audio' ? <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} controls className="w-full" /> : <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} controls className="max-h-40 w-full" />)}
         <div className="mt-2 flex items-center gap-2">
-          <select aria-label="转写语言" value={language} onChange={(event) => { const next = transcriptLanguage(event.target.value); setLanguage(next); updateNodeData(id, { transcriptLanguage: next }); }} className="nodrag h-7 rounded-[12px] border border-white/10 bg-surface-field px-2 text-text-dark"><option value="auto">自动识别</option><option value="zh">中文</option><option value="en">English</option></select>
-          <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('transcribe')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>{operationId || data.managedOperationId ? '处理中…' : data.words.length ? '重新转写' : '开始转写'}</button>
-          {scriptRef && <button type="button" disabled={busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>按脚本对齐</button>}
-          <span>{artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
+          <span>{language === 'zh' ? '中文' : language === 'en' ? 'English' : '自动识别'}</span>
+          <span className="text-white/20">·</span>
+          <span>{operationId || data.managedOperationId ? '处理中…' : artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
         </div>
       </div>
       <div className="ui-scrollbar overflow-auto p-2">
@@ -298,7 +303,7 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
         </div>)}
         {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无转写内容</p>}
       </div>
-      {artifactRef && <div className="border-t border-white/[0.08] p-3 text-xs">{showWordDetails && <label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label>}<div className="flex flex-wrap gap-2">{showWordDetails && <button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button>}<button type="button" onClick={() => void exportResult('json')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 JSON</button><button type="button" onClick={() => void exportResult('srt')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>导出 SRT</button></div></div>}
+      {artifactRef && showWordDetails && <div className="border-t border-white/[0.08] p-3 text-xs"><label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button></div>}
       {error && error !== data.unresolved?.[0] && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}
     </div>
   </div>;
