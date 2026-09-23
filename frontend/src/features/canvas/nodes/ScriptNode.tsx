@@ -471,6 +471,17 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
+  const remixBrollRequirements = Array.isArray(data.remixBrollRequirements)
+    ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>
+    : [];
+  const requiredRemixBroll = remixBrollRequirements.filter((requirement) => requirement.required);
+  const completedRequiredRemixBroll = requiredRemixBroll.filter((requirement) => {
+    const event = initialRemixDraft.selections.find((selection) => selection.id === requirement.event_id);
+    return Boolean(event?.visualNodeId && event.visualMediaRevision);
+  }).length;
+  const remixTopic = typeof data.remixTopic === 'string' && data.remixTopic.trim()
+    ? data.remixTopic.trim()
+    : '尚未填写改编主题';
   const remixScriptLabel = remixScriptEditorLabel(data, Boolean(blueprintRef));
   const isRemixScript = Boolean(remixScriptLabel);
   const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
@@ -482,6 +493,18 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         ? remixJourneyStep.label
         : `下一步：${remixJourneyStep.label}`
     : null;
+  const remixNodeStatus = remixJourneyStatus
+    ?? (remixNextAction === 'edit_script'
+      ? '下一步：编辑改编脚本'
+      : remixNextAction === 'create_timeline'
+        ? '下一步：生成语义时间轴'
+      : remixNextAction === 'view_alignment'
+        ? '对齐中：查看进度'
+        : remixNextAction === 'align_narration'
+          ? '下一步：按脚本对齐'
+          : remixNextAction === 'create_narration'
+            ? '下一步：制作配音'
+            : '脚本已就绪');
   const remixVisualNodes = upstreamNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node)).map((node) => ({
     id: node.id,
     label: String(node.data.displayName || node.id),
@@ -842,13 +865,22 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         </div>}
         {isRemixScript ? (
           <div className="nodrag flex min-h-0 flex-1 flex-col gap-2 px-3 py-3 text-xs text-text-muted">
+            <p className="truncate font-medium text-text-dark" title={remixTopic}>改编主题：{remixTopic}</p>
+            <div className="flex flex-wrap gap-1.5 text-[11px]">
+              <span className="rounded-full bg-white/[0.06] px-2 py-1">{initialRemixDraft.selections.length} 个事件</span>
+              <span className="rounded-full bg-white/[0.06] px-2 py-1">
+                {requiredRemixBroll.length > 0
+                  ? `B-roll ${completedRequiredRemixBroll}/${requiredRemixBroll.length}`
+                  : 'B-roll 无必需项'}
+              </span>
+            </div>
             {initialRemixDraft.dialogue.trim() ? (
-              <p className="ui-scrollbar min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words leading-5 text-text-dark">{initialRemixDraft.dialogue}</p>
+              <p className="line-clamp-3 min-h-0 flex-1 whitespace-pre-wrap break-words leading-5 text-text-dark/80">{initialRemixDraft.dialogue}</p>
             ) : (
               <p className="flex-1">点击“{remixScriptLabel}”填写台词。</p>
             )}
             <div className="border-t border-white/[0.08] pt-2">
-              {`${initialRemixDraft.selections.length} 个语义事件 · ${remixJourneyStatus ?? (remixNextAction === 'create_timeline' ? '下一步：生成语义时间轴' : remixNextAction === 'view_alignment' ? '对齐中：查看进度' : remixNextAction === 'align_narration' ? '下一步：按脚本对齐' : remixNextAction === 'create_narration' ? '下一步：制作配音' : '编辑后保存脚本')}`}
+              {remixNodeStatus}
             </div>
           </div>
         ) : hasResult ? (
@@ -981,7 +1013,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             }}
             visualNodes={remixVisualNodes}
             sfxNodes={remixSfxNodes}
-            brollRequirements={Array.isArray(data.remixBrollRequirements) ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }> : []}
+            brollRequirements={remixBrollRequirements}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onAutoSave={autoSaveRemixDraft}

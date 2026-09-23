@@ -287,14 +287,21 @@ describe('native canvas remix journey integration', () => {
           position: { x: 0, y: 0 },
           data: {
             remixRole: 'adaptation_script',
+            remixTopic: '新品咖啡',
             referenceBlueprintRef: { artifactId: 'blueprint', revision: 1 },
             remixScriptRef: { artifactId: 'script-artifact', revision: 1 },
             remixBrollPlanRef: { artifactId: 'broll-plan', revision: 1 },
             remixBrollScriptRef: { artifactId: 'script-artifact', revision: 1 },
-            remixBrollRequirements: [{ event_id: 'product', required: true }],
+            remixBrollRequirements: [
+              { event_id: 'product', required: true },
+              { event_id: 'cta', required: true },
+            ],
             remixScriptDraft: {
-              dialogue: '新品登场',
-              selections: [{ id: 'product', label: '产品登场', start: 0, end: 4 }],
+              dialogue: '新品登场\n第二句台词\n第三句台词\n第四句台词',
+              selections: [
+                { id: 'product', label: '产品登场', start: 0, end: 4, visualNodeId: 'visual', visualMediaRevision: 'a'.repeat(64) },
+                { id: 'cta', label: '结尾 CTA', start: 5, end: 9 },
+              ],
             },
           },
         },
@@ -308,7 +315,10 @@ describe('native canvas remix journey integration', () => {
     });
 
     render(<JourneyCanvas />);
-    expect(await screen.findByText('1 个语义事件 · 下一步：补齐必需 B-roll')).toBeInTheDocument();
+    expect(await screen.findByText('改编主题：新品咖啡')).toBeInTheDocument();
+    expect(screen.getByText('2 个事件')).toBeInTheDocument();
+    expect(screen.getByText('B-roll 1/2')).toBeInTheDocument();
+    expect(screen.getByText('下一步：补齐必需 B-roll')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '制作配音' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '编辑改编脚本' })).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
@@ -316,9 +326,36 @@ describe('native canvas remix journey integration', () => {
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 素材' }));
     expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollRequirements)
-      .toEqual([{ event_id: 'product', required: true }]);
+      .toEqual([
+        { event_id: 'product', required: true },
+        { event_id: 'cta', required: true },
+      ]);
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixScriptRef)
       .toEqual({ artifactId: 'script-artifact', revision: 2 }));
     expect(screen.getByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+  });
+
+  it('shows clear empty states in an adaptation script summary', async () => {
+    useCanvasStore.setState({
+      nodes: [{
+        id: 'script',
+        type: 'scriptNode',
+        position: { x: 0, y: 0 },
+        data: {
+          remixRole: 'adaptation_script',
+          remixScriptDraft: { dialogue: '待编辑台词', selections: [] },
+          remixBrollRequirements: [],
+        },
+      }],
+      edges: [],
+      selectedNodeId: 'script',
+      history: { past: [], future: [] },
+    });
+
+    render(<JourneyCanvas />);
+
+    expect(await screen.findByText('改编主题：尚未填写改编主题')).toBeInTheDocument();
+    expect(screen.getByText('B-roll 无必需项')).toBeInTheDocument();
+    expect(screen.getByText('下一步：编辑改编脚本')).toBeInTheDocument();
   });
 });
