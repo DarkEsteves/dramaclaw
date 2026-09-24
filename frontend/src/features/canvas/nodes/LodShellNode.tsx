@@ -52,7 +52,7 @@ import {
   nodeHasSourceHandle,
   nodeHasTargetHandle,
 } from '@/features/canvas/domain/nodeRegistry';
-import type { CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
+import { VIDEO_STORY_NODE_DEFAULT_SIZE, type CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
 
 /**
  * 未测量且未显式设尺寸的节点（首屏恢复在低缩放档、且从未被渲染过）的兜底尺寸。
@@ -73,7 +73,7 @@ export const SHELL_FALLBACK_SIZES: Partial<Record<string, { width: number; heigh
   textAnnotationNode: { width: 440, height: 320 },
   scriptNode: { width: 480, height: 320 },
   audioNode: { width: 480, height: 210 },
-  videoStoryNode: { width: 800, height: 480 },
+  videoStoryNode: VIDEO_STORY_NODE_DEFAULT_SIZE,
   transcriptNode: { width: 420, height: 300 },
   semanticTimelineNode: { width: 420, height: 300 },
   videoComposeNode: { width: 240, height: 136 },

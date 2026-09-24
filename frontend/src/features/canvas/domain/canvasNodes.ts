@@ -48,6 +48,8 @@ export const DEFAULT_ASPECT_RATIO = '1:1';
 export const AUTO_REQUEST_ASPECT_RATIO = 'auto';
 export const DEFAULT_NODE_WIDTH = 320;
 export const EXPORT_RESULT_NODE_DEFAULT_WIDTH = 480;
+/** Default canvas footprint for an analyzed reference with a scrollable event list. */
+export const VIDEO_STORY_NODE_DEFAULT_SIZE = { width: 960, height: 900 } as const;
 export const EXPORT_RESULT_NODE_LAYOUT_HEIGHT = 360;
 export const EXPORT_RESULT_NODE_MIN_WIDTH = 300;
 export const EXPORT_RESULT_NODE_MIN_HEIGHT = 300;

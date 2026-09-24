@@ -44,6 +44,7 @@ describe('analyzeReferenceVideo', () => {
   it('creates connected transcript and story nodes before joint analysis', async () => {
     const result = analyzeReferenceVideo('video', { videoUrl: '/static/projects/demo/freezone/_uploads/clip.mp4' });
     expect(result.nodeId).toBe('story');
+    expect(state.findNodePosition).toHaveBeenCalledWith('video', 960, 900);
     await result.completion;
 
     expect(state.edges).toEqual(expect.arrayContaining([

@@ -1,5 +1,5 @@
 import { attachRemixMedia, fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef, type RemixUploadedMedia } from '@/api/remix';
-import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
+import { CANVAS_NODE_TYPES, VIDEO_STORY_NODE_DEFAULT_SIZE } from '@/features/canvas/domain/canvasNodes';
 import { timelineWords, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { projectMediaPathFromUrl } from '@/features/canvas/remix/remixMediaPath';
 import { readUrl } from '@/lib/url-params';
@@ -161,7 +161,8 @@ export function analyzeReferenceVideo(sourceId: string, opts: { videoUrl: string
     : null;
   if (runningTarget) return { nodeId: runningTarget.id, completion: running.get(runningTarget.id)! };
 
-  const storyId = explicitTarget?.id ?? store.addNode(CANVAS_NODE_TYPES.videoStory, store.findNodePosition(sourceId, 720, 360), {
+  const storyId = explicitTarget?.id ?? store.addNode(CANVAS_NODE_TYPES.videoStory,
+    store.findNodePosition(sourceId, VIDEO_STORY_NODE_DEFAULT_SIZE.width, VIDEO_STORY_NODE_DEFAULT_SIZE.height), {
     displayName: '原片拆解', sourceVideoUrl: opts.videoUrl, rows: [], rawResult: null, isAnalyzing: true, remixAnalysisStage: 'preparing', analysisError: null,
   });
   if (!explicitTarget && !store.addEdge(sourceId, storyId)) { store.deleteNode(storyId); throw new Error('连接原片拆解节点失败'); }

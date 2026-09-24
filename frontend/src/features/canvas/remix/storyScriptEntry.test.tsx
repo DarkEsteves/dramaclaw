@@ -7,9 +7,10 @@ const { ensureSaved, createScriptFromBlueprint, updateNodeData } = vi.hoisted(()
   createScriptFromBlueprint: vi.fn(() => 'script-1'),
   updateNodeData: vi.fn(),
 }));
+const canvasNodes = vi.hoisted(() => [] as Array<{ id: string; width?: number; height?: number; measured?: { width: number; height: number }; style?: { width?: number; height?: number } }>);
 vi.mock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unknown) => unknown) => selector({ nodes: [], edges: [], setSelectedNode: vi.fn(), updateNodeData }) }));
+vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: (selector: (state: unknown) => unknown) => selector({ nodes: canvasNodes, edges: [], setSelectedNode: vi.fn(), updateNodeData }) }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/NodeResizeHandle', () => ({ NodeResizeHandle: () => null }));
 vi.mock('@/features/canvas/ui/nodeFrameStyles', () => ({ CANVAS_NODE_PANEL_SURFACE_CLASS: '', canvasNodeFrameClass: () => '' }));
@@ -20,11 +21,21 @@ import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 describe('story script entry', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { vi.clearAllMocks(); canvasNodes.length = 0; });
   it('opens a readable story card by default and keeps an explicitly resized card', () => {
     const props = { id: 'story-1', type: 'videoStoryNode', zIndex: 0, draggable: true, dragging: false, selected: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0, data: { displayName: '原片拆解', rows: [] } };
     const { container, rerender } = render(<VideoStoryNode {...props} />);
-    expect(container.firstElementChild).toHaveStyle({ width: '800px', height: '480px' });
+    expect(container.firstElementChild).toHaveStyle({ width: '960px', height: '900px' });
+    rerender(<VideoStoryNode {...props} width={810} height={450} />);
+    expect(container.firstElementChild).toHaveStyle({ width: '810px', height: '450px' });
+  });
+  it('updates the old measured default while respecting a manually resized story node', () => {
+    const data = { displayName: '原片拆解', rows: [] };
+    const props = { id: 'story-1', type: 'videoStoryNode', zIndex: 0, draggable: true, dragging: false, selected: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0, data };
+    canvasNodes.push({ id: 'story-1', measured: { width: 800, height: 480 } });
+    const { container, rerender } = render(<VideoStoryNode {...props} width={800} height={480} />);
+    expect(container.firstElementChild).toHaveStyle({ width: '960px', height: '900px' });
+    canvasNodes[0] = { id: 'story-1', width: 810, height: 450, measured: { width: 810, height: 450 } };
     rerender(<VideoStoryNode {...props} width={810} height={450} />);
     expect(container.firstElementChild).toHaveStyle({ width: '810px', height: '450px' });
   });

@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   CANVAS_NODE_TYPES,
+  VIDEO_STORY_NODE_DEFAULT_SIZE,
   type VideoStoryNodeData,
   type VideoStoryRow,
 } from '@/features/canvas/domain/canvasNodes';
@@ -40,8 +41,6 @@ type VideoStoryNodeProps = NodeProps & {
   selected?: boolean;
 };
 
-const DEFAULT_WIDTH = 800;
-const DEFAULT_HEIGHT = 480;
 const MIN_WIDTH = 480;
 const MIN_HEIGHT = 240;
 const MAX_WIDTH = 1600;
@@ -370,8 +369,12 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoStory, data, t),
     [data, t],
   );
-  const resolvedWidth = Math.max(MIN_WIDTH, Math.round(width ?? DEFAULT_WIDTH));
-  const resolvedHeight = Math.max(MIN_HEIGHT, Math.round(height ?? DEFAULT_HEIGHT));
+  const ownNode = canvasNodes.find((node) => node.id === id);
+  const oldAutomaticSize = ownNode?.measured?.width === 800 && ownNode.measured.height === 480
+    && ownNode.width == null && ownNode.height == null
+    && ownNode.style?.width == null && ownNode.style?.height == null;
+  const resolvedWidth = Math.max(MIN_WIDTH, Math.round(oldAutomaticSize ? VIDEO_STORY_NODE_DEFAULT_SIZE.width : width ?? VIDEO_STORY_NODE_DEFAULT_SIZE.width));
+  const resolvedHeight = Math.max(MIN_HEIGHT, Math.round(oldAutomaticSize ? VIDEO_STORY_NODE_DEFAULT_SIZE.height : height ?? VIDEO_STORY_NODE_DEFAULT_SIZE.height));
 
   useEffect(() => {
     updateNodeInternals(id);

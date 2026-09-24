@@ -3,15 +3,11 @@
 import { submitFreezoneAnalyzeVideoStory } from '@/api/ops';
 import type { RemixArtifactRef } from '@/api/remix';
 import { awaitTaskCompletion } from '@/api/tasks';
-import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
+import { CANVAS_NODE_TYPES, VIDEO_STORY_NODE_DEFAULT_SIZE } from '@/features/canvas/domain/canvasNodes';
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 
 import { normalizeVideoStoryRows } from './videoStoryNormalizer';
-
-/** 视频故事节点的落位尺寸（与 NodeActionToolbar.handleVideoAnalyze 一致）。 */
-const STORY_LAYOUT_WIDTH = 720;
-const STORY_LAYOUT_HEIGHT = 360;
 
 export interface VideoAnalyzeStoryResult {
   /** 同步建好的 videoStory 节点 id（loading 态，数据回来后原地回填）。 */
@@ -138,8 +134,8 @@ export function analyzeVideoStory(
   // 数据回来后再 updateNodeData 把分镜填进去；失败则把错误写到该节点。
   const storyPosition = store.findNodePosition(
     sourceNodeId,
-    STORY_LAYOUT_WIDTH,
-    STORY_LAYOUT_HEIGHT,
+    VIDEO_STORY_NODE_DEFAULT_SIZE.width,
+    VIDEO_STORY_NODE_DEFAULT_SIZE.height,
   );
   const storyNodeId = store.addNode(CANVAS_NODE_TYPES.videoStory, storyPosition, {
     sourceVideoUrl: opts.videoUrl,
