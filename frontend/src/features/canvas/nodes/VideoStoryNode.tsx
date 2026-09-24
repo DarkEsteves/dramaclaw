@@ -341,7 +341,7 @@ function ErrorStoryState({ message }: { message: string }) {
   );
 }
 
-export const VideoStoryNode = memo(({ id, data, selected, width, height }: VideoStoryNodeProps) => {
+export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps) => {
   const { t } = useTranslation();
   const updateNodeInternals = useUpdateNodeInternals();
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
@@ -370,11 +370,12 @@ export const VideoStoryNode = memo(({ id, data, selected, width, height }: Video
     [data, t],
   );
   const ownNode = canvasNodes.find((node) => node.id === id);
-  const oldAutomaticSize = ownNode?.measured?.width === 800 && ownNode.measured.height === 480
-    && ownNode.width == null && ownNode.height == null
-    && ownNode.style?.width == null && ownNode.style?.height == null;
-  const resolvedWidth = Math.max(MIN_WIDTH, Math.round(oldAutomaticSize ? VIDEO_STORY_NODE_DEFAULT_SIZE.width : width ?? VIDEO_STORY_NODE_DEFAULT_SIZE.width));
-  const resolvedHeight = Math.max(MIN_HEIGHT, Math.round(oldAutomaticSize ? VIDEO_STORY_NODE_DEFAULT_SIZE.height : height ?? VIDEO_STORY_NODE_DEFAULT_SIZE.height));
+  // React Flow passes auto-measured dimensions through width/height as well.
+  // Only dimensions persisted on the node represent a deliberate resize.
+  const explicitWidth = ownNode?.width ?? (typeof ownNode?.style?.width === 'number' ? ownNode.style.width : undefined);
+  const explicitHeight = ownNode?.height ?? (typeof ownNode?.style?.height === 'number' ? ownNode.style.height : undefined);
+  const resolvedWidth = Math.max(MIN_WIDTH, Math.round(explicitWidth ?? VIDEO_STORY_NODE_DEFAULT_SIZE.width));
+  const resolvedHeight = Math.max(MIN_HEIGHT, Math.round(explicitHeight ?? VIDEO_STORY_NODE_DEFAULT_SIZE.height));
 
   useEffect(() => {
     updateNodeInternals(id);
