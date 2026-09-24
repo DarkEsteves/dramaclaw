@@ -13,18 +13,20 @@ export interface BlueprintSources {
   transcriptRef: RemixArtifactRef | null;
 }
 
-/** Turn the existing model analysis into editable starting rules for a script branch. */
-export function suggestBlueprintRules(storyData: Record<string, unknown> | undefined): {
+export interface BlueprintRuleSuggestions {
   narrativeRole: string;
   preserveRule: string;
   replaceRule: string;
-} {
+}
+
+function videoStoryAnalysis(storyData: Record<string, unknown> | undefined): Record<string, unknown> | null {
   const rawResult = storyData?.rawResult;
   const videoStory = rawResult && typeof rawResult === 'object'
     ? (rawResult as Record<string, unknown>).video_story : null;
-  const summary = videoStory && typeof videoStory === 'object'
-    ? (videoStory as Record<string, unknown>).summary : null;
-  const narrativeSummary = typeof summary === 'string' ? summary.trim() : '';
+  return videoStory && typeof videoStory === 'object' ? videoStory as Record<string, unknown> : null;
+}
+
+function analyzedRoles(storyData: Record<string, unknown> | undefined): string[] {
   const events = Array.isArray(storyData?.referenceEvents) ? storyData.referenceEvents : [];
   const roles = events.flatMap((event) => {
     if (!event || typeof event !== 'object') return [];
@@ -39,6 +41,46 @@ export function suggestBlueprintRules(storyData: Record<string, unknown> | undef
       if (typeof role === 'string' && role.trim()) roles.push(role.trim());
     }
   }
+  return roles;
+}
+
+const BEAT_CUES: Array<[RegExp, string]> = [
+  [/提问|发问|问题|悬念|设问/, '提问'],
+  [/回答|答案|揭晓|亮出|揭示|展示/, '揭晓'],
+  [/举例|列举|日常|场景|演示|使用|佐证/, '举例佐证'],
+  [/调侃|质疑|吐槽|反问|冲突/, '调侃'],
+  [/反转|反击|回击|反称|逆转/, '反转'],
+];
+
+/** Use the model's reusable structure, with a conservative fallback for older analyses. */
+export function suggestBlueprintRules(storyData: Record<string, unknown> | undefined): BlueprintRuleSuggestions {
+  const structure = videoStoryAnalysis(storyData)?.adaptation_structure;
+  const structured = structure && typeof structure === 'object' ? structure as Record<string, unknown> : null;
+  const modelRole = typeof structured?.narrative_role === 'string' && structured.narrative_role.length <= 100
+    ? structured.narrative_role.trim() : '';
+  const modelBeats = Array.isArray(structured?.reusable_beats)
+    ? structured.reusable_beats.filter((beat): beat is string => typeof beat === 'string' && beat.trim().length > 0 && beat.trim().length <= 16)
+      .map((beat) => beat.trim()).slice(0, 6)
+    : [];
+  const beats = modelBeats.length ? [...new Set(modelBeats)] : analyzedRoles(storyData).flatMap((role) => {
+    const matches = BEAT_CUES.filter(([pattern]) => pattern.test(role)).map(([, beat]) => beat);
+    return matches;
+  }).filter((beat, index, all) => all.indexOf(beat) === index);
+  if (!modelRole && beats.length < 2) return { narrativeRole: '', preserveRule: '', replaceRule: '' };
+  return {
+    narrativeRole: modelRole || `通过${beats.join('、')}推进故事。`,
+    preserveRule: beats.length >= 2 ? `保留“${beats.join(' → ')}”的叙事节奏。` : '',
+    replaceRule: '',
+  };
+}
+
+/** Identify untouched defaults written by the previous release before upgrading them. */
+export function legacySuggestBlueprintRules(storyData: Record<string, unknown> | undefined): BlueprintRuleSuggestions {
+  const videoStory = videoStoryAnalysis(storyData);
+  const summary = videoStory && typeof videoStory === 'object'
+    ? (videoStory as Record<string, unknown>).summary : null;
+  const narrativeSummary = typeof summary === 'string' ? summary.trim() : '';
+  const roles = analyzedRoles(storyData);
   const keyRoles = roles.length <= 5
     ? roles
     : [roles[0], roles[1], roles[Math.floor(roles.length / 2)], roles[roles.length - 2], roles[roles.length - 1]];
@@ -51,6 +93,42 @@ export function suggestBlueprintRules(storyData: Record<string, unknown> | undef
       : narrativeSummary ? `保留原片的核心叙事线与节奏：${narrativeSummary}` : '',
     replaceRule: hasAnalysis ? '将原片特有的人物、产品、场景和具体说法替换为新主题的真实信息；重新制作对应画面与台词。' : '',
   };
+}
+
+type RuleDraft = {
+  blueprintNarrativeRole?: string;
+  blueprintPreserveRule?: string;
+  blueprintReplaceRule?: string;
+  blueprintRulesTouched?: boolean;
+  referenceBlueprintRef?: RemixArtifactRef | null;
+};
+
+/** Refresh only empty fields or exact old generated copy; preserve authored choices. */
+export function upgradeBlueprintRuleDraft(
+  input: object,
+  suggestions: BlueprintRuleSuggestions,
+  legacy: BlueprintRuleSuggestions,
+  hasSeed = false,
+): Partial<RuleDraft> {
+  const draft = input as RuleDraft;
+  if (draft.blueprintRulesTouched) return {};
+  const isExactLegacyCopy = Boolean(legacy.narrativeRole && suggestions.narrativeRole
+    && draft.blueprintNarrativeRole === legacy.narrativeRole
+    && draft.blueprintPreserveRule === legacy.preserveRule
+    && draft.blueprintReplaceRule === legacy.replaceRule);
+  if ((draft.referenceBlueprintRef || hasSeed) && !isExactLegacyCopy) return {};
+  const patch: Partial<RuleDraft> = {};
+  const fields: Array<[keyof Pick<RuleDraft, 'blueprintNarrativeRole' | 'blueprintPreserveRule' | 'blueprintReplaceRule'>, keyof BlueprintRuleSuggestions]> = [
+    ['blueprintNarrativeRole', 'narrativeRole'],
+    ['blueprintPreserveRule', 'preserveRule'],
+    ['blueprintReplaceRule', 'replaceRule'],
+  ];
+  for (const [field, key] of fields) {
+    const current = draft[field] ?? '';
+    const next = suggestions[key];
+    if (current !== next && (!current || (legacy[key] && current === legacy[key]))) patch[field] = next;
+  }
+  return patch;
 }
 
 function artifactRef(value: unknown): RemixArtifactRef | null {

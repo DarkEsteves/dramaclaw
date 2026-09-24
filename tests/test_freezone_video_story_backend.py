@@ -103,6 +103,9 @@ def test_video_story_prompt_uses_timed_reference_events() -> None:
     assert '"visible_text"' in prompt
     assert "木勺" in prompt
     assert "image_prompt 和 motion_prompt 用英文" in prompt
+    assert '"adaptation_structure"' in prompt
+    assert '"reusable_beats"' in prompt
+    assert "不要预设替换人物、产品或场景" in prompt
 
 
 def test_freezone_analyze_request_defaults_to_shots_mode() -> None:

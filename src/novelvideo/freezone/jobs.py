@@ -1971,11 +1971,12 @@ visible_text 只抄清楚可辨认的画面字幕原文，不要改写或补全�
 不要把未露出的道具、动作、身份、情绪和声音写进画面字段。各字段用中文短语，不写完整叙事句。
 visual_description 留空，由程序根据上述静态字段生成画面观察。
 narrative 只简述画面和同期台词在故事中的可能作用；推断应与画面事实分开，尽量在 35 字内。
+adaptation_structure 从全部事件提炼可复用的故事结构：narrative_role 用一句话说明叙事如何推进；reusable_beats 按顺序列出 2-6 个简短的叙事节拍，如“提问”“揭晓”“举例”“反转”。不要复述原片剧情，不要写原片人物、品牌、产品、地点或具体台词。不要预设替换人物、产品或场景，这些由用户在改编时决定。若无法判断结构，narrative_role 留空且 reusable_beats 留空数组。
 spoken_text 是转写结果，可能有错词；不要擅自更改，也不要据此补出看不见的物体。
 keyframes 对每个事件只能填写对应的输入帧序号。严格输出 JSON 对象，不要 markdown。
 image_prompt 和 motion_prompt 用英文，作为后续生成建议；不得把建议中的动作当成已观察到的原片事实。
 
-JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","duration":{duration_sec if duration_sec is not None else 'null'},"shots":[{{"shot":1,"start_time":0.0,"end_time":1.0,"duration":1.0,"visible_subject":"人物外观与姿态","visible_setting":"可见环境","visible_objects":["清楚可见的物品"],"visible_text":"画面字幕原文","visual_description":"","narrative":"中文叙事作用","shot_size":"中景","camera_angle":"平视","camera_movement":"固定","focus_depth":"中等景深","lighting":"中文光线","background_music":"","voice_sound":"","image_prompt":"A woman in a cafe, medium shot","motion_prompt":"The camera slowly pans left","keyframes":[1]}}]}}
+JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","duration":{duration_sec if duration_sec is not None else 'null'},"adaptation_structure":{{"narrative_role":"用提问引出答案，再以反转收尾。","reusable_beats":["提问","揭晓","反转"]}},"shots":[{{"shot":1,"start_time":0.0,"end_time":1.0,"duration":1.0,"visible_subject":"人物外观与姿态","visible_setting":"可见环境","visible_objects":["清楚可见的物品"],"visible_text":"画面字幕原文","visual_description":"","narrative":"中文叙事作用","shot_size":"中景","camera_angle":"平视","camera_movement":"固定","focus_depth":"中等景深","lighting":"中文光线","background_music":"","voice_sound":"","image_prompt":"A woman in a cafe, medium shot","motion_prompt":"The camera slowly pans left","keyframes":[1]}}]}}
 """
     duration_hint = (
         f"视频总时长约 {duration_sec:.2f} 秒。"
@@ -1998,6 +1999,7 @@ JSON 格式：{{"title":"中文短标题","summary":"中文一句话概括","dur
 - 时间字段使用数字秒，duration = end_time - start_time。
 - 画面描述写清主体、动作、环境、构图、情绪、重要道具。
 - 叙事内容写这一镜在故事中的作用，而不是重复画面描述。
+- adaptation_structure 提炼可复用的叙事作用与 2-6 个顺序节拍，不复述原片人物、产品、地点或具体台词。不要预设替换人物、产品或场景，由用户在改编时决定。无法判断时留空。
 - 图生视频提示词和视频运动提示词用英文，适合直接用于视频生成。
 - 背景音乐、人声/音效用中文，简洁描述。
 - 关键帧使用输入帧序号，1 到 {frame_count}。
@@ -2009,6 +2011,7 @@ JSON schema:
   "title": "中文短标题",
   "summary": "中文一句话概括视频故事",
   "duration": 数字秒或 null,
+  "adaptation_structure": {{"narrative_role": "可复用的叙事推进方式", "reusable_beats": ["提问", "揭晓", "反转"]}},
   "shots": [
     {{
       "shot": 1,

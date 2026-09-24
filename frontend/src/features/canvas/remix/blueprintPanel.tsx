@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
 import { createRemixArtifact, fetchRemixArtifact, fetchRemixOperation, reviseRemixArtifact, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
 import type { VideoStoryRow } from '@/features/canvas/domain/canvasNodes';
 import { readUrl } from '@/lib/url-params';
-import { blueprintReadinessErrors, buildReferenceBlueprint, referenceEventsFromBlueprint, type BlueprintSources } from './blueprintModel';
+import { blueprintReadinessErrors, buildReferenceBlueprint, referenceEventsFromBlueprint, upgradeBlueprintRuleDraft, type BlueprintRuleSuggestions, type BlueprintSources } from './blueprintModel';
 import type { ReferenceEvent } from './ReferenceEventList';
 
 interface BlueprintDraft {
@@ -30,6 +30,7 @@ interface Props {
   suggestedNarrativeRole?: string;
   suggestedPreserveRule?: string;
   suggestedReplaceRule?: string;
+  legacySuggestions?: BlueprintRuleSuggestions;
   seedRef?: RemixArtifactRef | null;
 }
 
@@ -37,26 +38,28 @@ export interface ReferenceBlueprintPanelHandle {
   ensureSaved: () => Promise<RemixArtifactRef>;
 }
 
-export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule, seedRef }, ref) {
+export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule, legacySuggestions, seedRef }, ref) {
   const project = readUrl().project;
   const [operationId, setOperationId] = useState<string | null>(draft.evidenceOperationId ?? null);
-  const canSuggest = !draft.blueprintRulesTouched && !draft.referenceBlueprintRef && !seedRef;
-  const [role, setRole] = useState(draft.blueprintNarrativeRole || (canSuggest ? suggestedNarrativeRole : '') || '');
-  const [preserve, setPreserve] = useState(draft.blueprintPreserveRule || (canSuggest ? suggestedPreserveRule : '') || '');
-  const [replace, setReplace] = useState(draft.blueprintReplaceRule || (canSuggest ? suggestedReplaceRule : '') || '');
+  const suggestions = { narrativeRole: suggestedNarrativeRole ?? '', preserveRule: suggestedPreserveRule ?? '', replaceRule: suggestedReplaceRule ?? '' };
+  const suggestedPatch = upgradeBlueprintRuleDraft(draft, suggestions, legacySuggestions ?? { narrativeRole: '', preserveRule: '', replaceRule: '' }, Boolean(seedRef));
+  const [role, setRole] = useState(suggestedPatch.blueprintNarrativeRole ?? draft.blueprintNarrativeRole ?? '');
+  const [preserve, setPreserve] = useState(suggestedPatch.blueprintPreserveRule ?? draft.blueprintPreserveRule ?? '');
+  const [replace, setReplace] = useState(suggestedPatch.blueprintReplaceRule ?? draft.blueprintReplaceRule ?? '');
   const [busy, setBusy] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirty] = useState(Boolean(draft.referenceBlueprintRef && Object.keys(suggestedPatch).length));
   const [error, setError] = useState<string | null>(null);
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
 
   useEffect(() => {
-    if (!canSuggest) return;
-    const patch: Partial<BlueprintDraft> = {};
-    if (!draft.blueprintNarrativeRole && suggestedNarrativeRole) { setRole(suggestedNarrativeRole); patch.blueprintNarrativeRole = suggestedNarrativeRole; }
-    if (!draft.blueprintPreserveRule && suggestedPreserveRule) { setPreserve(suggestedPreserveRule); patch.blueprintPreserveRule = suggestedPreserveRule; }
-    if (!draft.blueprintReplaceRule && suggestedReplaceRule) { setReplace(suggestedReplaceRule); patch.blueprintReplaceRule = suggestedReplaceRule; }
-    if (Object.keys(patch).length) onPatch(patch);
-  }, [canSuggest, draft.blueprintNarrativeRole, draft.blueprintPreserveRule, draft.blueprintReplaceRule, onPatch, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule]);
+    if (suggestedPatch.blueprintNarrativeRole !== undefined) setRole(suggestedPatch.blueprintNarrativeRole);
+    if (suggestedPatch.blueprintPreserveRule !== undefined) setPreserve(suggestedPatch.blueprintPreserveRule);
+    if (suggestedPatch.blueprintReplaceRule !== undefined) setReplace(suggestedPatch.blueprintReplaceRule);
+    if (Object.keys(suggestedPatch).length) {
+      if (draft.referenceBlueprintRef) setDirty(true);
+      onPatch({ ...suggestedPatch, ...(draft.referenceBlueprintRef ? { blueprintDirty: true } : {}) });
+    }
+  }, [draft.blueprintNarrativeRole, draft.blueprintPreserveRule, draft.blueprintReplaceRule, draft.blueprintRulesTouched, draft.referenceBlueprintRef, legacySuggestions?.narrativeRole, legacySuggestions?.preserveRule, legacySuggestions?.replaceRule, onPatch, seedRef, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule]);
 
   useEffect(() => {
     const restoreRef = draft.referenceBlueprintRef ?? seedRef;
@@ -142,7 +145,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
         setBusy(false);
       }
     }
-    const narrativeRole = role.trim() || suggestedNarrativeRole?.trim() || '';
+    const narrativeRole = role.trim();
     if (!narrativeRole) throw new Error('缺少叙事作用，请在参考蓝图设置中填写。');
     setBusy(true); setError(null);
     try {
@@ -176,10 +179,10 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
     <p className="rounded-[var(--ui-radius-lg)] bg-[rgb(var(--accent-rgb)/0.07)] px-3 py-2.5 leading-5 text-text-dark/78">这些规则只属于当前脚本分支，不会影响原片拆解或其他脚本节点。</p>
     <div className="grid gap-3">
       <div className="text-xs font-semibold text-text-dark">改编规则</div>
-      <label className={labelClass}>整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} className={fieldClass} /></label>
+      <label className={labelClass}>整体叙事作用<input aria-label="整体叙事作用" value={role} onChange={(event) => edit('blueprintNarrativeRole', event.target.value, setRole)} placeholder="例如：提问引出答案，再用场景佐证并反转收尾" className={fieldClass} /></label>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className={labelClass}>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} className={`${fieldClass} min-h-24 resize-y`} /></label>
-        <label className={labelClass}>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} className={`${fieldClass} min-h-24 resize-y`} /></label>
+        <label className={labelClass}>保留规则<textarea aria-label="保留规则" value={preserve} onChange={(event) => edit('blueprintPreserveRule', event.target.value, setPreserve)} placeholder="例如：保留问答和结尾反转的节奏" className={`${fieldClass} min-h-24 resize-y`} /></label>
+        <label className={labelClass}>替换规则<textarea aria-label="替换规则" value={replace} onChange={(event) => edit('blueprintReplaceRule', event.target.value, setReplace)} placeholder="确定新主题后，再填写要换的人物、产品或场景" className={`${fieldClass} min-h-24 resize-y`} /></label>
       </div>
     </div>
     <details className="rounded-[var(--ui-radius-lg)] border border-[var(--ui-border-soft)] bg-[rgba(var(--bg-rgb)/0.28)]">

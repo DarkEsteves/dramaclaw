@@ -80,9 +80,9 @@ describe('createScriptFromBlueprint', () => {
     createScriptFromBlueprint('story-1');
 
     expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
-      blueprintNarrativeRole: expect.stringContaining('双人访谈中展示产品并以反转收尾'),
-      blueprintPreserveRule: expect.stringContaining('开场提问'),
-      blueprintReplaceRule: expect.stringContaining('新主题'),
+      blueprintNarrativeRole: '通过提问、揭晓、反转推进故事。',
+      blueprintPreserveRule: '保留“提问 → 揭晓 → 反转”的叙事节奏。',
+      blueprintReplaceRule: '',
     }));
   });
 
@@ -96,6 +96,25 @@ describe('createScriptFromBlueprint', () => {
 
     expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
       blueprintNarrativeRole: '',
+      remixBlueprintSeedRef: { artifactId: 'saved-blueprint', revision: 2 },
+    }));
+  });
+
+  it('upgrades exact legacy defaults when branching from an automatically saved blueprint', () => {
+    state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
+      rawResult: { video_story: { summary: '旧剧情摘要' } },
+      referenceEvents: [{ narrative_inference: '开场提问' }, { narrative_inference: '结尾反转' }],
+      blueprintNarrativeRole: '旧剧情摘要',
+      blueprintPreserveRule: '保留原片的叙事顺序与关键转折：开场提问 → 结尾反转。',
+      blueprintReplaceRule: '将原片特有的人物、产品、场景和具体说法替换为新主题的真实信息；重新制作对应画面与台词。',
+      referenceBlueprintRef: { artifactId: 'saved-blueprint', revision: 2 },
+    } }];
+
+    createScriptFromBlueprint('story-1');
+    expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
+      blueprintNarrativeRole: '通过提问、反转推进故事。',
+      blueprintPreserveRule: '保留“提问 → 反转”的叙事节奏。',
+      blueprintReplaceRule: '',
       remixBlueprintSeedRef: { artifactId: 'saved-blueprint', revision: 2 },
     }));
   });

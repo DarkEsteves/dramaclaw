@@ -90,7 +90,7 @@ import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSy
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
 import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
-import { connectedBlueprintSources, suggestBlueprintRules } from '@/features/canvas/remix/blueprintModel';
+import { connectedBlueprintSources, legacySuggestBlueprintRules, suggestBlueprintRules } from '@/features/canvas/remix/blueprintModel';
 import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
@@ -462,6 +462,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     ? upstreamStory.data.referenceEvents as ReferenceEvent[]
     : [];
   const suggestedRules = suggestBlueprintRules(upstreamStory?.data);
+  const legacySuggestedRules = legacySuggestBlueprintRules(upstreamStory?.data);
   const patchBranchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
   const ensureBranchBlueprint = useCallback(async () => {
     if (!blueprintPanelRef.current) throw new Error('当前脚本的改编规则尚未准备好。');
@@ -1112,6 +1113,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
               suggestedNarrativeRole={suggestedRules.narrativeRole}
               suggestedPreserveRule={suggestedRules.preserveRule}
               suggestedReplaceRule={suggestedRules.replaceRule}
+              legacySuggestions={legacySuggestedRules}
             /> : undefined}
             onEnsureBlueprint={upstreamStory ? ensureBranchBlueprint : undefined}
             generationRunning={data.remixScriptGenerationStatus === 'running'}

@@ -44,6 +44,7 @@ vi.mock('@/api/ops', async (importOriginal) => {
       return { url: file.type.startsWith('audio/') ? '/api/v1/projects/demo/media/voice.wav' : '/api/v1/projects/demo/media/broll.png' };
     }),
     submitFreezoneAnalyzeVideoStory: vi.fn(async () => ({
+      video_story: { adaptation_structure: { narrative_role: '通过展示引出核心信息。', reusable_beats: ['展示', '讲解'] } },
       reference_events: [{
         event_id: 'product', start_us: 0, end_us: 2_000_000,
         observed_frame: { pts: 0, time_base: '1/1000', time_us: 0, url: '/frame.png' },
@@ -223,9 +224,9 @@ describe('native canvas remix journey integration', () => {
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).not.toBeInTheDocument();
     await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
     expect(screen.getByText('这些规则只属于当前脚本分支，不会影响原片拆解或其他脚本节点。')).toBeVisible();
-    expect(screen.getByLabelText('整体叙事作用')).toHaveValue('产品登场');
-    expect((screen.getByLabelText('保留规则') as HTMLTextAreaElement).value).toContain('产品登场');
-    expect((screen.getByLabelText('替换规则') as HTMLTextAreaElement).value).toContain('新主题');
+    expect(screen.getByLabelText('整体叙事作用')).toHaveValue('通过展示引出核心信息。');
+    expect((screen.getByLabelText('保留规则') as HTMLTextAreaElement).value).toContain('展示 → 讲解');
+    expect(screen.getByLabelText('替换规则')).toHaveValue('');
     fireEvent.change(await screen.findByLabelText('新主题'), { target: { value: '新品咖啡' } });
     fireEvent.click(screen.getByRole('button', { name: '生成改编台词' }));
     await screen.findByDisplayValue('新品登场');

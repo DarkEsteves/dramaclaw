@@ -79,6 +79,42 @@ describe('ReferenceBlueprintPanel', () => {
     expect(screen.getByLabelText('保留规则')).toHaveValue('');
   });
 
+  it('replaces untouched legacy copy with reusable structure and clears the old replacement default', async () => {
+    const onPatch = vi.fn();
+    render(<ReferenceBlueprintPanel nodeId="script" source={source} rows={rows} draft={{
+      blueprintNarrativeRole: '原片剧情', blueprintPreserveRule: '逐事件复述', blueprintReplaceRule: '自动替换人物产品',
+      referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 },
+    }} onPatch={onPatch} onReanalyze={() => {}}
+      suggestedNarrativeRole="提问后反转" suggestedPreserveRule="保留提问与反转" suggestedReplaceRule=""
+      legacySuggestions={{ narrativeRole: '原片剧情', preserveRule: '逐事件复述', replaceRule: '自动替换人物产品' }} />);
+
+    expect(screen.getByLabelText('整体叙事作用')).toHaveValue('提问后反转');
+    expect(screen.getByLabelText('保留规则')).toHaveValue('保留提问与反转');
+    expect(screen.getByLabelText('替换规则')).toHaveValue('');
+    await waitFor(() => expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({
+      blueprintNarrativeRole: '提问后反转', blueprintPreserveRule: '保留提问与反转', blueprintReplaceRule: '',
+    })));
+  });
+
+  it('revises an automatically saved legacy blueprint before generating again', async () => {
+    const panel = createRef<ReferenceBlueprintPanelHandle>();
+    const onPatch = vi.fn();
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="script" source={source} rows={rows} draft={{
+      blueprintNarrativeRole: '原片剧情', blueprintPreserveRule: '逐事件复述', blueprintReplaceRule: '自动替换人物产品',
+      referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 },
+      referenceBlueprintRef: { artifactId: 'old-blueprint', revision: 1 },
+    }} onPatch={onPatch} onReanalyze={() => {}}
+      suggestedNarrativeRole="提问后反转" suggestedPreserveRule="保留提问与反转" suggestedReplaceRule=""
+      legacySuggestions={{ narrativeRole: '原片剧情', preserveRule: '逐事件复述', replaceRule: '自动替换人物产品' }} />);
+
+    await waitFor(() => expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ blueprintDirty: true, blueprintReplaceRule: '' })));
+    await panel.current?.ensureSaved();
+    expect(reviseRemixArtifact).toHaveBeenCalledWith('demo', { artifactId: 'old-blueprint', revision: 1 }, expect.objectContaining({
+      narrative_role: '提问后反转',
+      preserve_replace_rules: [{ type: 'preserve', text: '保留提问与反转' }],
+    }), expect.any(Array));
+  });
+
   it('extracts full-video evidence and persists the resulting reference', async () => {
     const onPatch = vi.fn();
     render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{}} onPatch={onPatch} onReanalyze={() => {}} />);

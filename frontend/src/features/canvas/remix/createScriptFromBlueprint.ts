@@ -1,6 +1,6 @@
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
-import { suggestBlueprintRules } from './blueprintModel';
+import { legacySuggestBlueprintRules, suggestBlueprintRules, upgradeBlueprintRuleDraft } from './blueprintModel';
 import { requestRemixScriptEditor } from './remixScriptEditorRequests';
 
 /** Create a script branch from the analyzed reference story. */
@@ -12,12 +12,14 @@ export function createScriptFromBlueprint(storyId: string): string {
     ? { ...(value as Record<string, unknown>) }
     : null;
   const seedRef = cloneRef(storyData.referenceBlueprintRef);
-  const suggestions = seedRef ? { narrativeRole: '', preserveRule: '', replaceRule: '' } : suggestBlueprintRules(storyData);
+  const suggestions = suggestBlueprintRules(storyData);
+  const defaults = seedRef ? { narrativeRole: '', preserveRule: '', replaceRule: '' } : suggestions;
+  const upgrades = upgradeBlueprintRuleDraft(storyData, suggestions, legacySuggestBlueprintRules(storyData), Boolean(seedRef));
   const childId = store.addNode(CANVAS_NODE_TYPES.script, store.findNodePosition(storyId, 420, 360), {
     remixRole: 'adaptation_script',
-    blueprintNarrativeRole: typeof storyData.blueprintNarrativeRole === 'string' && storyData.blueprintNarrativeRole.trim() ? storyData.blueprintNarrativeRole : suggestions.narrativeRole,
-    blueprintPreserveRule: typeof storyData.blueprintPreserveRule === 'string' && storyData.blueprintPreserveRule.trim() ? storyData.blueprintPreserveRule : suggestions.preserveRule,
-    blueprintReplaceRule: typeof storyData.blueprintReplaceRule === 'string' && storyData.blueprintReplaceRule.trim() ? storyData.blueprintReplaceRule : suggestions.replaceRule,
+    blueprintNarrativeRole: upgrades.blueprintNarrativeRole ?? (typeof storyData.blueprintNarrativeRole === 'string' ? storyData.blueprintNarrativeRole : defaults.narrativeRole),
+    blueprintPreserveRule: upgrades.blueprintPreserveRule ?? (typeof storyData.blueprintPreserveRule === 'string' ? storyData.blueprintPreserveRule : defaults.preserveRule),
+    blueprintReplaceRule: upgrades.blueprintReplaceRule ?? (typeof storyData.blueprintReplaceRule === 'string' ? storyData.blueprintReplaceRule : defaults.replaceRule),
     referenceEvidenceRef: cloneRef(storyData.referenceEvidenceRef),
     sourceMediaPath: typeof storyData.sourceMediaPath === 'string' ? storyData.sourceMediaPath : null,
     remixBlueprintSeedRef: seedRef,
