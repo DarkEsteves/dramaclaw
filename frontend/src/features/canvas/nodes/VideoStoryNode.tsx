@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Handle,
@@ -17,7 +17,8 @@ import {
   type VideoStoryNodeData,
   type VideoStoryRow,
 } from '@/features/canvas/domain/canvasNodes';
-import { resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
+import { isRenderableImageSrc, resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
+import { aspectRatioFromImageDimensions } from '@/features/canvas/application/imageNodeSizing';
 import { localizeNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
 import {
   NodeHeader,
@@ -80,24 +81,27 @@ const COLUMNS: ColumnDef[] = [
 interface StoryCellProps {
   row: VideoStoryRow;
   col: ColumnDef;
+  rowIndex: number;
   onCommit?: (nextValue: string) => void;
+  onPreviewKeyframe?: (url: string, shot: string, aspectRatio: string) => void;
+  onExportKeyframe?: (url: string, shot: string, aspectRatio: string) => void;
 }
 
-function StoryCell({ row, col, onCommit }: StoryCellProps) {
+function StoryCell({ row, col, rowIndex, onCommit, onPreviewKeyframe, onExportKeyframe }: StoryCellProps) {
+  const [imageAspectRatio, setImageAspectRatio] = useState('1:1');
   const value = row[col.key];
 
   if (col.key === 'keyframeUrl') {
-    // 关键帧是图片列，沿用只读 —— 替换需要文件选择器 / URL 输入，是另一
-    // 条交互，等用户后续提（同 scriptNode 角色图列的处理）。
     const url = typeof value === 'string' ? value : null;
-    if (!url) return <span className="text-text-muted/60">—</span>;
+    if (!url || !isRenderableImageSrc(url)) return <span className="text-text-muted/60">—</span>;
+    const shot = String(row.shotNumber ?? rowIndex + 1);
     return (
-      <img
-        src={resolveImageDisplayUrl(url)}
-        alt="keyframe"
-        className="h-16 w-auto rounded border border-[rgba(255,255,255,0.08)] object-cover"
-        draggable={false}
-      />
+      <div className="flex flex-col items-start gap-1.5">
+        <button type="button" aria-label={`查看关键帧 ${shot}`} onClick={() => onPreviewKeyframe?.(url, shot, imageAspectRatio)} className="nodrag rounded-[var(--ui-radius-lg)] border border-[var(--ui-border-soft)] p-0.5 hover:border-[rgb(var(--accent-rgb)/0.55)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--accent-rgb))]">
+          <img src={resolveImageDisplayUrl(url)} alt={`第 ${shot} 镜关键帧缩略图`} onLoad={(event) => setImageAspectRatio(aspectRatioFromImageDimensions(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight) ?? '1:1')} className="h-16 max-w-28 rounded-[var(--ui-radius-lg)] object-contain" draggable={false} />
+        </button>
+        <button type="button" aria-label={`放到画布 · 关键帧 ${shot}`} onClick={() => onExportKeyframe?.(url, shot, imageAspectRatio)} className="nodrag text-xs text-text-dark underline-offset-2 hover:underline">放到画布</button>
+      </div>
     );
   }
 
@@ -124,9 +128,11 @@ interface StoryTableProps {
   rows: VideoStoryRow[];
   compact?: boolean;
   onCellCommit?: (rowIndex: number, colKey: keyof VideoStoryRow, nextValue: string) => void;
+  onPreviewKeyframe?: (url: string, shot: string, aspectRatio: string) => void;
+  onExportKeyframe?: (url: string, shot: string, aspectRatio: string) => void;
 }
 
-function StoryTable({ rows, compact, onCellCommit }: StoryTableProps) {
+function StoryTable({ rows, compact, onCellCommit, onPreviewKeyframe, onExportKeyframe }: StoryTableProps) {
   const { t } = useTranslation();
 
   return (
@@ -158,6 +164,9 @@ function StoryTable({ rows, compact, onCellCommit }: StoryTableProps) {
                   <StoryCell
                     row={row}
                     col={col}
+                    rowIndex={idx}
+                    onPreviewKeyframe={onPreviewKeyframe}
+                    onExportKeyframe={onExportKeyframe}
                     onCommit={
                       onCellCommit
                         ? (next) => onCellCommit(idx, col.key, next)
@@ -180,13 +189,15 @@ interface FullscreenStoryTableProps {
   onCellCommit: (rowIndex: number, colKey: keyof VideoStoryRow, nextValue: string) => void;
   onOverrideChange: (eventId: string, patch: ReferenceEventPatch) => void;
   onReviewAll: () => void;
+  onPreviewKeyframe: (url: string, shot: string, aspectRatio: string) => void;
+  onExportKeyframe: (url: string, shot: string, aspectRatio: string) => void;
 }
 
 function eventSeconds(timeUs: number | null | undefined): string {
   return typeof timeUs === 'number' ? `${(timeUs / 1_000_000).toFixed(1)} 秒` : '暂无';
 }
 
-function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, onReviewAll }: FullscreenStoryTableProps) {
+function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, onReviewAll, onPreviewKeyframe, onExportKeyframe }: FullscreenStoryTableProps) {
   const { t } = useTranslation();
   const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
   const itemCount = Math.max(rows.length, events.length);
@@ -234,6 +245,8 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
               const eventId = event?.event_id ?? `event-${index + 1}`;
               const observedFrame = event?.observed_frame;
               const frameUrl = event?.frame_url ?? observedFrame?.url;
+              const displayRow = row.keyframeUrl && isRenderableImageSrc(row.keyframeUrl)
+                ? row : { ...row, keyframeUrl: frameUrl };
               const reviewState = event?.review_state ?? 'needs_review';
               const spokenText = event?.spoken_text ?? event?.spoken_range?.text;
               return (
@@ -295,7 +308,7 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                   </td>
                   {COLUMNS.map((column) => (
                     <td key={column.key as string} className="overflow-hidden px-3 py-3 align-top break-words">
-                      <StoryCell row={row} col={column} onCommit={(nextValue) => onCellCommit(index, column.key, nextValue)} />
+                      <StoryCell row={displayRow} col={column} rowIndex={index} onCommit={(nextValue) => onCellCommit(index, column.key, nextValue)} onPreviewKeyframe={onPreviewKeyframe} onExportKeyframe={onExportKeyframe} />
                     </td>
                   ))}
                 </tr>
@@ -354,7 +367,12 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const canvasNodes = useCanvasStore((state) => state.nodes);
   const canvasEdges = useCanvasStore((state) => state.edges);
+  const addNode = useCanvasStore((state) => state.addNode);
+  const findNodePosition = useCanvasStore((state) => state.findNodePosition);
+  const requestFocusNode = useCanvasStore((state) => state.requestFocusNode);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [keyframePreview, setKeyframePreview] = useState<{ url: string; shot: string; aspectRatio: string } | null>(null);
+  const keyframePreviewRef = useRef<HTMLDivElement>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const blueprintSource = useMemo(() => connectedBlueprintSources(id, canvasNodes, canvasEdges), [id, canvasNodes, canvasEdges]);
   const reanalyzeBlueprint = useCallback(() => {
@@ -387,16 +405,20 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
     updateNodeInternals(id);
   }, [id, resolvedHeight, resolvedWidth, updateNodeInternals]);
 
-  // Esc closes the node-level detail dialog.
+  // Escape closes the topmost detail layer first.
   useEffect(() => {
-    if (!isFullscreen) return;
+    if (!isFullscreen && !keyframePreview) return;
     const handleKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      setIsFullscreen(false);
+      if (keyframePreview) setKeyframePreview(null);
+      else setIsFullscreen(false);
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [isFullscreen]);
+  }, [isFullscreen, keyframePreview]);
+  useEffect(() => {
+    if (keyframePreview) keyframePreviewRef.current?.focus();
+  }, [keyframePreview?.url]);
 
   const cardToneClass = canvasNodeFrameClass({ selected });
 
@@ -447,6 +469,26 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
       : event);
     updateNodeData(id, { referenceEvents: nextEvents, referenceBlueprintRef: null, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
+
+  const exportKeyframe = useCallback((url: string, shot: string, aspectRatio: string) => {
+    const imageNodeId = addNode(CANVAS_NODE_TYPES.upload, findNodePosition(id, 360, 360), {
+      displayName: `原片关键帧 · 第 ${shot} 镜`,
+      imageUrl: url,
+      previewImageUrl: url,
+      aspectRatio,
+      imageOnly: true,
+      sourceStoryNodeId: id,
+      sourceStoryShotNumber: shot,
+    });
+    setKeyframePreview(null);
+    setIsFullscreen(false);
+    setSelectedNode(imageNodeId);
+    requestFocusNode(imageNodeId);
+  }, [addNode, findNodePosition, id, requestFocusNode, setSelectedNode]);
+
+  const previewKeyframe = useCallback((url: string, shot: string, aspectRatio: string) => {
+    setKeyframePreview({ url, shot, aspectRatio });
+  }, []);
 
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {
     if (nodeId === id && action === 'continue_story') {
@@ -532,7 +574,7 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
           ) : hasReferenceEvents ? (
             <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} onReviewAll={handleReviewAll} />
           ) : hasRows ? (
-            <StoryTable rows={rows} compact onCellCommit={handleCellCommit} />
+            <StoryTable rows={rows} compact onCellCommit={handleCellCommit} onPreviewKeyframe={previewKeyframe} onExportKeyframe={exportKeyframe} />
           ) : (
             <EmptyStoryState rawResult={data.rawResult ?? null} />
           )}
@@ -581,11 +623,27 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
                 onOverrideChange={handleReferenceOverride}
                 onReviewAll={handleReviewAll}
                 onCellCommit={handleCellCommit}
+                onPreviewKeyframe={previewKeyframe}
+                onExportKeyframe={exportKeyframe}
               />
             ) : (
-              <StoryTable rows={rows} onCellCommit={handleCellCommit} />
+              <StoryTable rows={rows} onCellCommit={handleCellCommit} onPreviewKeyframe={previewKeyframe} onExportKeyframe={exportKeyframe} />
             )}
           </div>
+        </div>,
+        document.body,
+      )}
+
+      {typeof document !== 'undefined' && keyframePreview && createPortal(
+        <div ref={keyframePreviewRef} role="dialog" aria-modal="true" aria-label="关键帧预览" tabIndex={-1} className="fixed inset-0 z-[230] flex flex-col bg-black/90 p-4 text-text-dark outline-none" onClick={() => setKeyframePreview(null)}>
+          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 py-2">
+            <div><p className="font-medium">第 {keyframePreview.shot} 镜 · 原片关键帧</p><p className="text-xs text-text-muted">可作为图片节点放到画布，连接到需要参考图的节点。</p></div>
+            <button type="button" aria-label="关闭关键帧预览" onClick={() => setKeyframePreview(null)} className="tap-button tap-button-quiet-primary"><X className="h-4 w-4" /></button>
+          </div>
+          <div className="flex min-h-0 flex-1 items-center justify-center" onClick={(event) => event.stopPropagation()}>
+            <img src={resolveImageDisplayUrl(keyframePreview.url)} alt={`第 ${keyframePreview.shot} 镜关键帧`} onLoad={(event) => { const aspectRatio = aspectRatioFromImageDimensions(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight); if (aspectRatio && aspectRatio !== keyframePreview.aspectRatio) setKeyframePreview((current) => current && current.url === keyframePreview.url ? { ...current, aspectRatio } : current); }} className="max-h-full max-w-full object-contain" />
+          </div>
+          <div className="mx-auto flex w-full max-w-5xl justify-end py-2"><button type="button" onClick={(event) => { event.stopPropagation(); exportKeyframe(keyframePreview.url, keyframePreview.shot, keyframePreview.aspectRatio); }} className="tap-button tap-button-quiet-primary">放到画布</button></div>
         </div>,
         document.body,
       )}
