@@ -278,18 +278,24 @@ describe('RemixScriptPanel', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onAutoSave={onAutoSave} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
     const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
     expect(await screen.findByText('用早晨疲惫引出咖啡')).toBeTruthy();
-    const editor = screen.getByRole('group', { name: '改编台词与事件标记' });
-    expect(within(editor).getByRole('button', { name: '将选中台词添加为事件' })).toBeVisible();
-    expect(within(screen.getByRole('region', { name: 'B-roll 补充镜头与音效' })).queryByRole('button', { name: '将选中台词添加为事件' })).not.toBeInTheDocument();
-    fireEvent.click(within(editor).getByRole('button', { name: '将选中台词添加为事件' }));
-    expect(within(editor).getByRole('alert')).toHaveTextContent('先在台词里选中一段文字。');
-    dialogue.focus();
-    dialogue.setSelectionRange(2, 4);
-    fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
-    expect(within(editor).getByText(/已添加 1 个事件/)).toBeVisible();
-    expect(within(editor).queryByRole('alert')).not.toBeInTheDocument();
+    const broll = screen.getByRole('region', { name: 'B-roll 补充镜头与音效' });
+    expect(dialogue).not.toHaveAttribute('readonly');
+    expect(within(broll).getByRole('button', { name: '从台词添加事件' })).toBeVisible();
+    expect(screen.queryByRole('group', { name: '改编台词与事件标记' })).not.toBeInTheDocument();
+    fireEvent.click(within(broll).getByRole('button', { name: '从台词添加事件' }));
+    const picker = within(broll).getByRole('textbox', { name: '选择台词片段' }) as HTMLTextAreaElement;
+    expect(picker).toHaveAttribute('readonly');
+    expect(picker).toHaveValue(dialogue.value);
+    expect(within(broll).getByRole('button', { name: '添加选中台词' })).toBeDisabled();
+    picker.focus();
+    picker.setSelectionRange(2, 4);
+    fireEvent.select(picker);
+    expect(within(broll).getByText('已选台词：咖啡')).toBeVisible();
+    fireEvent.click(within(broll).getByRole('button', { name: '添加选中台词' }));
+    expect(within(broll).queryByRole('textbox', { name: '选择台词片段' })).not.toBeInTheDocument();
     expect(screen.getByText('补充画面（B-roll）')).toBeVisible();
     expect(screen.getByText('手动添加')).toBeVisible();
+    expect((screen.getByLabelText('事件 1 名称') as HTMLInputElement).closest('[tabindex="-1"]')).toHaveFocus();
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'video-1' } });
     await waitFor(() => expect(onAutoSave).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [expect.objectContaining({ start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) })] })));
     expect(screen.queryByRole('button', { name: '保存脚本版本' })).not.toBeInTheDocument();
@@ -300,12 +306,14 @@ describe('RemixScriptPanel', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲乙丙丁戊己', selections: [{ id: 'generated-1', label: '后段事件', start: 4, end: 6 }] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
 
     expect(screen.getByText('台词事件（1）')).toBeVisible();
-    expect(screen.getByText('AI 已根据台词自动拆分，你也可以选中台词手动补充事件。')).toBeVisible();
+    expect(screen.getByText('AI 已根据台词自动拆分；手动事件可从这里选择台词添加。')).toBeVisible();
     expect(screen.getByText('AI 生成')).toBeVisible();
-    const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
-    dialogue.focus();
-    dialogue.setSelectionRange(1, 3);
-    fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
+    fireEvent.click(screen.getByRole('button', { name: '从台词添加事件' }));
+    const picker = screen.getByRole('textbox', { name: '选择台词片段' }) as HTMLTextAreaElement;
+    picker.focus();
+    picker.setSelectionRange(1, 3);
+    fireEvent.select(picker);
+    fireEvent.click(screen.getByRole('button', { name: '添加选中台词' }));
 
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ selections: [
       expect.objectContaining({ start: 1, end: 3, source: 'manual' }),
@@ -314,6 +322,20 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('台词事件（2）')).toBeVisible();
     expect(screen.getByText('手动添加')).toBeVisible();
     await screen.findByText('用早晨疲惫引出咖啡');
+  });
+
+  it('uses the current dialogue in the B-roll picker and clears a stale selection after edits', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: '从台词添加事件' }));
+    const picker = screen.getByRole('textbox', { name: '选择台词片段' }) as HTMLTextAreaElement;
+    picker.setSelectionRange(0, 2);
+    fireEvent.select(picker);
+    expect(screen.getByRole('button', { name: '添加选中台词' })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText('改编台词'), { target: { value: '新台词' } });
+    expect(picker).toHaveValue('新台词');
+    expect(screen.getByRole('button', { name: '添加选中台词' })).toBeDisabled();
+    expect(screen.getByText('尚未选中台词')).toBeVisible();
   });
 
   it('shows the dialogue covered by each event and updates it with the character range', () => {

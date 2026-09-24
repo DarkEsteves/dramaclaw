@@ -55,7 +55,10 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
   const [batchSource, setBatchSource] = useState<{ segmentId: string; bindingIndex: number } | null>(null);
   const [batchTargets, setBatchTargets] = useState<string[]>([]);
   const [blueprintRole, setBlueprintRole] = useState<string | null>(null);
-  const dialogueRef = useRef<HTMLTextAreaElement>(null);
+  const [eventPickerOpen, setEventPickerOpen] = useState(false);
+  const [eventSelection, setEventSelection] = useState<{ start: number; end: number } | null>(null);
+  const [pendingEventFocusId, setPendingEventFocusId] = useState<string | null>(null);
+  const eventPickerRef = useRef<HTMLTextAreaElement>(null);
   const draftEditCount = useRef(0);
   const draftRef = useRef(draft);
   const visualBindingRequest = useRef(new Map<string, number>());
@@ -82,6 +85,17 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     draftRef.current = initialDraft;
     setDraft(initialDraft);
   }, [initialDraft]);
+
+  useEffect(() => { setEventSelection(null); }, [draft.dialogue]);
+  useEffect(() => { if (eventPickerOpen) eventPickerRef.current?.focus(); }, [eventPickerOpen]);
+  useEffect(() => {
+    if (!pendingEventFocusId) return;
+    const card = document.getElementById(`remix-event-${pendingEventFocusId}`);
+    if (!card) return;
+    card.scrollIntoView?.({ block: 'nearest' });
+    card.focus({ preventScroll: true });
+    setPendingEventFocusId(null);
+  }, [draft.selections, pendingEventFocusId]);
 
   const persistDraft = async (next: RemixScriptDraft) => {
     const persist = onAutoSaveRef.current;
@@ -145,13 +159,16 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     finally { setGenerating(false); }
   };
   const markSelected = () => {
-    const field = dialogueRef.current;
-    if (!field || field.selectionStart === field.selectionEnd) { setError(SELECTION_REQUIRED_ERROR); return; }
-    const start = Array.from(field.value.slice(0, field.selectionStart)).length;
-    const end = Array.from(field.value.slice(0, field.selectionEnd)).length;
+    const range = eventSelection;
+    if (!range || !draft.dialogue.slice(range.start, range.end).trim()) { setError(SELECTION_REQUIRED_ERROR); return; }
+    const start = Array.from(draft.dialogue.slice(0, range.start)).length;
+    const end = Array.from(draft.dialogue.slice(0, range.end)).length;
     const index = draft.selections.length + 1;
     const added = { id: `event-${crypto.randomUUID()}`, label: index === 1 ? '产品登场' : `语义事件 ${index}`, start, end, source: 'manual' as const };
     const selections = [...draft.selections, added].sort((left, right) => left.start - right.start || left.end - right.end);
+    setEventPickerOpen(false);
+    setEventSelection(null);
+    setPendingEventFocusId(added.id);
     changeDraft({ ...draft, selections });
   };
   const bindVisual = async (index: number, nodeId: string) => {
@@ -272,6 +289,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     : brollPlanStatus === 'failed' ? '规划失败'
       : brollPlanCurrent ? `已规划 ${brollRequirements.length} 个台词事件`
         : draft.selections.length ? `待规划 · ${draft.selections.length} 个台词事件` : '暂无台词事件';
+  const selectedEventText = eventSelection ? draft.dialogue.slice(eventSelection.start, eventSelection.end).trim() : '';
   const primaryVisualAction = missingPrimaryVisualCount > 0 && onCreatePrimaryVisuals && <div className="mt-3 border-t border-white/[0.08] pt-3">
     <p className="text-text-muted">{missingPrimaryVisualCount} 个台词事件还没有可用画面。{draft.segments?.length ? '创建后，请在旁白段落中选择要使用的主画面。' : '使用音频节点配音时，可为这些事件准备主画面。'}画面在新节点中生成。</p>
     <button type="button" onClick={() => { if (onCreatePrimaryVisuals()) onClose(); }} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-2`}>创建缺少的主画面视频节点</button>
@@ -291,14 +309,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         </div>
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}
-      <div role="group" aria-label="改编台词与事件标记">
-        <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-text-muted">选中上方台词，可添加需要补充镜头或音效的事件。已添加 {draft.selections.length} 个事件</p>
-          <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
-        </div>
-        {error === SELECTION_REQUIRED_ERROR && <p role="alert" className="mt-1 text-red-300">{error}</p>}
-      </div>
+      <label className="block">改编台词<textarea aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <section aria-label="A-roll 主画面与声音" className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div><div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">01</span><h3 className="font-medium">主画面与声音</h3><span className="text-base font-semibold text-text-dark">A-roll</span></div><p className="mt-1 text-text-muted">先决定台词由谁说、成片使用哪段基础画面和声音。素材在对应的画布节点制作。</p><p className="mt-1 text-[11px] text-text-muted">{arollStatus}</p></div>
@@ -374,13 +385,23 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       <div className="mt-3 border-t border-white/10 pt-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="font-medium text-text-dark">台词事件（{draft.selections.length}）</h3>
+          <div className="flex flex-wrap items-center gap-2"><button type="button" disabled={!draft.dialogue.trim()} onClick={() => { setEventPickerOpen(!eventPickerOpen); setEventSelection(null); setError(null); }} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{eventPickerOpen ? '收起台词选择' : '从台词添加事件'}</button>
           {onPlanBroll && <button type="button"
             disabled={!existingRef || autoSaving || generating || generationRunning || !draft.selections.length || brollPlanStatus === 'running'}
             onClick={onPlanBroll} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>
             {brollPlanStatus === 'running' ? '规划 B-roll 中…' : brollPlanStatus === 'failed' ? '重试规划 B-roll' : brollPlanCurrent ? '重新规划 B-roll' : '规划 B-roll'}
-          </button>}
+          </button>}</div>
         </div>
-        <p className="mt-1 text-text-muted">AI 已根据台词自动拆分，你也可以选中台词手动补充事件。</p>
+        {eventPickerOpen && <div className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
+          <p className="text-text-muted">在这段台词里选中文字，添加后即可为事件设置补充画面或音效。台词内容与上方编辑框同步。</p>
+          <textarea ref={eventPickerRef} aria-label="选择台词片段" readOnly value={draft.dialogue} onSelect={(event) => { const { selectionStart: start, selectionEnd: end } = event.currentTarget; setEventSelection(start < end ? { start, end } : null); }} className={`${fieldClass} min-h-40 max-h-60 resize-y text-sm`} />
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p aria-live="polite" className="min-w-0 flex-1 truncate text-text-muted">{selectedEventText ? `已选台词：${selectedEventText}` : '尚未选中台词'}</p>
+            <button type="button" disabled={!selectedEventText} onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>添加选中台词</button>
+          </div>
+          {error === SELECTION_REQUIRED_ERROR && <p role="alert" className="mt-1 text-red-300">{error}</p>}
+        </div>}
+        <p className="mt-1 text-text-muted">AI 已根据台词自动拆分；手动事件可从这里选择台词添加。</p>
         {onPlanBroll && <p className="mt-1 text-text-muted">规划仅提供建议，素材仍由你在事件中选择或生成。</p>}
         {onPlanBroll && <p className="mt-1 text-text-muted">
           {generating || generationRunning ? '正在生成新台词，完成后可规划补充画面。'
@@ -396,7 +417,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       {draft.selections.map((selection, index) => {
         const requirement = brollRequirements.find((item) => item.event_id === selection.id);
         const selectedDialogue = Array.from(draft.dialogue).slice(Math.max(0, selection.start), Math.max(0, selection.end)).join('');
-        return <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
+        return <div key={selection.id} id={`remix-event-${selection.id}`} tabIndex={-1} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3 outline-none focus:border-[rgb(var(--accent-rgb)/0.55)]">
         {brollPlanCurrent && requirement && <div className="col-span-6 space-y-1">
           <p className="text-text-muted">AI 建议：{requirement.required ? '需要补充画面' : '无需补充画面'}{requirement.purpose ? ` · ${requirement.purpose}` : ''}{requirement.suggested_query ? ` · 建议提示词：${requirement.suggested_query}` : ''}</p>
           {onBrollDecisionChange && <label className="flex items-center gap-2 text-text-dark"><input type="checkbox" aria-label={`${selection.label}需要 B-roll`} checked={brollDecisions[selection.id] ?? requirement.required} onChange={(event) => onBrollDecisionChange(selection.id, event.target.checked)} />此事件需要 B-roll</label>}
