@@ -27,6 +27,8 @@ interface Props {
   onConnectReference?: (nodeId: string) => void;
   onCreateTake?: (segment: RemixPerformanceSegment) => string;
   onAttachTake?: (nodeId: string, source: RemixPerformanceSegment['source']) => Promise<string>;
+  missingPrimaryVisualCount?: number;
+  onCreatePrimaryVisuals?: () => boolean;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
   onCreateVisual?: (mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
@@ -38,7 +40,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -233,6 +235,10 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
   const speakerSegments = seedPerformanceSegments(draft.dialogue);
   const canSplitSpeakers = speakerSegments.length > 0 && speakerSegments.every((segment) => segment.source === 'speaking_video');
   const singleVoiceover = draft.segments?.length === 1 && draft.segments[0].source === 'voiceover';
+  const primaryVisualAction = missingPrimaryVisualCount > 0 && onCreatePrimaryVisuals && <div className="mt-3 border-t border-white/[0.08] pt-3">
+    <p className="text-text-muted">{missingPrimaryVisualCount} 个台词事件还没有可用画面。{draft.segments?.length ? '创建后，请在旁白段落中选择要使用的主画面。' : '使用音频节点配音时，可为这些事件准备主画面。'}画面在新节点中生成。</p>
+    <button type="button" onClick={() => { if (onCreatePrimaryVisuals()) onClose(); }} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-2`}>创建缺少的主画面视频节点</button>
+  </div>;
 
   return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><h2 className="text-sm font-semibold">改编脚本与语义区间</h2><button type="button" onClick={onClose} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>关闭</button></div>
@@ -262,6 +268,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
             <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('voiceover')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作独立旁白片段</button>
             {canSplitSpeakers && <button type="button" onClick={() => changeDraft({ ...draft, segments: speakerSegments })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按说话者拆段</button>}
           </div>
+          {primaryVisualAction}
         </div>}
         {draft.segments?.map((segment, index) => {
           const text = Array.from(draft.dialogue).slice(segment.start, segment.end).join('').trim();
@@ -314,6 +321,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
             </div>
           </div>;
         })}
+        {draft.segments?.some((segment) => segment.source === 'voiceover') && primaryVisualAction}
       </section>
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>

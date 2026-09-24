@@ -140,6 +140,17 @@ export function primaryVisualEventsForScript(script: CanvasNode, nodes: CanvasNo
   });
 }
 
+export function primaryVisualEventsWithoutNodes(script: CanvasNode, nodes: CanvasNode[], edges: CanvasEdge[]): Array<{ id: string; label: string }> {
+  if (!ref(script.data.remixScriptRef)) return [];
+  return primaryVisualEventsForScript(script, nodes, edges).filter((event) => !nodes.some((candidate) =>
+    candidate.type === CANVAS_NODE_TYPES.video
+    && candidate.data.remixRole === 'primary'
+    && candidate.data.remixEventId === event.id
+    && sameRef(candidate.data.remixScriptRef, script.data.remixScriptRef)
+    && edges.some((edge) => edge.source === candidate.id && edge.target === script.id),
+  ));
+}
+
 /** Resolve exactly one visible next step from the selected remix graph. */
 export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], selectedNodeId: string): RemixJourneyStep | null {
   const component = connectedIds(edges, selectedNodeId);
@@ -235,7 +246,7 @@ export function nextRemixJourneyStep(nodes: CanvasNode[], edges: CanvasEdge[], s
     const primaryNodes = graph.filter((candidate) => candidate.type === CANVAS_NODE_TYPES.video && candidate.data.remixRole === 'primary'
       && sameRef(candidate.data.remixScriptRef, scriptRef)
       && edges.some((edge) => edge.source === candidate.id && edge.target === script.id));
-    const missing = needsPrimary.filter((selection) => !primaryNodes.some((candidate) => candidate.data.remixEventId === selection.id));
+    const missing = primaryVisualEventsWithoutNodes(script, graph, edges);
     if (missing.length) return { kind: 'action', action: 'create_primary_visuals', targetNodeId: script.id, label: '创建主画面', inputHint: `为 ${missing.length} 个台词事件准备生成节点。` };
     for (const selection of needsPrimary) {
       const primary = primaryNodes.find((candidate) => candidate.data.remixEventId === selection.id)!;

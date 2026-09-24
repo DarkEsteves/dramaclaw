@@ -85,6 +85,22 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ source: 'speaking_video', speaker: '口播' })] }), 'media-binding');
   });
 
+  it('offers main visual creation inside the editor for a voiceover segment', () => {
+    const onCreatePrimaryVisuals = vi.fn(() => true);
+    const onClose = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旁白台词。', selections: [
+      { id: 'event-1', label: '开场', start: 0, end: 5 },
+    ], segments: [
+      { id: 'segment-1', start: 0, end: 5, speaker: '旁白', source: 'voiceover' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      missingPrimaryVisualCount={1} onCreatePrimaryVisuals={onCreatePrimaryVisuals}
+      onDraftChange={() => {}} onSave={() => {}} onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '创建缺少的主画面视频节点' }));
+    expect(onCreatePrimaryVisuals).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it('makes script generation the clear primary action after entering a topic', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 

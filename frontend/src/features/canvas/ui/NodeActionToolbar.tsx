@@ -146,9 +146,8 @@ import { transcriptToolbarState } from '@/features/canvas/remix/transcriptToolba
 import { semanticTimelineToolbarState } from '@/features/canvas/remix/semanticTimelineToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
-import { primaryVisualEventsForScript } from '@/features/canvas/remix/remixJourney';
 import { requestRemixScriptEditor } from '@/features/canvas/remix/remixScriptEditorRequests';
-import { attachBrollVisualMedia, boundBrollVisualMedia, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
+import { attachBrollVisualMedia, boundBrollVisualMedia } from '@/features/canvas/remix/brollCanvasBinding';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1645,21 +1644,6 @@ export const NodeActionToolbar = memo(
       ? remixScriptEditorLabel(node.data, edges.some((edge) => edge.target === node.id
         && nodes.some((source) => source.id === edge.source && source.type === CANVAS_NODE_TYPES.videoStory && Boolean(source.data.referenceBlueprintRef))))
       : null;
-    const remixStoryNode = node.type === CANVAS_NODE_TYPES.script
-      ? nodes.find((candidate) => candidate.type === CANVAS_NODE_TYPES.videoStory
-        && edges.some((edge) => edge.source === candidate.id && edge.target === node.id))
-      : undefined;
-    const missingPrimaryVisualEvents = remixScriptLabel && node.data.remixScriptRef && remixStoryNode
-      ? primaryVisualEventsForScript(node, nodes, edges).filter((event) => !nodes.some((candidate) =>
-        candidate.type === CANVAS_NODE_TYPES.video
-        && candidate.data.remixRole === 'primary'
-        && candidate.data.remixEventId === event.id
-        && edges.some((edge) => edge.source === candidate.id && edge.target === node.id)
-        && (candidate.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId
-          === (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId
-        && (candidate.data.remixScriptRef as { revision?: number } | undefined)?.revision
-          === (node.data.remixScriptRef as { revision?: number } | undefined)?.revision,
-      )) : [];
     const remixVisualRole = node.data.remixRole === 'primary' || node.data.remixRole === 'background'
       ? node.data.remixRole : null;
     const remixVisualSourceReady = Boolean(node.data.videoUrl || node.data.imageUrl || node.data.previewImageUrl);
@@ -1818,18 +1802,6 @@ export const NodeActionToolbar = memo(
               {node.data.remixBrollPlanStatus === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
               {node.data.remixBrollPlanStatus === 'running' ? '规划 B-roll 中…' : node.data.remixBrollPlanRef ? '重新规划 B-roll' : '规划 B-roll'}
             </UiChipButton>}
-            {missingPrimaryVisualEvents.length > 0 && remixStoryNode && <UiChipButton
-              className={TOOLBAR_TEXT_BUTTON_CLASS}
-              onClick={(event) => {
-                event.stopPropagation();
-                const store = useCanvasStore.getState();
-                const script = store.nodes.find((candidate) => candidate.id === node.id);
-                if (!script) return;
-                const eventIds = missingPrimaryVisualEvents.map((item) => item.id);
-                const created = createPrimaryVisualNodes(store, node.id, remixStoryNode.id, eventIds);
-                if (created.length) requestFocusNode(created[0]);
-              }}
-            ><Film className="h-3.5 w-3.5" />创建主画面节点</UiChipButton>}
             {remixVisualNeedsBinding && remixVisualRole && <UiChipButton
               className={TOOLBAR_TEXT_BUTTON_CLASS}
               onClick={(event) => {

@@ -363,9 +363,16 @@ describe('native canvas remix journey integration', () => {
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     expect(backend.submit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
-    fireEvent.click(await screen.findByRole('button', { name: '创建主画面节点' }));
+    expect(screen.queryByRole('button', { name: '创建主画面节点' })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    const editor = await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
+    const createPrimary = screen.getByRole('button', { name: '创建缺少的主画面视频节点' });
+    expect(editor.contains(createPrimary)).toBe(true);
+    fireEvent.click(createPrimary);
     const primary = useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'primary')!;
     expect(primary.data.displayName).toContain('主画面 · 产品登场');
+    expect(screen.queryByRole('dialog', { name: '改编脚本与语义区间' })).not.toBeInTheDocument();
+    expect(useCanvasStore.getState().selectedNodeId).toBe(primary.id);
     act(() => useCanvasStore.getState().setSelectedNode('script'));
     expect(screen.queryByRole('button', { name: '创建主画面节点' })).not.toBeInTheDocument();
     act(() => useCanvasStore.getState().setSelectedNode(primary.id));

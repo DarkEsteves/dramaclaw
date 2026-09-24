@@ -82,7 +82,7 @@ import {
 import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
-import { attachBrollVisualMedia, createBrollVisualNode } from '@/features/canvas/remix/brollCanvasBinding';
+import { attachBrollVisualMedia, createBrollVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
 import { attachPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, performanceSourceUrl, takeReferenceSnapshot, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
@@ -96,7 +96,7 @@ import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
-import { nextRemixJourneyStep } from '@/features/canvas/remix/remixJourney';
+import { nextRemixJourneyStep, primaryVisualEventsWithoutNodes } from '@/features/canvas/remix/remixJourney';
 import {
   consumeRemixScriptEditorRequest,
   subscribeRemixScriptEditorRequest,
@@ -469,6 +469,19 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     return blueprintPanelRef.current.ensureSaved();
   }, []);
   const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
+  const currentScriptNode = canvasNodes.find((node) => node.id === id);
+  const primaryEventsWithoutNodes = upstreamStory && currentScriptNode
+    ? primaryVisualEventsWithoutNodes(currentScriptNode, canvasNodes, canvasEdges) : [];
+  const createMissingPrimaryVisuals = useCallback(() => {
+    const store = useCanvasStore.getState();
+    const script = store.nodes.find((node) => node.id === id);
+    const storyId = upstreamStory?.id;
+    if (!script || !storyId) return false;
+    const missing = primaryVisualEventsWithoutNodes(script, store.nodes, store.edges);
+    const created = createPrimaryVisualNodes(store, id, storyId, missing.map((event) => event.id));
+    if (created.length) store.requestFocusNode(created[0]);
+    return created.length > 0;
+  }, [id, upstreamStory?.id]);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
   const remixBrollRequirements = Array.isArray(data.remixBrollRequirements)
@@ -1134,6 +1147,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onConnectReference={connectPerformanceReference}
             onCreateTake={createPerformanceTake}
             onAttachTake={attachPerformanceTake}
+            missingPrimaryVisualCount={primaryEventsWithoutNodes.length}
+            onCreatePrimaryVisuals={upstreamStory ? createMissingPrimaryVisuals : undefined}
             sfxNodes={remixSfxNodes}
             brollRequirements={remixBrollRequirements}
             onCreateVisual={createRemixVisual}
