@@ -1734,42 +1734,51 @@ export const NodeActionToolbar = memo(
                 }}
               ><PenLine className="h-3.5 w-3.5" />{storyScriptAction.label}</UiChipButton>
             )}
-            {storyMedia && <>
-              <UiChipButton
-                key="story-import-keyframes"
-                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
-                disabled={storyMedia.keyframes === 0}
-                aria-label="导入关键帧到画布"
-                title={storyMedia.keyframes ? `将 ${storyMedia.keyframes} 张关键帧导入画布，已导入的会跳过` : '暂无可导入的关键帧'}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  try {
-                    const result = importStoryKeyframes(node.id);
-                    toast.success(result.imported ? `已导入 ${result.imported} 张关键帧${result.skipped ? `，跳过 ${result.skipped} 张` : ''}` : '关键帧已在画布中');
-                  } catch (cause) { toast.error(cause instanceof Error ? cause.message : '导入关键帧失败'); }
-                }}
-              ><Grid2x2 className="h-3.5 w-3.5" />导入关键帧</UiChipButton>
-              <UiChipButton
-                key="story-import-clips"
-                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
-                disabled={storyMedia.clips === 0 || isImportingStoryClips || isStoryClipImportRunning(node.id)}
-                aria-label="导入片段视频到画布"
-                title={storyMedia.clips ? `将 ${storyMedia.clips} 个原片片段裁切后导入画布，已导入的会跳过` : '暂无可裁切的片段或缺少原视频'}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setIsImportingStoryClips(true);
-                  const toastId = toast.loading(`正在导入片段视频 · 0/${storyMedia.clips}`);
-                  void importStoryClips(node.id, (done, total) => {
-                    toast.loading(`正在导入片段视频 · ${done}/${total}`, { id: toastId });
-                  }).then((result) => {
-                    if (result.failed) toast.error(`导入 ${result.imported} 个片段，${result.failed} 个失败；可再次点击重试`, { id: toastId });
-                    else if (result.imported) toast.success(`已导入 ${result.imported} 个片段视频${result.skipped ? `，跳过 ${result.skipped} 个` : ''}`, { id: toastId });
-                    else toast.info('片段视频已在画布中', { id: toastId });
-                  }).catch((cause) => toast.error(cause instanceof Error ? cause.message : '导入片段视频失败', { id: toastId }))
-                    .finally(() => setIsImportingStoryClips(false));
-                }}
-              >{isImportingStoryClips ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}{isImportingStoryClips ? '正在导入片段' : '导入片段视频'}</UiChipButton>
-            </>}
+            {storyMedia && <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <UiChipButton
+                  key="story-import-menu"
+                  className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                  disabled={storyMedia.keyframes === 0 && storyMedia.clips === 0}
+                  aria-label="导入画布"
+                  title={storyMedia.keyframes === 0 && storyMedia.clips === 0 ? '暂无可导入的原片素材' : '选择要导入画布的原片素材'}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {isImportingStoryClips ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  导入画布<ChevronDown className="h-3 w-3" />
+                </UiChipButton>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" sideOffset={6} className={`${TOOLBAR_MENU_CONTENT_CLASS} min-w-[220px]`} onClick={(event) => event.stopPropagation()}>
+                <DropdownMenuItem
+                  className={TOOLBAR_MENU_ITEM_CLASS}
+                  disabled={storyMedia.keyframes === 0}
+                  title={storyMedia.keyframes ? '将关键帧导入为图片节点，已导入的会跳过' : '暂无可导入的关键帧'}
+                  onSelect={() => {
+                    try {
+                      const result = importStoryKeyframes(node.id);
+                      toast.success(result.imported ? `已导入 ${result.imported} 张关键帧${result.skipped ? `，跳过 ${result.skipped} 张` : ''}` : '关键帧已在画布中');
+                    } catch (cause) { toast.error(cause instanceof Error ? cause.message : '导入关键帧失败'); }
+                  }}
+                ><Grid2x2 className="h-4 w-4" />关键帧图片<span className="ml-auto text-xs text-text-muted">{storyMedia.keyframes} 张</span></DropdownMenuItem>
+                <DropdownMenuItem
+                  className={TOOLBAR_MENU_ITEM_CLASS}
+                  disabled={storyMedia.clips === 0 || isImportingStoryClips || isStoryClipImportRunning(node.id)}
+                  title={storyMedia.clips ? '按原片事件裁切片段视频，已导入的会跳过' : '暂无可裁切的片段或缺少原视频'}
+                  onSelect={() => {
+                    setIsImportingStoryClips(true);
+                    const toastId = toast.loading(`正在导入片段视频 · 0/${storyMedia.clips}`);
+                    void importStoryClips(node.id, (done, total) => {
+                      toast.loading(`正在导入片段视频 · ${done}/${total}`, { id: toastId });
+                    }).then((result) => {
+                      if (result.failed) toast.error(`导入 ${result.imported} 个片段，${result.failed} 个失败；可再次点击重试`, { id: toastId });
+                      else if (result.imported) toast.success(`已导入 ${result.imported} 个片段视频${result.skipped ? `，跳过 ${result.skipped} 个` : ''}`, { id: toastId });
+                      else toast.info('片段视频已在画布中', { id: toastId });
+                    }).catch((cause) => toast.error(cause instanceof Error ? cause.message : '导入片段视频失败', { id: toastId }))
+                      .finally(() => setIsImportingStoryClips(false));
+                  }}
+                ><Scissors className="h-4 w-4" />片段视频<span className="ml-auto text-xs text-text-muted">{storyMedia.clips} 段</span></DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>}
             {transcriptActions && <>
               <select
                 aria-label="转写语言"

@@ -234,10 +234,14 @@ describe('native canvas remix journey integration', () => {
     useCanvasStore.getState().setSelectedNode('story-1');
     render(<JourneyCanvas />);
 
-    expect(screen.getByRole('button', { name: '导入片段视频到画布' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: '导入关键帧到画布' }));
+    const importButton = screen.getByRole('button', { name: '导入画布' });
+    expect(importButton).toBeEnabled();
+    expect(screen.queryByRole('button', { name: '导入关键帧到画布' })).not.toBeInTheDocument();
+    fireEvent.pointerDown(importButton, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: /关键帧图片/ }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'uploadNode' && node.data.imageUrl === '/static/frame.png')).toBe(true));
-    fireEvent.click(screen.getByRole('button', { name: '导入片段视频到画布' }));
+    fireEvent.pointerDown(importButton, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: /片段视频/ }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'videoNode' && node.data.videoUrl === '/static/cut.mp4')).toBe(true));
     expect(backend.clipSubmit.mock.calls[0][0].tracks[0].items[0]).toMatchObject({ sourceUrl: '/static/reference.mp4', sourceStart: 0, sourceEnd: 1 });
   });
