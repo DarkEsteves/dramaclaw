@@ -14,6 +14,7 @@ from novelvideo.freezone.recipe_runtime import (
 
 
 _SPEAKER_LINE = re.compile(r"^\s*([^：:\n]{1,24})[：:]\s*(\S.*)$")
+_INLINE_SPEAKER = re.compile(r"[。！？!?]\s*(?:男|女|男生|女生|人物\d+|角色\d+|旁白|口播)[：:]")
 
 
 def performance_segments_from_dialogue(dialogue: str) -> list[dict[str, Any]]:
@@ -82,17 +83,36 @@ def draft_from_recipe_output(payload: dict[str, Any]) -> dict[str, Any]:
     return {"dialogue": dialogue, "selections": selections, "segments": []}
 
 
+def _has_one_speaker_turn_per_line(dialogue: str) -> bool:
+    lines = [line for line in dialogue.splitlines() if line.strip()]
+    return bool(lines) and all(
+        _SPEAKER_LINE.match(line) and not _INLINE_SPEAKER.search(line)
+        for line in lines
+    )
+
+
 async def generate_script_draft(*, blueprint: dict[str, Any], topic: str, username: str) -> dict[str, Any]:
     recipe = get_recipe_for_runtime(username=username, recipe_id="reference-remix-script")
     source = {key: blueprint.get(key) for key in (
         "narrative_role", "events", "preserve_replace_rules", "observations", "inferences", "user_choices"
     )}
-    content = await generate_recipe_text(
-        username=username,
-        recipe_id="reference-remix-script",
-        node_kind="text",
-        node_prompt="按给定参考蓝图和新主题生成一份可编辑的改编口播台词及语义关键句。只输出符合 Recipe output_schema 的 JSON。",
-        user_goal=topic,
-        upstream_text=json.dumps(source, ensure_ascii=False)[:12_000],
+    prompt = (
+        "按给定参考蓝图和新主题生成可编辑的改编台词及语义关键句。"
+        "dialogue 必须按说话轮次写，每句独立一行，格式为“角色：台词”；"
+        "参考片有男女对话时分别标“男：”“女：”，保持角色和轮换顺序一致。"
+        "角色标签只表示说话者，不决定用口播视频还是独立配音。"
+        "只输出符合 Recipe output_schema 的 JSON。"
     )
-    return draft_from_recipe_output(validate_structured_recipe_output(recipe, content))
+    for attempt in range(2):
+        content = await generate_recipe_text(
+            username=username,
+            recipe_id="reference-remix-script",
+            node_kind="text",
+            node_prompt=prompt if attempt == 0 else prompt + "上一版把说话者的台词写成一整段；请重新生成完整 JSON，每句都按“角色：台词”独立换行。",
+            user_goal=topic,
+            upstream_text=json.dumps(source, ensure_ascii=False)[:12_000],
+        )
+        draft = draft_from_recipe_output(validate_structured_recipe_output(recipe, content))
+        if _has_one_speaker_turn_per_line(draft["dialogue"]):
+            return draft
+    raise ValueError("生成台词格式无效：每句都应独立一行并写成“角色：台词”。请重试。")

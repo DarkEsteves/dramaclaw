@@ -313,15 +313,16 @@ async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatc
 
     async def generate(**kwargs):
         calls.append(kwargs)
-        return json.dumps({"dialogue": "新咖啡来了。", "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
+        return json.dumps({"dialogue": "男：你喝什么？\n女：新咖啡来了。", "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
 
     monkeypatch.setattr(script_draft, "generate_recipe_text", generate)
     draft = await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
 
-    assert draft["selections"] == [{"id": "generated-1", "label": "产品登场", "start": 0, "end": 3}]
+    assert draft["selections"] == [{"id": "generated-1", "label": "产品登场", "start": 10, "end": 13}]
     assert calls[0]["recipe_id"] == "reference-remix-script"
     assert calls[0]["user_goal"] == "新咖啡"
     assert "问题开场" in calls[0]["upstream_text"]
+    assert "角色：台词" in calls[0]["node_prompt"]
 
     async def invalid(**kwargs):
         return '{"dialogue":"新咖啡来了。","segments":[],"selections":[{"label":"产品登场","quote":"不存在"}],"blueprint_mappings":[],"media_requirements":[]}'
@@ -329,6 +330,60 @@ async def test_generator_uses_builtin_recipe_and_validates_model_json(monkeypatc
     monkeypatch.setattr(script_draft, "generate_recipe_text", invalid)
     with pytest.raises(ValueError, match="关键句"):
         await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+
+
+@pytest.mark.asyncio
+async def test_generator_retries_unlabelled_dialogue_before_publishing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import script_draft
+
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        dialogue = "你喝什么？新咖啡来了。" if len(calls) == 1 else "男：你喝什么？\n女：新咖啡来了。"
+        return json.dumps({"dialogue": dialogue, "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(script_draft, "generate_recipe_text", generate)
+    draft = await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+
+    assert draft["dialogue"] == "男：你喝什么？\n女：新咖啡来了。"
+    assert draft["segments"] == []
+    assert len(calls) == 2
+    assert "上一版" in calls[1]["node_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_unlabelled_dialogue_after_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import script_draft
+
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({"dialogue": "你喝什么？新咖啡来了。", "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(script_draft, "generate_recipe_text", generate)
+    with pytest.raises(ValueError, match="每句.*角色：台词"):
+        await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generator_retries_two_speakers_written_on_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    from novelvideo.freezone.remix import script_draft
+
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        dialogue = "男：你喝什么？女：新咖啡。" if len(calls) == 1 else "男：你喝什么？\n女：新咖啡。"
+        return json.dumps({"dialogue": dialogue, "segments": [], "selections": [{"label": "产品登场", "quote": "新咖啡"}], "blueprint_mappings": [], "media_requirements": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(script_draft, "generate_recipe_text", generate)
+    draft = await script_draft.generate_script_draft(blueprint=blueprint_payload(), topic="新咖啡", username="alice")
+
+    assert draft["dialogue"] == "男：你喝什么？\n女：新咖啡。"
+    assert len(calls) == 2
 
 
 @pytest.fixture

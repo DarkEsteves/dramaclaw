@@ -13,7 +13,7 @@ from novelvideo.freezone.remix.render import render_manifest, validate_manifest
 from novelvideo.freezone.remix.alignment import align_script, transcribe_media
 from novelvideo.freezone.remix.evidence import build_reference_evidence
 from novelvideo.freezone.remix.broll_plan import generate_broll_plan
-from novelvideo.freezone.remix.script_draft import generate_script_draft, performance_segments_from_dialogue
+from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.timing import compile_timing
 from novelvideo.freezone.remix.take_timing import compile_take_timing
@@ -143,7 +143,7 @@ def run_remix_generate_script_draft(envelope: dict[str, Any], ctx: ProjectContex
         "remix_script.v1",
         {
             "dialogue": draft["dialogue"],
-            "segments": draft.get("segments") or performance_segments_from_dialogue(draft["dialogue"]),
+            "segments": draft.get("segments", []),
             "selections": draft["selections"],
             "blueprint_mappings": [],
             "media_requirements": [],

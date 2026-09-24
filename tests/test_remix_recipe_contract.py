@@ -93,3 +93,5 @@ def test_reference_script_recipe_prefers_reviewed_user_corrections() -> None:
     root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins/recipes"
     payload = validate_agent_recipe_config(json.loads((root / "reference-remix-script.json").read_text()))
     assert "二者冲突时以 user_override" in payload["system_prompt"]
+    assert "角色：台词" in payload["system_prompt"]
+    assert "每句独立一行" in payload["system_prompt"]

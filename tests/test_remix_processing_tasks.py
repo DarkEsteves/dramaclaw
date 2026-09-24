@@ -102,8 +102,8 @@ def test_script_draft_runner_publishes_editable_draft_for_exact_blueprint(tmp_pa
         assert blueprint["narrative_role"] == "提问后反转"
         assert topic == "薯条"
         assert username == "alice"
-        return {"dialogue": "女：薯条。", "selections": [{
-            "id": "generated-1", "label": "产品亮相", "start": 2, "end": 4,
+        return {"dialogue": "男：你吃什么？\n女：薯条。", "segments": [], "selections": [{
+            "id": "generated-1", "label": "产品亮相", "start": 10, "end": 12,
         }]}
 
     monkeypatch.setattr(runner, "generate_script_draft", generate)
@@ -118,11 +118,8 @@ def test_script_draft_runner_publishes_editable_draft_for_exact_blueprint(tmp_pa
     artifact = store.read(result["artifact_ref"]["artifact_id"], result["artifact_ref"]["revision"])
     assert artifact["schema"] == "remix_script.v1"
     assert artifact["upstream_refs"] == [{**blueprint_ref, "project_id": "demo"}]
-    assert artifact["payload"]["dialogue"] == "女：薯条。"
-    assert artifact["payload"]["segments"] == [{
-        "segment_id": "segment-1", "start_char": 2, "end_char": 5,
-        "speaker": "女", "source": "speaking_video",
-    }]
+    assert artifact["payload"]["dialogue"] == "男：你吃什么？\n女：薯条。"
+    assert artifact["payload"]["segments"] == []
     assert artifact["payload"]["selections"][0]["label"] == "产品亮相"
     assert operations.get(operation["operation_id"])["output_refs"] == [result["artifact_ref"]]
 
