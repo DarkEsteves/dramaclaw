@@ -117,7 +117,7 @@ describe('RemixScriptPanel', () => {
       { id: 'segment-1', start: 0, end: Array.from(dialogue).length, speaker: '口播', source: 'speaking_video' },
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByRole('heading', { name: '主画面与声音' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'A-roll 主画面与声音' })).toBeVisible();
     expect(screen.getByText('整段台词')).toBeVisible();
     expect(screen.getByText(`${Array.from(dialogue).length} 字`)).toBeVisible();
     expect(screen.queryByText(`0–${Array.from(dialogue).length} 字`)).not.toBeInTheDocument();
