@@ -244,7 +244,7 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === visual.id)?.data.imageUrl).toContain('broll.png'));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptDraft as { selections: Array<{ visualMediaRevision?: string }> }).selections[0].visualMediaRevision).toBe('c'.repeat(64)));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef as { revision?: number }).revision).toBe(3));
-    expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
+    expect(screen.getByText('未规划')).toBeInTheDocument();
 
     act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
@@ -256,7 +256,7 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === scriptNode.id)?.data.remixBrollPlanStatus).toBe('completed'));
     expect(screen.getByText('已分析 1 个事件，建议 1 个补充画面。')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
-    expect(screen.getByText('B-roll 1/1')).toBeInTheDocument();
+    expect(screen.getByText('1/1 项素材已关联')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '制作配音' }));
 
     const audio = useCanvasStore.getState().nodes.find((node) => node.type === 'audioNode')!;
@@ -358,8 +358,13 @@ describe('native canvas remix journey integration', () => {
     render(<JourneyCanvas />);
     expect(await screen.findByText('改编主题：新品咖啡')).toBeInTheDocument();
     expect(screen.getByText('2 个事件')).toBeInTheDocument();
-    expect(screen.getByText('B-roll 1/2')).toBeInTheDocument();
+    expect(screen.getByText('1/2 项素材已关联')).toBeInTheDocument();
     expect(screen.getByText('已保存版本 1 · 0 个片段')).toBeInTheDocument();
+    const arollStage = screen.getByText('A-roll');
+    const brollStage = screen.getByText('B-roll');
+    expect(arollStage.compareDocumentPosition(brollStage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(arollStage.parentElement).toHaveTextContent('已保存版本 1 · 0 个片段');
+    expect(brollStage.parentElement).toHaveTextContent('1/2 项素材已关联');
     expect(screen.queryByText(/下一步：/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '编辑改编脚本' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
@@ -428,7 +433,7 @@ describe('native canvas remix journey integration', () => {
     render(<JourneyCanvas />);
 
     expect(await screen.findByText('改编主题：尚未填写改编主题')).toBeInTheDocument();
-    expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
+    expect(screen.getByText('未规划')).toBeInTheDocument();
     expect(screen.getByText('草稿 · 0 个片段')).toBeInTheDocument();
   });
 

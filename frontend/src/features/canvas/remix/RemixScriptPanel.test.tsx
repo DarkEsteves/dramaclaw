@@ -11,6 +11,22 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 describe('RemixScriptPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('shows A-roll before B-roll with local status and keeps B-roll planning available', () => {
+    const onPlanBroll = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [
+      { id: 'event-1', label: '开场', start: 2, end: 4 },
+    ], segments: [{ id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' }] }}
+      existingRef={{ artifactId: 'script-1', revision: 1 }} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      onPlanBroll={onPlanBroll} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    const aroll = screen.getByRole('region', { name: 'A-roll 主画面与声音' });
+    const broll = screen.getByRole('region', { name: 'B-roll 补充镜头与音效' });
+    expect(aroll.compareDocumentPosition(broll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(aroll).toHaveTextContent('已选 0/1 个片段');
+    expect(broll).toHaveTextContent('待规划 · 1 个台词事件');
+    fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
+    expect(onPlanBroll).toHaveBeenCalledOnce();
+  });
+
   it('applies arbitrary references from one segment to explicitly selected segments', () => {
     const onDraftChange = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲：你好\n乙：好\n丙：再见', selections: [], segments: [
@@ -105,7 +121,8 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText('整段台词')).toBeVisible();
     expect(screen.getByText(`${Array.from(dialogue).length} 字`)).toBeVisible();
     expect(screen.queryByText(`0–${Array.from(dialogue).length} 字`)).not.toBeInTheDocument();
-    expect(screen.getByText(/决定谁说这段台词.*补充镜头（B-roll）在下方“台词事件”设置.*实际生成在画布节点完成/)).toBeVisible();
+    expect(screen.getByText(/先决定台词由谁说、成片使用哪段基础画面和声音.*素材在对应的画布节点制作/)).toBeVisible();
+    expect(screen.getByText(/在基础画面的台词位置.*插入补充镜头或音效/)).toBeVisible();
     const preview = screen.getByText('查看本段台词').closest('details');
     expect(preview).not.toHaveAttribute('open');
     fireEvent.click(screen.getByText('查看本段台词'));
@@ -118,7 +135,7 @@ describe('RemixScriptPanel', () => {
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'person', label: '新人物', kind: 'image' }]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
     const references = screen.getByText(/参考素材（可选）/).closest('details');
     expect(references).not.toHaveAttribute('open');
-    expect(screen.getByText(/决定谁说这段台词/)).toBeVisible();
+    expect(screen.getByText(/先决定台词由谁说/)).toBeVisible();
     fireEvent.click(screen.getByText(/参考素材（可选）/));
     expect(references).toHaveAttribute('open');
     expect(screen.getByText('未使用参考素材')).toBeVisible();

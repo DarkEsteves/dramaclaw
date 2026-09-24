@@ -521,6 +521,12 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     } catch { return false; }
   }).length ?? 0;
   const remixNodeStatus = `${remixRef(data.remixScriptRef) ? `已保存版本 ${remixRef(data.remixScriptRef)?.revision}` : '草稿'} · ${remixSegmentCount} 个片段${remixSegmentCount ? `，${remixBoundSegmentCount} 个已绑定` : ''}`;
+  const remixBrollStageStatus = data.remixBrollPlanStatus === 'running' ? '规划中'
+    : data.remixBrollPlanStatus === 'failed' ? '规划失败'
+      : !currentBrollPlan ? '未规划'
+        : requiredRemixBroll.length > 0
+          ? `${completedRequiredRemixBroll}/${requiredRemixBroll.length} 项素材已关联`
+          : '无需补充素材';
   const remixVisualNodes = upstreamNodes.filter((node) => node.data.remixRole === 'visual'
     && (isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))).map((node) => ({
     id: node.id,
@@ -991,25 +997,15 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         {isRemixScript ? (
           <div className="nodrag flex min-h-0 flex-1 flex-col gap-2 px-3 py-3 text-xs text-text-muted">
             <p className="truncate font-medium text-text-dark" title={remixTopic}>改编主题：{remixTopic}</p>
-            <div className="flex flex-wrap gap-1.5 text-[11px]">
-              <span className="rounded-full bg-white/[0.06] px-2 py-1">{initialRemixDraft.selections.length} 个事件</span>
-              <span className="rounded-full bg-white/[0.06] px-2 py-1">
-                {data.remixBrollPlanStatus === 'running' ? 'B-roll 规划中'
-                  : data.remixBrollPlanStatus === 'failed' ? 'B-roll 规划失败'
-                    : !currentBrollPlan ? 'B-roll 未规划'
-                      : requiredRemixBroll.length > 0
-                        ? `B-roll ${completedRequiredRemixBroll}/${requiredRemixBroll.length}`
-                        : 'B-roll 无必需项'}
-              </span>
+            <div className="space-y-1.5 border-y border-white/[0.08] py-2 text-[11px]">
+              <div className="flex min-w-0 items-center gap-2"><span aria-hidden="true" className="font-mono text-[rgb(var(--accent-rgb))]">01</span><span className="shrink-0 text-text-dark">A-roll</span><span className="min-w-0 truncate">{remixNodeStatus}</span></div>
+              <div className="flex min-w-0 items-center gap-2"><span aria-hidden="true" className="font-mono text-[rgb(var(--accent-rgb))]">02</span><span className="shrink-0 text-text-dark">B-roll</span><span className="min-w-0 truncate">{remixBrollStageStatus}</span><span className="ml-auto shrink-0 text-text-muted">{initialRemixDraft.selections.length} 个事件</span></div>
             </div>
             {initialRemixDraft.dialogue.trim() ? (
               <p className="line-clamp-3 min-h-0 flex-1 whitespace-pre-wrap break-words leading-5 text-text-dark/80">{initialRemixDraft.dialogue}</p>
             ) : (
               <p className="flex-1">点击“{remixScriptLabel}”填写台词。</p>
             )}
-            <div className="border-t border-white/[0.08] pt-2">
-              {remixNodeStatus}
-            </div>
           </div>
         ) : hasResult ? (
           <>
