@@ -34,6 +34,22 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
   });
 
+  it('passes each speaking segment identity when creating a person reference', () => {
+    const first = { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
+    const second = { id: 'segment-2', start: 7, end: 9, speaker: '女', source: 'speaking_video' as const };
+    const onCreateReference = vi.fn(() => 'reference-node');
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n女：你好', selections: [], segments: [first, second] }}
+      existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      onCreateReference={onCreateReference} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    screen.getAllByText(/更换人物、产品和场景/).forEach((summary) => fireEvent.click(summary));
+    const generateButtons = screen.getAllByRole('button', { name: '生成' });
+    fireEvent.click(generateButtons[0]);
+    fireEvent.click(generateButtons[3]);
+    expect(onCreateReference).toHaveBeenNthCalledWith(1, 'person', 'generate', first, 0);
+    expect(onCreateReference).toHaveBeenNthCalledWith(2, 'person', 'generate', second, 1);
+  });
+
   it('explains the main picture decision without repeating the script or showing character offsets', () => {
     const dialogue = '你每天喝什么？我喝咖啡。';
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue, selections: [], segments: [

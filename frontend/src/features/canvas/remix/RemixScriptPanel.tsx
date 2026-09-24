@@ -23,7 +23,7 @@ interface Props {
   referenceNodes?: Array<{ id: string; label: string }>;
   voiceNodes?: Array<{ id: string; label: string }>;
   motionNodes?: Array<{ id: string; label: string }>;
-  onCreateReference?: (kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') => string;
+  onCreateReference?: (kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number) => string;
   onConnectReference?: (nodeId: string) => void;
   onCreateTake?: (segment: RemixPerformanceSegment) => string;
   onAttachTake?: (nodeId: string, source: RemixPerformanceSegment['source']) => Promise<string>;
@@ -203,8 +203,8 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     if (nodeId) onConnectReference?.(nodeId);
     updateSegment(segment.id, { [key]: nodeId || undefined, takeNodeId: undefined, takeMediaRevision: undefined });
   };
-  const createReference = (segment: RemixPerformanceSegment, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') => {
-    const id = onCreateReference?.(kind, mode);
+  const createReference = (segment: RemixPerformanceSegment, segmentIndex: number, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') => {
+    const id = onCreateReference?.(kind, mode, segment, segmentIndex);
     if (!id) return;
     updateSegment(segment.id, { [`${kind}NodeId`]: id, takeNodeId: undefined, takeMediaRevision: undefined });
   };
@@ -300,7 +300,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
               <p className="mt-1 text-text-muted">为新视频提供参考素材；不选则由视频节点中的提示词决定画面。</p>
               <div className="mt-2 grid gap-2 sm:grid-cols-3">{([['personNodeId', '人物', 'person'], ['productNodeId', '产品', 'product'], ['settingNodeId', '场景', 'setting']] as const).map(([key, label, kind]) => <div key={key}>
                 <label>{label}参考<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
-                <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
+                <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, index, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, index, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
               </div>)}</div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <label>声音参考（可选）<select aria-label={`${segment.speaker} 声音参考`} value={segment.voiceNodeId ?? ''} onChange={(event) => chooseReference(segment, 'voiceNodeId', event.target.value)} className={fieldClass}>

@@ -1,12 +1,58 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeReferenceSnapshot } from './takeCanvasBinding';
-import type { CanvasNode } from '@/features/canvas/domain/canvasNodes';
+import { createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeReferenceSnapshot } from './takeCanvasBinding';
+import type { CanvasNode, CanvasNodeData } from '@/features/canvas/domain/canvasNodes';
 import type { RemixPerformanceSegment } from './remixScriptModel';
 
 const segment: RemixPerformanceSegment = { id: 'segment-1', start: 2, end: 5, speaker: '女', source: 'speaking_video', personNodeId: 'person', productNodeId: 'product', settingNodeId: 'setting' };
 const node = (id: string, type: CanvasNode['type'], data: Record<string, unknown>) => ({ id, type, position: { x: 0, y: 0 }, data }) as CanvasNode;
 
 describe('performance take canvas binding', () => {
+  it('names generated person references by speaker and segment, including a repeated creation', () => {
+    const nodes = [node('script', 'scriptNode', {})];
+    let nextId = 0;
+    const store = {
+      nodes,
+      addNode: vi.fn((type: CanvasNode['type'], _position: { x: number; y: number }, data?: Partial<CanvasNodeData>) => {
+        const id = `reference-${++nextId}`;
+        nodes.push(node(id, type, data ?? {}));
+        return id;
+      }),
+      addEdge: vi.fn(() => 'edge'),
+      setSelectedNode: vi.fn(),
+      findNodePosition: vi.fn(() => ({ x: 420, y: 0 })),
+    };
+    const male = { id: 'segment-1', start: 0, end: 4, speaker: '男', source: 'speaking_video' as const };
+    const female = { id: 'segment-2', start: 5, end: 9, speaker: '女', source: 'speaking_video' as const };
+
+    createPerformanceReferenceNode(store, 'script', 'person', 'generate', male, 0);
+    createPerformanceReferenceNode(store, 'script', 'person', 'generate', female, 1);
+    createPerformanceReferenceNode(store, 'script', 'person', 'generate', male, 0);
+
+    expect(nodes.slice(1).map((item) => item.data.displayName)).toEqual([
+      '生成人物参考 · 01 男', '生成人物参考 · 02 女', '生成人物参考 · 01 男 · 2',
+    ]);
+    expect(nodes.slice(1).map((item) => item.data.remixSegmentId)).toEqual(['segment-1', 'segment-2', 'segment-1']);
+  });
+
+  it('labels bound legacy reference nodes while preserving user-edited titles', () => {
+    const nodes = [
+      node('script', 'scriptNode', {}),
+      node('male', 'imageGenNode', { displayName: '生成人物参考', remixRole: 'identity', remixIdentityKind: 'person' }),
+      node('female', 'imageGenNode', { displayName: '生成人物参考', remixRole: 'identity', remixIdentityKind: 'person' }),
+      node('custom', 'imageGenNode', { displayName: '女主形象', remixRole: 'identity', remixIdentityKind: 'person' }),
+    ];
+    const edges = ['male', 'female', 'custom'].map((source) => ({ id: `${source}-script`, source, target: 'script' }));
+    const segments = [
+      { id: 'segment-1', start: 0, end: 4, speaker: '男', source: 'speaking_video' as const, personNodeId: 'male' },
+      { id: 'segment-2', start: 5, end: 9, speaker: '女', source: 'speaking_video' as const, personNodeId: 'female' },
+      { id: 'segment-3', start: 10, end: 14, speaker: '女', source: 'speaking_video' as const, personNodeId: 'custom' },
+    ];
+
+    expect(legacyPerformanceReferenceLabelPatches(nodes, edges, 'script', segments)).toEqual([
+      { id: 'male', displayName: '生成人物参考 · 01 男', remixSegmentId: 'segment-1' },
+      { id: 'female', displayName: '生成人物参考 · 02 女', remixSegmentId: 'segment-2' },
+    ]);
+  });
   it('creates a speaking video with explicit identity references and native speech', () => {
     const addNode = vi.fn(() => 'take');
     const addEdge = vi.fn(() => 'edge');

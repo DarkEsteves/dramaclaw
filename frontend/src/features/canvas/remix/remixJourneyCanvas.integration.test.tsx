@@ -161,6 +161,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 
 const nodeTypes: NodeTypes = {
   videoNode: () => <div />,
+  imageGenNode: () => <div />,
   videoStoryNode: VideoStoryNode,
   scriptNode: ScriptNode,
   uploadNode: UploadNode,
@@ -428,5 +429,36 @@ describe('native canvas remix journey integration', () => {
     expect(await screen.findByText('改编主题：尚未填写改编主题')).toBeInTheDocument();
     expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
     expect(screen.getByText('下一步：编辑改编脚本')).toBeInTheDocument();
+  });
+
+  it('identifies previously created person references by their speaking segment', async () => {
+    useCanvasStore.setState({
+      nodes: [
+        { id: 'script', type: 'scriptNode', position: { x: 0, y: 0 }, data: {
+          remixRole: 'adaptation_script', remixScriptDraft: {
+            dialogue: '男：你好\n女：你好', selections: [], segments: [
+              { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video', personNodeId: 'male' },
+              { id: 'segment-2', start: 7, end: 9, speaker: '女', source: 'speaking_video', personNodeId: 'female' },
+            ],
+          },
+        } },
+        { id: 'male', type: 'imageGenNode', position: { x: -450, y: 0 }, data: {
+          displayName: '生成人物参考', remixRole: 'identity', remixIdentityKind: 'person',
+        } },
+        { id: 'female', type: 'imageGenNode', position: { x: -450, y: 350 }, data: {
+          displayName: '生成人物参考', remixRole: 'identity', remixIdentityKind: 'person',
+        } },
+      ],
+      edges: [
+        { id: 'male-script', source: 'male', target: 'script' },
+        { id: 'female-script', source: 'female', target: 'script' },
+      ],
+      selectedNodeId: 'script', history: { past: [], future: [] },
+    });
+
+    render(<JourneyCanvas />);
+
+    await waitFor(() => expect(useCanvasStore.getState().nodes.filter((node) => node.data.remixRole === 'identity')
+      .map((node) => node.data.displayName)).toEqual(['生成人物参考 · 01 男', '生成人物参考 · 02 女']));
   });
 });

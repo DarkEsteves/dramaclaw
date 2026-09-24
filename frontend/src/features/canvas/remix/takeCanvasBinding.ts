@@ -11,11 +11,44 @@ interface Store {
   findNodePosition: (nodeId: string, width: number, height: number) => { x: number; y: number };
 }
 
-export function createPerformanceReferenceNode(store: Store, scriptId: string, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') {
+function referenceTitle(kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number): string {
+  const label = { person: '人物', product: '产品', setting: '场景' }[kind];
+  const speaker = segment.speaker.trim() || '未命名角色';
+  return `${mode === 'upload' ? '上传' : '生成'}${label}参考 · ${String(segmentIndex + 1).padStart(2, '0')} ${speaker}`;
+}
+
+export function legacyPerformanceReferenceLabelPatches(nodes: CanvasNode[], edges: CanvasEdge[], scriptId: string,
+  segments: RemixPerformanceSegment[]): Array<{ id: string; displayName: string; remixSegmentId: string }> {
+  const patches: Array<{ id: string; displayName: string; remixSegmentId: string }> = [];
+  const seen = new Set<string>();
+  const fields = [['personNodeId', 'person'], ['productNodeId', 'product'], ['settingNodeId', 'setting']] as const;
+  segments.forEach((segment, segmentIndex) => {
+    for (const [field, kind] of fields) {
+      const id = segment[field];
+      if (!id || seen.has(id)) continue;
+      const node = nodes.find((candidate) => candidate.id === id);
+      const label = { person: '人物', product: '产品', setting: '场景' }[kind];
+      const mode = node?.data.displayName === `上传${label}参考` ? 'upload' : 'generate';
+      if (!node || node.data.remixRole !== 'identity' || node.data.remixIdentityKind !== kind
+        || node.data.displayName !== `${mode === 'upload' ? '上传' : '生成'}${label}参考`
+        || !edges.some((edge) => edge.source === id && edge.target === scriptId)) continue;
+      seen.add(id);
+      patches.push({ id, displayName: referenceTitle(kind, mode, segment, segmentIndex), remixSegmentId: segment.id });
+    }
+  });
+  return patches;
+}
+
+export function createPerformanceReferenceNode(store: Store, scriptId: string, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate',
+  segment: RemixPerformanceSegment, segmentIndex: number) {
   const label = { person: '人物', product: '产品', setting: '场景' }[kind];
   const type = mode === 'upload' ? CANVAS_NODE_TYPES.upload : CANVAS_NODE_TYPES.imageGen;
+  const title = referenceTitle(kind, mode, segment, segmentIndex);
+  const copies = store.nodes.filter((node) => node.data.displayName === title
+    || (typeof node.data.displayName === 'string' && node.data.displayName.startsWith(`${title} · `))).length;
   const id = store.addNode(type, store.findNodePosition(scriptId, 420, 300), {
-    displayName: `${mode === 'upload' ? '上传' : '生成'}${label}参考`, remixRole: 'identity', remixIdentityKind: kind,
+    displayName: copies ? `${title} · ${copies + 1}` : title,
+    remixRole: 'identity', remixIdentityKind: kind, remixSegmentId: segment.id,
     ...(mode === 'generate' ? { prompt: `竖屏视频${label}视觉参考图，真实摄影质感，不要文字、水印或标志。` } : {}),
   });
   store.addEdge(id, scriptId);

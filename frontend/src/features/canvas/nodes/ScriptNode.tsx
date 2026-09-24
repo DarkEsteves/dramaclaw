@@ -83,7 +83,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
-import { attachPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, performanceSourceUrl, takeReferenceSnapshot, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
+import { attachPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, legacyPerformanceReferenceLabelPatches, performanceSourceUrl, takeReferenceSnapshot, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
@@ -484,6 +484,12 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   }, [id, upstreamStory?.id]);
   const remixDraft = data.remixScriptDraft as RemixScriptDraft | undefined;
   const initialRemixDraft: RemixScriptDraft = remixDraft ?? { dialogue: typeof data.prompt === 'string' ? data.prompt : '', selections: [] };
+  useEffect(() => {
+    if (!remixDraft?.segments?.length) return;
+    for (const patch of legacyPerformanceReferenceLabelPatches(canvasNodes, canvasEdges, id, remixDraft.segments)) {
+      updateNodeData(patch.id, { displayName: patch.displayName, remixSegmentId: patch.remixSegmentId });
+    }
+  }, [canvasEdges, canvasNodes, id, remixDraft?.segments, updateNodeData]);
   const remixBrollRequirements = Array.isArray(data.remixBrollRequirements)
     ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>
     : [];
@@ -547,8 +553,9 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     const state = useCanvasStore.getState();
     if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接参考素材到脚本');
   }, [id]);
-  const createPerformanceReference = useCallback((kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate') =>
-    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode), [id]);
+  const createPerformanceReference = useCallback((kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate',
+    segment: NonNullable<RemixScriptDraft['segments']>[number], segmentIndex: number) =>
+    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode, segment, segmentIndex), [id]);
   const createPerformanceTake = useCallback((segment: NonNullable<RemixScriptDraft['segments']>[number]) => {
     const index = initialRemixDraft.segments?.findIndex((item) => item.id === segment.id) ?? -1;
     const observed = index >= 0 ? storyReferenceEvents[index] : undefined;
