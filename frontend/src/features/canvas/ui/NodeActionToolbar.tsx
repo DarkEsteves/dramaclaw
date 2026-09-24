@@ -1855,10 +1855,9 @@ export const NodeActionToolbar = memo(
               {semanticTimelineAction.disabled ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Workflow className="h-3.5 w-3.5" />}
               {semanticTimelineAction.label}
             </UiChipButton>}
-            {(isVideoNode(node) || isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
+            {(isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
               <>
-                {(isVideoNode(node) ? [{ action: 'open_media', label: '视频用途', Icon: Wand2 }]
-                  : isAudioNode(node) ? [
+                {(isAudioNode(node) ? [
                     ...(audioToolbarState(node.data.audioUrl).canConfigureMedia ? [{ action: 'open_media', label: '音频用途', Icon: Wand2 }] : []),
                     ...(node.data.remixRole === 'narration' && node.data.audioUrl ? [{ action: 'align_script', label: '按脚本对齐', Icon: Workflow }] : []),
                   ]

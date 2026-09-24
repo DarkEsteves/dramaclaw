@@ -198,6 +198,12 @@ describe('native canvas remix journey integration', () => {
     Object.defineProperty(window, 'DOMMatrixReadOnly', { configurable: true, value: class { m22 = 1 } });
   });
 
+  it('keeps the reference video role implicit in the toolbar', () => {
+    render(<JourneyCanvas />);
+    expect(screen.getByRole('button', { name: '继续改编 · 分析参考视频' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '视频用途' })).not.toBeInTheDocument();
+  });
+
   it('clicks the real toolbar and nodes from uploaded reference through manual audio to render submission', async () => {
     render(<JourneyCanvas />);
 
