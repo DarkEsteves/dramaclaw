@@ -22,6 +22,7 @@ describe('RemixScriptPanel', () => {
     ]} voiceNodes={[{ id: 'voice', label: '男声样本' }]} sfxNodes={[]} onConnectReference={onConnectReference}
       motionNodes={[{ id: 'shot', label: '原片裁出镜头' }]}
       onCreateTake={onCreateTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByText(/更换人物、产品和场景/));
     fireEvent.change(screen.getByLabelText('男 人物参考'), { target: { value: 'person' } });
     fireEvent.change(screen.getByLabelText('男 产品参考'), { target: { value: 'product' } });
     fireEvent.change(screen.getByLabelText('男 场景参考'), { target: { value: 'setting' } });
@@ -31,6 +32,37 @@ describe('RemixScriptPanel', () => {
     expect(onConnectReference.mock.calls.map(([id]) => id)).toEqual(['person', 'product', 'setting', 'voice', 'shot']);
     expect(onCreateTake).toHaveBeenCalledWith(expect.objectContaining({ personNodeId: 'person', productNodeId: 'product', settingNodeId: 'setting', voiceNodeId: 'voice', motionNodeId: 'shot' }));
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
+  });
+
+  it('explains the main picture decision without repeating the script or showing character offsets', () => {
+    const dialogue = '你每天喝什么？我喝咖啡。';
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue, selections: [], segments: [
+      { id: 'segment-1', start: 0, end: Array.from(dialogue).length, speaker: '口播', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.getByRole('heading', { name: '主画面与声音' })).toBeVisible();
+    expect(screen.getByText('整段台词')).toBeVisible();
+    expect(screen.getByText(`${Array.from(dialogue).length} 字`)).toBeVisible();
+    expect(screen.queryByText(`0–${Array.from(dialogue).length} 字`)).not.toBeInTheDocument();
+    expect(screen.getByText(/决定谁说这段台词.*补充镜头（B-roll）在下方“台词事件”设置.*实际生成在画布节点完成/)).toBeVisible();
+    const preview = screen.getByText('查看本段台词').closest('details');
+    expect(preview).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByText('查看本段台词'));
+    expect(preview).toHaveAttribute('open');
+  });
+
+  it('keeps optional references out of the primary decision and explains the create-node action', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '你好', selections: [], segments: [
+      { id: 'segment-1', start: 0, end: 2, speaker: '口播', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'person', label: '新人物' }]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    const references = screen.getByText(/更换人物、产品和场景/).closest('details');
+    expect(references).not.toHaveAttribute('open');
+    expect(screen.getByText(/决定谁说这段台词/)).toBeVisible();
+    fireEvent.click(screen.getByText(/更换人物、产品和场景/));
+    expect(references).toHaveAttribute('open');
+    expect(screen.getByLabelText('口播 人物参考')).toBeVisible();
+    expect(screen.getByText(/此按钮会在画布创建节点，生成视频请到该节点操作/)).toBeVisible();
   });
 
   it('does not treat an unlabelled script as a confirmed voiceover and lets the user choose a speaking video', () => {

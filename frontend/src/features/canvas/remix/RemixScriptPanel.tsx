@@ -250,45 +250,67 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       </div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <section className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
-        <div className="flex items-center justify-between gap-3"><div><h3 className="font-medium">表演与素材</h3><p className="mt-1 text-text-muted">{draft.segments?.length ? '逐段选择人物、产品、场景与声音来源。口播视频使用视频自身的声音；独立旁白需要主画面。' : '生成台词不会替你决定口播视频还是独立旁白。可以暂不配置，继续在音频节点制作整段旁白。'}</p></div>
-          {!!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: [] })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改用整段旁白流程</button>}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div><h3 className="font-medium">主画面与声音</h3><p className="mt-1 text-text-muted">决定谁说这段台词，以及成片显示什么画面。补充镜头（B-roll）在下方“台词事件”设置；实际生成在画布节点完成。</p></div>
+          {!!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: [] })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>不分段，使用音频节点</button>}
         </div>
-        {!draft.segments?.length && <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('speaking_video')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作整段口播视频</button>
-          <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('voiceover')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作独立旁白片段</button>
-          {canSplitSpeakers && <button type="button" onClick={() => changeDraft({ ...draft, segments: speakerSegments })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按说话者拆段</button>}
+        {!draft.segments?.length && <div className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
+          <p className="font-medium">当前：整段配音</p>
+          <p className="mt-1 text-text-muted">生成台词不会替你决定口播视频还是独立旁白。此时可在音频节点制作旁白；想让人物出镜说话，再选择下面的方式。</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('speaking_video')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作整段口播视频</button>
+            <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('voiceover')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作独立旁白片段</button>
+            {canSplitSpeakers && <button type="button" onClick={() => changeDraft({ ...draft, segments: speakerSegments })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按说话者拆段</button>}
+          </div>
         </div>}
-        {singleVoiceover && <button type="button" onClick={() => updateSegment(draft.segments![0].id, { source: 'speaking_video', speaker: '口播', takeNodeId: undefined, takeMediaRevision: undefined, primaryNodeId: undefined, primaryMediaRevision: undefined })} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-2`}>改成整段口播视频</button>}
         {draft.segments?.map((segment, index) => {
           const text = Array.from(draft.dialogue).slice(segment.start, segment.end).join('').trim();
+          const isWhole = segment.start === 0 && segment.end === Array.from(draft.dialogue).length;
           const choices = performanceNodes.filter((node) => node.kind === (segment.source === 'voiceover' ? 'audio' : 'video'));
+          const referenceCount = [segment.personNodeId, segment.productNodeId, segment.settingNodeId, segment.voiceNodeId, segment.motionNodeId].filter(Boolean).length;
+          const modeHint = segment.source === 'speaking_video'
+            ? '人物在视频里说这段台词，成片使用视频自带的声音。'
+            : segment.source === 'voiceover'
+              ? '单独录制或生成声音，并指定旁白播放时显示的主画面。'
+              : '直接使用原片片段及原声；请确认原声台词与改编台词相符。';
           return <div key={segment.id} className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
-            <div className="flex items-center justify-between gap-2"><strong>{String(index + 1).padStart(2, '0')} · {segment.speaker}</strong><span className="text-text-muted">{segment.start}–{segment.end} 字</span></div>
-            <p className="mt-2 whitespace-pre-wrap break-words text-text-dark/80">{text || '当前段落没有台词'}</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              <label>声音与画面来源<select aria-label={`${segment.speaker} 声音来源`} value={segment.source} onChange={(event) => updateSegment(segment.id, { source: event.target.value as RemixPerformanceSegment['source'], takeNodeId: undefined, takeMediaRevision: undefined })} className={fieldClass}>
-                <option value="speaking_video">人物口播视频（视频自带声音）</option><option value="voiceover">独立旁白（另选主画面）</option><option value="original_sound">保留原声视频</option>
+            <div className="flex items-center justify-between gap-2"><div className="flex items-baseline gap-2"><span className="font-mono text-[11px] text-text-muted">{String(index + 1).padStart(2, '0')}</span><strong>{isWhole ? '整段台词' : segment.speaker}</strong></div><span className="text-text-muted">{Array.from(text).length} 字</span></div>
+            <details className="mt-2 text-text-muted"><summary className="cursor-pointer">查看本段台词</summary><p className="mt-2 whitespace-pre-wrap break-words text-text-dark/80">{text || '当前段落没有台词'}</p></details>
+            <div className="mt-3 border-t border-white/[0.08] pt-3">
+              <label>这段台词怎么呈现？<select aria-label={`${segment.speaker} 声音来源`} value={segment.source} onChange={(event) => updateSegment(segment.id, { source: event.target.value as RemixPerformanceSegment['source'], takeNodeId: undefined, takeMediaRevision: undefined })} className={fieldClass}>
+                <option value="speaking_video">人物出镜说话 · 视频自带声音</option><option value="voiceover">画面配旁白 · 单独制作声音</option><option value="original_sound">沿用原片片段和原声</option>
               </select></label>
-              <label>采用片段<select aria-label={`${segment.speaker} 采用片段`} value={segment.takeNodeId ?? ''} onChange={(event) => void chooseTake(segment, event.target.value)} className={fieldClass}>
-                <option value="">请选择已生成或上传的片段</option>{choices.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待完成'}</option>)}
-              </select></label>
+              <p className="mt-1 text-text-muted">{modeHint}</p>
             </div>
-            {segment.source === 'speaking_video' && <div className="mt-2 grid gap-2 sm:grid-cols-3">{([['personNodeId', '人物', 'person'], ['productNodeId', '产品', 'product'], ['settingNodeId', '场景', 'setting']] as const).map(([key, label, kind]) => <div key={key}>
-              <label>{label}参考<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
-              <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
-            </div>)}</div>}
-            {segment.source === 'speaking_video' && <label className="mt-2 block">声音参考（可选）<select aria-label={`${segment.speaker} 声音参考`} value={segment.voiceNodeId ?? ''} onChange={(event) => chooseReference(segment, 'voiceNodeId', event.target.value)} className={fieldClass}>
-              <option value="">不指定</option>{voiceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
-            </select></label>}
-            {segment.source === 'speaking_video' && <label className="mt-2 block">原片镜头参考（可选，建议先裁出对应片段）<select aria-label={`${segment.speaker} 镜头参考`} value={segment.motionNodeId ?? ''} onChange={(event) => chooseReference(segment, 'motionNodeId', event.target.value)} className={fieldClass}>
-              <option value="">只用镜头描述</option>{motionNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
-            </select></label>}
-            {segment.source === 'voiceover' && <label className="mt-2 block">旁白主画面<select aria-label={`${segment.speaker} 主画面`} value={segment.primaryNodeId ?? ''} onChange={(event) => void choosePrimary(segment, event.target.value)} className={fieldClass}>
+            {segment.source === 'speaking_video' && <details className="mt-3 rounded-[8px] border border-white/[0.08] px-3 py-2">
+              <summary className="cursor-pointer text-text-dark">更换人物、产品和场景（可选）{referenceCount ? ` · 已选 ${referenceCount} 项参考` : ''}</summary>
+              <p className="mt-1 text-text-muted">为新视频提供参考素材；不选则由视频节点中的提示词决定画面。</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-3">{([['personNodeId', '人物', 'person'], ['productNodeId', '产品', 'product'], ['settingNodeId', '场景', 'setting']] as const).map(([key, label, kind]) => <div key={key}>
+                <label>{label}参考<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+                <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
+              </div>)}</div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <label>声音参考（可选）<select aria-label={`${segment.speaker} 声音参考`} value={segment.voiceNodeId ?? ''} onChange={(event) => chooseReference(segment, 'voiceNodeId', event.target.value)} className={fieldClass}>
+                  <option value="">不指定</option>{voiceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+                </select></label>
+                <label>原片镜头参考（可选）<select aria-label={`${segment.speaker} 镜头参考`} value={segment.motionNodeId ?? ''} onChange={(event) => chooseReference(segment, 'motionNodeId', event.target.value)} className={fieldClass}>
+                  <option value="">只用镜头描述</option>{motionNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+                </select></label>
+              </div>
+            </details>}
+            {segment.source === 'voiceover' && <label className="mt-3 block">旁白播放时显示的主画面<select aria-label={`${segment.speaker} 主画面`} value={segment.primaryNodeId ?? ''} onChange={(event) => void choosePrimary(segment, event.target.value)} className={fieldClass}>
               <option value="">请选择生成或上传的视频／图片</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
             </select></label>}
-            <div className="mt-2 flex flex-wrap items-center gap-2"><button type="button" onClick={() => createTake(segment)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{segment.source === 'voiceover' ? '创建旁白节点' : segment.source === 'original_sound' ? '创建原声上传节点' : '创建口播视频节点'}</button>
-              {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
-              <span className={segment.takeMediaRevision ? 'text-emerald-300' : 'text-text-muted'}>{segment.takeMediaRevision ? '素材已绑定' : '等待片段生成或上传'}</span>
+            <div className="mt-3 border-t border-white/[0.08] pt-3">
+              <label>使用哪个{segment.source === 'voiceover' ? '音频' : '视频'}片段？<select aria-label={`${segment.speaker} 采用片段`} value={segment.takeNodeId ?? ''} onChange={(event) => void chooseTake(segment, event.target.value)} className={fieldClass}>
+                <option value="">尚未选择片段</option>{choices.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待完成'}</option>)}
+              </select></label>
+              <div className="mt-2 flex flex-wrap items-center gap-2"><button type="button" onClick={() => createTake(segment)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{segment.source === 'voiceover' ? '创建旁白节点' : segment.source === 'original_sound' ? '创建原声上传节点' : '创建口播视频节点'}</button>
+                {singleVoiceover && <button type="button" onClick={() => updateSegment(segment.id, { source: 'speaking_video', speaker: '口播', takeNodeId: undefined, takeMediaRevision: undefined, primaryNodeId: undefined, primaryMediaRevision: undefined })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改成整段口播视频</button>}
+                {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
+                <span className={segment.takeMediaRevision ? 'text-emerald-300' : 'text-text-muted'}>{segment.takeMediaRevision ? '素材已绑定' : '尚未完成片段'}</span>
+              </div>
+              <p className="mt-1 text-text-muted">此按钮会在画布创建节点，生成{segment.source === 'voiceover' ? '音频' : '视频'}请到该节点操作。</p>
             </div>
           </div>;
         })}
