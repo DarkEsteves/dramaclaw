@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/api/remix', () => ({
@@ -21,6 +21,8 @@ describe('RemixScriptPanel', () => {
     const aroll = screen.getByRole('region', { name: 'A-roll 主画面与声音' });
     const broll = screen.getByRole('region', { name: 'B-roll 补充镜头与音效' });
     expect(aroll.compareDocumentPosition(broll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(aroll).getByRole('heading', { name: '主画面与声音' }).compareDocumentPosition(within(aroll).getByText('A-roll')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(broll).getByRole('heading', { name: '补充镜头与音效' }).compareDocumentPosition(within(broll).getByText('B-roll')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(aroll).toHaveTextContent('已选 0/1 个片段');
     expect(broll).toHaveTextContent('待规划 · 1 个台词事件');
     fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
@@ -117,7 +119,7 @@ describe('RemixScriptPanel', () => {
       { id: 'segment-1', start: 0, end: Array.from(dialogue).length, speaker: '口播', source: 'speaking_video' },
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByRole('heading', { name: 'A-roll 主画面与声音' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: '主画面与声音' })).toBeVisible();
     expect(screen.getByText('整段台词')).toBeVisible();
     expect(screen.getByText(`${Array.from(dialogue).length} 字`)).toBeVisible();
     expect(screen.queryByText(`0–${Array.from(dialogue).length} 字`)).not.toBeInTheDocument();
@@ -276,10 +278,16 @@ describe('RemixScriptPanel', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝下咖啡', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[{ id: 'video-1', label: '咖啡画面', mediaRevision: 'a'.repeat(64) }]} sfxNodes={[]} onAutoSave={onAutoSave} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
     const dialogue = screen.getByLabelText('改编台词') as HTMLTextAreaElement;
     expect(await screen.findByText('用早晨疲惫引出咖啡')).toBeTruthy();
+    const editor = screen.getByRole('group', { name: '改编台词与事件标记' });
+    expect(within(editor).getByRole('button', { name: '将选中台词添加为事件' })).toBeVisible();
+    expect(within(screen.getByRole('region', { name: 'B-roll 补充镜头与音效' })).queryByRole('button', { name: '将选中台词添加为事件' })).not.toBeInTheDocument();
+    fireEvent.click(within(editor).getByRole('button', { name: '将选中台词添加为事件' }));
+    expect(within(editor).getByRole('alert')).toHaveTextContent('先在台词里选中一段文字。');
     dialogue.focus();
     dialogue.setSelectionRange(2, 4);
-    expect(screen.getByText('选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '将选中台词添加为事件' }));
+    expect(within(editor).getByText(/已添加 1 个事件/)).toBeVisible();
+    expect(within(editor).queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('补充画面（B-roll）')).toBeVisible();
     expect(screen.getByText('手动添加')).toBeVisible();
     fireEvent.change(screen.getByLabelText('产品登场画面'), { target: { value: 'video-1' } });

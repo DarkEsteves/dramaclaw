@@ -7,6 +7,7 @@ import { NODE_CONTEXT_CONTROL_TRIGGER_CLASS } from '@/features/canvas/ui/nodeCon
 import type { BrollVisualAttachment } from './brollCanvasBinding';
 
 const fieldClass = 'nodrag mt-1 w-full rounded-[12px] border border-white/10 bg-surface-field px-3 py-2 text-text-dark outline-none focus:border-white/25';
+const SELECTION_REQUIRED_ERROR = '先在台词里选中一段文字。';
 
 interface Props {
   project: string;
@@ -145,7 +146,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
   };
   const markSelected = () => {
     const field = dialogueRef.current;
-    if (!field || field.selectionStart === field.selectionEnd) { setError('先在台词里选中一段文字。'); return; }
+    if (!field || field.selectionStart === field.selectionEnd) { setError(SELECTION_REQUIRED_ERROR); return; }
     const start = Array.from(field.value.slice(0, field.selectionStart)).length;
     const end = Array.from(field.value.slice(0, field.selectionEnd)).length;
     const index = draft.selections.length + 1;
@@ -290,10 +291,17 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         </div>
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}
-      <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
+      <div role="group" aria-label="改编台词与事件标记">
+        <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-text-muted">选中上方台词，可添加需要补充镜头或音效的事件。已添加 {draft.selections.length} 个事件</p>
+          <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
+        </div>
+        {error === SELECTION_REQUIRED_ERROR && <p role="alert" className="mt-1 text-red-300">{error}</p>}
+      </div>
       <section aria-label="A-roll 主画面与声音" className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <div><div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">01</span><h3 aria-label="A-roll 主画面与声音" className="flex items-baseline gap-2"><span className="text-base font-semibold text-text-dark">A-roll</span><span className="text-xs font-medium text-text-muted">主画面与声音</span></h3></div><p className="mt-1 text-text-muted">先决定台词由谁说、成片使用哪段基础画面和声音。素材在对应的画布节点制作。</p><p className="mt-1 text-[11px] text-text-muted">{arollStatus}</p></div>
+          <div><div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">01</span><h3 className="font-medium">主画面与声音</h3><span className="text-base font-semibold text-text-dark">A-roll</span></div><p className="mt-1 text-text-muted">先决定台词由谁说、成片使用哪段基础画面和声音。素材在对应的画布节点制作。</p><p className="mt-1 text-[11px] text-text-muted">{arollStatus}</p></div>
           {!!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: [] })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>不分段，使用音频节点</button>}
         </div>
         {!draft.segments?.length && <div className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
@@ -360,13 +368,9 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         {draft.segments?.some((segment) => segment.source === 'voiceover') && primaryVisualAction}
       </section>
       <section aria-label="B-roll 补充镜头与音效" className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
-        <div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">02</span><h3 aria-label="B-roll 补充镜头与音效" className="flex items-baseline gap-2"><span className="text-base font-semibold text-text-dark">B-roll</span><span className="text-xs font-medium text-text-muted">补充镜头与音效</span></h3><span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-text-muted">可选</span></div>
+        <div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">02</span><h3 className="font-medium">补充镜头与音效</h3><span className="text-base font-semibold text-text-dark">B-roll</span><span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-text-muted">可选</span></div>
         <p className="mt-1 text-text-muted">在基础画面的台词位置，决定是否插入补充镜头或音效。可以先规划建议，也可以直接手动设置。</p>
         <p className="mt-1 text-[11px] text-text-muted">{brollStatus}</p>
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/[0.08] pt-3">
-          <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
-          <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>
-        </div>
       <div className="mt-3 border-t border-white/10 pt-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="font-medium text-text-dark">台词事件（{draft.selections.length}）</h3>
@@ -415,7 +419,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
       </div>})}
       </div>
       </section>
-      {error && <p role="alert" className="text-red-300">{error}</p>}
+      {error && error !== SELECTION_REQUIRED_ERROR && <p role="alert" className="text-red-300">{error}</p>}
     </div>
   </div>;
 }
