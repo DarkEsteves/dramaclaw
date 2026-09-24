@@ -243,11 +243,19 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === visual.id)?.data.imageUrl).toContain('broll.png'));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptDraft as { selections: Array<{ visualMediaRevision?: string }> }).selections[0].visualMediaRevision).toBe('c'.repeat(64)));
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef as { revision?: number }).revision).toBe(3));
+    expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
 
     act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '规划 B-roll' }));
+    expect(screen.queryByRole('button', { name: '规划 B-roll' })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === scriptNode.id)?.data.remixBrollPlanStatus).toBe('completed'));
+    expect(screen.getByText('已分析 1 个事件，建议 1 个补充画面。')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(screen.getByText('B-roll 1/1')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '制作配音' }));
 
     const audio = useCanvasStore.getState().nodes.find((node) => node.type === 'audioNode')!;
@@ -274,6 +282,20 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: '生成合成清单' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')?.data.remixManifestLoadState).toBe('ready'));
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
+
+    const compose = useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')!;
+    act(() => useCanvasStore.getState().updateNodeData(compose.id, { remixInputsCurrent: true, resultVideoUrl: '/final.mp4' }));
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '产品登场需要 B-roll' }));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === scriptNode.id)?.data.remixBrollDecisions).toEqual({ product: false });
+    const timeline = useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')!;
+    expect(useCanvasStore.getState().edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: scriptNode.id, target: timeline.id }),
+      expect.objectContaining({ source: timeline.id, target: compose.id }),
+    ]));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === compose.id)?.data.remixInputsCurrent).toBe(false);
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === compose.id)?.data.resultVideoUrl).toBeNull();
   });
 
   it('opens the script editor when the next step is to complete required B-roll', async () => {
@@ -342,7 +364,9 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
 
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    act(() => useCanvasStore.getState().updateNodeData('script', { remixBrollPlanStatus: 'running' }));
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 图片素材' }));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollPlanStatus).toBe('completed');
     expect(useCanvasStore.getState().nodes.find((node) => node.type === 'imageGenNode')?.data.displayName)
       .toBe('生成图片 · 产品登场');
     expect(useCanvasStore.getState().nodes.find((node) => node.id === 'script')?.data.remixBrollRequirements)
@@ -402,7 +426,7 @@ describe('native canvas remix journey integration', () => {
     render(<JourneyCanvas />);
 
     expect(await screen.findByText('改编主题：尚未填写改编主题')).toBeInTheDocument();
-    expect(screen.getByText('B-roll 无必需项')).toBeInTheDocument();
+    expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
     expect(screen.getByText('下一步：编辑改编脚本')).toBeInTheDocument();
   });
 });

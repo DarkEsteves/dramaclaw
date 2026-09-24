@@ -122,6 +122,15 @@ describe('prepareNodeRemix', () => {
     expect(after).not.toBe(before);
   });
 
+  it('changes the input fingerprint when a user changes a B-roll decision', () => {
+    const script = node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 1 }, remixBrollDecisions: { product: true } });
+    const compose = node('compose', 'videoComposeNode', {});
+    const edges = [edge('script', 'compose')];
+    const before = remixGraphFingerprint([script, compose], edges, 'compose');
+    const after = remixGraphFingerprint([node('script', 'scriptNode', { ...script.data, remixBrollDecisions: { product: false } }), compose], edges, 'compose');
+    expect(after).not.toBe(before);
+  });
+
   it('changes the fingerprint when a deep story blueprint revision changes', () => {
     const compose = node('compose', 'videoComposeNode', {});
     const script = node('script', 'scriptNode', { remixScriptRef: { artifactId: 'script', revision: 1 } });

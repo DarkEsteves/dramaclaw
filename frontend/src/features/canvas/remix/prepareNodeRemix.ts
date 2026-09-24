@@ -25,6 +25,13 @@ function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): 
   return result;
 }
 
+function brollDecisionsFingerprint(data: Record<string, unknown>): Array<[string, boolean]> {
+  const decisions = data.remixBrollDecisions;
+  if (!decisions || typeof decisions !== 'object' || Array.isArray(decisions)) return [];
+  return Object.entries(decisions).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean')
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
 /** The exact upstream material versions a compose manifest was built from. */
 export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], composeId: string): string {
   const upstream = ancestors(nodes, edges, composeId);
@@ -54,6 +61,7 @@ export function remixGraphFingerprint(nodes: CanvasNode[], edges: CanvasEdge[], 
     previewImageUrl: 'previewImageUrl' in node.data ? node.data.previewImageUrl ?? null : undefined,
     audioUrl: node.type === CANVAS_NODE_TYPES.audio ? node.data.audioUrl ?? null : undefined,
     role: 'remixRole' in node.data ? node.data.remixRole : undefined,
+    brollDecisions: node.type === CANVAS_NODE_TYPES.script ? brollDecisionsFingerprint(node.data as Record<string, unknown>) : undefined,
     generationRequest: node.type === CANVAS_NODE_TYPES.imageGen ? {
       prompt: node.data.prompt ?? '', model: node.data.model ?? null,
       aspectRatio: node.data.aspectRatio ?? null, size: node.data.size ?? null,

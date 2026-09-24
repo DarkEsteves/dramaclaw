@@ -150,6 +150,19 @@ describe('reference video remix canvas journey', () => {
     expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
   });
 
+  it('lets a user skip an AI-required B-roll without removing the AI recommendation', () => {
+    const graph = completeThroughScript();
+    const script = graph.nodes[2];
+    script.data.remixBrollPlanRef = ref('broll');
+    script.data.remixBrollScriptRef = ref('script');
+    script.data.remixBrollRequirements = [{ event_id: 'product', required: true }];
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ label: '补齐必需 B-roll' });
+
+    script.data.remixBrollDecisions = { product: false };
+    expect(nextRemixJourneyStep(graph.nodes, graph.edges, 'script')).toMatchObject({ action: 'create_narration' });
+    expect(script.data.remixBrollRequirements).toEqual([{ event_id: 'product', required: true }]);
+  });
+
   it('stops for missing required B-roll and then advances alignment through editable MP4', () => {
     const graph = completeThroughScript();
     const draft = graph.nodes[2].data.remixScriptDraft as { selections: Array<Record<string, unknown>> };

@@ -99,8 +99,11 @@ function missingRequiredBroll(node: CanvasNode, nodes: CanvasNode[], edges: Canv
   const draft = node.data.remixScriptDraft as { selections?: Array<{ id?: unknown; visualNodeId?: unknown; visualMediaRevision?: unknown }> } | undefined;
   const requirements = Array.isArray(node.data.remixBrollRequirements)
     ? node.data.remixBrollRequirements as Array<{ event_id?: unknown; required?: unknown }> : [];
+  const decisions = node.data.remixBrollDecisions && typeof node.data.remixBrollDecisions === 'object'
+    ? node.data.remixBrollDecisions as Record<string, unknown> : {};
   return requirements.some((requirement) => {
-    if (requirement.required !== true || typeof requirement.event_id !== 'string') return false;
+    if (typeof requirement.event_id !== 'string'
+      || (typeof decisions[requirement.event_id] === 'boolean' ? decisions[requirement.event_id] : requirement.required) !== true) return false;
     const selection = draft?.selections?.find((item) => item.id === requirement.event_id);
     if (typeof selection?.visualNodeId !== 'string' || typeof selection.visualMediaRevision !== 'string'
       || !/^[a-f0-9]{64}$/u.test(selection.visualMediaRevision)) return true;

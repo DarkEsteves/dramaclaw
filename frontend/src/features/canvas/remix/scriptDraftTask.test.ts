@@ -73,6 +73,14 @@ describe('script draft generation task controller', () => {
     });
   });
 
+  it('clears event-specific B-roll decisions when generating a different script', async () => {
+    state.nodes[0].data.remixBrollDecisions = { 'old-event': false };
+
+    await startScriptDraftGeneration('script', { artifactId: 'blueprint-1', revision: 2 }, '薯条');
+
+    expect(state.nodes[0].data.remixBrollDecisions).toEqual({});
+  });
+
   it('starts a new task when the same topic is generated again', async () => {
     const blueprintRef = { artifactId: 'blueprint-1', revision: 2 };
     await startScriptDraftGeneration('script', blueprintRef, '薯条');

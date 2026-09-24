@@ -487,7 +487,11 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const remixBrollRequirements = Array.isArray(data.remixBrollRequirements)
     ? data.remixBrollRequirements as Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>
     : [];
-  const requiredRemixBroll = remixBrollRequirements.filter((requirement) => requirement.required);
+  const remixBrollDecisions = data.remixBrollDecisions && typeof data.remixBrollDecisions === 'object'
+    ? data.remixBrollDecisions as Record<string, boolean> : {};
+  const currentBrollPlan = Boolean(remixRef(data.remixBrollPlanRef)
+    && sameRemixRef(remixRef(data.remixBrollScriptRef), remixRef(data.remixScriptRef)));
+  const requiredRemixBroll = remixBrollRequirements.filter((requirement) => remixBrollDecisions[requirement.event_id] ?? requirement.required);
   const completedRequiredRemixBroll = requiredRemixBroll.filter((requirement) => {
     const event = initialRemixDraft.selections.find((selection) => selection.id === requirement.event_id);
     return Boolean(event?.visualNodeId && event.visualMediaRevision);
@@ -992,9 +996,12 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             <div className="flex flex-wrap gap-1.5 text-[11px]">
               <span className="rounded-full bg-white/[0.06] px-2 py-1">{initialRemixDraft.selections.length} 个事件</span>
               <span className="rounded-full bg-white/[0.06] px-2 py-1">
-                {requiredRemixBroll.length > 0
-                  ? `B-roll ${completedRequiredRemixBroll}/${requiredRemixBroll.length}`
-                  : 'B-roll 无必需项'}
+                {data.remixBrollPlanStatus === 'running' ? 'B-roll 规划中'
+                  : data.remixBrollPlanStatus === 'failed' ? 'B-roll 规划失败'
+                    : !currentBrollPlan ? 'B-roll 未规划'
+                      : requiredRemixBroll.length > 0
+                        ? `B-roll ${completedRequiredRemixBroll}/${requiredRemixBroll.length}`
+                        : 'B-roll 无必需项'}
               </span>
             </div>
             {initialRemixDraft.dialogue.trim() ? (
@@ -1099,7 +1106,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             project={readUrl().project ?? ''}
             initialDraft={initialRemixDraft}
             initialTopic={typeof data.remixTopic === 'string' ? data.remixTopic : ''}
-            existingRef={savedRemixRef}
+            existingRef={remixRef(data.remixScriptRef)}
             blueprintRef={blueprintRef}
             blueprintSettings={upstreamStory ? <ReferenceBlueprintPanel
               ref={blueprintPanelRef}
@@ -1151,6 +1158,19 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onCreatePrimaryVisuals={upstreamStory ? createMissingPrimaryVisuals : undefined}
             sfxNodes={remixSfxNodes}
             brollRequirements={remixBrollRequirements}
+            brollDecisions={remixBrollDecisions}
+            brollPlanStatus={data.remixBrollPlanStatus === 'running' || data.remixBrollPlanStatus === 'failed' || data.remixBrollPlanStatus === 'completed' ? data.remixBrollPlanStatus : null}
+            brollPlanError={typeof data.remixBrollPlanError === 'string' ? data.remixBrollPlanError : null}
+            brollPlanCurrent={currentBrollPlan}
+            onPlanBroll={() => {
+              const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data;
+              if (latest?.remixScriptGenerationStatus !== 'running' && remixRef(latest?.remixScriptRef)) void startBrollPlan(id);
+            }}
+            onBrollDecisionChange={(eventId, required) => {
+              const current = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data.remixBrollDecisions;
+              applyRemixInvalidation(id, 'media_binding');
+              updateNodeData(id, { remixBrollDecisions: { ...(current && typeof current === 'object' ? current : {}), [eventId]: required } });
+            }}
             onCreateVisual={createRemixVisual}
             onAttachVisual={attachRemixVisual}
             onAutoSave={autoSaveRemixDraft}
@@ -1158,6 +1178,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onDraftChange={(next, changeKind = 'content') => {
               const isMediaBinding = changeKind === 'media-binding';
               applyRemixInvalidation(id, isMediaBinding ? 'media_binding' : 'script');
+              const latest = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data;
+              const cancelRunningPlan = isMediaBinding && latest?.remixBrollPlanStatus === 'running';
               updateNodeData(id, {
                 remixScriptDraft: next,
                 ...(!isMediaBinding ? {
@@ -1166,13 +1188,19 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
                   remixBrollPlanRef: null,
                   remixBrollScriptRef: null,
                   remixBrollRequirements: [],
+                  remixBrollDecisions: {},
                   remixBrollPlanStatus: null,
+                } : {}),
+                ...(cancelRunningPlan ? {
+                  remixBrollPlanStatus: remixRef(latest?.remixBrollPlanRef)
+                    && sameRemixRef(remixRef(latest?.remixBrollScriptRef), remixRef(latest?.remixScriptRef)) ? 'completed' : null,
+                  remixBrollPlanError: null,
                 } : {}),
                 remixBrollOperationId: null,
                 remixBrollOperationScriptRef: null,
               });
             }}
-            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); setRemixScriptOpen(false); }}
+            onSave={(ref, branchRef) => { updateNodeData(id, { remixScriptRef: ref, remixScriptLastSavedRef: ref, referenceBlueprintRef: branchRef ?? blueprintRef, remixBlueprintRef: branchRef ?? blueprintRef, remixBrollPlanRef: null, remixBrollScriptRef: null, remixBrollDecisions: {}, remixBrollPlanStatus: null, remixBrollOperationId: null, remixBrollOperationScriptRef: null }); setRemixScriptOpen(false); }}
             onClose={() => setRemixScriptOpen(false)}
           />
         </div>, document.body,

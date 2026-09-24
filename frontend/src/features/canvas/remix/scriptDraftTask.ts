@@ -148,6 +148,7 @@ async function observe(
             remixBrollPlanRef: null,
             remixBrollScriptRef: null,
             remixBrollRequirements: [],
+            remixBrollDecisions: {},
             remixBrollPlanStatus: null,
             remixBrollOperationId: null,
             remixBrollOperationScriptRef: null,

@@ -31,6 +31,12 @@ interface Props {
   onCreatePrimaryVisuals?: () => boolean;
   sfxNodes: Array<{ id: string; label: string }>;
   brollRequirements?: Array<{ event_id: string; required: boolean; purpose: string; suggested_query: string }>;
+  brollDecisions?: Record<string, boolean>;
+  brollPlanStatus?: 'running' | 'failed' | 'completed' | null;
+  brollPlanError?: string | null;
+  brollPlanCurrent?: boolean;
+  onPlanBroll?: () => void;
+  onBrollDecisionChange?: (eventId: string, required: boolean) => void;
   onCreateVisual?: (mode: 'generate' | 'generateVideo' | 'upload', selectionId: string, eventName: string, suggestedPrompt?: string) => { id: string; label: string; mediaRevision?: string } | null;
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
@@ -40,7 +46,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -326,13 +332,34 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       <button type="button" onClick={markSelected} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>将选中台词添加为事件</button>
       <p className="text-text-muted">选中一段台词后添加为语义事件，用来指定这段台词需要搭配的补充画面（B-roll）或音效。</p>
       <div className="border-t border-white/10 pt-3">
-        <h3 className="font-medium text-text-dark">台词事件（{draft.selections.length}）</h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-medium text-text-dark">台词事件（{draft.selections.length}）</h3>
+          {onPlanBroll && <button type="button"
+            disabled={!existingRef || autoSaving || generating || generationRunning || !draft.selections.length || brollPlanStatus === 'running'}
+            onClick={onPlanBroll} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>
+            {brollPlanStatus === 'running' ? '规划 B-roll 中…' : brollPlanStatus === 'failed' ? '重试规划 B-roll' : brollPlanCurrent ? '重新规划 B-roll' : '规划 B-roll'}
+          </button>}
+        </div>
         <p className="mt-1 text-text-muted">AI 已根据台词自动拆分，你也可以选中台词手动补充事件。</p>
+        {onPlanBroll && <p className="mt-1 text-text-muted">规划仅提供建议，素材仍由你在事件中选择或生成。</p>}
+        {onPlanBroll && <p className="mt-1 text-text-muted">
+          {generating || generationRunning ? '正在生成新台词，完成后可规划补充画面。'
+            : autoSaving ? '正在保存当前台词，保存后可规划补充画面。'
+            : !existingRef ? '保存当前台词后即可分析补充画面。'
+              : brollPlanStatus === 'running' ? '正在逐个分析台词事件…'
+                : brollPlanCurrent ? `已分析 ${brollRequirements.length} 个事件，建议 ${brollRequirements.filter((item) => item.required).length} 个补充画面。`
+                  : '可让 AI 判断各事件是否需要补充画面，也可以直接在下方选择素材。'}
+        </p>}
+        {brollPlanStatus === 'failed' && brollPlanError && <p role="alert" className="mt-1 text-red-300">{brollPlanError}</p>}
       </div>
       {draft.selections.map((selection, index) => {
         const requirement = brollRequirements.find((item) => item.event_id === selection.id);
         const selectedDialogue = Array.from(draft.dialogue).slice(Math.max(0, selection.start), Math.max(0, selection.end)).join('');
         return <div key={selection.id} className="grid grid-cols-[1fr_100px_100px_1fr_1fr_auto] items-end gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
+        {brollPlanCurrent && requirement && <div className="col-span-6 space-y-1">
+          <p className="text-text-muted">AI 建议：{requirement.required ? '需要补充画面' : '无需补充画面'}{requirement.purpose ? ` · ${requirement.purpose}` : ''}{requirement.suggested_query ? ` · 建议提示词：${requirement.suggested_query}` : ''}</p>
+          {onBrollDecisionChange && <label className="flex items-center gap-2 text-text-dark"><input type="checkbox" aria-label={`${selection.label}需要 B-roll`} checked={brollDecisions[selection.id] ?? requirement.required} onChange={(event) => onBrollDecisionChange(selection.id, event.target.checked)} />此事件需要 B-roll</label>}
+        </div>}
         <label><span className="flex items-center justify-between gap-2">事件名称<span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-text-muted">{selection.source === 'manual' || (!selection.source && selection.id.startsWith('event-')) ? '手动添加' : 'AI 生成'}</span></span><input aria-label={`事件 ${index + 1} 名称`} value={selection.label} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, label: event.target.value } : item) })} className={fieldClass} /></label>
         <label>起始字<input aria-label={`${selection.label} 起始字`} type="number" value={selection.start} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, start: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
         <label>结束字<input aria-label={`${selection.label} 结束字`} type="number" value={selection.end} onChange={(event) => changeDraft({ ...draft, selections: draft.selections.map((item, position) => position === index ? { ...item, end: Number(event.target.value), invalidReason: undefined } : item) })} className={fieldClass} /></label>
@@ -347,7 +374,6 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
           <button type="button" aria-label={`替换 ${selection.label} 素材`} onClick={() => selection.visualNodeId ? void bindVisual(index, selection.visualNodeId) : document.getElementById(`remix-visual-${selection.id}`)?.focus()} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>替换素材</button>
           {selection.visualNodeId && !selection.visualMediaRevision && <span className="text-amber-300">{autoSaving ? '补充画面节点已创建，正在自动保存脚本…' : '补充画面节点已创建，脚本已自动保存。稍后在画布完成素材后会自动关联。'}</span>}
         </div>
-        {requirement?.required && <p className="col-span-6 text-amber-300">必需补充画面（B-roll）· {requirement.purpose} · 建议提示词：{requirement.suggested_query}</p>}
         {selection.invalidReason && <p className="col-span-6 text-amber-300">台词已改变，请重新标记这个区间。</p>}
       </div>})}
       {error && <p role="alert" className="text-red-300">{error}</p>}

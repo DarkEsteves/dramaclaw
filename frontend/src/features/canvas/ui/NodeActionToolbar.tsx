@@ -1791,17 +1791,6 @@ export const NodeActionToolbar = memo(
                 requestRemixScriptEditor(node.id);
               }}
             ><PenLine className="h-3.5 w-3.5" />{remixScriptLabel}</UiChipButton>}
-            {Boolean(remixScriptLabel && node.data.remixScriptRef) && <UiChipButton
-              className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
-              disabled={node.data.remixBrollPlanStatus === 'running'}
-              onClick={(event) => {
-                event.stopPropagation();
-                canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'plan_broll' });
-              }}
-            >
-              {node.data.remixBrollPlanStatus === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-              {node.data.remixBrollPlanStatus === 'running' ? '规划 B-roll 中…' : node.data.remixBrollPlanRef ? '重新规划 B-roll' : '规划 B-roll'}
-            </UiChipButton>}
             {remixVisualNeedsBinding && remixVisualRole && <UiChipButton
               className={TOOLBAR_TEXT_BUTTON_CLASS}
               onClick={(event) => {

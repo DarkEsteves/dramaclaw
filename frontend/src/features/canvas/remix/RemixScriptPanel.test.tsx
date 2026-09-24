@@ -101,6 +101,72 @@ describe('RemixScriptPanel', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it('plans B-roll beside script events only after the current draft is saved', () => {
+    const draft = { dialogue: '新品咖啡登场', selections: [{ id: 'product', label: '产品登场', start: 0, end: 6 }] };
+    const onPlanBroll = vi.fn();
+    const props = { project: 'demo', initialDraft: draft, blueprintRef: null, visualNodes: [], sfxNodes: [], onDraftChange: () => {}, onSave: () => {}, onClose: () => {}, onPlanBroll };
+    const { rerender } = render(<RemixScriptPanel {...props} existingRef={null} />);
+
+    const action = screen.getByRole('button', { name: '规划 B-roll' });
+    expect(screen.getByRole('heading', { name: '台词事件（1）' }).parentElement?.contains(action)).toBe(true);
+    expect(action).toBeDisabled();
+    expect(screen.getByText('保存当前台词后即可分析补充画面。')).toBeVisible();
+
+    rerender(<RemixScriptPanel {...props} existingRef={{ artifactId: 'script-1', revision: 2 }} />);
+    expect(action).toBeEnabled();
+    fireEvent.click(action);
+    expect(onPlanBroll).toHaveBeenCalledOnce();
+  });
+
+  it('does not plan the previous saved script while a replacement draft is generating', () => {
+    const onPlanBroll = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '旧台词', selections: [
+      { id: 'old-event', label: '旧事件', start: 0, end: 3 },
+    ] }} existingRef={{ artifactId: 'old-script', revision: 1 }} blueprintRef={null}
+      visualNodes={[]} sfxNodes={[]} generationRunning onPlanBroll={onPlanBroll}
+      onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
+    expect(screen.getByRole('button', { name: '规划 B-roll' })).toBeDisabled();
+    expect(onPlanBroll).not.toHaveBeenCalled();
+  });
+
+  it('shows B-roll planning progress, failure and a reviewable result in the event section', () => {
+    const draft = { dialogue: '新品咖啡登场', selections: [{ id: 'product', label: '产品登场', start: 0, end: 6 }] };
+    const props = { project: 'demo', initialDraft: draft, existingRef: { artifactId: 'script-1', revision: 2 }, blueprintRef: null, visualNodes: [], sfxNodes: [], onDraftChange: () => {}, onSave: () => {}, onClose: () => {}, onPlanBroll: vi.fn() };
+    const { rerender } = render(<RemixScriptPanel {...props} brollPlanStatus="running" />);
+    expect(screen.getByRole('button', { name: '规划 B-roll 中…' })).toBeDisabled();
+
+    rerender(<RemixScriptPanel {...props} brollPlanStatus="failed" brollPlanError="模型服务不可用" />);
+    expect(screen.getByRole('alert')).toHaveTextContent('模型服务不可用');
+    expect(screen.getByRole('button', { name: '重试规划 B-roll' })).toBeEnabled();
+
+    rerender(<RemixScriptPanel {...props} brollPlanStatus="completed" brollPlanCurrent brollRequirements={[
+      { event_id: 'product', required: true, purpose: '展示产品', suggested_query: '咖啡特写' },
+    ]} />);
+    expect(screen.getByText('已分析 1 个事件，建议 1 个补充画面。')).toBeVisible();
+    expect(screen.getByRole('button', { name: '重新规划 B-roll' })).toBeEnabled();
+    expect(screen.getByText(/AI 建议：需要补充画面.*咖啡特写/)).toBeVisible();
+  });
+
+  it('lets the user override an AI B-roll recommendation while retaining the suggestion', () => {
+    const onBrollDecisionChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '新品咖啡登场', selections: [
+      { id: 'product', label: '产品登场', start: 0, end: 6 },
+    ] }} existingRef={{ artifactId: 'script-1', revision: 2 }} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      brollPlanStatus="completed" brollPlanCurrent brollRequirements={[
+        { event_id: 'product', required: true, purpose: '展示产品', suggested_query: '咖啡特写' },
+      ]} brollDecisions={{ product: false }} onBrollDecisionChange={onBrollDecisionChange}
+      onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+
+    const decision = screen.getByRole('checkbox', { name: '产品登场需要 B-roll' });
+    expect(decision).not.toBeChecked();
+    expect(decision.compareDocumentPosition(screen.getByLabelText('产品登场画面')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/AI 建议：需要补充画面.*咖啡特写/)).toBeVisible();
+    fireEvent.click(decision);
+    expect(onBrollDecisionChange).toHaveBeenCalledWith('product', true);
+  });
+
   it('makes script generation the clear primary action after entering a topic', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
@@ -294,6 +360,7 @@ describe('RemixScriptPanel', () => {
         visualNodes={[]}
         sfxNodes={[]}
         brollRequirements={requirements}
+        brollPlanCurrent
         onCreateVisual={() => ({ id: 'generated-last', label: '生成画面' })}
         onDraftChange={(_draft, changeKind) => {
           if (changeKind !== 'media-binding') setRequirements([]);
@@ -311,9 +378,9 @@ describe('RemixScriptPanel', () => {
   });
 
   it('shows the Recipe requirement beside the exact B-roll event', () => {
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollRequirements={[{ event_id: 'product', required: true, purpose: '必须看见产品', suggested_query: '咖啡杯特写' }]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '喝咖啡', selections: [{ id: 'product', label: '产品登场', start: 1, end: 3 }] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} brollPlanCurrent brollRequirements={[{ event_id: 'product', required: true, purpose: '必须看见产品', suggested_query: '咖啡杯特写' }]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 
-    expect(screen.getByText('必需补充画面（B-roll）· 必须看见产品 · 建议提示词：咖啡杯特写')).toBeInTheDocument();
+    expect(screen.getByText('AI 建议：需要补充画面 · 必须看见产品 · 建议提示词：咖啡杯特写')).toBeInTheDocument();
   });
 
   it('attaches an existing canvas visual and stores its immutable media revision', async () => {
