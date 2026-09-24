@@ -26,6 +26,7 @@ export interface RemixPerformanceSegment {
   end: number;
   speaker: string;
   source: 'speaking_video' | 'voiceover' | 'original_sound';
+  referenceBindings?: RemixReferenceBinding[];
   personNodeId?: string;
   productNodeId?: string;
   settingNodeId?: string;
@@ -35,6 +36,30 @@ export interface RemixPerformanceSegment {
   takeMediaRevision?: string;
   primaryNodeId?: string;
   primaryMediaRevision?: string;
+}
+
+export interface RemixReferenceBinding {
+  nodeId: string;
+  purpose: string;
+}
+
+const LEGACY_REFERENCE_FIELDS = [
+  ['personNodeId', '保持人物形象'],
+  ['productNodeId', '保持物件外观'],
+  ['settingNodeId', '保持场景环境'],
+  ['motionNodeId', '参考镜头动作'],
+  ['voiceNodeId', '参考说话音色'],
+] as const;
+
+export function referenceBindingsForSegment(segment: RemixPerformanceSegment): RemixReferenceBinding[] {
+  if (segment.referenceBindings) return segment.referenceBindings;
+  const seen = new Set<string>();
+  return LEGACY_REFERENCE_FIELDS.flatMap(([key, purpose]) => {
+    const nodeId = segment[key];
+    if (!nodeId || seen.has(nodeId)) return [];
+    seen.add(nodeId);
+    return [{ nodeId, purpose }];
+  });
 }
 
 const speakerLine = /^\s*([^：:\n]{1,24})[：:]\s*(\S.*)$/u;
@@ -103,6 +128,14 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
       || !['speaking_video', 'voiceover', 'original_sound'].includes(segment.source)) throw new Error('表演段落范围或来源无效');
     if (segment.takeMediaRevision && (!segment.takeNodeId || !/^[a-f0-9]{64}$/u.test(segment.takeMediaRevision))) throw new Error('表演段落素材版本无效');
     if (segment.primaryMediaRevision && (!segment.primaryNodeId || !/^[a-f0-9]{64}$/u.test(segment.primaryMediaRevision))) throw new Error('主画面素材版本无效');
+    if (segment.referenceBindings) {
+      const bindingIds = new Set<string>();
+      for (const binding of segment.referenceBindings) {
+        if (!binding.nodeId.trim() || !binding.purpose.trim()) throw new Error('参考用途和素材不能为空');
+        if (bindingIds.has(binding.nodeId)) throw new Error('参考素材重复');
+        bindingIds.add(binding.nodeId);
+      }
+    }
     previousEnd = segment.end;
     segmentIds.add(segment.id);
   }
@@ -110,6 +143,7 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
     dialogue: draft.dialogue, segments: (draft.segments ?? []).map((item) => ({
       segment_id: item.id, start_char: item.start, end_char: item.end,
       speaker: item.speaker, source: item.source,
+      ...(item.referenceBindings ? { reference_bindings: item.referenceBindings.map(({ nodeId, purpose }) => ({ node_id: nodeId, purpose: purpose.trim() })) } : {}),
       ...(item.personNodeId ? { person_node_id: item.personNodeId } : {}),
       ...(item.productNodeId ? { product_node_id: item.productNodeId } : {}),
       ...(item.settingNodeId ? { setting_node_id: item.settingNodeId } : {}),

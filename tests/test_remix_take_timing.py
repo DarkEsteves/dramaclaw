@@ -3,6 +3,19 @@ from __future__ import annotations
 import pytest
 
 from novelvideo.freezone.remix.take_timing import compile_take_timing
+from novelvideo.freezone.remix.contracts import PerformanceSegment
+
+
+def test_performance_segment_accepts_custom_references_and_rejects_duplicate_nodes() -> None:
+    base = {"segment_id": "one", "start_char": 0, "end_char": 2, "speaker": "甲", "source": "speaking_video"}
+    segment = PerformanceSegment.model_validate({**base, "reference_bindings": [
+        {"node_id": "shot", "purpose": "保持镜头运动"}, {"node_id": "voice", "purpose": "参考音色"},
+    ]})
+    assert [item.purpose for item in segment.reference_bindings] == ["保持镜头运动", "参考音色"]
+    with pytest.raises(ValueError, match="duplicate"):
+        PerformanceSegment.model_validate({**base, "reference_bindings": [
+            {"node_id": "shot", "purpose": "镜头"}, {"node_id": "shot", "purpose": "构图"},
+        ]})
 
 
 def test_take_timing_joins_exact_media_and_maps_broll_to_spoken_words() -> None:

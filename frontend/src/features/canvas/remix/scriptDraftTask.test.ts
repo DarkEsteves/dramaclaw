@@ -109,6 +109,21 @@ describe('script draft generation task controller', () => {
     expect(result?.segments).toEqual([]);
   });
 
+  it('loads generic bindings and older typed references without losing either', async () => {
+    vi.mocked(fetchRemixArtifact).mockResolvedValue({
+      id: 'draft-1', revision: 1, schema: 'remix_script.v1',
+      upstream_refs: [{ artifact_id: 'blueprint-1', revision: 2 }],
+      payload: { dialogue: '女：你好。', selections: [], blueprint_mappings: [], media_requirements: [], segments: [{
+        segment_id: 'one', start_char: 2, end_char: 5, speaker: '女', source: 'speaking_video',
+        person_node_id: 'portrait', reference_bindings: [{ node_id: 'camera', purpose: '保持构图' }],
+      }] },
+    });
+    const result = await startScriptDraftGeneration('script', { artifactId: 'blueprint-1', revision: 2 }, '薯条');
+    expect(result?.segments?.[0]).toEqual(expect.objectContaining({
+      referenceBindings: [{ nodeId: 'camera', purpose: '保持构图' }], personNodeId: 'portrait',
+    }));
+  });
+
   it('resumes after reload without resubmitting', async () => {
     state.nodes[0].data = {
       ...state.nodes[0].data,

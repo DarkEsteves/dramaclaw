@@ -1,9 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { buildRemixScriptPayload, editRemixDialogue, seedPerformanceSegments, type RemixScriptDraft } from './remixScriptModel';
+import { buildRemixScriptPayload, editRemixDialogue, referenceBindingsForSegment, seedPerformanceSegments, type RemixScriptDraft } from './remixScriptModel';
 
 const draft: RemixScriptDraft = { dialogue: '喝下咖啡', selections: [{ id: 'product', label: '产品登场', start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) }] };
 
 describe('remix script editor', () => {
+  it('keeps arbitrary ordered media purposes without requiring product or scene slots', () => {
+    const segment = { id: 'one', start: 0, end: 2, speaker: '甲', source: 'speaking_video' as const,
+      referenceBindings: [{ nodeId: 'shot', purpose: '保持手持镜头运动' }, { nodeId: 'voice', purpose: '参考说话音色' }] };
+    expect(referenceBindingsForSegment(segment)).toEqual(segment.referenceBindings);
+    expect(buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [segment] }, 1).segments).toEqual([
+      expect.objectContaining({ reference_bindings: [
+        { node_id: 'shot', purpose: '保持手持镜头运动' }, { node_id: 'voice', purpose: '参考说话音色' },
+      ] }),
+    ]);
+    expect(() => buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [{ ...segment,
+      referenceBindings: [{ nodeId: 'shot', purpose: '   ' }] }] }, 1)).toThrow('参考用途');
+    expect(() => buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [{ ...segment,
+      referenceBindings: [{ nodeId: 'shot', purpose: '镜头' }, { nodeId: 'shot', purpose: '另一用途' }] }] }, 1)).toThrow('重复');
+  });
+
+  it('adapts legacy fields unless an explicit empty reference list clears them', () => {
+    const legacy = { id: 'one', start: 0, end: 2, speaker: '甲', source: 'speaking_video' as const,
+      personNodeId: 'person', productNodeId: 'prop', settingNodeId: 'room' };
+    expect(referenceBindingsForSegment(legacy)).toEqual([
+      { nodeId: 'person', purpose: '保持人物形象' }, { nodeId: 'prop', purpose: '保持物件外观' },
+      { nodeId: 'room', purpose: '保持场景环境' },
+    ]);
+    expect(referenceBindingsForSegment({ ...legacy, referenceBindings: [] })).toEqual([]);
+  });
   it('seeds speaking takes from labelled dialogue independently of B-roll events', () => {
     const dialogue = '男：你喝什么？\n女：新咖啡。';
     expect(seedPerformanceSegments(dialogue)).toEqual([

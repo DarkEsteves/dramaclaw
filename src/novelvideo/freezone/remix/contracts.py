@@ -206,12 +206,24 @@ class ReferenceBlueprint(_Contract):
         return self
 
 
+class RemixReferenceBinding(_Contract):
+    node_id: str = Field(min_length=1, max_length=128)
+    purpose: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "RemixReferenceBinding":
+        if not self.node_id.strip() or not self.purpose.strip():
+            raise ValueError("reference binding node and purpose must not be blank")
+        return self
+
+
 class PerformanceSegment(_Contract):
     segment_id: str = Field(min_length=1, max_length=128)
     start_char: int = Field(ge=0)
     end_char: int = Field(ge=1)
     speaker: str = Field(min_length=1, max_length=80)
     source: Literal["speaking_video", "voiceover", "original_sound"]
+    reference_bindings: list[RemixReferenceBinding] | None = None
     person_node_id: str | None = None
     product_node_id: str | None = None
     setting_node_id: str | None = None
@@ -230,6 +242,10 @@ class PerformanceSegment(_Contract):
             raise ValueError("performance segment media revision requires a take node")
         if self.primary_media_revision and not self.primary_node_id:
             raise ValueError("performance segment primary media revision requires a node")
+        if self.reference_bindings is not None:
+            ids = [binding.node_id for binding in self.reference_bindings]
+            if len(ids) != len(set(ids)):
+                raise ValueError("duplicate reference binding node")
         return self
 
 
