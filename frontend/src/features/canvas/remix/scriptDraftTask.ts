@@ -80,6 +80,9 @@ function draftFromPayload(payload: Record<string, unknown>): RemixScriptDraft {
       return {
         id: row.segment_id, start: row.start_char, end: row.end_char,
         speaker: row.speaker, source: row.source,
+        ...(Array.isArray(row.speech_ranges) ? { speechRanges: row.speech_ranges.map((rawRange) => ({
+          start: (rawRange as Record<string, unknown>).start_char, end: (rawRange as Record<string, unknown>).end_char,
+        })) } : {}),
         ...(Array.isArray(row.reference_bindings) ? { referenceBindings: row.reference_bindings.map((binding) => ({
           nodeId: (binding as Record<string, unknown>).node_id,
           purpose: (binding as Record<string, unknown>).purpose,

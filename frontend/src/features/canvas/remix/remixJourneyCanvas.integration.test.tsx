@@ -359,7 +359,8 @@ describe('native canvas remix journey integration', () => {
     expect(await screen.findByText('改编主题：新品咖啡')).toBeInTheDocument();
     expect(screen.getByText('2 个事件')).toBeInTheDocument();
     expect(screen.getByText('B-roll 1/2')).toBeInTheDocument();
-    expect(screen.getByText('下一步：补齐必需 B-roll')).toBeInTheDocument();
+    expect(screen.getByText('已保存版本 1 · 0 个片段')).toBeInTheDocument();
+    expect(screen.queryByText(/下一步：/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '编辑改编脚本' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
@@ -428,7 +429,7 @@ describe('native canvas remix journey integration', () => {
 
     expect(await screen.findByText('改编主题：尚未填写改编主题')).toBeInTheDocument();
     expect(screen.getByText('B-roll 未规划')).toBeInTheDocument();
-    expect(screen.getByText('下一步：编辑改编脚本')).toBeInTheDocument();
+    expect(screen.getByText('草稿 · 0 个片段')).toBeInTheDocument();
   });
 
   it('identifies previously created person references by their speaking segment', async () => {

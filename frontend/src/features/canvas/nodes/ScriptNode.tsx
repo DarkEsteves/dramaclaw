@@ -83,7 +83,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
-import { attachPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, legacyPerformanceReferenceLabelPatches, performanceSourceUrl, takeReferenceSnapshot, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
+import { attachPerformanceTakeMedia, boundPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, legacyPerformanceReferenceLabelPatches, performanceSourceUrl, takeBindingsCurrent, takeReferenceSnapshot, takeReferencesConnected, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
@@ -95,8 +95,8 @@ import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList'
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
 import { createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
-import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
-import { nextRemixJourneyStep, primaryVisualEventsWithoutNodes } from '@/features/canvas/remix/remixJourney';
+import { remixScriptEditorLabel } from '@/features/canvas/remix/scriptCanvasState';
+import { primaryVisualEventsWithoutNodes } from '@/features/canvas/remix/remixJourney';
 import {
   consumeRemixScriptEditorRequest,
   subscribeRemixScriptEditorRequest,
@@ -507,28 +507,20 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     : '尚未填写改编主题';
   const remixScriptLabel = remixScriptEditorLabel(data, Boolean(blueprintRef));
   const isRemixScript = Boolean(remixScriptLabel);
-  const remixNextAction = isRemixScript ? scriptCanvasState(canvasNodes, canvasEdges, id).nextAction : null;
-  const remixJourneyStep = isRemixScript ? nextRemixJourneyStep(canvasNodes, canvasEdges, id) : null;
-  const remixJourneyStatus = remixJourneyStep?.targetNodeId === id
-    ? remixJourneyStep.action === 'create_narration'
-      ? '下一步：制作配音'
-      : remixJourneyStep.kind === 'wait' || remixJourneyStep.kind === 'complete'
-        ? remixJourneyStep.label
-        : `下一步：${remixJourneyStep.label}`
-    : null;
-  const remixNodeStatus = remixJourneyStatus
-    ?? (initialRemixDraft.segments?.length ? (remixJourneyStep?.label ? `下一步：${remixJourneyStep.label}` : '表演片段已就绪') : null)
-    ?? (remixNextAction === 'edit_script'
-      ? '下一步：编辑改编脚本'
-      : remixNextAction === 'create_timeline'
-        ? '下一步：生成语义时间轴'
-      : remixNextAction === 'view_alignment'
-        ? '对齐中：查看进度'
-        : remixNextAction === 'align_narration'
-          ? '下一步：按脚本对齐'
-          : remixNextAction === 'create_narration'
-            ? '下一步：制作配音'
-            : '脚本已就绪');
+  const remixSegmentCount = initialRemixDraft.segments?.length ?? 0;
+  const remixBoundSegmentCount = initialRemixDraft.segments?.filter((segment) => {
+    const take = canvasNodes.find((node) => node.id === segment.takeNodeId);
+    if (!take || !canvasEdges.some((edge) => edge.source === take.id && edge.target === id)) return false;
+    try {
+      const media = boundPerformanceTakeMedia(readUrl().project || '', take, segment.source);
+      const references = take.data.remixReferenceNodeIds;
+      return media.media_hash === segment.takeMediaRevision && takeBindingsCurrent(take, segment)
+        && takeReferencesConnected(take, segment, canvasEdges)
+        && (!Array.isArray(references) || !references.length || takeReferencesCurrent(canvasNodes,
+          references.filter((value): value is string => typeof value === 'string'), take.data.remixReferenceSnapshot));
+    } catch { return false; }
+  }).length ?? 0;
+  const remixNodeStatus = `${remixRef(data.remixScriptRef) ? `已保存版本 ${remixRef(data.remixScriptRef)?.revision}` : '草稿'} · ${remixSegmentCount} 个片段${remixSegmentCount ? `，${remixBoundSegmentCount} 个已绑定` : ''}`;
   const remixVisualNodes = upstreamNodes.filter((node) => node.data.remixRole === 'visual'
     && (isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))).map((node) => ({
     id: node.id,
@@ -542,39 +534,36 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     mediaRevision: typeof node.data.remixMedia === 'object' && node.data.remixMedia && 'media_hash' in node.data.remixMedia
       ? String(node.data.remixMedia.media_hash) : undefined,
   }));
-  const performanceReferenceNodes = canvasNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))
+  const performanceReferenceNodes = canvasNodes.filter((node) => isAudioNode(node) || isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))
     .filter((node) => node.id !== id && node.data.remixRole !== 'reference' && node.data.remixRole !== 'performance')
-    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
-  const performancePersonReferenceNodes = canvasNodes.filter((node) => node.data.remixRole === 'identity' && node.data.remixIdentityKind === 'person')
-    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
-  const performanceVoiceNodes = canvasNodes.filter((node) => isAudioNode(node) && Boolean(node.data.audioUrl))
-    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
-  const performanceMotionNodes = canvasNodes.filter((node) => isVideoNode(node) && Boolean(node.data.videoUrl))
-    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id),
+      kind: (isAudioNode(node) || Boolean(node.data.audioUrl) ? 'audio' : isVideoNode(node) || Boolean(node.data.videoUrl) ? 'video' : 'image') as 'audio' | 'video' | 'image' }));
   const connectPerformanceReference = useCallback((nodeId: string) => {
     const state = useCanvasStore.getState();
     if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接参考素材到脚本');
   }, [id]);
-  const createPerformanceReference = useCallback((kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate',
-    segment: NonNullable<RemixScriptDraft['segments']>[number], segmentIndex: number, scope?: 'segment' | 'speaker') =>
-    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode, segment, segmentIndex, scope), [id]);
+  const createPerformanceReference = useCallback((mode: 'upload' | 'generate',
+    segment: NonNullable<RemixScriptDraft['segments']>[number], segmentIndex: number) =>
+    createPerformanceReferenceNode(useCanvasStore.getState(), id, 'generic', mode, segment, segmentIndex), [id]);
   const createPerformanceTake = useCallback((segment: NonNullable<RemixScriptDraft['segments']>[number]) => {
     const index = initialRemixDraft.segments?.findIndex((item) => item.id === segment.id) ?? -1;
     const observed = index >= 0 ? storyReferenceEvents[index] : undefined;
     return createPerformanceTakeNode(useCanvasStore.getState(), id, segment, initialRemixDraft.dialogue,
       String(data.remixTopic || ''), observed?.visual_observation || '');
   }, [id, initialRemixDraft.dialogue, initialRemixDraft.segments, data.remixTopic, storyReferenceEvents]);
-  const attachPerformanceTake = useCallback(async (nodeId: string, source: NonNullable<RemixScriptDraft['segments']>[number]['source']) => {
+  const attachPerformanceTake = useCallback(async (nodeId: string, source: NonNullable<RemixScriptDraft['segments']>[number]['source'], segment: NonNullable<RemixScriptDraft['segments']>[number]) => {
     const project = readUrl().project;
     if (!project) throw new Error('缺少项目');
     const state = useCanvasStore.getState();
     const node = state.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) throw new Error('片段节点不存在');
+    if (!takeBindingsCurrent(node, segment)) throw new Error('参考用途已变化，请重新制作片段');
+    if (!takeReferencesConnected(node, segment, state.edges)) throw new Error('参考素材连接已变化，请重新制作片段');
     if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接片段到脚本');
     if (Array.isArray(node.data.remixReferenceNodeIds) && Array.isArray(node.data.remixReferenceSnapshot)
       && !takeReferencesCurrent(state.nodes, node.data.remixReferenceNodeIds.filter((value): value is string => typeof value === 'string'), node.data.remixReferenceSnapshot)
       && performanceSourceUrl(node) === (node.data.remixMedia as { url?: unknown } | undefined)?.url) {
-      throw new Error('人物、产品、场景或声音参考已变化，请重新生成口播片段');
+      throw new Error('参考素材已变化，请重新生成口播片段');
     }
     const media = await attachPerformanceTakeMedia(project, node, attachRemixMedia, state.updateNodeData, source);
     if (Array.isArray(node.data.remixReferenceNodeIds) && node.data.remixReferenceNodeIds.length) {
@@ -648,7 +637,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     const syncKey = `${activeScriptRef.artifactId}:${activeScriptRef.revision}:${pending.id}:${sourceId}`;
     if (pendingTakeSyncRef.current === syncKey) return;
     pendingTakeSyncRef.current = syncKey;
-    const attach = pendingTake ? attachPerformanceTake(sourceId, pending.source) : attachRemixVisual(sourceId).then((attachment) => {
+    const attach = pendingTake ? attachPerformanceTake(sourceId, pending.source, pending) : attachRemixVisual(sourceId).then((attachment) => {
       if (typeof attachment !== 'string') attachment.commit();
       return typeof attachment === 'string' ? attachment : attachment.mediaRevision;
     });
@@ -1157,9 +1146,6 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             visualNodes={remixVisualNodes}
             performanceNodes={performanceNodes}
             referenceNodes={performanceReferenceNodes}
-            personReferenceNodes={performancePersonReferenceNodes}
-            voiceNodes={performanceVoiceNodes}
-            motionNodes={performanceMotionNodes}
             onCreateReference={createPerformanceReference}
             onConnectReference={connectPerformanceReference}
             onCreateTake={createPerformanceTake}

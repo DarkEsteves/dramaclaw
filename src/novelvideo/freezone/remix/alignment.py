@@ -58,7 +58,9 @@ def align_script(
     """Force-align a versioned script and return its normalized word timeline.
 
     ``script`` requires ``revision`` and either ``dialogue`` or ``text``; its
-    optional ``language`` is inferred from the script when absent. Engine
+    optional ``language`` is inferred from the script when absent. Set
+    ``already_spoken`` for projected take text whose speaker labels were
+    removed upstream, so spoken colons are never parsed as another label. Engine
     character spans are checked against the exact script slice. Engines without
     spans are matched only in forward sequence after whitespace, which prevents
     a repeated word from being rebound to the first occurrence. Mismatches are
@@ -72,7 +74,7 @@ def align_script(
         raise ValueError("script dialogue or text is required")
     language = _script_language(script.get("language"), text)
     _validate_media_and_language(media_path, language)
-    spoken, original_positions = _spoken_script_positions(text)
+    spoken, original_positions = (text, None) if script.get("already_spoken") is True else _spoken_script_positions(text)
     with _SPEECH_ENGINE_SLOT:
         raw = _require_aligner(aligner).align(media_path, spoken, language)
     result = _normalize_result(

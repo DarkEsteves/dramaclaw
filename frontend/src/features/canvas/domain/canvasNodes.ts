@@ -284,6 +284,8 @@ export interface VideoNodeData extends NodeDisplayData {
    * (如新接入的)排在其后,按节点 y 坐标兜底。
    */
   referenceOrder?: string[];
+  /** Ordered remix purposes captured when a performance take was created. */
+  remixReferenceBindings?: Array<{ nodeId: string; purpose: string }>;
   /** Uploaded document reference for all-reference generation. */
   referenceFileUrl?: string | null;
   referenceFileName?: string | null;
@@ -700,6 +702,9 @@ export interface AudioNodeData extends NodeDisplayData {
   /** Project-owned audio actually used by transcription and rendering. */
   remixMedia?: import('../remix/workbenchModel').UploadedRemixMedia;
   remixRole?: 'narration' | 'bgm' | 'sfx' | 'take_audio';
+  remixReferenceBindings?: Array<{ nodeId: string; purpose: string }>;
+  remixReferenceNodeIds?: string[];
+  remixReferenceSnapshot?: Array<{ id: string; url: string | null; hash: string | null }>;
   /** Optional speech mode; absent keeps the historical single-voice behavior. */
   dialogueVoiceMode?: 'single' | 'dialogue';
   /** Present only on an audio node created from role-labelled remix dialogue. */

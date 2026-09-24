@@ -4,6 +4,7 @@ import pytest
 
 from novelvideo.freezone.remix.take_timing import compile_take_timing
 from novelvideo.freezone.remix.contracts import PerformanceSegment
+from novelvideo.freezone.remix.contracts import RemixScript
 
 
 def test_performance_segment_accepts_custom_references_and_rejects_duplicate_nodes() -> None:
@@ -16,6 +17,33 @@ def test_performance_segment_accepts_custom_references_and_rejects_duplicate_nod
         PerformanceSegment.model_validate({**base, "reference_bindings": [
             {"node_id": "shot", "purpose": "镜头"}, {"node_id": "shot", "purpose": "构图"},
         ]})
+
+
+def test_one_take_aligns_two_spoken_turns_without_speaker_labels() -> None:
+    dialogue = "男：你好。\n女：再见。"
+    segment = {"segment_id": "both", "start_char": 2, "end_char": len(dialogue), "speaker": "多人", "source": "speaking_video",
+               "speech_ranges": [{"start_char": 2, "end_char": 5}, {"start_char": 8, "end_char": 11}]}
+    script = {"dialogue": dialogue, "revision": 1, "segments": [segment],
+              "selections": [{"selection_id": "second", "start_char": 8, "end_char": 10, "script_revision": 1}],
+              "events": [{"event_id": "second", "selection_id": "second", "required": True}]}
+    take = {"segment_id": "both", "media_hash": "sha256:" + "a" * 64, "duration_us": 2_000_000,
+            "alignment": {"status": "completed", "transcript": "你好。\n再见。", "media_hash": "sha256:" + "a" * 64,
+                          "script_revision": 1, "words": [
+                              {"text": "你好", "start_char": 0, "end_char": 2, "start_us": 100_000, "end_us": 500_000},
+                              {"text": "再见", "start_char": 4, "end_char": 6, "start_us": 1_100_000, "end_us": 1_500_000},
+                          ]}}
+    result = compile_take_timing(script, [take], fps=30)
+    assert result["takes"][0]["caption"] == "你好。\n再见。"
+    assert result["events"] == [{"event_id": "second", "start_frame": 33, "end_frame": 45}]
+
+
+def test_spoken_ranges_must_be_ordered_inside_the_segment() -> None:
+    base = {"dialogue": "男：你好。\n女：再见。", "segments": [{"segment_id": "both", "start_char": 2, "end_char": 11,
+            "speaker": "多人", "source": "speaking_video", "speech_ranges": [
+                {"start_char": 8, "end_char": 11}, {"start_char": 2, "end_char": 5}]}],
+            "selections": [], "blueprint_mappings": [], "media_requirements": []}
+    with pytest.raises(ValueError, match="speech range"):
+        RemixScript.model_validate(base)
 
 
 def test_take_timing_joins_exact_media_and_maps_broll_to_spoken_words() -> None:

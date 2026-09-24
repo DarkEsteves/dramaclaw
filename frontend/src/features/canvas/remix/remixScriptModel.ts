@@ -26,6 +26,7 @@ export interface RemixPerformanceSegment {
   end: number;
   speaker: string;
   source: 'speaking_video' | 'voiceover' | 'original_sound';
+  speechRanges?: Array<{ start: number; end: number }>;
   referenceBindings?: RemixReferenceBinding[];
   personNodeId?: string;
   productNodeId?: string;
@@ -62,6 +63,41 @@ export function referenceBindingsForSegment(segment: RemixPerformanceSegment): R
   });
 }
 
+export function spokenTextForSegment(dialogue: string, segment: RemixPerformanceSegment): string {
+  const chars = Array.from(dialogue);
+  return (segment.speechRanges ?? [{ start: segment.start, end: segment.end }])
+    .map(({ start, end }) => chars.slice(start, end).join('')).join('\n');
+}
+
+export function mergeAdjacentPerformanceSegments(draft: RemixScriptDraft, firstId: string): RemixScriptDraft {
+  const segments = draft.segments ?? [];
+  const index = segments.findIndex((segment) => segment.id === firstId);
+  const first = segments[index];
+  const second = segments[index + 1];
+  if (!first || !second || first.source !== second.source || first.source !== 'speaking_video') throw new Error('只能合并相邻的口播段落');
+  const speechRanges = [
+    ...(first.speechRanges ?? [{ start: first.start, end: first.end }]),
+    ...(second.speechRanges ?? [{ start: second.start, end: second.end }]),
+  ];
+  const referenceBindings: RemixReferenceBinding[] = [];
+  for (const segment of [first, second]) {
+    for (const binding of referenceBindingsForSegment(segment)) {
+      const purpose = segment.speaker === '多人' ? binding.purpose : `${segment.speaker}发言时：${binding.purpose}`;
+      const existing = referenceBindings.find((item) => item.nodeId === binding.nodeId);
+      if (existing) {
+        if (!existing.purpose.includes(purpose)) existing.purpose += `；${purpose}`;
+      } else referenceBindings.push({ nodeId: binding.nodeId, purpose });
+    }
+  }
+  const { takeNodeId: _takeNodeId, takeMediaRevision: _takeMediaRevision, primaryNodeId: _primaryNodeId,
+    primaryMediaRevision: _primaryMediaRevision, ...choices } = first;
+  return { ...draft, segments: [
+    ...segments.slice(0, index),
+    { ...choices, start: first.start, end: second.end, speaker: '多人', speechRanges, referenceBindings },
+    ...segments.slice(index + 2),
+  ] };
+}
+
 const speakerLine = /^\s*([^：:\n]{1,24})[：:]\s*(\S.*)$/u;
 
 export function seedPerformanceSegments(dialogue: string): RemixPerformanceSegment[] {
@@ -92,17 +128,40 @@ function spoken(dialogue: string, segment: RemixPerformanceSegment): string {
 
 function rebasePerformanceSegments(draft: RemixScriptDraft, dialogue: string): RemixPerformanceSegment[] | undefined {
   if (!draft.segments) return undefined;
+  if (draft.dialogue === dialogue) return draft.segments;
   const seeded = seedPerformanceSegments(dialogue);
+  const before = Array.from(draft.dialogue);
+  const after = Array.from(dialogue);
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  const oldEditEnd = before.length - suffix;
+  const shift = after.length - before.length;
+  // A grouped take spans several speaker lines. Keep it only when its entire
+  // outer span is outside the edited region, including all inner speech spans.
+  const groups = draft.segments.flatMap((old) => {
+    if (!old.speechRanges || old.speechRanges.length < 2) return [];
+    const offset = old.end <= prefix ? 0 : old.start >= oldEditEnd ? shift : null;
+    if (offset === null) return [];
+    return [{ ...old, start: old.start + offset, end: old.end + offset,
+      speechRanges: old.speechRanges.map((range) => ({ start: range.start + offset, end: range.end + offset })) }];
+  });
   const unused = new Set(draft.segments);
-  return seeded.map((next, index) => {
+  groups.forEach((group) => unused.delete(draft.segments!.find((old) => old.id === group.id)!));
+  const rebased = seeded.map((next, index) => {
+    if (groups.some((group) => next.start >= group.start && next.end <= group.end)) return null;
     const exact = [...unused].find((old) => old.speaker === next.speaker && spoken(draft.dialogue, old) === spoken(dialogue, next));
-    const prior = exact ?? (draft.segments?.[index]?.speaker === next.speaker ? draft.segments[index] : undefined);
+    const prior = exact ?? (draft.segments?.[index]?.speaker === next.speaker ? draft.segments[index] : undefined)
+      ?? [...unused].filter((old) => old.speaker === next.speaker).sort((left, right) => Math.abs(left.start - next.start) - Math.abs(right.start - next.start))[0];
     if (!prior || !unused.has(prior)) return next;
     unused.delete(prior);
     const sameText = spoken(draft.dialogue, prior) === spoken(dialogue, next);
-    const { takeNodeId, takeMediaRevision, ...choices } = prior;
+    const { takeNodeId, takeMediaRevision, speechRanges: _speechRanges, ...choices } = prior;
     return { ...next, ...choices, start: next.start, end: next.end, ...(sameText ? { takeNodeId, takeMediaRevision } : {}) };
-  });
+  }).filter((item): item is RemixPerformanceSegment => item !== null);
+  return [...rebased, ...groups].sort((left, right) => left.start - right.start);
 }
 
 export function editRemixDialogue(draft: RemixScriptDraft, dialogue: string): RemixScriptDraft {
@@ -136,6 +195,16 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
         bindingIds.add(binding.nodeId);
       }
     }
+    if (segment.speechRanges) {
+      if (!segment.speechRanges.length || segment.speechRanges[0].start !== segment.start
+        || segment.speechRanges[segment.speechRanges.length - 1].end !== segment.end) throw new Error('发言范围未覆盖段落');
+      let previousSpeechEnd = segment.start;
+      for (const range of segment.speechRanges) {
+        if (!Number.isInteger(range.start) || !Number.isInteger(range.end)
+          || range.start < previousSpeechEnd || range.end <= range.start || range.end > segment.end) throw new Error('发言范围无效');
+        previousSpeechEnd = range.end;
+      }
+    }
     previousEnd = segment.end;
     segmentIds.add(segment.id);
   }
@@ -143,7 +212,9 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
     dialogue: draft.dialogue, segments: (draft.segments ?? []).map((item) => ({
       segment_id: item.id, start_char: item.start, end_char: item.end,
       speaker: item.speaker, source: item.source,
-      ...(item.referenceBindings ? { reference_bindings: item.referenceBindings.map(({ nodeId, purpose }) => ({ node_id: nodeId, purpose: purpose.trim() })) } : {}),
+      ...(item.speechRanges ? { speech_ranges: item.speechRanges.map(({ start, end }) => ({ start_char: start, end_char: end })) } : {}),
+      ...(item.referenceBindings || referenceBindingsForSegment(item).length
+        ? { reference_bindings: referenceBindingsForSegment(item).map(({ nodeId, purpose }) => ({ node_id: nodeId, purpose: purpose.trim() })) } : {}),
       ...(item.personNodeId ? { person_node_id: item.personNodeId } : {}),
       ...(item.productNodeId ? { product_node_id: item.productNodeId } : {}),
       ...(item.settingNodeId ? { setting_node_id: item.settingNodeId } : {}),

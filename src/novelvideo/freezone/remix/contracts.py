@@ -217,12 +217,24 @@ class RemixReferenceBinding(_Contract):
         return self
 
 
+class RemixSpeechRange(_Contract):
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "RemixSpeechRange":
+        if self.end_char <= self.start_char:
+            raise ValueError("speech range must be non-empty")
+        return self
+
+
 class PerformanceSegment(_Contract):
     segment_id: str = Field(min_length=1, max_length=128)
     start_char: int = Field(ge=0)
     end_char: int = Field(ge=1)
     speaker: str = Field(min_length=1, max_length=80)
     source: Literal["speaking_video", "voiceover", "original_sound"]
+    speech_ranges: list[RemixSpeechRange] | None = None
     reference_bindings: list[RemixReferenceBinding] | None = None
     person_node_id: str | None = None
     product_node_id: str | None = None
@@ -238,6 +250,14 @@ class PerformanceSegment(_Contract):
     def _validate_range(self) -> "PerformanceSegment":
         if self.end_char <= self.start_char:
             raise ValueError("performance segment range must be non-empty")
+        if self.speech_ranges is not None:
+            if not self.speech_ranges or self.speech_ranges[0].start_char != self.start_char or self.speech_ranges[-1].end_char != self.end_char:
+                raise ValueError("speech ranges must cover the segment bounds")
+            previous_end = self.start_char
+            for speech_range in self.speech_ranges:
+                if speech_range.start_char < previous_end or speech_range.end_char > self.end_char:
+                    raise ValueError("speech ranges must be ordered inside the segment")
+                previous_end = speech_range.end_char
         if self.take_media_revision and not self.take_node_id:
             raise ValueError("performance segment media revision requires a take node")
         if self.primary_media_revision and not self.primary_node_id:

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeReferenceSnapshot } from './takeCanvasBinding';
+import { createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeBindingsCurrent, takeReferenceSnapshot } from './takeCanvasBinding';
 import type { CanvasNode, CanvasNodeData } from '@/features/canvas/domain/canvasNodes';
 import type { RemixPerformanceSegment } from './remixScriptModel';
 
@@ -73,11 +73,72 @@ describe('performance take canvas binding', () => {
     expect(addEdge.mock.calls).toEqual(expect.arrayContaining([['person', 'take'], ['product', 'take'], ['setting', 'take'], ['take', 'script']]));
   });
 
+  it('connects arbitrary media references in order and uses only their stated purposes', () => {
+    const addNode = vi.fn((_type: CanvasNode['type'], _position: { x: number; y: number }, _data?: Partial<CanvasNodeData>) => 'take');
+    const addEdge = vi.fn(() => 'edge');
+    const store = { nodes: [node('script', 'scriptNode', {}), node('camera', 'videoNode', { displayName: '原片镜头' }), node('voice', 'audioNode', { displayName: '声音样本' })],
+      addNode, addEdge, setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 400, y: 0 })) };
+    createPerformanceTakeNode(store, 'script', { ...segment, referenceBindings: [
+      { nodeId: 'camera', purpose: '参考镜头移动' }, { nodeId: 'voice', purpose: '参考语速与音色' },
+    ] }, '女：新品', '新品咖啡');
+    const take = addNode.mock.calls[0][2] as Record<string, unknown>;
+    expect(take.referenceOrder).toEqual(['camera', 'voice']);
+    expect(take.remixReferenceNodeIds).toEqual(['camera', 'voice']);
+    expect(take.prompt).toContain('参考镜头移动');
+    expect(take.prompt).toContain('参考语速与音色');
+    expect(take.prompt).not.toContain('替换人物、产品和场景');
+    expect(addEdge.mock.calls).toEqual([['camera', 'take'], ['voice', 'take'], ['take', 'script']]);
+  });
+
+  it('keeps speakers attached to their lines when a single take covers multiple turns', () => {
+    const addNode = vi.fn((_type: CanvasNode['type'], _position: { x: number; y: number }, _data?: Partial<CanvasNodeData>) => 'take');
+    createPerformanceTakeNode({ nodes: [node('script', 'scriptNode', {})], addNode, addEdge: vi.fn(() => 'edge'),
+      setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 0, y: 0 })) }, 'script',
+    { id: 'both', start: 2, end: 11, speaker: '多人', source: 'speaking_video', speechRanges: [{ start: 2, end: 5 }, { start: 8, end: 11 }] },
+    '男：你好。\n女：再见。', '问候');
+    const prompt = String(addNode.mock.calls[0][2]?.prompt);
+    expect(prompt).toContain('男：你好。');
+    expect(prompt).toContain('女：再见。');
+    expect(prompt).not.toContain('男：你好。\n女：再见。\n男：你好。');
+  });
+
   it('keeps voiceover as an independent audio take', () => {
     const addNode = vi.fn(() => 'voice');
     createPerformanceTakeNode({ nodes: [node('script', 'scriptNode', {})], addNode, addEdge: vi.fn(), setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 0, y: 0 })) },
       'script', { ...segment, start: 0, end: 4, source: 'voiceover' }, '独立旁白', '');
     expect(addNode).toHaveBeenCalledWith('audioNode', expect.anything(), expect.objectContaining({ remixRole: 'take_audio', text: '独立旁白' }));
+  });
+
+  it('records ordered references for an audio take without adding them to spoken text', () => {
+    const addNode = vi.fn(() => 'voice');
+    const addEdge = vi.fn(() => 'edge');
+    createPerformanceTakeNode({ nodes: [node('script', 'scriptNode', {}), node('sample', 'audioNode', {})], addNode,
+      addEdge, setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 0, y: 0 })) }, 'script',
+    { id: 'voice', start: 0, end: 4, speaker: '旁白', source: 'voiceover', referenceBindings: [{ nodeId: 'sample', purpose: '参考音色' }] },
+    '独立旁白', '');
+    expect(addNode).toHaveBeenCalledWith('audioNode', expect.anything(), expect.objectContaining({ text: '独立旁白',
+      remixReferenceBindings: [{ nodeId: 'sample', purpose: '参考音色' }] }));
+    expect(addEdge.mock.calls).toContainEqual(['sample', 'voice']);
+  });
+
+  it('rejects a take after changing, removing, or repurposing its references', () => {
+    const take = node('take', 'videoNode', { remixReferenceNodeIds: ['person'], remixReferenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] });
+    expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] })).toBe(true);
+    expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '参考镜头移动' }] })).toBe(false);
+    expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [] })).toBe(false);
+  });
+
+  it('blocks timeline selection when the saved take uses an older reference purpose', () => {
+    const reference = node('person', 'imageGenNode', { imageUrl: '/person.png' });
+    const take = node('take', 'videoNode', { videoUrl: '/take.mp4', remixReferenceNodeIds: ['person'],
+      remixReferenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }],
+      remixReferenceSnapshot: [{ id: 'person', url: '/person.png', hash: null }],
+      remixMedia: { url: '/take.mp4', media_path: 'take.mp4', media_hash: 'a'.repeat(64), media_kind: 'video', has_audio: true } });
+    const script = node('script', 'scriptNode', { remixScriptDraft: { segments: [{ ...segment,
+      referenceBindings: [{ nodeId: 'person', purpose: '参考镜头移动' }], takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64),
+    }] } });
+    const edges = [{ id: 'reference-take', source: 'person', target: 'take' }, { id: 'take-script', source: 'take', target: 'script' }];
+    expect(() => selectedPerformanceTakes('demo', [script, take, reference], edges, script)).toThrow(/参考用途已变化/);
   });
 
   it('rejects stale and silent speaking video media', () => {

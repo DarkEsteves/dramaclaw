@@ -218,6 +218,28 @@ def test_align_script_uses_engine_character_spans_for_repeated_words(tmp_path: P
     assert result["confidence_available"] is True
 
 
+def test_align_script_keeps_colons_in_preprojected_speech(tmp_path: Path) -> None:
+    media = tmp_path / "dialogue.wav"
+    media.write_bytes(b"voice")
+    spoken = "你好：欢迎\n再见：明天"
+
+    class CheckingAligner(FakeSpeechAligner):
+        def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
+            assert script == spoken
+            return self.alignment
+
+    result = align_script(media, {"revision": 1, "dialogue": spoken, "already_spoken": True},
+                          aligner=CheckingAligner(transcription={"status": "completed", "words": []},
+                                                  alignment={"status": "completed", "words": [
+                                                      {"text": "你好：欢迎", "start_char": 0, "end_char": 5,
+                                                       "start_us": 0, "end_us": 500_000},
+                                                      {"text": "再见：明天", "start_char": 6, "end_char": 11,
+                                                       "start_us": 600_000, "end_us": 1_000_000},
+                                                  ]}))
+    assert result["status"] == "completed"
+    assert result["transcript"] == spoken
+
+
 def test_align_script_skips_speaker_labels_and_maps_words_to_original_script(tmp_path: Path) -> None:
     media = tmp_path / "dialogue.wav"
     media.write_bytes(b"voice")

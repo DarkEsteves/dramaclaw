@@ -11,87 +11,88 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 describe('RemixScriptPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('lets the editor choose person, product, setting and a speaking take', () => {
+  it('applies arbitrary references from one segment to explicitly selected segments', () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲：你好\n乙：好\n丙：再见', selections: [], segments: [
+      { id: 'one', start: 2, end: 4, speaker: '甲', source: 'speaking_video', referenceBindings: [{ nodeId: 'shot', purpose: '参考镜头运动' }] },
+      { id: 'two', start: 7, end: 8, speaker: '乙', source: 'speaking_video', referenceBindings: [{ nodeId: 'voice', purpose: '参考音色' }], takeNodeId: 'old-take', takeMediaRevision: 'a'.repeat(64) },
+      { id: 'three', start: 11, end: 13, speaker: '丙', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'shot', label: '原片镜头', kind: 'video' }, { id: 'voice', label: '声音样本', kind: 'audio' }]}
+      sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getAllByText(/参考素材（可选）/)[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '将参考 1 应用到其他段落' })[0]);
+    fireEvent.click(screen.getByRole('checkbox', { name: '应用到乙' }));
+    fireEvent.click(screen.getByRole('button', { name: '应用到选中段落' }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
+      expect.objectContaining({ id: 'one', referenceBindings: [{ nodeId: 'shot', purpose: '参考镜头运动' }] }),
+      expect.objectContaining({ id: 'two', referenceBindings: [
+        { nodeId: 'voice', purpose: '参考音色' }, { nodeId: 'shot', purpose: '参考镜头运动' },
+      ], takeNodeId: undefined, takeMediaRevision: undefined }),
+      expect.objectContaining({ id: 'three' }),
+    ] }), 'media-binding');
+  });
+
+  it('lets one speaking video cover two neighboring speaker turns', () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好。\n女：再见。', selections: [], segments: [
+      { id: 'one', start: 2, end: 5, speaker: '男', source: 'speaking_video' },
+      { id: 'two', start: 8, end: 11, speaker: '女', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: '与下一段共用一个视频片段' }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
+      expect.objectContaining({ speaker: '多人', speechRanges: [{ start: 2, end: 5 }, { start: 8, end: 11 }] }),
+    ] }), 'media-binding');
+    expect(screen.getByText('你好。 再见。')).toBeInTheDocument();
+  });
+
+  it('lets the editor attach a generic video reference and create a speaking take', () => {
     const onDraftChange = vi.fn();
     const onCreateTake = vi.fn(() => 'take-1');
     const onConnectReference = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
       { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' },
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[
-      { id: 'person', label: '新人像' }, { id: 'product', label: '新咖啡' }, { id: 'setting', label: '新场景' },
-    ]} voiceNodes={[{ id: 'voice', label: '男声样本' }]} sfxNodes={[]} onConnectReference={onConnectReference}
-      motionNodes={[{ id: 'shot', label: '原片裁出镜头' }]}
+      { id: 'shot', label: '原片镜头', kind: 'video' }, { id: 'voice', label: '声音样本', kind: 'audio' },
+    ]} sfxNodes={[]} onConnectReference={onConnectReference}
       onCreateTake={onCreateTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
-    fireEvent.click(screen.getByText(/更换人物、产品和场景/));
-    fireEvent.change(screen.getByLabelText('男 人物参考'), { target: { value: 'person' } });
-    fireEvent.change(screen.getByLabelText('男 产品参考'), { target: { value: 'product' } });
-    fireEvent.change(screen.getByLabelText('男 场景参考'), { target: { value: 'setting' } });
-    fireEvent.change(screen.getByLabelText('男 声音参考'), { target: { value: 'voice' } });
-    fireEvent.change(screen.getByLabelText('男 镜头参考'), { target: { value: 'shot' } });
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
+    fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+    fireEvent.change(screen.getByLabelText('参考 1 用途'), { target: { value: '参考镜头运动' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+    fireEvent.change(screen.getByLabelText('参考 2 用途'), { target: { value: '参考说话节奏' } });
     fireEvent.click(screen.getByRole('button', { name: '创建口播视频节点' }));
-    expect(onConnectReference.mock.calls.map(([id]) => id)).toEqual(['person', 'product', 'setting', 'voice', 'shot']);
-    expect(onCreateTake).toHaveBeenCalledWith(expect.objectContaining({ personNodeId: 'person', productNodeId: 'product', settingNodeId: 'setting', voiceNodeId: 'voice', motionNodeId: 'shot' }));
+    expect(onConnectReference.mock.calls.map(([id]) => id)).toContain('voice');
+    expect(onCreateTake).toHaveBeenCalledWith(expect.objectContaining({ referenceBindings: [
+      { nodeId: 'shot', purpose: '参考镜头运动' }, { nodeId: 'voice', purpose: '参考说话节奏' },
+    ] }));
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
   });
 
-  it('passes each speaking segment identity when creating a person reference', () => {
-    const first = { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
-    const second = { id: 'segment-2', start: 7, end: 9, speaker: '女', source: 'speaking_video' as const };
+  it('creates a neutral reference node for a segment without requiring a category', () => {
+    const segment = { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
     const onCreateReference = vi.fn(() => 'reference-node');
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n女：你好', selections: [], segments: [first, second] }}
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [segment] }}
       existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
-      onCreateReference={onCreateReference} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
-
-    screen.getAllByText(/更换人物、产品和场景/).forEach((summary) => fireEvent.click(summary));
-    const generateButtons = screen.getAllByRole('button', { name: '生成' });
-    fireEvent.click(generateButtons[0]);
-    fireEvent.click(generateButtons[3]);
-    expect(onCreateReference).toHaveBeenNthCalledWith(1, 'person', 'generate', first, 0);
-    expect(onCreateReference).toHaveBeenNthCalledWith(2, 'person', 'generate', second, 1);
-  });
-
-  it('applies one person reference to every speaking segment of the same character', () => {
-    const onDraftChange = vi.fn();
-    const onConnectReference = vi.fn();
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n女：好\n男：再见', selections: [], segments: [
-      { id: 'male-1', start: 2, end: 4, speaker: '男', source: 'speaking_video', personNodeId: 'old-ref', takeNodeId: 'old-take', takeMediaRevision: 'a'.repeat(64) },
-      { id: 'female-1', start: 7, end: 8, speaker: '女', source: 'speaking_video', personNodeId: 'female-ref', takeNodeId: 'female-take', takeMediaRevision: 'b'.repeat(64) },
-      { id: 'male-2', start: 11, end: 13, speaker: '男', source: 'speaking_video' },
-    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[
-      { id: 'male-ref', label: '男角色参考' }, { id: 'female-ref', label: '女角色参考' },
-      { id: 'old-ref', label: '旧男角色参考' }, { id: 'product-ref', label: '产品参考' },
-    ]} personReferenceNodes={[{ id: 'male-ref', label: '男角色参考' }, { id: 'female-ref', label: '女角色参考' }]}
-      sfxNodes={[]} onConnectReference={onConnectReference} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
-
-    const characterSelect = screen.getByLabelText('男 全部口播段落的人物参考');
-    expect(Array.from(characterSelect.querySelectorAll('option')).map((option) => option.textContent)).not.toContain('产品参考');
-    expect(characterSelect).toHaveValue('__mixed__');
-    fireEvent.change(characterSelect, { target: { value: 'male-ref' } });
-
-    expect(onConnectReference).toHaveBeenCalledExactlyOnceWith('male-ref');
-    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
-      expect.objectContaining({ id: 'male-1', personNodeId: 'male-ref', takeNodeId: undefined, takeMediaRevision: undefined }),
-      expect.objectContaining({ id: 'female-1', personNodeId: 'female-ref', takeNodeId: 'female-take', takeMediaRevision: 'b'.repeat(64) }),
-      expect.objectContaining({ id: 'male-2', personNodeId: 'male-ref' }),
-    ] }), 'media-binding');
-  });
-
-  it('creates one shared person node for a repeated character', () => {
-    const onDraftChange = vi.fn();
-    const onCreateReference = vi.fn(() => 'shared-ref');
-    const first = { id: 'male-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
-    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n男：再见', selections: [], segments: [
-      first, { id: 'male-2', start: 7, end: 9, speaker: '男', source: 'speaking_video' },
-    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
       onCreateReference={onCreateReference} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
-
-    fireEvent.click(screen.getByRole('button', { name: '生成人物参考 · 男' }));
-
-    expect(onCreateReference).toHaveBeenCalledExactlyOnceWith('person', 'generate', first, 0, 'speaker');
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
+    fireEvent.click(screen.getByRole('button', { name: '创建图片节点' }));
+    expect(onCreateReference).toHaveBeenCalledExactlyOnceWith('generate', segment, 0);
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
-      expect.objectContaining({ id: 'male-1', personNodeId: 'shared-ref' }),
-      expect.objectContaining({ id: 'male-2', personNodeId: 'shared-ref' }),
+      expect.objectContaining({ referenceBindings: [{ nodeId: 'reference-node', purpose: '参考画面内容' }] }),
     ] }), 'media-binding');
+  });
+
+  it('displays legacy references as editable generic bindings', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video', personNodeId: 'portrait' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[
+      { id: 'portrait', label: '人物照片', kind: 'image' },
+    ]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
+    expect(screen.getByLabelText('参考 1 素材')).toHaveValue('portrait');
+    expect(screen.getByLabelText('参考 1 用途')).toHaveValue('保持人物形象');
   });
 
   it('explains the main picture decision without repeating the script or showing character offsets', () => {
@@ -111,17 +112,16 @@ describe('RemixScriptPanel', () => {
     expect(preview).toHaveAttribute('open');
   });
 
-  it('keeps optional references out of the primary decision and explains the create-node action', () => {
+  it('keeps optional references out of the primary decision', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '你好', selections: [], segments: [
       { id: 'segment-1', start: 0, end: 2, speaker: '口播', source: 'speaking_video' },
-    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'person', label: '新人物' }]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
-
-    const references = screen.getByText(/更换人物、产品和场景/).closest('details');
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'person', label: '新人物', kind: 'image' }]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    const references = screen.getByText(/参考素材（可选）/).closest('details');
     expect(references).not.toHaveAttribute('open');
     expect(screen.getByText(/决定谁说这段台词/)).toBeVisible();
-    fireEvent.click(screen.getByText(/更换人物、产品和场景/));
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
     expect(references).toHaveAttribute('open');
-    expect(screen.getByLabelText('口播 人物参考')).toBeVisible();
+    expect(screen.getByText('未使用参考素材')).toBeVisible();
     expect(screen.getByText(/此按钮会在画布创建节点，生成视频请到该节点操作/)).toBeVisible();
   });
 
@@ -143,6 +143,21 @@ describe('RemixScriptPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '改成整段口播视频' }));
     expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ source: 'speaking_video', speaker: '口播' })] }), 'media-binding');
+  });
+
+  it('offers optional source references for an audio take while keeping voice choice in its node', () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '独立旁白', selections: [], segments: [
+      { id: 'voice', start: 0, end: 4, speaker: '旁白', source: 'voiceover' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      referenceNodes={[{ id: 'sample', label: '音色样本', kind: 'audio' }]}
+      onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
+    expect(screen.getByText(/音色仍需在音频节点中选择/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({
+      referenceBindings: [{ nodeId: 'sample', purpose: '参考声音表现' }],
+    })] }), 'media-binding');
   });
 
   it('offers main visual creation inside the editor for a voiceover segment', () => {

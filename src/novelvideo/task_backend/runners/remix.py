@@ -16,7 +16,7 @@ from novelvideo.freezone.remix.broll_plan import generate_broll_plan
 from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.timing import compile_timing
-from novelvideo.freezone.remix.take_timing import compile_take_timing
+from novelvideo.freezone.remix.take_timing import compile_take_timing, spoken_text_for_segment
 from novelvideo.freezone.remix.store import RemixArtifactStore
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.project_context import ProjectContext
@@ -261,8 +261,8 @@ def run_remix_compile_take_timeline(envelope: dict[str, Any], ctx: ProjectContex
         media_hash = "sha256:" + binding["media_sha256"]
         if segment.get("take_media_revision") and segment["take_media_revision"] != binding["media_sha256"]:
             raise ValueError("selected take media revision has changed")
-        text = script["dialogue"][segment["start_char"]:segment["end_char"]]
-        aligned = align_script(path, {"revision": script_artifact["revision"], "dialogue": text})
+        text = spoken_text_for_segment(script["dialogue"], segment)
+        aligned = align_script(path, {"revision": script_artifact["revision"], "dialogue": text, "already_spoken": True})
         if aligned.get("status") != "completed" or aligned.get("media_hash") != media_hash:
             raise ValueError(f"take {segment['segment_id']} does not match its spoken script or media")
         word_artifact = store.create("word_timeline.v1", {**aligned, "segment_id": segment["segment_id"]}, refs[:1])

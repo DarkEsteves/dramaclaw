@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRemixScriptPayload, editRemixDialogue, referenceBindingsForSegment, seedPerformanceSegments, type RemixScriptDraft } from './remixScriptModel';
+import { buildRemixScriptPayload, editRemixDialogue, mergeAdjacentPerformanceSegments, referenceBindingsForSegment, seedPerformanceSegments, spokenTextForSegment, type RemixScriptDraft } from './remixScriptModel';
 
 const draft: RemixScriptDraft = { dialogue: '喝下咖啡', selections: [{ id: 'product', label: '产品登场', start: 2, end: 4, visualNodeId: 'video-1', visualMediaRevision: 'a'.repeat(64) }] };
 
@@ -27,6 +27,12 @@ describe('remix script editor', () => {
       { nodeId: 'room', purpose: '保持场景环境' },
     ]);
     expect(referenceBindingsForSegment({ ...legacy, referenceBindings: [] })).toEqual([]);
+    expect(buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [legacy] }, 1).segments).toEqual([
+      expect.objectContaining({ reference_bindings: [
+        { node_id: 'person', purpose: '保持人物形象' }, { node_id: 'prop', purpose: '保持物件外观' },
+        { node_id: 'room', purpose: '保持场景环境' },
+      ] }),
+    ]);
   });
   it('seeds speaking takes from labelled dialogue independently of B-roll events', () => {
     const dialogue = '男：你喝什么？\n女：新咖啡。';
@@ -34,6 +40,33 @@ describe('remix script editor', () => {
       { id: 'segment-1', start: 2, end: 7, speaker: '男', source: 'speaking_video' },
       { id: 'segment-2', start: 10, end: 14, speaker: '女', source: 'speaking_video' },
     ]);
+  });
+
+  it('merges neighboring turns into one take while projecting only spoken text', () => {
+    const dialogue = '男：你好。\n女：再见。';
+    const seeded = seedPerformanceSegments(dialogue);
+    const merged = mergeAdjacentPerformanceSegments({ dialogue, selections: [], segments: seeded }, seeded[0].id);
+    expect(merged.segments).toHaveLength(1);
+    expect(merged.segments?.[0]).toEqual(expect.objectContaining({ start: 2, end: 11, speaker: '多人',
+      speechRanges: [{ start: 2, end: 5 }, { start: 8, end: 11 }] }));
+    expect(spokenTextForSegment(dialogue, merged.segments![0])).toBe('你好。\n再见。');
+    expect(buildRemixScriptPayload(merged, 1).segments).toEqual([expect.objectContaining({ speech_ranges: [
+      { start_char: 2, end_char: 5 }, { start_char: 8, end_char: 11 },
+    ] })]);
+    expect(() => buildRemixScriptPayload({ ...merged, segments: [{ ...merged.segments![0], speechRanges: [
+      { start: 8, end: 11 }, { start: 2, end: 5 },
+    ] }] }, 1)).toThrow('发言范围');
+  });
+
+  it('keeps references from both turns when sharing a take', () => {
+    const dialogue = '男：你好。\n女：再见。';
+    const [first, second] = seedPerformanceSegments(dialogue);
+    const merged = mergeAdjacentPerformanceSegments({ dialogue, selections: [], segments: [
+      { ...first, referenceBindings: [{ nodeId: 'male', purpose: '保持男角色形象' }] },
+      { ...second, referenceBindings: [{ nodeId: 'female', purpose: '保持女角色形象' }] },
+    ] }, first.id);
+    expect(merged.segments?.[0].referenceBindings?.map((binding) => binding.nodeId)).toEqual(['male', 'female']);
+    expect(merged.segments?.[0].referenceBindings?.[1].purpose).toContain('女');
   });
 
   it('keeps a take choice on an unchanged line and clears selected media after text changes', () => {
@@ -48,6 +81,28 @@ describe('remix script editor', () => {
     expect(revised.segments?.[1].takeMediaRevision).toBeUndefined();
   });
 
+  it('preserves merged turns and their accepted take when dialogue outside the group changes', () => {
+    const dialogue = '男：你好。\n女：再见。\n旁白：片尾';
+    const seeded = seedPerformanceSegments(dialogue);
+    const grouped = mergeAdjacentPerformanceSegments({ dialogue, selections: [], segments: seeded }, seeded[0].id);
+    const first = { ...grouped.segments![0], takeNodeId: 'take-1', takeMediaRevision: 'a'.repeat(64) };
+    const revised = editRemixDialogue({ ...grouped, segments: [first, seeded[2]] }, '男：你好。\n女：再见。\n旁白：新片尾');
+    expect(revised.segments?.[0]).toEqual(first);
+    expect(revised.segments?.[1].takeNodeId).toBeUndefined();
+  });
+
+  it('shifts a merged take after an edit before it and drops it when spoken text changes', () => {
+    const dialogue = '旁白：开场\n男：你好。\n女：再见。';
+    const seeded = seedPerformanceSegments(dialogue);
+    const grouped = mergeAdjacentPerformanceSegments({ dialogue, selections: [], segments: seeded }, seeded[1].id);
+    const accepted = { ...grouped.segments![1], takeNodeId: 'shared', takeMediaRevision: 'a'.repeat(64) };
+    const revised = editRemixDialogue({ ...grouped, segments: [seeded[0], accepted] }, '旁白：新的开场\n男：你好。\n女：再见。');
+    expect(revised.segments?.[1]).toEqual({ ...accepted, start: accepted.start + 2, end: accepted.end + 2,
+      speechRanges: accepted.speechRanges?.map((range) => ({ start: range.start + 2, end: range.end + 2 })) });
+    const changed = editRemixDialogue({ ...grouped, segments: [seeded[0], accepted] }, '旁白：开场\n男：你好呀。\n女：再见。');
+    expect(changed.segments?.some((segment) => segment.id === accepted.id && segment.takeNodeId === 'shared')).toBe(false);
+  });
+
   it('serializes accepted take choices and rejects mismatched media references', () => {
     const withTake: RemixScriptDraft = { dialogue: '男：你好。', selections: [], segments: [{
       id: 'segment-1', start: 2, end: 5, speaker: '男', source: 'speaking_video',
@@ -56,6 +111,7 @@ describe('remix script editor', () => {
     expect(buildRemixScriptPayload(withTake, 3).segments).toEqual([{
       segment_id: 'segment-1', start_char: 2, end_char: 5, speaker: '男', source: 'speaking_video',
       take_node_id: 'video-1', take_media_revision: 'a'.repeat(64), product_node_id: 'product-1',
+      reference_bindings: [{ node_id: 'product-1', purpose: '保持物件外观' }],
     }]);
     expect(() => buildRemixScriptPayload({ ...withTake, segments: [{ ...withTake.segments![0], takeMediaRevision: 'bad' }] }, 3)).toThrow('素材版本');
   });

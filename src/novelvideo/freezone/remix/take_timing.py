@@ -13,6 +13,24 @@ def _ceil_frame(us: int, fps: int) -> int:
     return (us * fps + 999_999) // 1_000_000
 
 
+def spoken_text_for_segment(dialogue: str, segment: dict[str, Any]) -> str:
+    """Project only spoken spans; legacy segments use their contiguous outer span."""
+    ranges = segment.get("speech_ranges")
+    if ranges is None:
+        return dialogue[segment["start_char"]:segment["end_char"]]
+    return "\n".join(dialogue[row["start_char"]:row["end_char"]] for row in ranges)
+
+
+def _spoken_offsets(segment: dict[str, Any]) -> list[int | None]:
+    ranges = segment.get("speech_ranges") or [{"start_char": segment["start_char"], "end_char": segment["end_char"]}]
+    offsets: list[int | None] = []
+    for index, row in enumerate(ranges):
+        if index:
+            offsets.append(None)  # The projected newline is absent from the original dialogue.
+        offsets.extend(range(row["start_char"], row["end_char"]))
+    return offsets
+
+
 def compile_take_timing(script: dict[str, Any], takes: list[dict[str, Any]], *, fps: int) -> dict[str, Any]:
     """Place one aligned, immutable media take per ordered script segment."""
     revision = script.get("revision")
@@ -35,7 +53,10 @@ def compile_take_timing(script: dict[str, Any], takes: list[dict[str, Any]], *, 
         start_char, end_char = segment.get("start_char"), segment.get("end_char")
         if type(start_char) is not int or type(end_char) is not int or not 0 <= start_char < end_char <= len(dialogue):
             raise ValueError("take segment range is invalid")
-        expected_text = dialogue[start_char:end_char]
+        expected_text = spoken_text_for_segment(dialogue, segment)
+        projected_offsets = _spoken_offsets(segment)
+        if len(projected_offsets) != len(expected_text):
+            raise ValueError("take speech ranges are invalid")
         media_hash = take.get("media_hash")
         alignment = take.get("alignment")
         if not isinstance(alignment, dict) or alignment.get("media_hash") != media_hash:
@@ -63,7 +84,10 @@ def compile_take_timing(script: dict[str, Any], takes: list[dict[str, Any]], *, 
                 raise ValueError("take word timing is shorter than one output frame")
             cues.append({"text": word.get("text", ""), "start_char": word_start, "end_char": word_end,
                          "start_frame": start_frame, "end_frame": end_frame})
-            global_words.append({"start_char": start_char + word_start, "end_char": start_char + word_end,
+            original_offsets = projected_offsets[word_start:word_end]
+            if any(value is None for value in original_offsets) or original_offsets != list(range(original_offsets[0], original_offsets[0] + len(original_offsets))):
+                raise ValueError("take word crosses a speech range boundary")
+            global_words.append({"start_char": original_offsets[0], "end_char": original_offsets[-1] + 1,
                                  "start_frame": start_frame, "end_frame": end_frame})
             previous_end = end_frame
         if not cues:
