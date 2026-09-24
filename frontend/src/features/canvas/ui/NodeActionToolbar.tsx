@@ -135,6 +135,7 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { useFreezoneVideoModels } from "@/features/canvas/hooks/useFreezoneVideoModels";
 import { findSeedance25VideoModel } from "@/features/canvas/nodes/shared/videoModelCapabilities";
 import { openNodeImageViewer } from '../application/nodeMediaViewer';
+import { importStoryClips, importStoryKeyframes, isStoryClipImportRunning, storyMediaCounts } from "@/features/canvas/remix/storyMediaImport";
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
 import { attachRemixMedia } from '@/api/remix';
@@ -608,6 +609,7 @@ export const NodeActionToolbar = memo(
     const [isCopyTextSuccess, setIsCopyTextSuccess] = useState(false);
     const [isCopyErrorSuccess, setIsCopyErrorSuccess] = useState(false);
     const [isRunningGroupWorkflow, setIsRunningGroupWorkflow] = useState(false);
+    const [isImportingStoryClips, setIsImportingStoryClips] = useState(false);
     const [groupWorkflowStopRequested, setGroupWorkflowStopRequested] = useState(false);
     const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
       null,
@@ -1654,6 +1656,7 @@ export const NodeActionToolbar = memo(
     }
     const storyScriptAction = node.type === CANVAS_NODE_TYPES.videoStory
       ? storyScriptToolbarState(nodes, edges, node.id) : null;
+    const storyMedia = node.type === CANVAS_NODE_TYPES.videoStory ? storyMediaCounts(node) : null;
     const transcriptActions = node.type === CANVAS_NODE_TYPES.transcript
       ? transcriptToolbarState(nodes, edges, node.id) : null;
     const semanticTimelineAction = node.type === CANVAS_NODE_TYPES.semanticTimeline
@@ -1731,6 +1734,42 @@ export const NodeActionToolbar = memo(
                 }}
               ><PenLine className="h-3.5 w-3.5" />{storyScriptAction.label}</UiChipButton>
             )}
+            {storyMedia && <>
+              <UiChipButton
+                key="story-import-keyframes"
+                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                disabled={storyMedia.keyframes === 0}
+                aria-label="导入关键帧到画布"
+                title={storyMedia.keyframes ? `将 ${storyMedia.keyframes} 张关键帧导入画布，已导入的会跳过` : '暂无可导入的关键帧'}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  try {
+                    const result = importStoryKeyframes(node.id);
+                    toast.success(result.imported ? `已导入 ${result.imported} 张关键帧${result.skipped ? `，跳过 ${result.skipped} 张` : ''}` : '关键帧已在画布中');
+                  } catch (cause) { toast.error(cause instanceof Error ? cause.message : '导入关键帧失败'); }
+                }}
+              ><Grid2x2 className="h-3.5 w-3.5" />导入关键帧</UiChipButton>
+              <UiChipButton
+                key="story-import-clips"
+                className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+                disabled={storyMedia.clips === 0 || isImportingStoryClips || isStoryClipImportRunning(node.id)}
+                aria-label="导入片段视频到画布"
+                title={storyMedia.clips ? `将 ${storyMedia.clips} 个原片片段裁切后导入画布，已导入的会跳过` : '暂无可裁切的片段或缺少原视频'}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setIsImportingStoryClips(true);
+                  const toastId = toast.loading(`正在导入片段视频 · 0/${storyMedia.clips}`);
+                  void importStoryClips(node.id, (done, total) => {
+                    toast.loading(`正在导入片段视频 · ${done}/${total}`, { id: toastId });
+                  }).then((result) => {
+                    if (result.failed) toast.error(`导入 ${result.imported} 个片段，${result.failed} 个失败；可再次点击重试`, { id: toastId });
+                    else if (result.imported) toast.success(`已导入 ${result.imported} 个片段视频${result.skipped ? `，跳过 ${result.skipped} 个` : ''}`, { id: toastId });
+                    else toast.info('片段视频已在画布中', { id: toastId });
+                  }).catch((cause) => toast.error(cause instanceof Error ? cause.message : '导入片段视频失败', { id: toastId }))
+                    .finally(() => setIsImportingStoryClips(false));
+                }}
+              >{isImportingStoryClips ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Scissors className="h-3.5 w-3.5" />}{isImportingStoryClips ? '正在导入片段' : '导入片段视频'}</UiChipButton>
+            </>}
             {transcriptActions && <>
               <select
                 aria-label="转写语言"

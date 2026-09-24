@@ -11,6 +11,7 @@ const backend = vi.hoisted(() => ({
   submit: vi.fn(),
   render: vi.fn(),
   upload: vi.fn(),
+  clipSubmit: vi.fn(),
 }));
 
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
@@ -39,6 +40,11 @@ vi.mock('@/api/ops', async (importOriginal) => {
   return {
     ...actual,
     fetchFreezoneAudioReferences: vi.fn(async () => ({ references: [] })),
+    submitFreezoneVideoCompose: vi.fn(async (_project: string, payload: unknown) => {
+      backend.clipSubmit(payload);
+      return { task_key: 'clip-task', task_type: 'freezone_video_compose', job_id: 'clip-job' };
+    }),
+    fetchFreezoneJobResult: vi.fn(async () => ({ url: '/static/cut.mp4' })),
     uploadFreezoneImage: vi.fn(async (_project: string, file: File) => {
       backend.upload(file);
       return { url: file.type.startsWith('audio/') ? '/api/v1/projects/demo/media/voice.wav' : '/api/v1/projects/demo/media/broll.png' };
@@ -54,6 +60,10 @@ vi.mock('@/api/ops', async (importOriginal) => {
     })),
   };
 });
+vi.mock('@/api/tasks', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/tasks')>()),
+  awaitTaskCompletion: vi.fn(async () => ({ result: {} })),
+}));
 vi.mock('@/api/remix', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/remix')>();
   const putArtifact = (schema: string, payload: Record<string, unknown>, upstream: Array<{ artifactId: string; revision: number }> = []) => {
@@ -157,6 +167,7 @@ import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { stashExternalFile } from '@/features/canvas/application/pendingExternalFiles';
 import { NodeActionToolbar } from '@/features/canvas/ui/NodeActionToolbar';
+import type { CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
 
 const nodeTypes: NodeTypes = {
@@ -188,7 +199,7 @@ function JourneyCanvas() {
 describe('native canvas remix journey integration', () => {
   beforeEach(() => {
     backend.artifacts.clear(); backend.operations.clear(); backend.nextArtifact = 1;
-    backend.submit.mockClear(); backend.render.mockClear(); backend.upload.mockClear();
+    backend.submit.mockClear(); backend.render.mockClear(); backend.upload.mockClear(); backend.clipSubmit.mockClear();
     backend.artifacts.set('evidence:1', { id: 'evidence', revision: 1, schema: 'reference_evidence.v1', upstream_refs: [], payload: { media_hash: `sha256:${'a'.repeat(64)}`, duration_us: 2_000_000, frames: [] } });
     useCanvasStore.setState({
       nodes: [{ id: 'reference', type: 'videoNode', position: { x: 0, y: 0 }, data: { videoUrl: '/api/v1/projects/demo/media/reference.mp4', remixRole: 'reference', remixMedia: { media_kind: 'video', media_path: 'reference.mp4', media_hash: 'a'.repeat(64), url: '/api/v1/projects/demo/media/reference.mp4', duration_us: 2_000_000, has_audio: false, size: 10 } } }],
@@ -212,6 +223,23 @@ describe('native canvas remix journey integration', () => {
     render(<JourneyCanvas />);
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /分析原片/ })).toBeVisible();
+  });
+
+  it('offers batch keyframe and clip imports on a story node toolbar', async () => {
+    useCanvasStore.getState().setCanvasData([{
+      id: 'story-1', type: 'videoStoryNode', position: { x: 0, y: 0 },
+      data: { rows: [{ shotNumber: 1, keyframeUrl: '/static/frame.png' }], sourceVideoUrl: '/static/reference.mp4',
+        referenceEvents: [{ event_id: 'hook', start_us: 0, end_us: 1_000_000 }] },
+    } as CanvasNode], []);
+    useCanvasStore.getState().setSelectedNode('story-1');
+    render(<JourneyCanvas />);
+
+    expect(screen.getByRole('button', { name: '导入片段视频到画布' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '导入关键帧到画布' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'uploadNode' && node.data.imageUrl === '/static/frame.png')).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: '导入片段视频到画布' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'videoNode' && node.data.videoUrl === '/static/cut.mp4')).toBe(true));
+    expect(backend.clipSubmit.mock.calls[0][0].tracks[0].items[0]).toMatchObject({ sourceUrl: '/static/reference.mp4', sourceStart: 0, sourceEnd: 1 });
   });
 
   it('clicks node actions from uploaded reference through manual audio to a compose manifest', async () => {
