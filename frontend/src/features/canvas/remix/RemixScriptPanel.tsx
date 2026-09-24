@@ -223,6 +223,16 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
         updateSegment(segment.id, { primaryMediaRevision: typeof attachment === 'string' ? attachment : attachment.mediaRevision });
     } catch (cause) { setError(cause instanceof Error ? cause.message : '主画面尚未完成'); }
   };
+  const addWholePerformance = (source: RemixPerformanceSegment['source']) => {
+    if (!draft.dialogue.trim()) return;
+    changeDraft({ ...draft, segments: [{
+      id: 'segment-1', start: 0, end: Array.from(draft.dialogue).length,
+      speaker: source === 'voiceover' ? '旁白' : '口播', source,
+    }] });
+  };
+  const speakerSegments = seedPerformanceSegments(draft.dialogue);
+  const canSplitSpeakers = speakerSegments.length > 0 && speakerSegments.every((segment) => segment.source === 'speaking_video');
+  const singleVoiceover = draft.segments?.length === 1 && draft.segments[0].source === 'voiceover';
 
   return <div role="dialog" aria-modal="true" aria-label="改编脚本与语义区间" className={`nodrag flex max-h-[88vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-[12px] text-text-dark shadow-2xl ${CANVAS_NODE_OPS_PANEL_CLASS}`} onClick={(event) => event.stopPropagation()}>
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-3"><h2 className="text-sm font-semibold">改编脚本与语义区间</h2><button type="button" onClick={onClose} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>关闭</button></div>
@@ -240,10 +250,15 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', blu
       </div>}
       <label className="block">改编台词<textarea ref={dialogueRef} aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
       <section className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
-        <div className="flex items-center justify-between gap-3"><div><h3 className="font-medium">表演与素材</h3><p className="mt-1 text-text-muted">逐段选择人物、产品、场景与声音来源。口播视频使用视频自身的声音；独立旁白需要主画面。</p></div>
-          {!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: seedPerformanceSegments(draft.dialogue) })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按台词拆段</button>}
+        <div className="flex items-center justify-between gap-3"><div><h3 className="font-medium">表演与素材</h3><p className="mt-1 text-text-muted">{draft.segments?.length ? '逐段选择人物、产品、场景与声音来源。口播视频使用视频自身的声音；独立旁白需要主画面。' : '生成台词不会替你决定口播视频还是独立旁白。可以暂不配置，继续在音频节点制作整段旁白。'}</p></div>
           {!!draft.segments?.length && <button type="button" onClick={() => changeDraft({ ...draft, segments: [] })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改用整段旁白流程</button>}
         </div>
+        {!draft.segments?.length && <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('speaking_video')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作整段口播视频</button>
+          <button type="button" disabled={!draft.dialogue.trim()} onClick={() => addWholePerformance('voiceover')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>制作独立旁白片段</button>
+          {canSplitSpeakers && <button type="button" onClick={() => changeDraft({ ...draft, segments: speakerSegments })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>按说话者拆段</button>}
+        </div>}
+        {singleVoiceover && <button type="button" onClick={() => updateSegment(draft.segments![0].id, { source: 'speaking_video', speaker: '口播', takeNodeId: undefined, takeMediaRevision: undefined, primaryNodeId: undefined, primaryMediaRevision: undefined })} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-2`}>改成整段口播视频</button>}
         {draft.segments?.map((segment, index) => {
           const text = Array.from(draft.dialogue).slice(segment.start, segment.end).join('').trim();
           const choices = performanceNodes.filter((node) => node.kind === (segment.source === 'voiceover' ? 'audio' : 'video'));

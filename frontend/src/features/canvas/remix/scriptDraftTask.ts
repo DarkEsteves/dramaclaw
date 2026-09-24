@@ -8,7 +8,7 @@ import {
 import { readUrl } from '@/lib/url-params';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { applyRemixInvalidation } from './spawnRemixDownstream';
-import { seedPerformanceSegments, type RemixScriptDraft, type RemixPerformanceSegment } from './remixScriptModel';
+import { type RemixScriptDraft, type RemixPerformanceSegment } from './remixScriptModel';
 
 const observers = new Map<string, Promise<RemixScriptDraft | null>>();
 const POLL_INTERVAL_MS = 1_000;
@@ -74,7 +74,7 @@ function draftFromPayload(payload: Record<string, unknown>): RemixScriptDraft {
   if (typeof payload.dialogue !== 'string' || !Array.isArray(payload.selections)) {
     throw new Error('改编台词任务返回了无效结果。');
   }
-  const segments = Array.isArray(payload.segments) && payload.segments.length
+  const segments = Array.isArray(payload.segments)
     ? payload.segments.map((raw) => {
       const row = raw as Record<string, unknown>;
       return {
@@ -91,7 +91,7 @@ function draftFromPayload(payload: Record<string, unknown>): RemixScriptDraft {
         ...(row.primary_media_revision ? { primaryMediaRevision: row.primary_media_revision } : {}),
       } as RemixPerformanceSegment;
     })
-    : seedPerformanceSegments(payload.dialogue);
+    : [];
   return { dialogue: payload.dialogue, selections: payload.selections as RemixScriptDraft['selections'], segments };
 }
 

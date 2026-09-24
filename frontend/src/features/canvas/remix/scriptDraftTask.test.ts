@@ -73,6 +73,21 @@ describe('script draft generation task controller', () => {
     });
   });
 
+  it('preserves an undecided media mode from a generated script draft', async () => {
+    vi.mocked(fetchRemixArtifact).mockResolvedValue({
+      id: 'draft-1', revision: 1, schema: 'remix_script.v1',
+      upstream_refs: [{ artifact_id: 'blueprint-1', revision: 2 }],
+      payload: {
+        dialogue: '你每天喝什么？', segments: [], blueprint_mappings: [], media_requirements: [],
+        selections: [{ id: 'generated-1', label: '提问', start: 0, end: 8 }],
+      },
+    });
+
+    const result = await startScriptDraftGeneration('script', { artifactId: 'blueprint-1', revision: 2 }, '薯条');
+
+    expect(result?.segments).toEqual([]);
+  });
+
   it('resumes after reload without resubmitting', async () => {
     state.nodes[0].data = {
       ...state.nodes[0].data,

@@ -73,6 +73,7 @@ def test_generated_quotes_become_unicode_codepoint_selections() -> None:
 
     assert draft["dialogue"] == "早上😴没精神？喝下咖啡，立刻清醒。"
     assert draft["selections"] == [{"id": "generated-1", "label": "产品登场", "start": 9, "end": 11}]
+    assert draft["segments"] == []
 
 
 @pytest.mark.parametrize("quote", ["不存在", "咖啡"])

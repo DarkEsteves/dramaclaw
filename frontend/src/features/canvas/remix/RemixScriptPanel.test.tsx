@@ -33,6 +33,26 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
   });
 
+  it('does not treat an unlabelled script as a confirmed voiceover and lets the user choose a speaking video', () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '你每天喝什么？\n我喝咖啡。', selections: [], segments: [] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    expect(screen.queryByText('01 · 旁白')).not.toBeInTheDocument();
+    expect(screen.getByText(/生成台词不会替你决定口播视频还是独立旁白/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '制作整段口播视频' }));
+    expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ source: 'speaking_video', speaker: '口播' })] }));
+  });
+
+  it('lets an existing single voiceover segment switch to a speaking video', () => {
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '你每天喝什么？', selections: [], segments: [
+      { id: 'segment-1', start: 0, end: 7, speaker: '旁白', source: 'voiceover' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '改成整段口播视频' }));
+    expect(onDraftChange).toHaveBeenCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ source: 'speaking_video', speaker: '口播' })] }), 'media-binding');
+  });
+
   it('makes script generation the clear primary action after entering a topic', () => {
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '', selections: [] }} existingRef={null} blueprintRef={{ artifactId: 'blueprint-1', revision: 1 }} visualNodes={[]} sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
 

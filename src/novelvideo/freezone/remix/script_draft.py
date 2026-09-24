@@ -79,7 +79,7 @@ def draft_from_recipe_output(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("生成脚本的关键句区间重叠")
         used.append((start, end))
         selections.append({"id": f"generated-{index}", "label": label.strip(), "start": start, "end": end})
-    return {"dialogue": dialogue, "selections": selections, "segments": performance_segments_from_dialogue(dialogue)}
+    return {"dialogue": dialogue, "selections": selections, "segments": []}
 
 
 async def generate_script_draft(*, blueprint: dict[str, Any], topic: str, username: str) -> dict[str, Any]:
