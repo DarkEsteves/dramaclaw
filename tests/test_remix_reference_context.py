@@ -161,11 +161,12 @@ def test_blueprint_contract_accepts_reviewed_uncertainty_but_rejects_broken_evid
             },
             "spoken_range": None,
             "model": {"visual_observation": "人物举杯", "narrative_inference": "可能是产品揭晓"},
-            "user_override": {"narrative_role": "保留悬念", "review_state": "reviewed_uncertain"},
+            "user_override": {"visual_observation": "人物手持杯子", "visible_text": "", "narrative_role": "保留悬念", "review_state": "reviewed_uncertain"},
         }],
         "preserve_replace_rules": [], "observations": [], "inferences": [], "user_choices": [],
     }
     assert validate_payload("reference_blueprint.v1", payload)["events"][0]["user_override"]["review_state"] == "reviewed_uncertain"
+    assert validate_payload("reference_blueprint.v1", payload)["events"][0]["user_override"]["visual_observation"] == "人物手持杯子"
 
     payload["events"][0]["observed_frame"]["evidence_ref"] = {"artifact_id": "evidence-other", "revision": 1}
     with pytest.raises(ValueError, match="reference_blueprint"):

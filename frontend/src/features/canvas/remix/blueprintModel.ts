@@ -198,9 +198,12 @@ function structuredReferenceEvent(event: ReferenceEvent, index: number, evidence
       : null,
     model: {
       visual_observation: event.visual_observation ?? '',
+      visible_text: event.visible_text ?? '',
       narrative_inference: event.narrative_inference ?? '',
     },
     user_override: {
+      ...(event.user_visual_observation !== undefined ? { visual_observation: event.user_visual_observation } : {}),
+      ...(event.user_visible_text !== undefined ? { visible_text: event.user_visible_text } : {}),
       narrative_role: event.user_narrative_role ?? event.narrative_inference ?? '',
       review_state: event.review_state ?? 'needs_review',
     },
@@ -215,13 +218,17 @@ export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<
   const observations = !useReferenceEvents && input.rows.length
     ? input.rows.filter((row) => typeof row.visualDescription === 'string' && row.visualDescription.trim())
       .map((row, index) => ({ source: 'video_story_analysis', verified: false, shot: index + 1, start_time: row.startTime, end_time: row.endTime, description: row.visualDescription }))
-    : eventFallback.filter((event) => event.visual_observation?.trim())
-      .map((event, index) => ({ source: 'reference_event', verified: false, shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), description: event.visual_observation }));
+    : eventFallback.flatMap((event, index) => {
+      const description = event.user_visual_observation ?? event.visual_observation ?? '';
+      return description.trim() ? [{ source: event.user_visual_observation !== undefined ? 'user_override' : 'reference_event', verified: event.user_visual_observation !== undefined && (event.review_state === 'reviewed' || event.review_state === 'reviewed_uncertain'), shot: index + 1, start_time: (event.start_us / 1_000_000).toFixed(3), end_time: (event.end_us / 1_000_000).toFixed(3), description }] : [];
+    });
   const inferences = !useReferenceEvents && input.rows.length
     ? input.rows.filter((row) => typeof row.narrative === 'string' && row.narrative.trim())
       .map((row, index) => ({ source: 'video_story_analysis', shot: index + 1, interpretation: row.narrative }))
-    : eventFallback.filter((event) => event.narrative_inference?.trim())
-      .map((event, index) => ({ source: 'reference_event', shot: index + 1, interpretation: event.narrative_inference }));
+    : eventFallback.flatMap((event, index) => {
+      const interpretation = event.user_narrative_role ?? event.narrative_inference ?? '';
+      return interpretation.trim() ? [{ source: event.user_narrative_role !== undefined ? 'user_override' : 'reference_event', shot: index + 1, interpretation }] : [];
+    });
   const choices = [
     { type: 'preserve', text: input.preserveRule.trim() },
     { type: 'replace', text: input.replaceRule.trim() },
@@ -331,7 +338,10 @@ export function referenceEventsFromBlueprint(payload: Record<string, unknown>): 
       spoken_range: spoken && typeof spoken.text === 'string' && Number.isInteger(spoken.start_us) && Number.isInteger(spoken.end_us) ? { text: spoken.text, start_us: Number(spoken.start_us), end_us: Number(spoken.end_us) } : null,
       spoken_text: typeof spoken?.text === 'string' ? spoken.text : '',
       visual_observation: typeof model.visual_observation === 'string' ? model.visual_observation : '',
+      visible_text: typeof model.visible_text === 'string' ? model.visible_text : '',
       narrative_inference: typeof model.narrative_inference === 'string' ? model.narrative_inference : '',
+      user_visual_observation: typeof override.visual_observation === 'string' ? override.visual_observation : undefined,
+      user_visible_text: typeof override.visible_text === 'string' ? override.visible_text : undefined,
       user_narrative_role: typeof override.narrative_role === 'string' ? override.narrative_role : '',
       review_state: ['needs_review', 'reviewed', 'reviewed_uncertain'].includes(String(override.review_state)) ? override.review_state as ReferenceEvent['review_state'] : 'needs_review',
       note_status: frame ? 'needs_review' : 'missing_frame',

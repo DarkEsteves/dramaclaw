@@ -75,6 +75,7 @@ describe('story script entry', () => {
         expect.objectContaining({ event_id: 'uncertain-1', review_state: 'reviewed_uncertain' }),
         expect.objectContaining({ event_id: 'pending-2', review_state: 'reviewed' }),
       ],
+      referenceBlueprintRef: null,
       blueprintDirty: true,
     });
   });
@@ -93,13 +94,18 @@ describe('story script entry', () => {
     fireEvent.click(screen.getByRole('button', { name: 'node.videoStory.fullscreen' }));
     const dialog = screen.getByRole('dialog', { name: '原片拆解全屏校对' });
     expect(within(dialog).getByRole('table', { name: '原片拆解完整字段' })).toHaveClass('table-fixed');
-    expect(within(dialog).getByText('人物展示产品')).toBeTruthy();
+    expect(within(dialog).getByLabelText('事件 1 画面描述')).toHaveValue('人物展示产品');
     expect(within(dialog).getByText('这是产品台词')).toBeTruthy();
     expect(within(dialog).getByText('产品登场')).toBeTruthy();
     expect(within(dialog).getByText(/PTS 7500 · 1\/15000/)).toBeTruthy();
     const editableValues = () => Array.from(dialog.querySelectorAll<HTMLElement>('.editable-table-cell')).map((cell) => cell.innerText);
     await waitFor(() => expect(editableValues()).toContain('完整画面描述'));
     for (const value of ['旧版叙事内容', '中景', '平视', '固定', '中等景深', '室内柔和光', '轻快音乐', '环境音', '完整图像提示词', '完整视频提示词']) expect(editableValues()).toContain(value);
+    fireEvent.change(within(dialog).getByLabelText('事件 1 画面描述'), { target: { value: '人物举着产品，没有展示' } });
+    expect(updateNodeData).toHaveBeenCalledWith('story-1', expect.objectContaining({
+      referenceEvents: [expect.objectContaining({ event_id: 'event-1', user_visual_observation: '人物举着产品，没有展示', review_state: 'needs_review' })],
+      referenceBlueprintRef: null,
+    }));
     fireEvent.change(within(dialog).getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed' } });
     expect(updateNodeData).toHaveBeenCalledWith('story-1', expect.objectContaining({
       referenceEvents: [expect.objectContaining({ event_id: 'event-1', review_state: 'reviewed' })],

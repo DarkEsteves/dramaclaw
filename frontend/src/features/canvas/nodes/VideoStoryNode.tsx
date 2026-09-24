@@ -33,7 +33,7 @@ import { createScriptFromBlueprint } from '@/features/canvas/remix/createScriptF
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { reanalyzeVideoStory } from '@/features/canvas/application/videoAnalyzeStory';
 import { analyzeReferenceVideo } from '@/features/canvas/application/analyzeReferenceVideo';
-import { ReferenceEventList, type ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
+import { ReferenceEventList, type ReferenceEvent, type ReferenceEventPatch } from '@/features/canvas/remix/ReferenceEventList';
 
 type VideoStoryNodeProps = NodeProps & {
   id: string;
@@ -178,7 +178,7 @@ interface FullscreenStoryTableProps {
   rows: VideoStoryRow[];
   events: ReferenceEvent[];
   onCellCommit: (rowIndex: number, colKey: keyof VideoStoryRow, nextValue: string) => void;
-  onOverrideChange: (eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => void;
+  onOverrideChange: (eventId: string, patch: ReferenceEventPatch) => void;
   onReviewAll: () => void;
 }
 
@@ -257,12 +257,18 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                       <div className="flex gap-3">
                         {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-24 w-16 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
                         <div className="grid content-start gap-1">
-                          <span>{event.visual_observation || '待核对画面'}</span>
+                          <span>{event.user_visual_observation ?? event.visual_observation ?? '待核对画面'}</span>
                           <span className="text-text-muted">事件 {eventSeconds(event.start_us)}–{eventSeconds(event.end_us)}</span>
                           <span className="font-mono text-[11px] text-text-muted">画面 {eventSeconds(observedFrame?.time_us ?? event.analysis_frame_time_us)} · PTS {(observedFrame?.pts ?? event.frame_pts?.join('、')) || '未知'} · {observedFrame?.time_base ?? '未知 time_base'}</span>
                         </div>
                       </div>
-                      <span><span className="text-text-muted">画面字幕：</span>{event.visible_text || '未识别'}</span>
+                      <label className="text-[11px] text-text-muted">画面描述 · 核对后修正
+                        <textarea aria-label={`事件 ${index + 1} 画面描述`} value={event.user_visual_observation ?? event.visual_observation ?? ''} onChange={(change) => onOverrideChange(eventId, { visualObservation: change.target.value })} rows={2} className="ui-field mt-1 w-full resize-y px-2 py-1.5 text-xs text-text-dark" />
+                      </label>
+                      <label className="text-[11px] text-text-muted">画面字幕 · 实际可见文字
+                        <input aria-label={`事件 ${index + 1} 画面字幕`} value={event.user_visible_text ?? event.visible_text ?? ''} onChange={(change) => onOverrideChange(eventId, { visibleText: change.target.value })} className="ui-field mt-1 w-full px-2 py-1.5 text-xs text-text-dark" />
+                      </label>
+                      <details className="text-[11px] text-text-muted"><summary className="cursor-pointer">查看模型原文</summary><p>{event.visual_observation || '无画面描述'}</p><p>{event.visible_text || '无画面字幕'}</p></details>
                       <span><span className="text-text-muted">代表帧时间：</span>{event.frame_times_us?.map(eventSeconds).join('、') || '暂无'}</span>
                       <span><span className="text-text-muted">证据状态：</span>{event.note_status || '正常'}</span>
                     </div> : <span className="text-text-muted/60">—</span>}
@@ -271,13 +277,13 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
                     {event ? <div className="grid gap-1.5 whitespace-pre-wrap break-words">
                       <span>{spokenText || '无同期台词'}</span>
                       <span className="text-[11px] text-text-muted">{event.word_spans?.map((word) => `${word.text} ${eventSeconds(word.start_us)}–${eventSeconds(word.end_us)}`).join('；') || '暂无逐词时间'}</span>
-                      {(event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warningIndex}-${warning.transcript_word}`} className="text-amber-300">疑似错词：{warning.transcript_word} → {warning.caption_word}</span>)}
+                      {event.user_visible_text === undefined && (event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warningIndex}-${warning.transcript_word}`} className="text-amber-300">疑似错词：{warning.transcript_word} → {warning.caption_word}</span>)}
                     </div> : <span className="text-text-muted/60">—</span>}
                   </td>
                   <td className="px-3 py-3 align-top">
                     {event ? <div className="grid gap-2 whitespace-pre-wrap break-words">
-                      <span>{event.narrative_inference || '待补充模型判断'}</span>
-                      <label className="text-[11px] text-text-muted">叙事作用
+                      <span><span className="text-text-muted">模型原判断：</span>{event.narrative_inference || '待补充'}</span>
+                      <label className="text-[11px] text-text-muted">叙事作用 · 你的判断
                         <input
                           aria-label={`事件 ${index + 1} 叙事作用`}
                           value={event.user_narrative_role ?? event.narrative_inference ?? ''}
@@ -419,23 +425,27 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
     [id, rows, updateNodeData],
   );
 
-  const handleReferenceOverride = useCallback((eventId: string, patch: { narrativeRole?: string; reviewState?: ReferenceEvent['review_state'] }) => {
+  const handleReferenceOverride = useCallback((eventId: string, patch: ReferenceEventPatch) => {
+    const contentChanged = patch.visualObservation !== undefined || patch.visibleText !== undefined || patch.narrativeRole !== undefined;
     const nextEvents = referenceEvents.map((event, index) => {
       if ((event.event_id ?? `event-${index + 1}`) !== eventId) return event;
       return {
         ...event,
+        ...(patch.visualObservation !== undefined ? { user_visual_observation: patch.visualObservation } : {}),
+        ...(patch.visibleText !== undefined ? { user_visible_text: patch.visibleText } : {}),
         ...(patch.narrativeRole !== undefined ? { user_narrative_role: patch.narrativeRole } : {}),
+        ...(contentChanged ? { review_state: 'needs_review' as const } : {}),
         ...(patch.reviewState !== undefined ? { review_state: patch.reviewState } : {}),
       };
     });
-    updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
+    updateNodeData(id, { referenceEvents: nextEvents, referenceBlueprintRef: null, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
   const handleReviewAll = useCallback(() => {
     const nextEvents = referenceEvents.map((event) => (event.review_state ?? 'needs_review') === 'needs_review'
       ? { ...event, review_state: 'reviewed' as const }
       : event);
-    updateNodeData(id, { referenceEvents: nextEvents, blueprintDirty: true });
+    updateNodeData(id, { referenceEvents: nextEvents, referenceBlueprintRef: null, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
   useEffect(() => canvasEventBus.subscribe('remix-node/action', ({ nodeId, action }) => {

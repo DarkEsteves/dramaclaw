@@ -37,7 +37,7 @@ describe('ReferenceEventList', () => {
       spoken_text: 'Christine', note_status: 'missing_frame',
     }]} />);
     expect(screen.getByText('画面未核实')).toBeTruthy();
-    expect(screen.getByText(/转写节点校对/)).toBeTruthy();
+    expect(screen.getByText(/转写节点保存校字/)).toBeTruthy();
   });
 
   it('shows a likely subtitle and transcript mismatch without changing the spoken text', () => {
@@ -51,23 +51,44 @@ describe('ReferenceEventList', () => {
     expect(screen.getByText(/Christine.*CREATINE/)).toBeTruthy();
   });
 
-  it('exposes immutable evidence beside editable narrative role and review state', () => {
+  it('lets reviewers correct the visual description, visible caption, and narrative role while keeping timed evidence', () => {
     const onOverrideChange = vi.fn();
     render(<ReferenceEventList onOverrideChange={onOverrideChange} events={[{
       event_id: 'event-1', start_us: 4_000_000, end_us: 6_000_000,
       observed_frame: { pts: 360_000, time_base: '1/90000', time_us: 4_000_000, url: '/frame.png' },
       spoken_range: { text: 'maybe this works', start_us: 4_100_000, end_us: 5_500_000 },
-      visual_observation: '人物展示杯子', narrative_inference: '模型认为这是产品揭晓',
+      visual_observation: '人物展示杯子', visible_text: 'WRONG LABEL', narrative_inference: '模型认为这是产品揭晓',
       user_narrative_role: '制造悬念', review_state: 'needs_review',
     }]} />);
 
     expect(screen.getByText(/PTS 360000 · 1\/90000/)).toBeTruthy();
-    expect(screen.getByText('模型认为这是产品揭晓')).toBeTruthy();
+    expect(screen.getByText('制造悬念')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /04.0–06.0 秒/ }));
+    fireEvent.click(screen.getByText('查看时间与证据'));
+    expect(screen.getByText(/模型叙事判断：模型认为这是产品揭晓/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('事件 1 画面描述'), { target: { value: '人物拿着杯子，并未展示' } });
+    fireEvent.change(screen.getByLabelText('事件 1 画面字幕'), { target: { value: 'CREATINE' } });
     fireEvent.change(screen.getByLabelText('事件 1 叙事作用'), { target: { value: '明确产品价值' } });
     fireEvent.change(screen.getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed_uncertain' } });
 
-    expect(onOverrideChange).toHaveBeenNthCalledWith(1, 'event-1', { narrativeRole: '明确产品价值' });
-    expect(onOverrideChange).toHaveBeenNthCalledWith(2, 'event-1', { reviewState: 'reviewed_uncertain' });
+    expect(onOverrideChange).toHaveBeenNthCalledWith(1, 'event-1', { visualObservation: '人物拿着杯子，并未展示' });
+    expect(onOverrideChange).toHaveBeenNthCalledWith(2, 'event-1', { visibleText: 'CREATINE' });
+    expect(onOverrideChange).toHaveBeenNthCalledWith(3, 'event-1', { narrativeRole: '明确产品价值' });
+    expect(onOverrideChange).toHaveBeenNthCalledWith(4, 'event-1', { reviewState: 'reviewed_uncertain' });
+  });
+
+  it('shows the corrected narrative role in the event summary while retaining the model judgment as evidence', () => {
+    render(<ReferenceEventList events={[{
+      event_id: 'event-1', start_us: 0, end_us: 1_000_000,
+      visual_observation: '人物拿着杯子', narrative_inference: '模型误判为产品展示',
+      user_narrative_role: '开场提问', review_state: 'reviewed',
+    }]} />);
+
+    expect(screen.getByText('开场提问')).toBeTruthy();
+    expect(screen.queryByText('模型误判为产品展示')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /00.0–01.0 秒/ }));
+    fireEvent.click(screen.getByText('查看时间与证据'));
+    expect(screen.getByText(/模型叙事判断：模型误判为产品展示/)).toBeTruthy();
   });
 
   it('shows the remaining review count and confirms all pending events in one action', () => {

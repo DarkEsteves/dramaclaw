@@ -60,10 +60,13 @@ class BlueprintSpokenRange(_Contract):
 
 class BlueprintModelNote(_Contract):
     visual_observation: str = ""
+    visible_text: str = ""
     narrative_inference: str = ""
 
 
 class BlueprintUserOverride(_Contract):
+    visual_observation: str | None = None
+    visible_text: str | None = None
     narrative_role: str = Field(min_length=1)
     review_state: Literal["needs_review", "reviewed", "reviewed_uncertain"]
 

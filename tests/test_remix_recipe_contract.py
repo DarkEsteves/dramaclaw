@@ -87,3 +87,9 @@ def test_reference_creative_recipes_are_structured_v2_and_legacy_v1_is_unchanged
     legacy = validate_agent_recipe_config(json.loads((root / "general-text.json").read_text()))
     assert legacy["schema_version"] == "dramaclaw.recipe.v1"
     assert "output_schema" not in legacy
+
+
+def test_reference_script_recipe_prefers_reviewed_user_corrections() -> None:
+    root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins/recipes"
+    payload = validate_agent_recipe_config(json.loads((root / "reference-remix-script.json").read_text()))
+    assert "二者冲突时以 user_override" in payload["system_prompt"]

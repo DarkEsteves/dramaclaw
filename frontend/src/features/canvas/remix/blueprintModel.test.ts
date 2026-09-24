@@ -52,7 +52,8 @@ describe('reference blueprint model', () => {
         event_id: 'event-1', start_us: 0, end_us: 3_000_000,
         observed_frame: { pts: 90_000, time_base: '1/90000', time_us: 1_000_000, url: '/frame.png' },
         spoken_range: { text: 'try this', start_us: 500_000, end_us: 2_000_000 },
-        visual_observation: '人物举杯', narrative_inference: '模型判断产品登场',
+        visual_observation: '人物举杯', visible_text: 'OLD', narrative_inference: '模型判断产品登场',
+        user_visual_observation: '人物举着空杯', user_visible_text: 'NEW',
         user_narrative_role: '证实产品价值', review_state: 'reviewed_uncertain',
       }],
       narrativeRole: '产品演示', preserveRule: '', replaceRule: '',
@@ -69,9 +70,10 @@ describe('reference blueprint model', () => {
         transcript_ref: { artifact_id: 'transcript-1', revision: 2 },
         text: 'try this', start_us: 500_000, end_us: 2_000_000,
       },
-      model: { visual_observation: '人物举杯', narrative_inference: '模型判断产品登场' },
-      user_override: { narrative_role: '证实产品价值', review_state: 'reviewed_uncertain' },
+      model: { visual_observation: '人物举杯', visible_text: 'OLD', narrative_inference: '模型判断产品登场' },
+      user_override: { visual_observation: '人物举着空杯', visible_text: 'NEW', narrative_role: '证实产品价值', review_state: 'reviewed_uncertain' },
     }]);
+    expect(payload.observations).toEqual([expect.objectContaining({ description: '人物举着空杯', source: 'user_override', verified: true })]);
     expect(blueprintReadinessErrors(payload)).toEqual([]);
   });
 
@@ -119,11 +121,12 @@ describe('reference blueprint model', () => {
       event_id: 'event-7', start_us: 1_000_000, end_us: 2_000_000,
       observed_frame: { evidence_ref: { artifact_id: 'evidence-1', revision: 1 }, pts: 45, time_base: '1/45', time_us: 1_000_000, url: '/saved.png' },
       spoken_range: { transcript_ref: { artifact_id: 'words-1', revision: 3 }, text: 'saved words', start_us: 1_100_000, end_us: 1_900_000 },
-      model: { visual_observation: '已保存画面', narrative_inference: '模型结论' },
-      user_override: { narrative_role: '用户修改后角色', review_state: 'reviewed' },
+      model: { visual_observation: '已保存画面', visible_text: '旧字幕', narrative_inference: '模型结论' },
+      user_override: { visual_observation: '修正画面', visible_text: '修正字幕', narrative_role: '用户修改后角色', review_state: 'reviewed' },
     }] });
     expect(events).toEqual([expect.objectContaining({
       event_id: 'event-7', frame_url: '/saved.png', spoken_text: 'saved words',
+      visual_observation: '已保存画面', user_visual_observation: '修正画面', visible_text: '旧字幕', user_visible_text: '修正字幕',
       user_narrative_role: '用户修改后角色', review_state: 'reviewed',
     })]);
   });
