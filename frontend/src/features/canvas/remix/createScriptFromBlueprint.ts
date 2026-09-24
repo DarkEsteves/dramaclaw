@@ -1,8 +1,9 @@
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { suggestBlueprintRules } from './blueprintModel';
 import { requestRemixScriptEditor } from './remixScriptEditorRequests';
 
-/** Create a new script branch from a saved reference blueprint. */
+/** Create a script branch from the analyzed reference story. */
 export function createScriptFromBlueprint(storyId: string): string {
   const store = useCanvasStore.getState();
   const story = store.nodes.find((node) => node.id === storyId);
@@ -10,14 +11,16 @@ export function createScriptFromBlueprint(storyId: string): string {
   const cloneRef = (value: unknown) => value && typeof value === 'object'
     ? { ...(value as Record<string, unknown>) }
     : null;
+  const seedRef = cloneRef(storyData.referenceBlueprintRef);
+  const suggestions = seedRef ? { narrativeRole: '', preserveRule: '', replaceRule: '' } : suggestBlueprintRules(storyData);
   const childId = store.addNode(CANVAS_NODE_TYPES.script, store.findNodePosition(storyId, 420, 360), {
     remixRole: 'adaptation_script',
-    blueprintNarrativeRole: typeof storyData.blueprintNarrativeRole === 'string' ? storyData.blueprintNarrativeRole : '',
-    blueprintPreserveRule: typeof storyData.blueprintPreserveRule === 'string' ? storyData.blueprintPreserveRule : '',
-    blueprintReplaceRule: typeof storyData.blueprintReplaceRule === 'string' ? storyData.blueprintReplaceRule : '',
+    blueprintNarrativeRole: typeof storyData.blueprintNarrativeRole === 'string' && storyData.blueprintNarrativeRole.trim() ? storyData.blueprintNarrativeRole : suggestions.narrativeRole,
+    blueprintPreserveRule: typeof storyData.blueprintPreserveRule === 'string' && storyData.blueprintPreserveRule.trim() ? storyData.blueprintPreserveRule : suggestions.preserveRule,
+    blueprintReplaceRule: typeof storyData.blueprintReplaceRule === 'string' && storyData.blueprintReplaceRule.trim() ? storyData.blueprintReplaceRule : suggestions.replaceRule,
     referenceEvidenceRef: cloneRef(storyData.referenceEvidenceRef),
     sourceMediaPath: typeof storyData.sourceMediaPath === 'string' ? storyData.sourceMediaPath : null,
-    remixBlueprintSeedRef: cloneRef(storyData.referenceBlueprintRef),
+    remixBlueprintSeedRef: seedRef,
     referenceBlueprintRef: null,
     remixBlueprintRef: null,
     blueprintRevision: 0,

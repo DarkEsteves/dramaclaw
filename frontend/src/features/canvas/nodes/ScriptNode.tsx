@@ -90,7 +90,7 @@ import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSy
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
 import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
 import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
-import { connectedBlueprintSources } from '@/features/canvas/remix/blueprintModel';
+import { connectedBlueprintSources, suggestBlueprintRules } from '@/features/canvas/remix/blueprintModel';
 import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { applyRemixInvalidation, createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
@@ -461,9 +461,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const storyReferenceEvents = Array.isArray(upstreamStory?.data.referenceEvents)
     ? upstreamStory.data.referenceEvents as ReferenceEvent[]
     : [];
-  const suggestedNarrativeRole = storyReferenceEvents
-    .map((event) => event.narrative_inference?.trim()).filter(Boolean).slice(0, 3).join(' → ')
-    || storyRows.map((row) => typeof row.narrative === 'string' ? row.narrative.trim() : '').filter(Boolean).slice(0, 3).join(' → ');
+  const suggestedRules = suggestBlueprintRules(upstreamStory?.data);
   const patchBranchBlueprint = useCallback((patch: Record<string, unknown>) => updateNodeData(id, patch), [id, updateNodeData]);
   const ensureBranchBlueprint = useCallback(async () => {
     if (!blueprintPanelRef.current) throw new Error('当前脚本的改编规则尚未准备好。');
@@ -1106,11 +1104,14 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
                 blueprintReplaceRule: typeof data.blueprintReplaceRule === 'string' ? data.blueprintReplaceRule : '',
                 blueprintRevision: typeof data.blueprintRevision === 'number' ? data.blueprintRevision : 0,
                 blueprintDirty: data.blueprintDirty === true,
+                blueprintRulesTouched: data.blueprintRulesTouched === true,
               }}
               seedRef={blueprintSeedRef}
               onPatch={patchBranchBlueprint}
               onReanalyze={() => canvasEventBus.publish('remix-node/action', { nodeId: upstreamStory.id, action: 'analyze' })}
-              suggestedNarrativeRole={suggestedNarrativeRole}
+              suggestedNarrativeRole={suggestedRules.narrativeRole}
+              suggestedPreserveRule={suggestedRules.preserveRule}
+              suggestedReplaceRule={suggestedRules.replaceRule}
             /> : undefined}
             onEnsureBlueprint={upstreamStory ? ensureBranchBlueprint : undefined}
             generationRunning={data.remixScriptGenerationStatus === 'running'}

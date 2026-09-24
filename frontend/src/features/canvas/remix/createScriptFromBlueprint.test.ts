@@ -66,6 +66,40 @@ describe('createScriptFromBlueprint', () => {
     expect((state.nodes[0] as { data: Record<string, unknown> }).data.blueprintPreserveRule).toBe('保留问答节奏');
   });
 
+  it('prefills a new branch from completed AI analysis when no rules were saved', () => {
+    state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
+      rawResult: { video_story: { summary: '双人访谈中展示产品并以反转收尾' } },
+      referenceEvents: [
+        { narrative_inference: '开场提问' },
+        { narrative_inference: '展示产品' },
+        { narrative_inference: '结尾反转' },
+      ],
+      referenceEvidenceRef: { artifactId: 'evidence-1', revision: 2 },
+    } }];
+
+    createScriptFromBlueprint('story-1');
+
+    expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
+      blueprintNarrativeRole: expect.stringContaining('双人访谈中展示产品并以反转收尾'),
+      blueprintPreserveRule: expect.stringContaining('开场提问'),
+      blueprintReplaceRule: expect.stringContaining('新主题'),
+    }));
+  });
+
+  it('lets a saved blueprint restore its exact rules before using analysis suggestions', () => {
+    state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
+      rawResult: { video_story: { summary: '原片的 AI 摘要' } },
+      referenceBlueprintRef: { artifactId: 'saved-blueprint', revision: 2 },
+    } }];
+
+    createScriptFromBlueprint('story-1');
+
+    expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
+      blueprintNarrativeRole: '',
+      remixBlueprintSeedRef: { artifactId: 'saved-blueprint', revision: 2 },
+    }));
+  });
+
   it('removes an unconnected new script and reports a failed connection', () => {
     addEdge.mockReturnValueOnce(null as unknown as string);
     expect(() => createScriptFromBlueprint('story-1')).toThrow('改编脚本连线失败');

@@ -16,6 +16,7 @@ interface BlueprintDraft {
   blueprintReplaceRule?: string;
   blueprintRevision?: number;
   blueprintDirty?: boolean;
+  blueprintRulesTouched?: boolean;
 }
 
 interface Props {
@@ -27,6 +28,8 @@ interface Props {
   onPatch: (patch: Partial<BlueprintDraft>) => void;
   onReanalyze: () => void;
   suggestedNarrativeRole?: string;
+  suggestedPreserveRule?: string;
+  suggestedReplaceRule?: string;
   seedRef?: RemixArtifactRef | null;
 }
 
@@ -34,20 +37,30 @@ export interface ReferenceBlueprintPanelHandle {
   ensureSaved: () => Promise<RemixArtifactRef>;
 }
 
-export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole, seedRef }, ref) {
+export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle, Props>(function ReferenceBlueprintPanel({ nodeId, source, rows, referenceEvents, draft, onPatch, onReanalyze, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule, seedRef }, ref) {
   const project = readUrl().project;
   const [operationId, setOperationId] = useState<string | null>(draft.evidenceOperationId ?? null);
-  const [role, setRole] = useState(draft.blueprintNarrativeRole ?? '');
-  const [preserve, setPreserve] = useState(draft.blueprintPreserveRule ?? '');
-  const [replace, setReplace] = useState(draft.blueprintReplaceRule ?? '');
+  const canSuggest = !draft.blueprintRulesTouched && !draft.referenceBlueprintRef && !seedRef;
+  const [role, setRole] = useState(draft.blueprintNarrativeRole || (canSuggest ? suggestedNarrativeRole : '') || '');
+  const [preserve, setPreserve] = useState(draft.blueprintPreserveRule || (canSuggest ? suggestedPreserveRule : '') || '');
+  const [replace, setReplace] = useState(draft.blueprintReplaceRule || (canSuggest ? suggestedReplaceRule : '') || '');
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const evidenceRef = draft.sourceMediaPath && source?.mediaPath !== draft.sourceMediaPath ? null : draft.referenceEvidenceRef;
 
   useEffect(() => {
+    if (!canSuggest) return;
+    const patch: Partial<BlueprintDraft> = {};
+    if (!draft.blueprintNarrativeRole && suggestedNarrativeRole) { setRole(suggestedNarrativeRole); patch.blueprintNarrativeRole = suggestedNarrativeRole; }
+    if (!draft.blueprintPreserveRule && suggestedPreserveRule) { setPreserve(suggestedPreserveRule); patch.blueprintPreserveRule = suggestedPreserveRule; }
+    if (!draft.blueprintReplaceRule && suggestedReplaceRule) { setReplace(suggestedReplaceRule); patch.blueprintReplaceRule = suggestedReplaceRule; }
+    if (Object.keys(patch).length) onPatch(patch);
+  }, [canSuggest, draft.blueprintNarrativeRole, draft.blueprintPreserveRule, draft.blueprintReplaceRule, onPatch, suggestedNarrativeRole, suggestedPreserveRule, suggestedReplaceRule]);
+
+  useEffect(() => {
     const restoreRef = draft.referenceBlueprintRef ?? seedRef;
-    if (!project || !restoreRef || draft.blueprintDirty) return;
+    if (!project || !restoreRef || (draft.blueprintDirty && (draft.referenceBlueprintRef || draft.blueprintRulesTouched || !seedRef))) return;
     let active = true;
     fetchRemixArtifact(project, restoreRef).then((artifact) => {
       if (!active || artifact.schema !== 'reference_blueprint.v1') return;
@@ -64,7 +77,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
       if (Object.keys(patch).length) onPatch(patch);
     }).catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : String(caught)); });
     return () => { active = false; };
-  }, [draft.blueprintDirty, draft.referenceBlueprintRef?.artifactId, draft.referenceBlueprintRef?.revision, project, seedRef?.artifactId, seedRef?.revision]);
+  }, [draft.blueprintDirty, draft.blueprintRulesTouched, draft.referenceBlueprintRef?.artifactId, draft.referenceBlueprintRef?.revision, project, seedRef?.artifactId, seedRef?.revision]);
 
   const analyzeEvidence = async () => {
     if (!project || !source || busy || operationId || draft.managedEvidenceOperationId) return;
@@ -153,7 +166,7 @@ export const ReferenceBlueprintPanel = forwardRef<ReferenceBlueprintPanelHandle,
   const edit = (field: 'blueprintNarrativeRole' | 'blueprintPreserveRule' | 'blueprintReplaceRule', value: string, setter: (value: string) => void) => {
     setter(value);
     setDirty(true);
-    onPatch({ [field]: value, blueprintDirty: true });
+    onPatch({ [field]: value, blueprintDirty: true, blueprintRulesTouched: true });
   };
 
   const labelClass = 'grid gap-1.5 text-[11px] font-medium text-text-muted';

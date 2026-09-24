@@ -56,6 +56,29 @@ describe('ReferenceBlueprintPanel', () => {
     expect(details).toHaveTextContent('证据 evidence-1 · r1');
   });
 
+  it('restores analysis suggestions for an existing blank branch without overwriting edits', async () => {
+    const onPatch = vi.fn();
+    const props = {
+      nodeId: 'script', source, rows,
+      referenceEvents: [],
+      onPatch, onReanalyze: () => {},
+      suggestedNarrativeRole: '访谈展示产品并反转',
+      suggestedPreserveRule: '保留提问和结尾反转',
+      suggestedReplaceRule: '按新主题替换人物、产品与场景',
+    };
+    const view = render(<ReferenceBlueprintPanel {...props} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 }, blueprintDirty: true }} />);
+    expect(screen.getByLabelText('整体叙事作用')).toHaveValue('访谈展示产品并反转');
+    expect(screen.getByLabelText('保留规则')).toHaveValue('保留提问和结尾反转');
+    expect(screen.getByLabelText('替换规则')).toHaveValue('按新主题替换人物、产品与场景');
+    await waitFor(() => expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ blueprintPreserveRule: '保留提问和结尾反转' })));
+
+    fireEvent.change(screen.getByLabelText('保留规则'), { target: { value: '' } });
+    expect(onPatch).toHaveBeenLastCalledWith(expect.objectContaining({ blueprintPreserveRule: '', blueprintRulesTouched: true }));
+    view.unmount();
+    render(<ReferenceBlueprintPanel {...props} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 }, blueprintNarrativeRole: '访谈展示产品并反转', blueprintPreserveRule: '', blueprintReplaceRule: '按新主题替换人物、产品与场景', blueprintRulesTouched: true, blueprintDirty: true }} />);
+    expect(screen.getByLabelText('保留规则')).toHaveValue('');
+  });
+
   it('extracts full-video evidence and persists the resulting reference', async () => {
     const onPatch = vi.fn();
     render(<ReferenceBlueprintPanel nodeId="story" source={source} rows={rows} draft={{}} onPatch={onPatch} onReanalyze={() => {}} />);
@@ -99,7 +122,7 @@ describe('ReferenceBlueprintPanel', () => {
     });
     const onPatch = vi.fn();
     const panel = createRef<ReferenceBlueprintPanelHandle>();
-    render(<ReferenceBlueprintPanel ref={panel} nodeId="script" seedRef={seed} source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={onPatch} onReanalyze={() => {}} />);
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="script" seedRef={seed} source={source} rows={rows} draft={{ referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 }, blueprintDirty: true }} onPatch={onPatch} onReanalyze={() => {}} />);
 
     await waitFor(() => expect(screen.getByLabelText('整体叙事作用')).toHaveValue('提问后展示新品'));
     expect(screen.getByLabelText('保留规则')).toHaveValue('保留问答节奏');

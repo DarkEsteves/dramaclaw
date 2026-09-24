@@ -13,6 +13,46 @@ export interface BlueprintSources {
   transcriptRef: RemixArtifactRef | null;
 }
 
+/** Turn the existing model analysis into editable starting rules for a script branch. */
+export function suggestBlueprintRules(storyData: Record<string, unknown> | undefined): {
+  narrativeRole: string;
+  preserveRule: string;
+  replaceRule: string;
+} {
+  const rawResult = storyData?.rawResult;
+  const videoStory = rawResult && typeof rawResult === 'object'
+    ? (rawResult as Record<string, unknown>).video_story : null;
+  const summary = videoStory && typeof videoStory === 'object'
+    ? (videoStory as Record<string, unknown>).summary : null;
+  const narrativeSummary = typeof summary === 'string' ? summary.trim() : '';
+  const events = Array.isArray(storyData?.referenceEvents) ? storyData.referenceEvents : [];
+  const roles = events.flatMap((event) => {
+    if (!event || typeof event !== 'object') return [];
+    const record = event as Record<string, unknown>;
+    const role = record.user_narrative_role || record.narrative_inference;
+    return typeof role === 'string' && role.trim() ? [role.trim()] : [];
+  });
+  if (!roles.length && Array.isArray(storyData?.rows)) {
+    for (const row of storyData.rows) {
+      if (!row || typeof row !== 'object') continue;
+      const role = (row as Record<string, unknown>).narrative;
+      if (typeof role === 'string' && role.trim()) roles.push(role.trim());
+    }
+  }
+  const keyRoles = roles.length <= 5
+    ? roles
+    : [roles[0], roles[1], roles[Math.floor(roles.length / 2)], roles[roles.length - 2], roles[roles.length - 1]];
+  const distinctRoles = keyRoles.filter((role, index) => keyRoles.indexOf(role) === index);
+  const hasAnalysis = Boolean(narrativeSummary || roles.length);
+  return {
+    narrativeRole: narrativeSummary || distinctRoles.join(' → '),
+    preserveRule: distinctRoles.length
+      ? `保留原片的叙事顺序与关键转折：${distinctRoles.join(' → ')}。`
+      : narrativeSummary ? `保留原片的核心叙事线与节奏：${narrativeSummary}` : '',
+    replaceRule: hasAnalysis ? '将原片特有的人物、产品、场景和具体说法替换为新主题的真实信息；重新制作对应画面与台词。' : '',
+  };
+}
+
 function artifactRef(value: unknown): RemixArtifactRef | null {
   if (!value || typeof value !== 'object') return null;
   const ref = value as Record<string, unknown>;
