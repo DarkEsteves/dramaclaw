@@ -199,7 +199,7 @@ export async function startScriptDraftGeneration(
       action: 'generate_script_draft',
       blueprintRef,
       newTopic: cleanTopic,
-      idempotencyKey: `script-draft:${nodeId}:${blueprintRef.artifactId}:${blueprintRef.revision}:${fingerprint(cleanTopic)}`,
+      idempotencyKey: `script-draft:${nodeId}:${nodeRevision}:${blueprintRef.artifactId}:${blueprintRef.revision}:${fingerprint(cleanTopic)}`,
       nodeRevision,
     });
     if (!matchesRequest(nodeData(nodeId), blueprintRef, cleanTopic)) return null;

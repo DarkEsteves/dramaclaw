@@ -73,6 +73,19 @@ describe('script draft generation task controller', () => {
     });
   });
 
+  it('starts a new task when the same topic is generated again', async () => {
+    const blueprintRef = { artifactId: 'blueprint-1', revision: 2 };
+    await startScriptDraftGeneration('script', blueprintRef, '薯条');
+    await startScriptDraftGeneration('script', blueprintRef, '薯条');
+
+    expect(submitRemixProcessAction).toHaveBeenCalledTimes(2);
+    const firstRequest = vi.mocked(submitRemixProcessAction).mock.calls[0][1];
+    const secondRequest = vi.mocked(submitRemixProcessAction).mock.calls[1][1];
+    expect(firstRequest.nodeRevision).toBe(5);
+    expect(secondRequest.nodeRevision).toBe(6);
+    expect(secondRequest.idempotencyKey).not.toBe(firstRequest.idempotencyKey);
+  });
+
   it('preserves an undecided media mode from a generated script draft', async () => {
     vi.mocked(fetchRemixArtifact).mockResolvedValue({
       id: 'draft-1', revision: 1, schema: 'remix_script.v1',
