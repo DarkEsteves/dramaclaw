@@ -109,7 +109,6 @@ import { GROUP_COLOR_PRESETS } from "@/features/canvas/domain/groupColors";
 import { StoryboardGroupToolbar } from "@/features/canvas/ui/StoryboardGroupToolbar";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import {
-  dispatchNodeAction,
   publishNodeActionAccepted,
   publishNodeActionError,
   publishNodeActionSuccess,
@@ -147,11 +146,9 @@ import { transcriptToolbarState } from '@/features/canvas/remix/transcriptToolba
 import { semanticTimelineToolbarState } from '@/features/canvas/remix/semanticTimelineToolbarState';
 import { createAlignedTranscriptFromAudio, createNarrationFromScript } from '@/features/canvas/remix/spawnNarrationAndAlignment';
 import { createTimelineFromScript } from '@/features/canvas/remix/spawnRemixDownstream';
-import { nextRemixJourneyStep, primaryVisualEventsForScript } from '@/features/canvas/remix/remixJourney';
-import { RemixJourneyButton } from '@/features/canvas/remix/RemixJourneyButton';
-import { advanceRemixJourneyStep } from '@/features/canvas/remix/remixJourneyActions';
+import { primaryVisualEventsForScript } from '@/features/canvas/remix/remixJourney';
 import { requestRemixScriptEditor } from '@/features/canvas/remix/remixScriptEditorRequests';
-import { attachBrollVisualMedia, createBackgroundVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
+import { attachBrollVisualMedia, boundBrollVisualMedia, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
@@ -1648,84 +1645,35 @@ export const NodeActionToolbar = memo(
       ? remixScriptEditorLabel(node.data, edges.some((edge) => edge.target === node.id
         && nodes.some((source) => source.id === edge.source && source.type === CANVAS_NODE_TYPES.videoStory && Boolean(source.data.referenceBlueprintRef))))
       : null;
-    const remixJourneyStep = useMemo(
-      () => nextRemixJourneyStep(nodes, edges, node.id),
-      [edges, node.id, nodes],
-    );
-    const remixJourneyBlocksScriptDownstream = node.type === CANVAS_NODE_TYPES.script
-      && remixJourneyStep?.targetNodeId === node.id
-      && (remixJourneyStep.kind === 'wait' || remixJourneyStep.action === 'plan_broll' || remixJourneyStep.action === 'edit_script');
+    const remixStoryNode = node.type === CANVAS_NODE_TYPES.script
+      ? nodes.find((candidate) => candidate.type === CANVAS_NODE_TYPES.videoStory
+        && edges.some((edge) => edge.source === candidate.id && edge.target === node.id))
+      : undefined;
+    const missingPrimaryVisualEvents = remixScriptLabel && node.data.remixScriptRef && remixStoryNode
+      ? primaryVisualEventsForScript(node, nodes, edges).filter((event) => !nodes.some((candidate) =>
+        candidate.type === CANVAS_NODE_TYPES.video
+        && candidate.data.remixRole === 'primary'
+        && candidate.data.remixEventId === event.id
+        && edges.some((edge) => edge.source === candidate.id && edge.target === node.id)
+        && (candidate.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId
+          === (node.data.remixScriptRef as { artifactId?: string; revision?: number } | undefined)?.artifactId
+        && (candidate.data.remixScriptRef as { revision?: number } | undefined)?.revision
+          === (node.data.remixScriptRef as { revision?: number } | undefined)?.revision,
+      )) : [];
+    const remixVisualRole = node.data.remixRole === 'primary' || node.data.remixRole === 'background'
+      ? node.data.remixRole : null;
+    const remixVisualSourceReady = Boolean(node.data.videoUrl || node.data.imageUrl || node.data.previewImageUrl);
+    let remixVisualNeedsBinding = false;
+    if (remixVisualRole && remixVisualSourceReady && node.data.remixVisualOutputCurrent !== false) {
+      try { boundBrollVisualMedia(readUrl().project ?? '', node); }
+      catch { remixVisualNeedsBinding = true; }
+    }
     const storyScriptAction = node.type === CANVAS_NODE_TYPES.videoStory
       ? storyScriptToolbarState(nodes, edges, node.id) : null;
     const transcriptActions = node.type === CANVAS_NODE_TYPES.transcript
       ? transcriptToolbarState(nodes, edges, node.id) : null;
     const semanticTimelineAction = node.type === CANVAS_NODE_TYPES.semanticTimeline
       ? semanticTimelineToolbarState({ compileOperationId: node.data.compileOperationId }) : null;
-
-    const advanceRemixJourney = useCallback(() => {
-      if (!remixJourneyStep) return;
-      void advanceRemixJourneyStep(remixJourneyStep, {
-        focus: (targetNodeId) => {
-          setSelectedNode(targetNodeId);
-          requestFocusNode(targetNodeId);
-        },
-        notify: (message) => toast.info(message),
-        analyzeReference: (targetNodeId) => {
-          const source = nodes.find((candidate) => candidate.id === targetNodeId);
-          if (!source || typeof source.data.videoUrl !== 'string' || !source.data.videoUrl) throw new Error('请先上传参考视频');
-          const started = analyzeReferenceVideo(source.id, { videoUrl: source.data.videoUrl });
-          setSelectedNode(started.nodeId); requestFocusNode(started.nodeId);
-        },
-        publish: (targetNodeId, action) => {
-          if (action === 'edit_script') {
-            requestRemixScriptEditor(targetNodeId);
-            return;
-          }
-          canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action });
-        },
-        createNarration: (targetNodeId) => { createNarrationFromScript(targetNodeId); },
-        alignNarration: (targetNodeId) => createAlignedTranscriptFromAudio(targetNodeId),
-        createTimeline: (targetNodeId) => { createTimelineFromScript(targetNodeId); },
-        createBackground: (targetNodeId) => {
-          if (!createBackgroundVisualNode(useCanvasStore.getState(), targetNodeId)) throw new Error('无法创建成片背景素材节点');
-        },
-        bindBackground: async (targetNodeId) => {
-          const project = readUrl().project;
-          const store = useCanvasStore.getState();
-          const background = store.nodes.find((candidate) => candidate.id === targetNodeId);
-          if (!project || !background) throw new Error('无法找到成片背景素材');
-          const attachment = await attachBrollVisualMedia(project, background, attachRemixMedia, store.updateNodeData, 'background');
-          attachment.commit();
-        },
-        createPrimaryVisuals: (targetNodeId) => {
-          const store = useCanvasStore.getState();
-          const script = store.nodes.find((candidate) => candidate.id === targetNodeId);
-          const storyId = store.edges.find((edge) => edge.target === targetNodeId
-            && store.nodes.some((candidate) => candidate.id === edge.source && candidate.type === CANVAS_NODE_TYPES.videoStory))?.source;
-          if (!script || !storyId) throw new Error('找不到当前脚本的参考片分析');
-          const eventIds = primaryVisualEventsForScript(script, store.nodes, store.edges).map((event) => event.id);
-          const created = createPrimaryVisualNodes(store, targetNodeId, storyId, eventIds);
-          if (!created.length) throw new Error('没有可生成的主画面事件');
-          requestFocusNode(created[0]);
-        },
-        generatePrimary: (targetNodeId) => {
-          if (!dispatchNodeAction({ nodeId: targetNodeId, action: 'generate_video', executionMode: 'single', requestId: crypto.randomUUID() })) {
-            throw new Error('视频生成节点尚未就绪，请稍后重试');
-          }
-        },
-        bindPrimary: async (targetNodeId) => {
-          const project = readUrl().project;
-          const store = useCanvasStore.getState();
-          const primary = store.nodes.find((candidate) => candidate.id === targetNodeId);
-          if (!project || !primary) throw new Error('无法找到主画面素材');
-          const attachment = await attachBrollVisualMedia(project, primary, attachRemixMedia, store.updateNodeData, 'primary');
-          attachment.commit();
-        },
-        createCompose: (targetNodeId) => canvasEventBus.publish('remix-node/action', { nodeId: targetNodeId, action: 'create_compose' }),
-      }).catch((cause) => {
-        toast.error(cause instanceof Error ? cause.message : '无法继续改编');
-      });
-    }, [nodes, remixJourneyStep, requestFocusNode, setSelectedNode]);
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;
 
@@ -1749,9 +1697,6 @@ export const NodeActionToolbar = memo(
           {/* 节点激活时，顶部菜单从节点上沿淡入+轻微上滑浮现（而非生硬地直接出现），
               与下方操作区的入场动画呼应。motion-reduce 下退化为无动画。 */}
           <UiPanel className="flex animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-2 items-center gap-1.5 rounded-[18px] !border-white/10 !bg-[#242426]/95 px-2 py-1.5 text-sm shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-2xl duration-200 ease-out motion-reduce:animate-none [&_svg]:h-4 [&_svg]:w-4">
-            {remixJourneyStep && !(node.type === CANVAS_NODE_TYPES.videoStory && remixJourneyStep.action === 'continue_story') && (
-              <RemixJourneyButton key="remix-continue" nodeId={node.id} step={remixJourneyStep} onContinue={advanceRemixJourney} />
-            )}
             {/* Mainline lock indicator — shown as a leading pill when the
                 node is preset-managed (or canvas-level fallback applies).
                 The chips below remain visible for spawn-style edits; the
@@ -1855,6 +1800,48 @@ export const NodeActionToolbar = memo(
               {semanticTimelineAction.disabled ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Workflow className="h-3.5 w-3.5" />}
               {semanticTimelineAction.label}
             </UiChipButton>}
+            {Boolean(remixScriptLabel) && <UiChipButton
+              className={TOOLBAR_TEXT_BUTTON_CLASS}
+              onClick={(event) => {
+                event.stopPropagation();
+                requestRemixScriptEditor(node.id);
+              }}
+            ><PenLine className="h-3.5 w-3.5" />{remixScriptLabel}</UiChipButton>}
+            {Boolean(remixScriptLabel && node.data.remixScriptRef) && <UiChipButton
+              className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40`}
+              disabled={node.data.remixBrollPlanStatus === 'running'}
+              onClick={(event) => {
+                event.stopPropagation();
+                canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'plan_broll' });
+              }}
+            >
+              {node.data.remixBrollPlanStatus === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              {node.data.remixBrollPlanStatus === 'running' ? '规划 B-roll 中…' : node.data.remixBrollPlanRef ? '重新规划 B-roll' : '规划 B-roll'}
+            </UiChipButton>}
+            {missingPrimaryVisualEvents.length > 0 && remixStoryNode && <UiChipButton
+              className={TOOLBAR_TEXT_BUTTON_CLASS}
+              onClick={(event) => {
+                event.stopPropagation();
+                const store = useCanvasStore.getState();
+                const script = store.nodes.find((candidate) => candidate.id === node.id);
+                if (!script) return;
+                const eventIds = missingPrimaryVisualEvents.map((item) => item.id);
+                const created = createPrimaryVisualNodes(store, node.id, remixStoryNode.id, eventIds);
+                if (created.length) requestFocusNode(created[0]);
+              }}
+            ><Film className="h-3.5 w-3.5" />创建主画面节点</UiChipButton>}
+            {remixVisualNeedsBinding && remixVisualRole && <UiChipButton
+              className={TOOLBAR_TEXT_BUTTON_CLASS}
+              onClick={(event) => {
+                event.stopPropagation();
+                const project = readUrl().project;
+                const visual = useCanvasStore.getState().nodes.find((candidate) => candidate.id === node.id);
+                if (!project || !visual) { toast.error('无法找到画面素材'); return; }
+                void attachBrollVisualMedia(project, visual, attachRemixMedia, useCanvasStore.getState().updateNodeData, remixVisualRole)
+                  .then((attachment) => attachment.commit())
+                  .catch((cause) => toast.error(cause instanceof Error ? cause.message : '关联画面失败'));
+              }}
+            ><Link2 className="h-3.5 w-3.5" />关联画面</UiChipButton>}
             {(isAudioNode(node) || node.type === CANVAS_NODE_TYPES.videoStory || node.type === CANVAS_NODE_TYPES.script || node.type === CANVAS_NODE_TYPES.semanticTimeline || node.type === CANVAS_NODE_TYPES.videoCompose) && (
               <>
                 {(isAudioNode(node) ? [
@@ -1863,21 +1850,17 @@ export const NodeActionToolbar = memo(
                   ]
                   : node.type === CANVAS_NODE_TYPES.videoStory ? [{ action: 'analyze', label: '重新分析', Icon: Film }]
                   : node.type === CANVAS_NODE_TYPES.script ? remixScriptLabel ? [
-                    ...(!remixJourneyBlocksScriptDownstream && node.data.remixScriptRef
-                      ? [{ action: 'edit_script', label: '编辑改编脚本', Icon: PenLine }]
-                      : []),
                     ...(Array.isArray((node.data.remixScriptDraft as { segments?: unknown } | undefined)?.segments)
                       && (node.data.remixScriptDraft as { segments: unknown[] }).segments.length > 0
-                      ? (!remixJourneyBlocksScriptDownstream && remixJourneyStep?.action === 'create_timeline'
-                        ? [{ action: 'create_timeline', label: '生成表演时间轴', Icon: Workflow }] : [])
+                      ? (node.data.remixScriptRef ? [{ action: 'create_timeline', label: '生成表演时间轴', Icon: Workflow }] : [])
                       : [
-                    ...(!remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'create_timeline'
+                    ...(remixScriptState?.nextAction === 'create_timeline'
                       ? [{ action: 'create_timeline', label: '生成语义时间轴', Icon: Workflow }]
-                      : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'view_alignment'
+                      : remixScriptState?.nextAction === 'view_alignment'
                       ? [{ action: 'view_alignment', label: '查看对齐进度', Icon: Workflow }]
-                      : !remixJourneyBlocksScriptDownstream && remixScriptState?.nextAction === 'align_narration'
+                      : remixScriptState?.nextAction === 'align_narration'
                       ? [{ action: 'align_narration', label: '按脚本对齐', Icon: Workflow }]
-                      : !remixJourneyBlocksScriptDownstream && node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
+                      : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
                     ]),
                   ] : []
                   : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'create_compose', label: '生成合成清单', Icon: Film }]
@@ -1898,8 +1881,6 @@ export const NodeActionToolbar = memo(
                     } else if (action === 'create_narration' || action === 'create_timeline') {
                       try { action === 'create_narration' ? createNarrationFromScript(node.id) : createTimelineFromScript(node.id); }
                       catch (cause) { toast.error(cause instanceof Error ? cause.message : '无法创建后续节点'); }
-                    } else if (action === 'edit_script') {
-                      requestRemixScriptEditor(node.id);
                     } else {
                       canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: action as 'open_media' | 'analyze' | 'compile' | 'prepare_compose' | 'create_compose' });
                     }

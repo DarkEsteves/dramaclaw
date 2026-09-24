@@ -78,7 +78,7 @@ vi.mock('@/api/remix', async (importOriginal) => {
     }),
     attachRemixMedia: vi.fn(async (_project: string, path: string) => path.endsWith('.wav')
       ? { media_kind: 'audio', media_path: path, media_hash: 'b'.repeat(64), url: `/api/v1/projects/demo/media/${path.split('/').pop()}`, duration_us: 2_000_000, has_audio: true, size: 10 }
-      : { media_kind: 'image', media_path: path, media_hash: 'c'.repeat(64), url: `/api/v1/projects/demo/media/${path.split('/').pop()}`, duration_us: 0, has_audio: false, size: 10 }),
+      : { media_kind: path.endsWith('.mp4') ? 'video' : 'image', media_path: path, media_hash: 'c'.repeat(64), url: `/api/v1/projects/demo/media/${path.split('/').pop()}`, duration_us: 0, has_audio: false, size: 10 }),
     submitRemixProcessAction: vi.fn(async (_project: string, request: Record<string, unknown>) => {
       const action = String(request.action);
       const operationId = `${action}-operation`;
@@ -198,16 +198,24 @@ describe('native canvas remix journey integration', () => {
     Object.defineProperty(window, 'DOMMatrixReadOnly', { configurable: true, value: class { m22 = 1 } });
   });
 
-  it('keeps the reference video role implicit in the toolbar', () => {
+  it('shows node actions without a remix journey button', () => {
     render(<JourneyCanvas />);
-    expect(screen.getByRole('button', { name: '继续改编 · 分析参考视频' })).toBeVisible();
+    expect(screen.getByRole('button', { name: /分析原片/ })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '视频用途' })).not.toBeInTheDocument();
   });
 
-  it('clicks the real toolbar and nodes from uploaded reference through manual audio to render submission', async () => {
+  it('keeps original video analysis available outside the remix reference flow', () => {
+    useCanvasStore.getState().updateNodeData('reference', { remixRole: undefined });
+    render(<JourneyCanvas />);
+    expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /分析原片/ })).toBeVisible();
+  });
+
+  it('clicks node actions from uploaded reference through manual audio to a compose manifest', async () => {
     render(<JourneyCanvas />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 分析参考视频' }));
+    fireEvent.click(await screen.findByRole('button', { name: /分析原片/ }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
 
     fireEvent.click(await screen.findByRole('button', { name: '生成改编脚本' }));
@@ -232,10 +240,10 @@ describe('native canvas remix journey integration', () => {
     await waitFor(() => expect((useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')?.data.remixScriptRef as { revision?: number }).revision).toBe(3));
 
     act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
-    await waitFor(() => expect(screen.queryByRole('button', { name: '继续改编 · 补齐必需 B-roll' })).toBeNull());
+    expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 规划 B-roll' }));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 创建旁白节点' }));
+    fireEvent.click(await screen.findByRole('button', { name: '规划 B-roll' }));
+    fireEvent.click(await screen.findByRole('button', { name: '制作配音' }));
 
     const audio = useCanvasStore.getState().nodes.find((node) => node.type === 'audioNode')!;
     const voice = new File(['wav'], 'voice.wav', { type: 'audio/wav' });
@@ -251,17 +259,16 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     act(() => useCanvasStore.getState().setSelectedNode(audio.id));
 
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 按脚本对齐旁白' }));
+    fireEvent.click(await screen.findByRole('button', { name: '按脚本对齐' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'transcriptNode')?.data.status).toBe('completed'));
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 生成语义时间轴' }));
+    fireEvent.click(await screen.findByRole('button', { name: '生成语义时间轴' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')?.data.artifactRef).toBeTruthy());
     const timelineNode = useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')!;
     act(() => useCanvasStore.getState().setSelectedNode(timelineNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 创建成片清单' }));
+    fireEvent.click(await screen.findByRole('button', { name: '生成合成清单' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')?.data.remixManifestLoadState).toBe('ready'));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 导出 MP4' }));
-    await waitFor(() => expect(backend.render).toHaveBeenCalledWith(expect.objectContaining({ manifestRef: expect.any(Object), nodeRevision: expect.any(Number) })));
+    expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
   });
 
   it('opens the script editor when the next step is to complete required B-roll', async () => {
@@ -325,9 +332,9 @@ describe('native canvas remix journey integration', () => {
     expect(screen.getByText('2 个事件')).toBeInTheDocument();
     expect(screen.getByText('B-roll 1/2')).toBeInTheDocument();
     expect(screen.getByText('下一步：补齐必需 B-roll')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '制作配音' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '编辑改编脚本' })).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
+    expect(screen.getByRole('button', { name: '编辑改编脚本' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
 
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '生成 产品登场 图片素材' }));
@@ -347,9 +354,20 @@ describe('native canvas remix journey integration', () => {
     expect(screen.getByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     act(() => useCanvasStore.getState().setSelectedNode('script'));
-    fireEvent.click(await screen.findByRole('button', { name: '继续改编 · 补齐必需 B-roll' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     expect(backend.submit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    fireEvent.click(await screen.findByRole('button', { name: '创建主画面节点' }));
+    const primary = useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'primary')!;
+    expect(primary.data.displayName).toContain('主画面 · 产品登场');
+    act(() => useCanvasStore.getState().setSelectedNode('script'));
+    expect(screen.queryByRole('button', { name: '创建主画面节点' })).not.toBeInTheDocument();
+    act(() => useCanvasStore.getState().setSelectedNode(primary.id));
+    act(() => useCanvasStore.getState().updateNodeData(primary.id, { videoUrl: '/api/v1/projects/demo/media/primary.mp4' }));
+    fireEvent.click(await screen.findByRole('button', { name: '关联画面' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === primary.id)?.data.remixMedia)
+      .toMatchObject({ media_kind: 'video', media_hash: 'c'.repeat(64) }));
   });
 
   it('shows clear empty states in an adaptation script summary', async () => {
