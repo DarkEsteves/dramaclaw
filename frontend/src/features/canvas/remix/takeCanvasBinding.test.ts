@@ -34,6 +34,16 @@ describe('performance take canvas binding', () => {
     expect(nodes.slice(1).map((item) => item.data.remixSegmentId)).toEqual(['segment-1', 'segment-2', 'segment-1']);
   });
 
+  it('names a shared person reference for the speaker instead of one segment', () => {
+    const addNode = vi.fn(() => 'shared-person');
+    createPerformanceReferenceNode({ nodes: [node('script', 'scriptNode', {})], addNode,
+      addEdge: vi.fn(() => 'edge'), setSelectedNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 0, y: 0 })) },
+    'script', 'person', 'generate', { id: 'segment-1', start: 0, end: 4, speaker: '男', source: 'speaking_video' }, 0, 'speaker');
+    expect(addNode).toHaveBeenCalledWith('imageGenNode', expect.anything(), expect.objectContaining({
+      displayName: '生成人物参考 · 男（共用）', remixRole: 'identity', remixIdentityKind: 'person',
+    }));
+  });
+
   it('labels bound legacy reference nodes while preserving user-edited titles', () => {
     const nodes = [
       node('script', 'scriptNode', {}),

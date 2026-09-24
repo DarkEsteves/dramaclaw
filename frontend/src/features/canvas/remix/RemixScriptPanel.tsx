@@ -21,9 +21,10 @@ interface Props {
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
   performanceNodes?: Array<{ id: string; label: string; kind: 'video' | 'audio'; mediaRevision?: string }>;
   referenceNodes?: Array<{ id: string; label: string }>;
+  personReferenceNodes?: Array<{ id: string; label: string }>;
   voiceNodes?: Array<{ id: string; label: string }>;
   motionNodes?: Array<{ id: string; label: string }>;
-  onCreateReference?: (kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number) => string;
+  onCreateReference?: (kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number, scope?: 'segment' | 'speaker') => string;
   onConnectReference?: (nodeId: string) => void;
   onCreateTake?: (segment: RemixPerformanceSegment) => string;
   onAttachTake?: (nodeId: string, source: RemixPerformanceSegment['source']) => Promise<string>;
@@ -46,7 +47,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], personReferenceNodes = [], voiceNodes = [], motionNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -208,6 +209,21 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     if (!id) return;
     updateSegment(segment.id, { [`${kind}NodeId`]: id, takeNodeId: undefined, takeMediaRevision: undefined });
   };
+  const applyPersonToSpeaker = (speaker: string, nodeId: string) => {
+    if (nodeId) onConnectReference?.(nodeId);
+    const latest = draftRef.current;
+    changeDraft({ ...latest, segments: latest.segments?.map((segment) => segment.source === 'speaking_video' && segment.speaker.trim() === speaker
+      && segment.personNodeId !== (nodeId || undefined)
+      ? { ...segment, personNodeId: nodeId || undefined, takeNodeId: undefined, takeMediaRevision: undefined }
+      : segment) }, 'media-binding');
+  };
+  const createSpeakerReference = (speaker: string, mode: 'upload' | 'generate') => {
+    const segments = draftRef.current.segments ?? [];
+    const index = segments.findIndex((segment) => segment.source === 'speaking_video' && segment.speaker.trim() === speaker);
+    if (index < 0) return;
+    const id = onCreateReference?.('person', mode, segments[index], index, 'speaker');
+    if (id) applyPersonToSpeaker(speaker, id);
+  };
   const chooseTake = async (segment: RemixPerformanceSegment, nodeId: string) => {
     updateSegment(segment.id, { takeNodeId: nodeId || undefined, takeMediaRevision: undefined });
     if (!nodeId || !onAttachTake) return;
@@ -241,6 +257,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
   const speakerSegments = seedPerformanceSegments(draft.dialogue);
   const canSplitSpeakers = speakerSegments.length > 0 && speakerSegments.every((segment) => segment.source === 'speaking_video');
   const singleVoiceover = draft.segments?.length === 1 && draft.segments[0].source === 'voiceover';
+  const speakerGroups = new Map<string, RemixPerformanceSegment[]>();
+  for (const segment of draft.segments ?? []) {
+    if (segment.source !== 'speaking_video') continue;
+    const speaker = segment.speaker.trim();
+    speakerGroups.set(speaker, [...(speakerGroups.get(speaker) ?? []), segment]);
+  }
+  const sharedSpeakerGroups = [...speakerGroups].filter(([, segments]) => segments.length > 1);
+  const repeatedSpeakers = new Set(sharedSpeakerGroups.map(([speaker]) => speaker));
   const primaryVisualAction = missingPrimaryVisualCount > 0 && onCreatePrimaryVisuals && <div className="mt-3 border-t border-white/[0.08] pt-3">
     <p className="text-text-muted">{missingPrimaryVisualCount} 个台词事件还没有可用画面。{draft.segments?.length ? '创建后，请在旁白段落中选择要使用的主画面。' : '使用音频节点配音时，可为这些事件准备主画面。'}画面在新节点中生成。</p>
     <button type="button" onClick={() => { if (onCreatePrimaryVisuals()) onClose(); }} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-2`}>创建缺少的主画面视频节点</button>
@@ -276,6 +300,25 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
           </div>
           {primaryVisualAction}
         </div>}
+        {!!sharedSpeakerGroups.length && <div className="mt-3 rounded-[10px] border border-white/[0.08] bg-surface-field p-3">
+          <h4 className="font-medium text-text-dark">按角色设置人物参考</h4>
+          <p className="mt-1 text-text-muted">每个角色选一次，应用到这个角色的所有口播段落。单段需要不同人物时，可在下方单独调整。更换参考后，受影响的口播片段需要重新制作。</p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">{sharedSpeakerGroups.map(([speaker, segments]) => {
+            const ids = segments.map((segment) => segment.personNodeId ?? '');
+            const uniform = ids.every((id) => id === ids[0]);
+            const selected = uniform ? ids[0] : '__mixed__';
+            const personChoices = referenceNodes.filter((node) => personReferenceNodes.some((candidate) => candidate.id === node.id)
+              || ids.includes(node.id));
+            return <div key={speaker} className="rounded-[8px] border border-white/[0.08] bg-white/[0.03] p-3">
+              <div className="flex items-center justify-between gap-2"><strong className="text-text-dark">{speaker}</strong><span className="text-text-muted">{segments.length} 段口播</span></div>
+              <label className="mt-2 block">全部段落的人物参考<select aria-label={`${speaker} 全部口播段落的人物参考`} value={selected} onChange={(event) => applyPersonToSpeaker(speaker, event.target.value)} className={fieldClass}>
+                {selected === '__mixed__' && <option value="__mixed__" disabled>各段不一致 · 选择后统一</option>}
+                <option value="">不指定</option>{personChoices.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+              </select></label>
+              {onCreateReference && <div className="mt-2 flex flex-wrap gap-1"><button type="button" onClick={() => createSpeakerReference(speaker, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传人物参考 · {speaker}</button><button type="button" onClick={() => createSpeakerReference(speaker, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成人物参考 · {speaker}</button></div>}
+            </div>;
+          })}</div>
+        </div>}
         {draft.segments?.map((segment, index) => {
           const text = Array.from(draft.dialogue).slice(segment.start, segment.end).join('').trim();
           const isWhole = segment.start === 0 && segment.end === Array.from(draft.dialogue).length;
@@ -299,7 +342,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
               <summary className="cursor-pointer text-text-dark">更换人物、产品和场景（可选）{referenceCount ? ` · 已选 ${referenceCount} 项参考` : ''}</summary>
               <p className="mt-1 text-text-muted">为新视频提供参考素材；不选则由视频节点中的提示词决定画面。</p>
               <div className="mt-2 grid gap-2 sm:grid-cols-3">{([['personNodeId', '人物', 'person'], ['productNodeId', '产品', 'product'], ['settingNodeId', '场景', 'setting']] as const).map(([key, label, kind]) => <div key={key}>
-                <label>{label}参考<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+                <label>{kind === 'person' && repeatedSpeakers.has(segment.speaker.trim()) ? '本段人物参考（可单独调整）' : `${label}参考`}<select aria-label={`${segment.speaker} ${label}参考`} value={segment[key] ?? ''} onChange={(event) => chooseReference(segment, key, event.target.value)} className={fieldClass}><option value="">不指定</option>{referenceNodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
                 <div className="mt-1 flex gap-1"><button type="button" onClick={() => createReference(segment, index, kind, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>上传</button><button type="button" onClick={() => createReference(segment, index, kind, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>生成</button></div>
               </div>)}</div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">

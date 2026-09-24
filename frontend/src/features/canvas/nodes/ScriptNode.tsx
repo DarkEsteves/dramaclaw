@@ -545,6 +545,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const performanceReferenceNodes = canvasNodes.filter((node) => isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))
     .filter((node) => node.id !== id && node.data.remixRole !== 'reference' && node.data.remixRole !== 'performance')
     .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
+  const performancePersonReferenceNodes = canvasNodes.filter((node) => node.data.remixRole === 'identity' && node.data.remixIdentityKind === 'person')
+    .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const performanceVoiceNodes = canvasNodes.filter((node) => isAudioNode(node) && Boolean(node.data.audioUrl))
     .map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const performanceMotionNodes = canvasNodes.filter((node) => isVideoNode(node) && Boolean(node.data.videoUrl))
@@ -554,8 +556,8 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (!state.edges.some((edge) => edge.source === nodeId && edge.target === id) && !state.addEdge(nodeId, id)) throw new Error('无法连接参考素材到脚本');
   }, [id]);
   const createPerformanceReference = useCallback((kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate',
-    segment: NonNullable<RemixScriptDraft['segments']>[number], segmentIndex: number) =>
-    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode, segment, segmentIndex), [id]);
+    segment: NonNullable<RemixScriptDraft['segments']>[number], segmentIndex: number, scope?: 'segment' | 'speaker') =>
+    createPerformanceReferenceNode(useCanvasStore.getState(), id, kind, mode, segment, segmentIndex, scope), [id]);
   const createPerformanceTake = useCallback((segment: NonNullable<RemixScriptDraft['segments']>[number]) => {
     const index = initialRemixDraft.segments?.findIndex((item) => item.id === segment.id) ?? -1;
     const observed = index >= 0 ? storyReferenceEvents[index] : undefined;
@@ -1155,6 +1157,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             visualNodes={remixVisualNodes}
             performanceNodes={performanceNodes}
             referenceNodes={performanceReferenceNodes}
+            personReferenceNodes={performancePersonReferenceNodes}
             voiceNodes={performanceVoiceNodes}
             motionNodes={performanceMotionNodes}
             onCreateReference={createPerformanceReference}

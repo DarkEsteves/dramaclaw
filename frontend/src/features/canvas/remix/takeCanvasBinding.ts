@@ -40,15 +40,17 @@ export function legacyPerformanceReferenceLabelPatches(nodes: CanvasNode[], edge
 }
 
 export function createPerformanceReferenceNode(store: Store, scriptId: string, kind: 'person' | 'product' | 'setting', mode: 'upload' | 'generate',
-  segment: RemixPerformanceSegment, segmentIndex: number) {
+  segment: RemixPerformanceSegment, segmentIndex: number, scope: 'segment' | 'speaker' = 'segment') {
   const label = { person: '人物', product: '产品', setting: '场景' }[kind];
   const type = mode === 'upload' ? CANVAS_NODE_TYPES.upload : CANVAS_NODE_TYPES.imageGen;
-  const title = referenceTitle(kind, mode, segment, segmentIndex);
+  const title = scope === 'speaker'
+    ? `${mode === 'upload' ? '上传' : '生成'}${label}参考 · ${segment.speaker.trim() || '未命名角色'}（共用）`
+    : referenceTitle(kind, mode, segment, segmentIndex);
   const copies = store.nodes.filter((node) => node.data.displayName === title
     || (typeof node.data.displayName === 'string' && node.data.displayName.startsWith(`${title} · `))).length;
   const id = store.addNode(type, store.findNodePosition(scriptId, 420, 300), {
     displayName: copies ? `${title} · ${copies + 1}` : title,
-    remixRole: 'identity', remixIdentityKind: kind, remixSegmentId: segment.id,
+    remixRole: 'identity', remixIdentityKind: kind, ...(scope === 'segment' ? { remixSegmentId: segment.id } : {}),
     ...(mode === 'generate' ? { prompt: `竖屏视频${label}视觉参考图，真实摄影质感，不要文字、水印或标志。` } : {}),
   });
   store.addEdge(id, scriptId);

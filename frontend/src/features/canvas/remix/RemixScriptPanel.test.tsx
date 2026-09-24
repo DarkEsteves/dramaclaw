@@ -50,6 +50,50 @@ describe('RemixScriptPanel', () => {
     expect(onCreateReference).toHaveBeenNthCalledWith(2, 'person', 'generate', second, 1);
   });
 
+  it('applies one person reference to every speaking segment of the same character', () => {
+    const onDraftChange = vi.fn();
+    const onConnectReference = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n女：好\n男：再见', selections: [], segments: [
+      { id: 'male-1', start: 2, end: 4, speaker: '男', source: 'speaking_video', personNodeId: 'old-ref', takeNodeId: 'old-take', takeMediaRevision: 'a'.repeat(64) },
+      { id: 'female-1', start: 7, end: 8, speaker: '女', source: 'speaking_video', personNodeId: 'female-ref', takeNodeId: 'female-take', takeMediaRevision: 'b'.repeat(64) },
+      { id: 'male-2', start: 11, end: 13, speaker: '男', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[
+      { id: 'male-ref', label: '男角色参考' }, { id: 'female-ref', label: '女角色参考' },
+      { id: 'old-ref', label: '旧男角色参考' }, { id: 'product-ref', label: '产品参考' },
+    ]} personReferenceNodes={[{ id: 'male-ref', label: '男角色参考' }, { id: 'female-ref', label: '女角色参考' }]}
+      sfxNodes={[]} onConnectReference={onConnectReference} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    const characterSelect = screen.getByLabelText('男 全部口播段落的人物参考');
+    expect(Array.from(characterSelect.querySelectorAll('option')).map((option) => option.textContent)).not.toContain('产品参考');
+    expect(characterSelect).toHaveValue('__mixed__');
+    fireEvent.change(characterSelect, { target: { value: 'male-ref' } });
+
+    expect(onConnectReference).toHaveBeenCalledExactlyOnceWith('male-ref');
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
+      expect.objectContaining({ id: 'male-1', personNodeId: 'male-ref', takeNodeId: undefined, takeMediaRevision: undefined }),
+      expect.objectContaining({ id: 'female-1', personNodeId: 'female-ref', takeNodeId: 'female-take', takeMediaRevision: 'b'.repeat(64) }),
+      expect.objectContaining({ id: 'male-2', personNodeId: 'male-ref' }),
+    ] }), 'media-binding');
+  });
+
+  it('creates one shared person node for a repeated character', () => {
+    const onDraftChange = vi.fn();
+    const onCreateReference = vi.fn(() => 'shared-ref');
+    const first = { id: 'male-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好\n男：再见', selections: [], segments: [
+      first, { id: 'male-2', start: 7, end: 9, speaker: '男', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      onCreateReference={onCreateReference} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '生成人物参考 · 男' }));
+
+    expect(onCreateReference).toHaveBeenCalledExactlyOnceWith('person', 'generate', first, 0, 'speaker');
+    expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
+      expect.objectContaining({ id: 'male-1', personNodeId: 'shared-ref' }),
+      expect.objectContaining({ id: 'male-2', personNodeId: 'shared-ref' }),
+    ] }), 'media-binding');
+  });
+
   it('explains the main picture decision without repeating the script or showing character offsets', () => {
     const dialogue = '你每天喝什么？我喝咖啡。';
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue, selections: [], segments: [
