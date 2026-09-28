@@ -36,7 +36,18 @@ describe('RemixScriptPanel', () => {
       performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
       sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
     expect(screen.getByText('视频已生成，待绑定')).toBeVisible();
+    expect(screen.getByText('视频已生成，点击「检查并绑定素材」将它用于这段台词。')).toBeVisible();
     expect(screen.queryByText('尚未完成片段')).not.toBeInTheDocument();
+  });
+
+  it('points an existing unfinished take to its canvas node instead of suggesting another node', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '女：你好', selections: [], segments: [
+      { id: 'one', start: 2, end: 4, speaker: '女', source: 'speaking_video', takeNodeId: 'take' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
+      performanceNodes={[{ id: 'take', label: '口播视频 · 女', kind: 'video', hasOutput: false }]}
+      sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    expect(screen.getByText('已选口播视频节点，请到画布中生成视频；无需再次创建节点。')).toBeVisible();
+    expect(screen.queryByText(/此按钮会在画布创建节点/)).not.toBeInTheDocument();
   });
 
   it('does not call an old media hash bound after the video output is removed', () => {
@@ -204,7 +215,7 @@ describe('RemixScriptPanel', () => {
     fireEvent.click(screen.getByText(/参考素材（可选）/));
     expect(references).toHaveAttribute('open');
     expect(screen.getByText('未使用参考素材')).toBeVisible();
-    expect(screen.getByText(/此按钮会在画布创建节点，生成视频请到该节点操作/)).toBeVisible();
+    expect(screen.getByText('点击「创建口播视频节点」会在画布创建节点；视频在新节点中生成。')).toBeVisible();
   });
 
   it('does not treat an unlabelled script as a confirmed voiceover and lets the user choose a speaking video', () => {

@@ -351,6 +351,16 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
               : takeHasOutput
                 ? `${segment.source === 'voiceover' ? '音频' : '视频'}已生成，待绑定`
                 : `${segment.source === 'voiceover' ? '音频' : '视频'}尚未生成`;
+          const takeNodeLabel = segment.source === 'voiceover' ? '旁白节点'
+            : segment.source === 'original_sound' ? '原声上传节点' : '口播视频节点';
+          const takeMediaLabel = segment.source === 'voiceover' ? '音频' : '视频';
+          const takeAction = segment.source === 'original_sound' ? '上传' : '生成';
+          const takeHint = takeIsBound ? null
+            : !segment.takeNodeId
+              ? `点击「创建${takeNodeLabel}」会在画布创建节点；${takeMediaLabel}在新节点中${takeAction}。`
+              : takeHasOutput
+                ? `${takeMediaLabel}已生成，点击「检查并绑定素材」将它用于这段台词。`
+                : `已选${takeNodeLabel}，请到画布中${takeAction}${takeMediaLabel}；无需再次创建节点。`;
           const referenceCount = referenceBindingsForSegment(segment).length;
           const modeHint = segment.source === 'speaking_video'
             ? '人物在视频里说这段台词，成片使用视频自带的声音。'
@@ -394,7 +404,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
                 {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
                 <span className={takeIsBound ? 'text-emerald-300' : 'text-text-muted'}>{takeStatus}</span>
               </div>
-              <p className="mt-1 text-text-muted">此按钮会在画布创建节点，生成{segment.source === 'voiceover' ? '音频' : '视频'}请到该节点操作。</p>
+              {takeHint && <p className="mt-1 text-text-muted">{takeHint}</p>}
             </div>
           </div>;
         })}
