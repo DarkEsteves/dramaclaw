@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/api/remix', () => ({
@@ -27,6 +27,40 @@ describe('RemixScriptPanel', () => {
     expect(broll).toHaveTextContent('待规划 · 1 个台词事件');
     fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
     expect(onPlanBroll).toHaveBeenCalledOnce();
+  });
+
+  it('calls an existing generated video ready to bind rather than unfinished', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'one', start: 2, end: 4, speaker: '男', source: 'speaking_video', takeNodeId: 'take' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
+      performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
+      sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    expect(screen.getByText('视频已生成，待绑定')).toBeVisible();
+    expect(screen.queryByText('尚未完成片段')).not.toBeInTheDocument();
+  });
+
+  it('does not call an old media hash bound after the video output is removed', () => {
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'one', start: 2, end: 4, speaker: '男', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64) },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
+      performanceNodes={[{ id: 'take', label: '口播', kind: 'video', hasOutput: false, mediaRevision: 'a'.repeat(64) }]}
+      sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
+    expect(screen.getByText('视频尚未生成')).toBeVisible();
+    expect(screen.queryByText('素材已绑定')).not.toBeInTheDocument();
+  });
+
+  it('keeps a valid binding visible while rechecking the same video', async () => {
+    const onDraftChange = vi.fn();
+    const onAttachTake = vi.fn(async () => 'a'.repeat(64));
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'one', start: 2, end: 4, speaker: '男', source: 'speaking_video', takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64) },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
+      performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
+      sfxNodes={[]} onAttachTake={onAttachTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查并绑定素材' })); });
+    expect(onAttachTake).toHaveBeenCalledOnce();
+    expect(screen.getByText('素材已绑定')).toBeVisible();
+    expect(onDraftChange).not.toHaveBeenCalled();
   });
 
   it('applies arbitrary references from one segment to explicitly selected segments', () => {

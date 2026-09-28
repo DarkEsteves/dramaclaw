@@ -89,7 +89,7 @@ import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPl
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
-import { saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
+import { canRecordRemixScriptSave, latestWritableRemixScriptRef, saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
 import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
 import { connectedBlueprintSources, legacySuggestBlueprintRules, suggestBlueprintRules } from '@/features/canvas/remix/blueprintModel';
 import type { ReferenceEvent } from '@/features/canvas/remix/ReferenceEventList';
@@ -469,7 +469,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     if (!blueprintPanelRef.current) throw new Error('当前脚本的改编规则尚未准备好。');
     return blueprintPanelRef.current.ensureSaved();
   }, []);
-  const savedRemixRef = remixRef(data.remixScriptRef) ?? remixRef(data.remixScriptLastSavedRef);
+  const savedRemixRef = latestWritableRemixScriptRef(remixRef(data.remixScriptRef), remixRef(data.remixScriptLastSavedRef));
   const currentScriptNode = canvasNodes.find((node) => node.id === id);
   const primaryEventsWithoutNodes = upstreamStory && currentScriptNode
     ? primaryVisualEventsWithoutNodes(currentScriptNode, canvasNodes, canvasEdges) : [];
@@ -538,6 +538,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   const remixSfxNodes = upstreamNodes.filter((node) => node.type === 'audioNode' && node.data.remixRole === 'sfx').map((node) => ({ id: node.id, label: String(node.data.displayName || node.id) }));
   const performanceNodes = canvasNodes.filter((node) => isVideoNode(node) || isAudioNode(node)).map((node) => ({
     id: node.id, label: String(node.data.displayName || node.id), kind: isAudioNode(node) ? 'audio' as const : 'video' as const,
+    hasOutput: Boolean(isAudioNode(node) ? node.data.audioUrl : node.data.videoUrl),
     mediaRevision: typeof node.data.remixMedia === 'object' && node.data.remixMedia && 'media_hash' in node.data.remixMedia
       ? String(node.data.remixMedia.media_hash) : undefined,
   }));
@@ -621,13 +622,15 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       const currentNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
       const savedBlueprintRef = remixRef(currentNode?.data.referenceBlueprintRef) ?? blueprintRef;
       const branchRef = savedBlueprintRef ?? (upstreamStory ? await ensureBranchBlueprint() : null);
-      const currentRef = remixRef(currentNode?.data.remixScriptRef) ?? remixRef(currentNode?.data.remixScriptLastSavedRef);
+      const currentRef = latestWritableRemixScriptRef(remixRef(currentNode?.data.remixScriptRef), remixRef(currentNode?.data.remixScriptLastSavedRef));
       const carryBrollPlan = Boolean(
         remixRef(currentNode?.data.remixBrollPlanRef)
         && sameRemixRef(remixRef(currentNode?.data.remixBrollScriptRef), currentRef),
       );
       const nextRef = await saveRemixScriptArtifact(project, nextDraft, currentRef, branchRef);
       const latestNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
+      if (!latestNode || !canRecordRemixScriptSave(currentRef, remixRef(latestNode.data.remixScriptRef),
+        remixRef(latestNode.data.remixScriptLastSavedRef), nextRef)) return;
       const draftIsCurrent = latestNode?.data.remixScriptDraft === nextDraft;
       useCanvasStore.getState().updateNodeData(id, {
         ...(draftIsCurrent ? { remixScriptRef: nextRef } : {}),
@@ -690,9 +693,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       takeRetryGateRef.current.recordSuccess();
       const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
         const current = useCanvasStore.getState().nodes.find((node) => node.id === id);
-        const currentRef = remixRef(current?.data.remixScriptRef);
+        const activeRef = remixRef(current?.data.remixScriptRef);
+        const currentRef = latestWritableRemixScriptRef(activeRef, remixRef(current?.data.remixScriptLastSavedRef));
         const latest = current?.data.remixScriptDraft as RemixScriptDraft | undefined;
-        if (!currentRef || !latest?.segments?.some((segment) => segment.id === pending.id
+        if (!activeRef || !currentRef || !latest?.segments?.some((segment) => segment.id === pending.id
           && (pendingTake ? segment.takeNodeId === sourceId && segment.takeMediaRevision !== revision
             : segment.primaryNodeId === sourceId && segment.primaryMediaRevision !== revision))) return;
         const next = { ...latest, segments: latest.segments.map((segment) => segment.id === pending.id
@@ -700,10 +704,16 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         const blueprint = remixRef(current?.data.referenceBlueprintRef) ?? blueprintRef;
         const nextRef = await saveRemixScriptArtifact(project, next, currentRef, blueprint);
         const after = useCanvasStore.getState().nodes.find((node) => node.id === id);
-        if (!sameRemixRef(remixRef(after?.data.remixScriptRef), currentRef)) return;
-        applyRemixInvalidation(id, 'media_binding');
-        useCanvasStore.getState().updateNodeData(id, { remixScriptDraft: next, remixScriptRef: nextRef, remixScriptLastSavedRef: nextRef,
-          ...(sameRemixRef(remixRef(current?.data.remixBrollScriptRef), currentRef) ? { remixBrollScriptRef: nextRef } : {}) });
+        if (!after || !canRecordRemixScriptSave(currentRef, remixRef(after.data.remixScriptRef),
+          remixRef(after.data.remixScriptLastSavedRef), nextRef)) return;
+        const draftIsCurrent = sameRemixRef(remixRef(after.data.remixScriptRef), activeRef)
+          && after.data.remixScriptDraft === latest;
+        if (draftIsCurrent) applyRemixInvalidation(id, 'media_binding');
+        useCanvasStore.getState().updateNodeData(id, {
+          ...(draftIsCurrent ? { remixScriptDraft: next, remixScriptRef: nextRef } : {}),
+          remixScriptLastSavedRef: nextRef,
+          ...(draftIsCurrent && sameRemixRef(remixRef(current?.data.remixBrollScriptRef), activeRef) ? { remixBrollScriptRef: nextRef } : {}),
+        });
       });
       remixAutoSaveQueueRef.current = operation;
       return operation;
@@ -734,27 +744,29 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     pendingBrollSyncRef.current = syncKey;
     const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
       const currentNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-      const currentRef = remixRef(currentNode?.data.remixScriptRef);
+      const activeRef = remixRef(currentNode?.data.remixScriptRef);
+      const currentRef = latestWritableRemixScriptRef(activeRef, remixRef(currentNode?.data.remixScriptLastSavedRef));
       const currentDraft = currentNode?.data.remixScriptDraft as RemixScriptDraft | undefined;
-      if (!currentRef || !currentDraft) return;
+      if (!activeRef || !currentRef || !currentDraft) return;
       const nextDraft = await resolvePendingBrollDraft(currentDraft, readyVisualIds, attachRemixVisual);
       if (!nextDraft) return;
       const currentBlueprintRef = remixRef(currentNode?.data.referenceBlueprintRef) ?? blueprintRef;
       const carryBrollPlan = Boolean(
         remixRef(currentNode?.data.remixBrollPlanRef)
-        && sameRemixRef(remixRef(currentNode?.data.remixBrollScriptRef), currentRef),
+        && sameRemixRef(remixRef(currentNode?.data.remixBrollScriptRef), activeRef),
       );
       const nextRef = await saveRemixScriptArtifact(project, nextDraft, currentRef, currentBlueprintRef);
       const latestNode = useCanvasStore.getState().nodes.find((candidate) => candidate.id === id);
-      if (!sameRemixRef(remixRef(latestNode?.data.remixScriptRef), currentRef)) return;
-      applyRemixInvalidation(id, 'media_binding');
+      if (!latestNode || !canRecordRemixScriptSave(currentRef, remixRef(latestNode.data.remixScriptRef),
+        remixRef(latestNode.data.remixScriptLastSavedRef), nextRef)) return;
+      const draftIsCurrent = sameRemixRef(remixRef(latestNode.data.remixScriptRef), activeRef)
+        && latestNode.data.remixScriptDraft === currentDraft;
+      if (draftIsCurrent) applyRemixInvalidation(id, 'media_binding');
       useCanvasStore.getState().updateNodeData(id, {
-        remixScriptDraft: nextDraft,
-        remixScriptRef: nextRef,
+        ...(draftIsCurrent ? { remixScriptDraft: nextDraft, remixScriptRef: nextRef } : {}),
         remixScriptLastSavedRef: nextRef,
-        ...(carryBrollPlan ? { remixBrollScriptRef: nextRef } : {}),
-        remixBrollOperationId: null,
-        remixBrollOperationScriptRef: null,
+        ...(draftIsCurrent && carryBrollPlan ? { remixBrollScriptRef: nextRef } : {}),
+        ...(draftIsCurrent ? { remixBrollOperationId: null, remixBrollOperationScriptRef: null } : {}),
       });
     });
     remixAutoSaveQueueRef.current = operation;

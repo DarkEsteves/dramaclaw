@@ -2,6 +2,18 @@ import { createRemixArtifact, type RemixArtifactRef } from '@/api/remix';
 import { apiCall } from '@/api/client';
 import { buildRemixScriptPayload, type RemixScriptDraft } from './remixScriptModel';
 
+export function latestWritableRemixScriptRef(active: RemixArtifactRef | null, lastSaved: RemixArtifactRef | null): RemixArtifactRef | null {
+  if (!active) return lastSaved;
+  if (!lastSaved || active.artifactId !== lastSaved.artifactId) return active;
+  return active.revision >= lastSaved.revision ? active : lastSaved;
+}
+
+export function canRecordRemixScriptSave(base: RemixArtifactRef | null, active: RemixArtifactRef | null,
+  lastSaved: RemixArtifactRef | null, saved: RemixArtifactRef): boolean {
+  const latest = latestWritableRemixScriptRef(active, lastSaved);
+  return base ? latest?.artifactId === base.artifactId && latest.revision <= saved.revision : !latest;
+}
+
 export async function saveRemixScriptArtifact(project: string, draft: RemixScriptDraft, existing: RemixArtifactRef | null, blueprint: RemixArtifactRef | null): Promise<RemixArtifactRef> {
   const nextRevision = (existing?.revision ?? 0) + 1;
   const payload = buildRemixScriptPayload(draft, nextRevision);

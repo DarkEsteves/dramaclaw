@@ -21,7 +21,7 @@ interface Props {
   generationRunning?: boolean;
   generationPersistsDraft?: boolean;
   visualNodes: Array<{ id: string; label: string; mediaRevision?: string }>;
-  performanceNodes?: Array<{ id: string; label: string; kind: 'video' | 'audio'; mediaRevision?: string }>;
+  performanceNodes?: Array<{ id: string; label: string; kind: 'video' | 'audio'; hasOutput?: boolean; mediaRevision?: string }>;
   referenceNodes?: ReferenceMediaNode[];
   onCreateReference?: (mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number) => string;
   onConnectReference?: (nodeId: string) => void;
@@ -255,14 +255,18 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
   };
   const chooseTake = async (segment: RemixPerformanceSegment, nodeId: string) => {
     const referenceBindings = nodeId ? onResolveTakeReferences?.(nodeId, segment) : undefined;
-    const selected = { ...segment, takeNodeId: nodeId || undefined, takeMediaRevision: undefined,
+    const resolvedBindings = referenceBindings ?? referenceBindingsForSegment(segment);
+    const sameTake = segment.takeNodeId === nodeId && JSON.stringify(referenceBindingsForSegment(segment)) === JSON.stringify(resolvedBindings);
+    const selected = { ...segment, takeNodeId: nodeId || undefined,
+      takeMediaRevision: sameTake ? segment.takeMediaRevision : undefined,
       ...(referenceBindings ? { referenceBindings } : {}) };
-    updateSegment(segment.id, selected);
+    if (!sameTake) updateSegment(segment.id, selected);
     if (!nodeId || !onAttachTake) return;
     try {
       const revision = await onAttachTake(nodeId, segment.source, selected);
       const current = draftRef.current.segments?.find((item) => item.id === segment.id);
       if (current?.takeNodeId === nodeId && current.source === segment.source
+        && current.takeMediaRevision !== revision
         && JSON.stringify(referenceBindingsForSegment(current)) === JSON.stringify(referenceBindingsForSegment(selected)))
         updateSegment(segment.id, { takeMediaRevision: revision });
     } catch (cause) { setError(cause instanceof Error ? cause.message : '片段还未准备好，请生成后再试'); }
@@ -339,6 +343,14 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
           const text = spokenTextForSegment(draft.dialogue, segment).trim();
           const isWhole = segment.start === 0 && segment.end === Array.from(draft.dialogue).length;
           const choices = performanceNodes.filter((node) => node.kind === (segment.source === 'voiceover' ? 'audio' : 'video'));
+          const selectedTake = choices.find((node) => node.id === segment.takeNodeId);
+          const takeHasOutput = selectedTake?.hasOutput ?? Boolean(selectedTake?.mediaRevision);
+          const takeIsBound = Boolean(takeHasOutput && segment.takeMediaRevision && selectedTake?.mediaRevision === segment.takeMediaRevision);
+          const takeStatus = takeIsBound ? '素材已绑定'
+            : !segment.takeNodeId ? '尚未选择片段'
+              : takeHasOutput
+                ? `${segment.source === 'voiceover' ? '音频' : '视频'}已生成，待绑定`
+                : `${segment.source === 'voiceover' ? '音频' : '视频'}尚未生成`;
           const referenceCount = referenceBindingsForSegment(segment).length;
           const modeHint = segment.source === 'speaking_video'
             ? '人物在视频里说这段台词，成片使用视频自带的声音。'
@@ -375,12 +387,12 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
             </select></label>}
             <div className="mt-3 border-t border-white/[0.08] pt-3">
               <label>使用哪个{segment.source === 'voiceover' ? '音频' : '视频'}片段？<select aria-label={`${segment.speaker} 采用片段`} value={segment.takeNodeId ?? ''} onChange={(event) => void chooseTake(segment, event.target.value)} className={fieldClass}>
-                <option value="">尚未选择片段</option>{choices.map((node) => <option key={node.id} value={node.id}>{node.label}{node.mediaRevision ? '' : ' · 待完成'}</option>)}
+                <option value="">尚未选择片段</option>{choices.map((node) => <option key={node.id} value={node.id}>{node.label}{(node.hasOutput ?? Boolean(node.mediaRevision)) ? '' : ' · 待生成'}</option>)}
               </select></label>
               <div className="mt-2 flex flex-wrap items-center gap-2"><button type="button" onClick={() => createTake(segment)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{segment.source === 'voiceover' ? '创建旁白节点' : segment.source === 'original_sound' ? '创建原声上传节点' : '创建口播视频节点'}</button>
                 {singleVoiceover && <button type="button" onClick={() => updateSegment(segment.id, { source: 'speaking_video', speaker: '口播', takeNodeId: undefined, takeMediaRevision: undefined, primaryNodeId: undefined, primaryMediaRevision: undefined })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改成整段口播视频</button>}
                 {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
-                <span className={segment.takeMediaRevision ? 'text-emerald-300' : 'text-text-muted'}>{segment.takeMediaRevision ? '素材已绑定' : '尚未完成片段'}</span>
+                <span className={takeIsBound ? 'text-emerald-300' : 'text-text-muted'}>{takeStatus}</span>
               </div>
               <p className="mt-1 text-text-muted">此按钮会在画布创建节点，生成{segment.source === 'voiceover' ? '音频' : '视频'}请到该节点操作。</p>
             </div>
