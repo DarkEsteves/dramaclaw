@@ -83,7 +83,7 @@ import { useModelTaskAccess } from '@/lib/model-task-access';
 import { readUrl } from '@/lib/url-params';
 import { attachRemixMedia, type RemixArtifactRef } from '@/api/remix';
 import { attachBrollVisualMedia, createBrollVisualNode, createPrimaryVisualNodes } from '@/features/canvas/remix/brollCanvasBinding';
-import { attachPerformanceTakeMedia, boundPerformanceTakeMedia, createPerformanceReferenceNode, createPerformanceTakeNode, legacyPerformanceReferenceLabelPatches, performanceSourceUrl, takeBindingsCurrent, takeReferenceSnapshot, takeReferencesConnected, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
+import { attachPerformanceTakeMedia, boundPerformanceTakeMedia, createPerformanceAutoBindRetryGate, createPerformanceReferenceNode, createPerformanceTakeNode, legacyPerformanceReferenceLabelPatches, performanceSourceUrl, performanceTakeAutoBindKey, takeBindingsCurrent, takeReferenceSnapshot, takeReferencesConnected, takeReferencesCurrent } from '@/features/canvas/remix/takeCanvasBinding';
 import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPlanTask';
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
@@ -618,6 +618,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   }, [blueprintRef, ensureBranchBlueprint, id, upstreamStory]);
   const pendingBrollSyncRef = useRef<string | null>(null);
   const pendingTakeSyncRef = useRef<string | null>(null);
+  const takeRetryGateRef = useRef(createPerformanceAutoBindRetryGate());
   useEffect(() => {
     const project = readUrl().project;
     const activeScriptRef = remixRef(data.remixScriptRef);
@@ -640,6 +641,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
     const pending = pendingTake ?? pendingPrimary;
     const sourceId = pendingTake?.takeNodeId ?? pendingPrimary?.primaryNodeId;
     if (!pending || !sourceId) return;
+    const takeNode = pendingTake ? upstreamNodes.find((node) => node.id === sourceId) : undefined;
+    const attemptKey = takeNode && pendingTake
+      ? performanceTakeAutoBindKey(takeNode, pendingTake, upstreamNodes, canvasEdges) : null;
+    if (attemptKey && !takeRetryGateRef.current.canAttempt(attemptKey)) return;
     const syncKey = `${activeScriptRef.artifactId}:${activeScriptRef.revision}:${pending.id}:${sourceId}`;
     if (pendingTakeSyncRef.current === syncKey) return;
     pendingTakeSyncRef.current = syncKey;
@@ -648,6 +653,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       return typeof attachment === 'string' ? attachment : attachment.mediaRevision;
     });
     void attach.then((revision) => {
+      takeRetryGateRef.current.recordSuccess();
       const operation = remixAutoSaveQueueRef.current.catch(() => undefined).then(async () => {
         const current = useCanvasStore.getState().nodes.find((node) => node.id === id);
         const currentRef = remixRef(current?.data.remixScriptRef);
@@ -667,9 +673,12 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
       });
       remixAutoSaveQueueRef.current = operation;
       return operation;
-    }).catch((cause) => toast.error(cause instanceof Error ? cause.message : '表演素材自动关联失败'))
+    }).catch((cause) => {
+      if (attemptKey) takeRetryGateRef.current.recordFailure(attemptKey);
+      toast.error(cause instanceof Error ? cause.message : '表演素材自动关联失败');
+    })
       .finally(() => { if (pendingTakeSyncRef.current === syncKey) pendingTakeSyncRef.current = null; });
-  }, [attachPerformanceTake, attachRemixVisual, blueprintRef, data.remixScriptDraft, data.remixScriptRef, id, upstreamNodes]);
+  }, [attachPerformanceTake, attachRemixVisual, blueprintRef, canvasEdges, data.remixScriptDraft, data.remixScriptRef, id, upstreamNodes]);
   useEffect(() => {
     const activeScriptRef = remixRef(data.remixScriptRef);
     const draft = data.remixScriptDraft as RemixScriptDraft | undefined;

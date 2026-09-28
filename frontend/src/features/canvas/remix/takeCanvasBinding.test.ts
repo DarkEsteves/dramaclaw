@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeBindingsCurrent, takeReferenceSnapshot } from './takeCanvasBinding';
+import { createPerformanceAutoBindRetryGate, createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeBindingsCurrent, takeReferenceSnapshot, performanceTakeAutoBindKey } from './takeCanvasBinding';
 import type { CanvasNode, CanvasNodeData } from '@/features/canvas/domain/canvasNodes';
 import type { RemixPerformanceSegment } from './remixScriptModel';
 
@@ -7,6 +7,25 @@ const segment: RemixPerformanceSegment = { id: 'segment-1', start: 2, end: 5, sp
 const node = (id: string, type: CanvasNode['type'], data: Record<string, unknown>) => ({ id, type, position: { x: 0, y: 0 }, data }) as CanvasNode;
 
 describe('performance take canvas binding', () => {
+  it('retries failed automatic binding only when its take or reference inputs change', () => {
+    const take = node('take', 'videoNode', { videoUrl: '/take-v1.mp4', remixReferenceNodeIds: ['person'],
+      remixReferenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] });
+    const person = node('person', 'imageGenNode', { imageUrl: '/person-v1.png' });
+    const edges = [{ id: 'person-take', source: 'person', target: 'take' }];
+    const selected = { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '参考镜头移动' }] };
+    const failedKey = performanceTakeAutoBindKey(take, selected, [take, person], edges);
+    const gate = createPerformanceAutoBindRetryGate();
+
+    expect(gate.canAttempt(failedKey)).toBe(true);
+    gate.recordFailure(failedKey);
+    expect(gate.canAttempt(failedKey)).toBe(false);
+
+    expect(performanceTakeAutoBindKey(take, { ...selected }, [take, person], [...edges])).toBe(failedKey);
+    const regeneratedKey = performanceTakeAutoBindKey({ ...take, data: { ...take.data, videoUrl: '/take-v2.mp4' } }, selected, [take, person], edges);
+    expect(gate.canAttempt(regeneratedKey)).toBe(true);
+    expect(performanceTakeAutoBindKey(take, { ...selected, referenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] }, [take, person], edges)).not.toBe(failedKey);
+    expect(performanceTakeAutoBindKey(take, selected, [take, { ...person, data: { ...person.data, imageUrl: '/person-v2.png' } }], edges)).not.toBe(failedKey);
+  });
   it('names generated person references by speaker and segment, including a repeated creation', () => {
     const nodes = [node('script', 'scriptNode', {})];
     let nextId = 0;

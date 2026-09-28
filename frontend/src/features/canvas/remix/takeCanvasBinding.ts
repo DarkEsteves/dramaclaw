@@ -147,6 +147,32 @@ export function takeReferencesConnected(take: CanvasNode, segment: RemixPerforma
   return referenceBindingsForSegment(segment).every((binding) => edges.some((edge) => edge.source === binding.nodeId && edge.target === take.id));
 }
 
+/** Inputs that can make a previously failed automatic take binding worth retrying. */
+export function performanceTakeAutoBindKey(take: CanvasNode, segment: RemixPerformanceSegment, nodes: CanvasNode[], edges: CanvasEdge[]): string {
+  const bindings = referenceBindingsForSegment(segment);
+  const savedIds = Array.isArray(take.data.remixReferenceNodeIds)
+    ? take.data.remixReferenceNodeIds.filter((id): id is string => typeof id === 'string') : [];
+  const referenceIds = [...new Set([...bindings.map(({ nodeId }) => nodeId), ...savedIds])];
+  const media = take.data.remixMedia as { url?: unknown; media_hash?: unknown } | undefined;
+  return JSON.stringify({
+    segmentId: segment.id, source: segment.source, takeId: take.id,
+    sourceUrl: performanceSourceUrl(take), mediaUrl: media?.url, mediaHash: media?.media_hash,
+    bindings, savedBindings: take.data.remixReferenceBindings, savedIds,
+    references: takeReferenceSnapshot(nodes, referenceIds).map((snapshot) => ({
+      ...snapshot, connected: edges.some((edge) => edge.source === snapshot.id && edge.target === take.id),
+    })),
+  });
+}
+
+export function createPerformanceAutoBindRetryGate() {
+  let failedKey: string | null = null;
+  return {
+    canAttempt: (key: string) => key !== failedKey,
+    recordFailure: (key: string) => { failedKey = key; },
+    recordSuccess: () => { failedKey = null; },
+  };
+}
+
 export function boundPerformanceTakeMedia(project: string, node: CanvasNode, source: RemixPerformanceSegment['source']): RemixUploadedMedia {
   if (source === 'voiceover' ? node.type !== CANVAS_NODE_TYPES.audio : node.type !== CANVAS_NODE_TYPES.video) {
     throw new Error('表演片段节点类型与声音来源不匹配');
