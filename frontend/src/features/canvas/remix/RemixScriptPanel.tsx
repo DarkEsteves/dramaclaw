@@ -346,11 +346,12 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
           const selectedTake = choices.find((node) => node.id === segment.takeNodeId);
           const takeHasOutput = selectedTake?.hasOutput ?? Boolean(selectedTake?.mediaRevision);
           const takeIsBound = Boolean(takeHasOutput && segment.takeMediaRevision && selectedTake?.mediaRevision === segment.takeMediaRevision);
-          const takeStatus = takeIsBound ? '素材已绑定'
+          const takeKindLabel = segment.source === 'voiceover' ? '音频片段' : '视频片段';
+          const takeStatus = takeIsBound ? `${takeKindLabel}已绑定到本段台词`
             : !segment.takeNodeId ? '尚未选择片段'
               : takeHasOutput
-                ? `${segment.source === 'voiceover' ? '音频' : '视频'}已生成，待绑定`
-                : `${segment.source === 'voiceover' ? '音频' : '视频'}尚未生成`;
+                ? `${takeKindLabel}已生成，待绑定`
+                : `${takeKindLabel}尚未生成`;
           const takeNodeLabel = segment.source === 'voiceover' ? '旁白节点'
             : segment.source === 'original_sound' ? '原声上传节点' : '口播视频节点';
           const takeMediaLabel = segment.source === 'voiceover' ? '音频' : '视频';
@@ -359,7 +360,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
             : !segment.takeNodeId
               ? `点击「创建${takeNodeLabel}」会在画布创建节点；${takeMediaLabel}在新节点中${takeAction}。`
               : takeHasOutput
-                ? `${takeMediaLabel}已生成，点击「检查并绑定素材」将它用于这段台词。`
+                ? `${takeMediaLabel}已生成，点击「检查并绑定${takeKindLabel}」将它用于这段台词。`
                 : `已选${takeNodeLabel}，请到画布中${takeAction}${takeMediaLabel}；无需再次创建节点。`;
           const referenceCount = referenceBindingsForSegment(segment).length;
           const modeHint = segment.source === 'speaking_video'
@@ -401,7 +402,7 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
               </select></label>
               <div className="mt-2 flex flex-wrap items-center gap-2"><button type="button" onClick={() => createTake(segment)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>{segment.source === 'voiceover' ? '创建旁白节点' : segment.source === 'original_sound' ? '创建原声上传节点' : '创建口播视频节点'}</button>
                 {singleVoiceover && <button type="button" onClick={() => updateSegment(segment.id, { source: 'speaking_video', speaker: '口播', takeNodeId: undefined, takeMediaRevision: undefined, primaryNodeId: undefined, primaryMediaRevision: undefined })} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>改成整段口播视频</button>}
-                {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定素材</button>}
+                {segment.takeNodeId && <button type="button" onClick={() => void chooseTake(segment, segment.takeNodeId!)} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>检查并绑定{takeKindLabel}</button>}
                 <span className={takeIsBound ? 'text-emerald-300' : 'text-text-muted'}>{takeStatus}</span>
               </div>
               {takeHint && <p className="mt-1 text-text-muted">{takeHint}</p>}

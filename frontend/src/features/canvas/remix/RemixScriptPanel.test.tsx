@@ -35,8 +35,8 @@ describe('RemixScriptPanel', () => {
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
       performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
       sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
-    expect(screen.getByText('视频已生成，待绑定')).toBeVisible();
-    expect(screen.getByText('视频已生成，点击「检查并绑定素材」将它用于这段台词。')).toBeVisible();
+    expect(screen.getByText('视频片段已生成，待绑定')).toBeVisible();
+    expect(screen.getByText('视频已生成，点击「检查并绑定视频片段」将它用于这段台词。')).toBeVisible();
     expect(screen.queryByText('尚未完成片段')).not.toBeInTheDocument();
   });
 
@@ -56,8 +56,8 @@ describe('RemixScriptPanel', () => {
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
       performanceNodes={[{ id: 'take', label: '口播', kind: 'video', hasOutput: false, mediaRevision: 'a'.repeat(64) }]}
       sfxNodes={[]} onDraftChange={() => {}} onSave={() => {}} onClose={() => {}} />);
-    expect(screen.getByText('视频尚未生成')).toBeVisible();
-    expect(screen.queryByText('素材已绑定')).not.toBeInTheDocument();
+    expect(screen.getByText('视频片段尚未生成')).toBeVisible();
+    expect(screen.queryByText('视频片段已绑定到本段台词')).not.toBeInTheDocument();
   });
 
   it('keeps a valid binding visible while rechecking the same video', async () => {
@@ -68,9 +68,9 @@ describe('RemixScriptPanel', () => {
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
       performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
       sfxNodes={[]} onAttachTake={onAttachTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查并绑定素材' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查并绑定视频片段' })); });
     expect(onAttachTake).toHaveBeenCalledOnce();
-    expect(screen.getByText('素材已绑定')).toBeVisible();
+    expect(screen.getByText('视频片段已绑定到本段台词')).toBeVisible();
     expect(onDraftChange).not.toHaveBeenCalled();
   });
 
