@@ -13,8 +13,10 @@ describe('remix script editor', () => {
         { node_id: 'shot', purpose: '保持手持镜头运动' }, { node_id: 'voice', purpose: '参考说话音色' },
       ] }),
     ]);
-    expect(() => buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [{ ...segment,
-      referenceBindings: [{ nodeId: 'shot', purpose: '   ' }] }] }, 1)).toThrow('参考用途');
+    expect(buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [{ ...segment,
+      referenceBindings: [{ nodeId: 'shot', purpose: '   ' }] }] }, 1).segments).toEqual([
+      expect.objectContaining({ reference_bindings: [{ node_id: 'shot', purpose: '' }] }),
+    ]);
     expect(() => buildRemixScriptPayload({ dialogue: '你好', selections: [], segments: [{ ...segment,
       referenceBindings: [{ nodeId: 'shot', purpose: '镜头' }, { nodeId: 'shot', purpose: '另一用途' }] }] }, 1)).toThrow('重复');
   });

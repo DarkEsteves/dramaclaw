@@ -1,7 +1,8 @@
-import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode, type CanvasNodeData, type CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
+import { CANVAS_NODE_TYPES, isAudioNode, isExportImageNode, isImageEditNode, isImageGenNode, isStoryboardGenNode, isUploadNode, isVideoNode, type CanvasEdge, type CanvasNode, type CanvasNodeData, type CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
+import { sortUpstreamByReferenceOrder, upstreamNodesInEdgeOrder } from '@/features/canvas/nodes/referenceOrdering';
 import type { RemixUploadedMedia } from '@/api/remix';
 import { projectMediaPathFromUrl } from './remixMediaPath';
-import { referenceBindingsForSegment, spokenTextForSegment, type RemixPerformanceSegment } from './remixScriptModel';
+import { referenceBindingsForSegment, spokenTextForSegment, type RemixPerformanceSegment, type RemixReferenceBinding, type RemixScriptDraft } from './remixScriptModel';
 
 interface Store {
   nodes: CanvasNode[];
@@ -83,7 +84,7 @@ export function createPerformanceTakeNode(store: Store, scriptId: string, segmen
     referenceObservation ? `原片对应镜头观察：${referenceObservation}。按台词和所选参考决定需要保留的画面细节。` : '',
     ...bindings.map(({ nodeId, purpose }, index) => {
       const ref = store.nodes.find((node) => node.id === nodeId)!;
-      return `参考 ${index + 1}（${String(ref.data.displayName || ref.id)}）：${purpose}。`;
+      return `参考 ${index + 1}（${String(ref.data.displayName || ref.id)}）${purpose.trim() ? `：${purpose.trim()}` : ''}。`;
     }),
     '画面不要字幕、文字、水印和背景音乐。',
   ].filter(Boolean).join('\n');
@@ -110,15 +111,60 @@ export function performanceSourceUrl(node: CanvasNode): string | null {
   return null;
 }
 
+/** The same ordered incoming media nodes that a video node uses when submitting a generation. */
+export function takeCanvasReferenceIds(take: CanvasNode, nodes: CanvasNode[], edges: CanvasEdge[]): string[] {
+  const referenceOrder = Array.isArray(take.data.referenceOrder)
+    ? take.data.referenceOrder.filter((id): id is string => typeof id === 'string') : undefined;
+  const ordered = sortUpstreamByReferenceOrder(upstreamNodesInEdgeOrder(nodes, edges, take.id), referenceOrder);
+  return [...new Set(ordered.filter((node) => isAudioNode(node) || isVideoNode(node) || isUploadNode(node)
+    || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node) || isStoryboardGenNode(node)).map((node) => node.id))];
+}
+
+export function takeCanvasReferenceBindings(take: CanvasNode, segment: RemixPerformanceSegment,
+  nodes: CanvasNode[], edges: CanvasEdge[]): RemixReferenceBinding[] {
+  const annotated = new Map<string, string>();
+  for (const binding of Array.isArray(take.data.remixReferenceBindings) ? take.data.remixReferenceBindings : [])
+    annotated.set(binding.nodeId, binding.purpose);
+  for (const binding of referenceBindingsForSegment(segment)) annotated.set(binding.nodeId, binding.purpose);
+  return takeCanvasReferenceIds(take, nodes, edges).map((nodeId) => ({ nodeId, purpose: annotated.get(nodeId) ?? '' }));
+}
+
+export function syncPerformanceReferenceSegment(segment: RemixPerformanceSegment, nodes: CanvasNode[], edges: CanvasEdge[]): RemixPerformanceSegment {
+  const take = nodes.find((node) => node.id === segment.takeNodeId);
+  if (!take) return segment;
+  const referenceBindings = takeCanvasReferenceBindings(take, segment, nodes, edges);
+  const prior = referenceBindingsForSegment(segment);
+  if (JSON.stringify(prior) === JSON.stringify(referenceBindings)) return segment;
+  const inputsChanged = JSON.stringify(prior.map(({ nodeId }) => nodeId)) !== JSON.stringify(referenceBindings.map(({ nodeId }) => nodeId));
+  return { ...segment, referenceBindings, ...(inputsChanged ? { takeMediaRevision: undefined } : {}) };
+}
+
+export function syncPerformanceReferenceDraft(draft: RemixScriptDraft, nodes: CanvasNode[], edges: CanvasEdge[]): RemixScriptDraft {
+  if (!draft.segments?.length) return draft;
+  const segments = draft.segments.map((segment) => syncPerformanceReferenceSegment(segment, nodes, edges));
+  return segments.every((segment, index) => segment === draft.segments?.[index]) ? draft : { ...draft, segments };
+}
+
 export function takeReferenceSnapshot(nodes: CanvasNode[], ids: string[]) {
   return ids.map((id) => {
     const node = nodes.find((candidate) => candidate.id === id);
     const data = node?.data as { videoUrl?: string; audioUrl?: string; previewImageUrl?: string; imageUrl?: string; referenceImageUrl?: string } | undefined;
-    const rawUrl = data?.videoUrl || data?.audioUrl || data?.previewImageUrl || data?.imageUrl || data?.referenceImageUrl;
+    const rawUrl = data?.videoUrl || data?.audioUrl || data?.imageUrl || data?.referenceImageUrl || data?.previewImageUrl;
     const media = node?.data.remixMedia as { media_hash?: unknown } | undefined;
     return { id, url: typeof rawUrl === 'string' ? rawUrl : null,
       hash: typeof media?.media_hash === 'string' ? media.media_hash : null };
   });
+}
+
+/** One-time migration for takes generated before the video node recorded its submitted references. */
+export function legacyTakeReferencePatch(take: CanvasNode, segment: RemixPerformanceSegment,
+  nodes: CanvasNode[], edges: CanvasEdge[]): Partial<CanvasNodeData> | null {
+  const sourceUrl = performanceSourceUrl(take);
+  if (!sourceUrl || take.data.remixGenerationReferenceUrl) return null;
+  const remixReferenceBindings = takeCanvasReferenceBindings(take, segment, nodes, edges);
+  const remixReferenceNodeIds = remixReferenceBindings.map((binding) => binding.nodeId);
+  return { remixReferenceBindings, remixReferenceNodeIds,
+    remixReferenceSnapshot: takeReferenceSnapshot(nodes, remixReferenceNodeIds), remixGenerationReferenceUrl: sourceUrl };
 }
 
 export function takeReferencesCurrent(nodes: CanvasNode[], ids: string[], saved: unknown): boolean {
@@ -132,19 +178,16 @@ export function takeReferencesCurrent(nodes: CanvasNode[], ids: string[], saved:
 }
 
 export function takeBindingsCurrent(take: CanvasNode, segment: RemixPerformanceSegment): boolean {
-  const expected = referenceBindingsForSegment(segment);
-  const saved = take.data.remixReferenceBindings;
-  if (!Array.isArray(saved)) {
-    const oldIds = take.data.remixReferenceNodeIds;
-    if (segment.referenceBindings === undefined && Array.isArray(oldIds))
-      return JSON.stringify(oldIds) === JSON.stringify(expected.map((binding) => binding.nodeId));
-    return expected.length === 0 && (!Array.isArray(oldIds) || oldIds.length === 0);
-  }
-  return JSON.stringify(saved) === JSON.stringify(expected);
+  const expected = referenceBindingsForSegment(segment).map((binding) => binding.nodeId);
+  const saved = take.data.remixReferenceNodeIds;
+  if (Array.isArray(saved)) return JSON.stringify(saved) === JSON.stringify(expected);
+  const legacy = take.data.remixReferenceBindings;
+  return JSON.stringify(Array.isArray(legacy) ? legacy.map((binding) => binding.nodeId) : []) === JSON.stringify(expected);
 }
 
-export function takeReferencesConnected(take: CanvasNode, segment: RemixPerformanceSegment, edges: CanvasEdge[]): boolean {
-  return referenceBindingsForSegment(segment).every((binding) => edges.some((edge) => edge.source === binding.nodeId && edge.target === take.id));
+export function takeReferencesConnected(take: CanvasNode, segment: RemixPerformanceSegment, nodes: CanvasNode[], edges: CanvasEdge[]): boolean {
+  return JSON.stringify(takeCanvasReferenceIds(take, nodes, edges))
+    === JSON.stringify(referenceBindingsForSegment(segment).map((binding) => binding.nodeId));
 }
 
 /** Inputs that can make a previously failed automatic take binding worth retrying. */
@@ -221,8 +264,8 @@ export function selectedPerformanceTakes(project: string, nodes: CanvasNode[], e
       referenceIds.filter((id): id is string => typeof id === 'string'), take.data.remixReferenceSnapshot)) {
       throw new Error(`${segment.speaker} 的参考素材已变化，请重新生成片段`);
     }
-    if (!takeBindingsCurrent(take, segment)) throw new Error(`${segment.speaker} 的参考用途已变化，请重新制作片段`);
-    if (!takeReferencesConnected(take, segment, edges))
+    if (!takeBindingsCurrent(take, segment)) throw new Error(`${segment.speaker} 的参考素材已变化，请重新生成片段`);
+    if (!takeReferencesConnected(take, segment, nodes, edges))
       throw new Error(`${segment.speaker} 的参考素材连接已变化，请重新制作片段`);
     return { segment, node: take, media };
   });

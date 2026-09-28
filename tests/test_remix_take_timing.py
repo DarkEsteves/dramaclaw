@@ -13,6 +13,10 @@ def test_performance_segment_accepts_custom_references_and_rejects_duplicate_nod
         {"node_id": "shot", "purpose": "保持镜头运动"}, {"node_id": "voice", "purpose": "参考音色"},
     ]})
     assert [item.purpose for item in segment.reference_bindings] == ["保持镜头运动", "参考音色"]
+    without_purpose = PerformanceSegment.model_validate({**base, "reference_bindings": [
+        {"node_id": "shot", "purpose": ""},
+    ]})
+    assert without_purpose.reference_bindings[0].purpose == ""
     with pytest.raises(ValueError, match="duplicate"):
         PerformanceSegment.model_validate({**base, "reference_bindings": [
             {"node_id": "shot", "purpose": "镜头"}, {"node_id": "shot", "purpose": "构图"},

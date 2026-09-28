@@ -82,7 +82,7 @@ export function mergeAdjacentPerformanceSegments(draft: RemixScriptDraft, firstI
   const referenceBindings: RemixReferenceBinding[] = [];
   for (const segment of [first, second]) {
     for (const binding of referenceBindingsForSegment(segment)) {
-      const purpose = segment.speaker === '多人' ? binding.purpose : `${segment.speaker}发言时：${binding.purpose}`;
+      const purpose = !binding.purpose ? '' : segment.speaker === '多人' ? binding.purpose : `${segment.speaker}发言时：${binding.purpose}`;
       const existing = referenceBindings.find((item) => item.nodeId === binding.nodeId);
       if (existing) {
         if (!existing.purpose.includes(purpose)) existing.purpose += `；${purpose}`;
@@ -190,7 +190,7 @@ export function buildRemixScriptPayload(draft: RemixScriptDraft, revision: numbe
     if (segment.referenceBindings) {
       const bindingIds = new Set<string>();
       for (const binding of segment.referenceBindings) {
-        if (!binding.nodeId.trim() || !binding.purpose.trim()) throw new Error('参考用途和素材不能为空');
+        if (!binding.nodeId.trim()) throw new Error('参考素材不能为空');
         if (bindingIds.has(binding.nodeId)) throw new Error('参考素材重复');
         bindingIds.add(binding.nodeId);
       }

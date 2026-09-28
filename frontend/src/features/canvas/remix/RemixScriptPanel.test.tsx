@@ -31,12 +31,13 @@ describe('RemixScriptPanel', () => {
 
   it('applies arbitrary references from one segment to explicitly selected segments', () => {
     const onDraftChange = vi.fn();
+    const onSetTakeReferences = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '甲：你好\n乙：好\n丙：再见', selections: [], segments: [
       { id: 'one', start: 2, end: 4, speaker: '甲', source: 'speaking_video', referenceBindings: [{ nodeId: 'shot', purpose: '参考镜头运动' }] },
       { id: 'two', start: 7, end: 8, speaker: '乙', source: 'speaking_video', referenceBindings: [{ nodeId: 'voice', purpose: '参考音色' }], takeNodeId: 'old-take', takeMediaRevision: 'a'.repeat(64) },
       { id: 'three', start: 11, end: 13, speaker: '丙', source: 'speaking_video' },
     ] }} existingRef={null} blueprintRef={null} visualNodes={[]} referenceNodes={[{ id: 'shot', label: '原片镜头', kind: 'video' }, { id: 'voice', label: '声音样本', kind: 'audio' }]}
-      sfxNodes={[]} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+      sfxNodes={[]} onSetTakeReferences={onSetTakeReferences} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
     fireEvent.click(screen.getAllByText(/参考素材（可选）/)[0]);
     fireEvent.click(screen.getAllByRole('button', { name: '将参考 1 应用到其他段落' })[0]);
     fireEvent.click(screen.getByRole('checkbox', { name: '应用到乙' }));
@@ -45,9 +46,12 @@ describe('RemixScriptPanel', () => {
       expect.objectContaining({ id: 'one', referenceBindings: [{ nodeId: 'shot', purpose: '参考镜头运动' }] }),
       expect.objectContaining({ id: 'two', referenceBindings: [
         { nodeId: 'voice', purpose: '参考音色' }, { nodeId: 'shot', purpose: '参考镜头运动' },
-      ], takeNodeId: undefined, takeMediaRevision: undefined }),
+      ], takeNodeId: 'old-take', takeMediaRevision: undefined }),
       expect.objectContaining({ id: 'three' }),
     ] }), 'media-binding');
+    expect(onSetTakeReferences).toHaveBeenCalledWith('old-take', [
+      { nodeId: 'voice', purpose: '参考音色' }, { nodeId: 'shot', purpose: '参考镜头运动' },
+    ]);
   });
 
   it('lets one speaking video cover two neighboring speaker turns', () => {
@@ -87,6 +91,31 @@ describe('RemixScriptPanel', () => {
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({ takeNodeId: 'take-1' })] }), 'media-binding');
   });
 
+  it('shows references connected outside the panel when selecting an existing video', async () => {
+    const onDraftChange = vi.fn();
+    const onAttachTake = vi.fn(async () => 'a'.repeat(64));
+    const onResolveTakeReferences = vi.fn(() => [
+      { nodeId: 'frame', purpose: '' }, { nodeId: 'voice', purpose: '' },
+    ]);
+    const onSetTakeReferences = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [], segments: [
+      { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' },
+    ] }} existingRef={null} blueprintRef={null} visualNodes={[]}
+      performanceNodes={[{ id: 'take', label: '已生成口播', kind: 'video', mediaRevision: 'a'.repeat(64) }]}
+      referenceNodes={[{ id: 'frame', label: '原片一帧', kind: 'image' }, { id: 'voice', label: '对应语音', kind: 'audio' }]}
+      sfxNodes={[]} onResolveTakeReferences={onResolveTakeReferences} onSetTakeReferences={onSetTakeReferences}
+      onAttachTake={onAttachTake} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText('男 采用片段'), { target: { value: 'take' } });
+    await waitFor(() => expect(onAttachTake).toHaveBeenCalledWith('take', 'speaking_video', expect.objectContaining({
+      referenceBindings: [{ nodeId: 'frame', purpose: '' }, { nodeId: 'voice', purpose: '' }],
+    })));
+    fireEvent.click(screen.getByText(/参考素材（可选）/));
+    expect(screen.getByLabelText('参考 1 素材')).toHaveValue('frame');
+    expect(screen.getByLabelText('参考 2 素材')).toHaveValue('voice');
+    fireEvent.click(screen.getByRole('button', { name: '移除参考 2' }));
+    expect(onSetTakeReferences).toHaveBeenCalledWith('take', [{ nodeId: 'frame', purpose: '' }]);
+  });
+
   it('creates a neutral reference node for a segment without requiring a category', () => {
     const segment = { id: 'segment-1', start: 2, end: 4, speaker: '男', source: 'speaking_video' as const };
     const onCreateReference = vi.fn(() => 'reference-node');
@@ -98,7 +127,7 @@ describe('RemixScriptPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建图片节点' }));
     expect(onCreateReference).toHaveBeenCalledExactlyOnceWith('generate', segment, 0);
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [
-      expect.objectContaining({ referenceBindings: [{ nodeId: 'reference-node', purpose: '参考画面内容' }] }),
+      expect.objectContaining({ referenceBindings: [{ nodeId: 'reference-node', purpose: '' }] }),
     ] }), 'media-binding');
   });
 
@@ -175,7 +204,7 @@ describe('RemixScriptPanel', () => {
     expect(screen.getByText(/音色仍需在音频节点中选择/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
     expect(onDraftChange).toHaveBeenLastCalledWith(expect.objectContaining({ segments: [expect.objectContaining({
-      referenceBindings: [{ nodeId: 'sample', purpose: '参考声音表现' }],
+      referenceBindings: [{ nodeId: 'sample', purpose: '' }],
     })] }), 'media-binding');
   });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPerformanceAutoBindRetryGate, createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeBindingsCurrent, takeReferenceSnapshot, performanceTakeAutoBindKey } from './takeCanvasBinding';
+import { createPerformanceAutoBindRetryGate, createPerformanceReferenceNode, legacyPerformanceReferenceLabelPatches, legacyTakeReferencePatch, createPerformanceTakeNode, boundPerformanceTakeMedia, selectedPerformanceTakes, takeBindingsCurrent, takeReferenceSnapshot, performanceTakeAutoBindKey, syncPerformanceReferenceSegment, syncPerformanceReferenceDraft } from './takeCanvasBinding';
 import type { CanvasNode, CanvasNodeData } from '@/features/canvas/domain/canvasNodes';
 import type { RemixPerformanceSegment } from './remixScriptModel';
 
@@ -25,6 +25,35 @@ describe('performance take canvas binding', () => {
     expect(gate.canAttempt(regeneratedKey)).toBe(true);
     expect(performanceTakeAutoBindKey(take, { ...selected, referenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] }, [take, person], edges)).not.toBe(failedKey);
     expect(performanceTakeAutoBindKey(take, selected, [take, { ...person, data: { ...person.data, imageUrl: '/person-v2.png' } }], edges)).not.toBe(failedKey);
+  });
+  it('reads a selected take’s actual canvas links and keeps optional purposes', () => {
+    const take = node('take', 'videoNode', { referenceOrder: ['frame', 'voice'], remixReferenceBindings: [{ nodeId: 'frame', purpose: '旧备注' }] });
+    const frame = node('frame', 'imageGenNode', { imageUrl: '/frame.png' });
+    const voice = node('voice', 'audioNode', { audioUrl: '/voice.wav' });
+    const edges = [{ id: 'voice-take', source: 'voice', target: 'take' }, { id: 'frame-take', source: 'frame', target: 'take' }];
+    const selected = { ...segment, takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64), referenceBindings: [{ nodeId: 'frame', purpose: '保留画面构图' }] };
+    expect(syncPerformanceReferenceSegment(selected, [take, frame, voice], edges)).toEqual({
+      ...selected, takeMediaRevision: undefined,
+      referenceBindings: [{ nodeId: 'frame', purpose: '保留画面构图' }, { nodeId: 'voice', purpose: '' }],
+    });
+    const draft = { dialogue: '你好', selections: [], segments: [selected] };
+    expect(syncPerformanceReferenceDraft(draft, [take, frame, voice], edges).segments?.[0].referenceBindings).toEqual([
+      { nodeId: 'frame', purpose: '保留画面构图' }, { nodeId: 'voice', purpose: '' },
+    ]);
+    expect(syncPerformanceReferenceDraft({ ...draft, segments: [syncPerformanceReferenceSegment(selected, [take, frame, voice], edges)] }, [take, frame, voice], edges).segments?.[0].takeNodeId).toBe('take');
+  });
+  it('adopts external links once for an already generated legacy take', () => {
+    const take = node('take', 'videoNode', { videoUrl: '/take.mp4', remixReferenceNodeIds: ['old'] });
+    const frame = node('frame', 'imageGenNode', { imageUrl: '/frame.png' });
+    const voice = node('voice', 'audioNode', { audioUrl: '/voice.wav' });
+    const edges = [{ id: 'frame-take', source: 'frame', target: 'take' }, { id: 'voice-take', source: 'voice', target: 'take' }];
+    const selected = { ...segment, takeNodeId: 'take', referenceBindings: [{ nodeId: 'frame', purpose: '' }, { nodeId: 'voice', purpose: '' }] };
+    const patch = legacyTakeReferencePatch(take, selected, [take, frame, voice], edges);
+    expect(patch).toEqual(expect.objectContaining({
+      remixReferenceNodeIds: ['frame', 'voice'], remixReferenceBindings: selected.referenceBindings,
+      remixReferenceSnapshot: [{ id: 'frame', url: '/frame.png', hash: null }, { id: 'voice', url: '/voice.wav', hash: null }],
+    }));
+    expect(legacyTakeReferencePatch({ ...take, data: { ...take.data, ...patch } }, selected, [take, frame, voice], edges)).toBeNull();
   });
   it('names generated person references by speaker and segment, including a repeated creation', () => {
     const nodes = [node('script', 'scriptNode', {})];
@@ -140,14 +169,14 @@ describe('performance take canvas binding', () => {
     expect(addEdge.mock.calls).toContainEqual(['sample', 'voice']);
   });
 
-  it('rejects a take after changing, removing, or repurposing its references', () => {
+  it('checks reference identities while allowing an optional purpose annotation', () => {
     const take = node('take', 'videoNode', { remixReferenceNodeIds: ['person'], remixReferenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] });
     expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }] })).toBe(true);
-    expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '参考镜头移动' }] })).toBe(false);
+    expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [{ nodeId: 'person', purpose: '' }] })).toBe(true);
     expect(takeBindingsCurrent(take, { ...segment, referenceBindings: [] })).toBe(false);
   });
 
-  it('blocks timeline selection when the saved take uses an older reference purpose', () => {
+  it('lets the timeline use a take after editing only its reference note', () => {
     const reference = node('person', 'imageGenNode', { imageUrl: '/person.png' });
     const take = node('take', 'videoNode', { videoUrl: '/take.mp4', remixReferenceNodeIds: ['person'],
       remixReferenceBindings: [{ nodeId: 'person', purpose: '保持角色形象' }],
@@ -157,7 +186,20 @@ describe('performance take canvas binding', () => {
       referenceBindings: [{ nodeId: 'person', purpose: '参考镜头移动' }], takeNodeId: 'take', takeMediaRevision: 'a'.repeat(64),
     }] } });
     const edges = [{ id: 'reference-take', source: 'person', target: 'take' }, { id: 'take-script', source: 'take', target: 'script' }];
-    expect(() => selectedPerformanceTakes('demo', [script, take, reference], edges, script)).toThrow(/参考用途已变化/);
+    expect(selectedPerformanceTakes('demo', [script, take, reference], edges, script)).toHaveLength(1);
+  });
+
+  it('does not treat a newly connected reference as part of an older generated video', () => {
+    const frame = node('frame', 'imageGenNode', { imageUrl: '/frame.png' });
+    const voice = node('voice', 'audioNode', { audioUrl: '/voice.wav' });
+    const take = node('take', 'videoNode', { videoUrl: '/take.mp4', remixGenerationReferenceUrl: '/take.mp4',
+      remixReferenceNodeIds: ['frame'], remixReferenceSnapshot: [{ id: 'frame', url: '/frame.png', hash: null }],
+      remixMedia: { url: '/take.mp4', media_path: 'take.mp4', media_hash: 'a'.repeat(64), media_kind: 'video', has_audio: true } });
+    const script = node('script', 'scriptNode', { remixScriptDraft: { segments: [{ ...segment, takeNodeId: 'take',
+      takeMediaRevision: 'a'.repeat(64), referenceBindings: [{ nodeId: 'frame', purpose: '' }, { nodeId: 'voice', purpose: '' }] }] } });
+    const edges = [{ id: 'frame-take', source: 'frame', target: 'take' }, { id: 'voice-take', source: 'voice', target: 'take' },
+      { id: 'take-script', source: 'take', target: 'script' }];
+    expect(() => selectedPerformanceTakes('demo', [script, take, frame, voice], edges, script)).toThrow(/参考素材已变化/);
   });
 
   it('rejects stale and silent speaking video media', () => {

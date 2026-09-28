@@ -25,6 +25,8 @@ interface Props {
   referenceNodes?: ReferenceMediaNode[];
   onCreateReference?: (mode: 'upload' | 'generate', segment: RemixPerformanceSegment, segmentIndex: number) => string;
   onConnectReference?: (nodeId: string) => void;
+  onResolveTakeReferences?: (nodeId: string, segment: RemixPerformanceSegment) => RemixReferenceBinding[];
+  onSetTakeReferences?: (nodeId: string, bindings: RemixReferenceBinding[]) => void;
   onCreateTake?: (segment: RemixPerformanceSegment) => string;
   onAttachTake?: (nodeId: string, source: RemixPerformanceSegment['source'], segment: RemixPerformanceSegment) => Promise<string>;
   missingPrimaryVisualCount?: number;
@@ -46,7 +48,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], onCreateReference, onConnectReference, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], onCreateReference, onConnectReference, onResolveTakeReferences, onSetTakeReferences, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -222,11 +224,13 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
     const prior = new Set(referenceBindingsForSegment(segment).map((binding) => binding.nodeId));
     bindings.filter(({ nodeId }) => !prior.has(nodeId) && referenceNodes.some((node) => node.id === nodeId))
       .forEach(({ nodeId }) => onConnectReference?.(nodeId));
-    updateSegment(segment.id, { referenceBindings: bindings, takeNodeId: undefined, takeMediaRevision: undefined });
+    const idsChanged = JSON.stringify([...prior]) !== JSON.stringify(bindings.map((binding) => binding.nodeId));
+    if (segment.takeNodeId && idsChanged) onSetTakeReferences?.(segment.takeNodeId, bindings);
+    updateSegment(segment.id, { referenceBindings: bindings, ...(idsChanged ? { takeMediaRevision: undefined } : {}) });
   };
   const createReference = (segment: RemixPerformanceSegment, segmentIndex: number, mode: 'upload' | 'generate') => {
     const id = onCreateReference?.(mode, segment, segmentIndex);
-    if (id) updateReferenceBindings(segment, [...referenceBindingsForSegment(segment), { nodeId: id, purpose: '参考画面内容' }]);
+    if (id) updateReferenceBindings(segment, [...referenceBindingsForSegment(segment), { nodeId: id, purpose: '' }]);
   };
   const applyReferencesToTargets = (source: RemixPerformanceSegment, bindingIndex: number) => {
     const binding = referenceBindingsForSegment(source)[bindingIndex];
@@ -241,19 +245,25 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         ? current.map((item) => item.nodeId === binding.nodeId ? { ...binding } : item)
         : [...current, { ...binding }];
       if (JSON.stringify(current) === JSON.stringify(referenceBindings)) return segment;
-      return { ...segment, referenceBindings, takeNodeId: undefined, takeMediaRevision: undefined };
+      const idsChanged = JSON.stringify(current.map((item) => item.nodeId))
+        !== JSON.stringify(referenceBindings.map((item) => item.nodeId));
+      if (segment.takeNodeId && idsChanged) onSetTakeReferences?.(segment.takeNodeId, referenceBindings);
+      return { ...segment, referenceBindings, ...(idsChanged ? { takeMediaRevision: undefined } : {}) };
     }) }, 'media-binding');
     setBatchSource(null);
     setBatchTargets([]);
   };
   const chooseTake = async (segment: RemixPerformanceSegment, nodeId: string) => {
-    updateSegment(segment.id, { takeNodeId: nodeId || undefined, takeMediaRevision: undefined });
+    const referenceBindings = nodeId ? onResolveTakeReferences?.(nodeId, segment) : undefined;
+    const selected = { ...segment, takeNodeId: nodeId || undefined, takeMediaRevision: undefined,
+      ...(referenceBindings ? { referenceBindings } : {}) };
+    updateSegment(segment.id, selected);
     if (!nodeId || !onAttachTake) return;
     try {
-      const revision = await onAttachTake(nodeId, segment.source, segment);
+      const revision = await onAttachTake(nodeId, segment.source, selected);
       const current = draftRef.current.segments?.find((item) => item.id === segment.id);
       if (current?.takeNodeId === nodeId && current.source === segment.source
-        && JSON.stringify(referenceBindingsForSegment(current)) === JSON.stringify(referenceBindingsForSegment(segment)))
+        && JSON.stringify(referenceBindingsForSegment(current)) === JSON.stringify(referenceBindingsForSegment(selected)))
         updateSegment(segment.id, { takeMediaRevision: revision });
     } catch (cause) { setError(cause instanceof Error ? cause.message : '片段还未准备好，请生成后再试'); }
   };
@@ -348,8 +358,8 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
             </div>
             {segment.source !== 'original_sound' && <details className="mt-3 rounded-[8px] border border-white/[0.08] px-3 py-2">
               <summary className="cursor-pointer text-text-dark">参考素材（可选）{referenceCount ? ` · 已选 ${referenceCount} 项` : ''}</summary>
-              <p className="mt-1 text-text-muted">按需要添加图片、视频或音频，并说明每项用途。{segment.source === 'voiceover' ? '音色仍需在音频节点中选择；这里记录参考来源。' : '也可以不添加，由视频节点的提示词决定画面。'}</p>
-              <SegmentReferenceEditor bindings={referenceBindingsForSegment(segment)} nodes={referenceNodes} onChange={(bindings) => updateReferenceBindings(segment, bindings)}
+              <p className="mt-1 text-text-muted">这里同步当前片段节点连入的图片、视频和音频；用途备注可以留空。{segment.source === 'voiceover' ? '音色仍需在音频节点中选择。' : '也可以不添加，由视频节点的提示词决定画面。'}</p>
+              <SegmentReferenceEditor bindings={referenceBindingsForSegment(segment)} nodes={referenceNodes.filter((node) => node.id !== segment.takeNodeId)} onChange={(bindings) => updateReferenceBindings(segment, bindings)}
                 onApply={(bindingIndex) => { setBatchSource({ segmentId: segment.id, bindingIndex }); setBatchTargets([]); }} />
               {onCreateReference && <div className="mt-2 flex gap-1"><button type="button" onClick={() => createReference(segment, index, 'upload')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>创建上传节点</button><button type="button" onClick={() => createReference(segment, index, 'generate')} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>创建图片节点</button></div>}
               {(draft.segments?.length ?? 0) > 1 && <div className="mt-2 border-t border-white/[0.08] pt-2">

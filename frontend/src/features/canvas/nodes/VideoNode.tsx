@@ -72,6 +72,7 @@ import {
 } from "@/features/canvas/domain/canvasNodes";
 import { isNodeStoryClip } from "@/features/canvas/story/storySelectors";
 import { canOpenStoryFrameEditor } from "@/features/canvas/story/storyFrameInteraction";
+import { takeCanvasReferenceIds, takeReferenceSnapshot } from "@/features/canvas/remix/takeCanvasBinding";
 import {
   publishNodeActionAccepted,
   publishNodeActionError,
@@ -2718,6 +2719,7 @@ export const VideoNode = memo(
         // 后端不再支持一次出多条，改为按「生成数量」并发调用 N 次接口。先按
         // genMode 组装出一个「调一次接口」的闭包 doSubmit，校验失败则置空提前返回。
         let doSubmit: ((targetId: string) => Promise<FreezoneJobRef>) | null = null;
+        let submittedReferenceUrls: string[] = [];
         if (genMode === "firstFrame" || genMode === "firstLastFrame") {
           const keyframes = collectUpstreamKeyframeUrls();
           const firstFrameUrl = keyframes.firstFrameUrl;
@@ -2733,6 +2735,7 @@ export const VideoNode = memo(
             });
             return;
           }
+          submittedReferenceUrls = [firstFrameUrl, lastFrameUrl].filter((url): url is string => Boolean(url));
           doSubmit = (targetId) =>
             submitFreezoneVideoKeyframes(projectId, {
               firstFrameUrl,
@@ -2765,6 +2768,7 @@ export const VideoNode = memo(
             });
             return;
           }
+          submittedReferenceUrls = imageUrls;
           doSubmit = (targetId) =>
             submitFreezoneVideoI2v(projectId, {
               imageUrls,
@@ -2837,6 +2841,7 @@ export const VideoNode = memo(
             .filter((item) => item.url.length > 0)
             .slice(0, audioLimit);
           if (!(await validateReferenceDurations("audio", audioRefs))) return;
+          submittedReferenceUrls = [videoUrl, ...imageUrls, ...audioRefs.map((item) => item.url)];
           doSubmit = (targetId) =>
             submitFreezoneVideoEdit(projectId, {
               videoUrl,
@@ -3030,6 +3035,8 @@ export const VideoNode = memo(
           }
           if (!(await validateReferenceDurations("audio", audioRefs))) return;
           if (!(await validateReferenceDurations("video", videoRefs))) return;
+          submittedReferenceUrls = references.filter((reference) => reference.type === "image" || reference.type === "video" || reference.type === "audio")
+            .map((reference) => reference.url);
           doSubmit = (targetId) =>
             submitFreezoneVideoOmniGen(projectId, {
               prompt: composedPrompt,
@@ -3075,6 +3082,16 @@ export const VideoNode = memo(
           return;
         }
         const submitOnce = doSubmit;
+        const generationState = useCanvasStore.getState();
+        const generationTake = generationState.nodes.find((node) => node.id === id);
+        const generationSnapshot = generationTake?.data.remixRole === "performance"
+          ? takeReferenceSnapshot(generationState.nodes, takeCanvasReferenceIds(generationTake, generationState.nodes, generationState.edges))
+            .filter((item) => item.url && submittedReferenceUrls.includes(item.url)) : null;
+        const generationIds = generationSnapshot?.map((item) => item.id) ?? null;
+        const priorBindings = generationTake?.data.remixReferenceBindings;
+        const priorPurposes = new Map(Array.isArray(priorBindings)
+          ? priorBindings.map((binding: { nodeId: string; purpose: string }) => [binding.nodeId, binding.purpose] as const) : []);
+        const generationBindings = generationIds?.map((nodeId) => ({ nodeId, purpose: priorPurposes.get(nodeId) ?? "" }));
 
         // 多条生成不再复制兄弟节点：N 个任务并发、全部回填到当前节点的
         // generationBatch（叠卡画册，与图片节点一致）。第 1 条完成的设为主视频，
@@ -3131,6 +3148,12 @@ export const VideoNode = memo(
                       generationError: null,
                       generationErrorDetails: null,
                       generationErrorRequestId: null,
+                      ...(generationIds ? {
+                        remixReferenceNodeIds: generationIds,
+                        remixReferenceBindings: generationBindings,
+                        remixReferenceSnapshot: generationSnapshot,
+                        remixGenerationReferenceUrl: url,
+                      } : {}),
                     }
                   : {}),
                 ...(total > 1 ? { generationBatch: [...completedUrls] } : {}),

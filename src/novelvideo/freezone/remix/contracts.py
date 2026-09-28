@@ -208,12 +208,12 @@ class ReferenceBlueprint(_Contract):
 
 class RemixReferenceBinding(_Contract):
     node_id: str = Field(min_length=1, max_length=128)
-    purpose: str = Field(min_length=1, max_length=500)
+    purpose: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")
     def _validate_content(self) -> "RemixReferenceBinding":
-        if not self.node_id.strip() or not self.purpose.strip():
-            raise ValueError("reference binding node and purpose must not be blank")
+        if not self.node_id.strip():
+            raise ValueError("reference binding node must not be blank")
         return self
 
 
