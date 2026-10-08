@@ -27,46 +27,50 @@ describe('createScriptFromBlueprint', () => {
     state.edges = [];
   });
 
-  it('creates and connects a script, then requests its editor', () => {
+  it('creates and opens one production plan for a new adaptation', () => {
     expect(createScriptFromBlueprint('story-1')).toBe('script-new');
     expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 }, expect.objectContaining({
-      blueprintNarrativeRole: '先提问再展示产品',
-      blueprintPreserveRule: '保留问答节奏',
-      blueprintReplaceRule: '替换产品画面',
-      referenceEvidenceRef: { artifactId: 'evidence-1', revision: 2 },
-      remixBlueprintSeedRef: { artifactId: 'story-blueprint', revision: 3 },
-      referenceBlueprintRef: null,
-      remixBlueprintRef: null,
+      remixRole: 'production_plan',
+      productionPlanOpenOnCreate: true,
+      productionPlanBlueprintRef: { artifactId: 'story-blueprint', revision: 3 },
     }));
     expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
     expect(setSelectedNode).toHaveBeenCalledWith('script-new');
     expect(requestFocusNode).toHaveBeenCalledWith('script-new');
-    expect(consumeRemixScriptEditorRequest('script-new')).toBe(true);
+    expect(consumeRemixScriptEditorRequest('script-new')).toBe(false);
   });
 
-  it('creates a fresh connected script when an older script already exists', () => {
-    state.nodes.push({ id: 'script-existing', type: 'scriptNode', data: {} });
+  it('reopens a connected script without replacing or duplicating it', () => {
+    state.nodes.push({ id: 'script-existing', type: 'scriptNode', data: { remixRole: 'adaptation_script', remixScriptRef: { artifactId: 'saved-script', revision: 2 } } });
     state.edges = [{ source: 'story-1', target: 'script-existing' }];
-    expect(createScriptFromBlueprint('story-1')).toBe('script-new');
-    expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 }, expect.any(Object));
-    expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
-    expect(consumeRemixScriptEditorRequest('script-new')).toBe(true);
+    expect(createScriptFromBlueprint('story-1')).toBe('script-existing');
+    expect(addNode).not.toHaveBeenCalled();
+    expect(addEdge).not.toHaveBeenCalled();
+    expect(setSelectedNode).toHaveBeenCalledWith('script-existing');
+    expect(requestFocusNode).toHaveBeenCalledWith('script-existing');
+    expect(consumeRemixScriptEditorRequest('script-existing')).toBe(true);
   });
 
-  it('copies branch settings into independent child data', () => {
-    addNode.mockReturnValueOnce('script-a').mockReturnValueOnce('script-b');
-    createScriptFromBlueprint('story-1');
-    createScriptFromBlueprint('story-1');
-    const first = addNode.mock.calls[0][2] as Record<string, unknown>;
-    const second = addNode.mock.calls[1][2] as Record<string, unknown>;
-
-    expect(first).not.toBe(second);
-    first.blueprintPreserveRule = '只改第一条分支';
-    expect(second.blueprintPreserveRule).toBe('保留问答节奏');
-    expect((state.nodes[0] as { data: Record<string, unknown> }).data.blueprintPreserveRule).toBe('保留问答节奏');
+  it('opens an existing production plan if that is the connected script', () => {
+    state.nodes.push({ id: 'plan-existing', type: 'scriptNode', data: { remixRole: 'production_plan', productionPlanRef: { artifactId: 'plan', revision: 1 } } });
+    state.edges = [{ source: 'story-1', target: 'plan-existing' }];
+    expect(createScriptFromBlueprint('story-1')).toBe('plan-existing');
+    expect(addNode).not.toHaveBeenCalled();
+    expect(updateNodeData).toHaveBeenCalledWith('plan-existing', { productionPlanOpenOnCreate: true });
   });
 
-  it('prefills a new branch from completed AI analysis when no rules were saved', () => {
+  it('opens an existing plan ahead of a legacy script when both are connected', () => {
+    state.nodes.push(
+      { id: 'plan-empty', type: 'scriptNode', data: { remixRole: 'production_plan' } },
+      { id: 'script-filled', type: 'scriptNode', data: { remixRole: 'adaptation_script', remixScriptDraft: { dialogue: '新台词' } } },
+    );
+    state.edges = [{ source: 'story-1', target: 'plan-empty' }, { source: 'story-1', target: 'script-filled' }];
+    expect(createScriptFromBlueprint('story-1')).toBe('plan-empty');
+    expect(addNode).not.toHaveBeenCalled();
+    expect(updateNodeData).toHaveBeenCalledWith('plan-empty', { productionPlanOpenOnCreate: true });
+  });
+
+  it('keeps the analyzed story as context for a new production plan', () => {
     state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
       rawResult: { video_story: { summary: '双人访谈中展示产品并以反转收尾' } },
       referenceEvents: [
@@ -80,13 +84,11 @@ describe('createScriptFromBlueprint', () => {
     createScriptFromBlueprint('story-1');
 
     expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
-      blueprintNarrativeRole: '通过提问、揭晓、反转推进故事。',
-      blueprintPreserveRule: '保留“提问 → 揭晓 → 反转”的叙事节奏。',
-      blueprintReplaceRule: '',
+      remixRole: 'production_plan', productionPlanSourceStoryId: 'story-1', productionPlanBlueprintRef: null,
     }));
   });
 
-  it('lets a saved blueprint restore its exact rules before using analysis suggestions', () => {
+  it('uses the exact saved blueprint reference for the new plan', () => {
     state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
       rawResult: { video_story: { summary: '原片的 AI 摘要' } },
       referenceBlueprintRef: { artifactId: 'saved-blueprint', revision: 2 },
@@ -95,12 +97,11 @@ describe('createScriptFromBlueprint', () => {
     createScriptFromBlueprint('story-1');
 
     expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
-      blueprintNarrativeRole: '',
-      remixBlueprintSeedRef: { artifactId: 'saved-blueprint', revision: 2 },
+      productionPlanBlueprintRef: { artifactId: 'saved-blueprint', revision: 2 },
     }));
   });
 
-  it('upgrades exact legacy defaults when branching from an automatically saved blueprint', () => {
+  it('does not copy legacy inferred rules into the plan', () => {
     state.nodes = [{ id: 'story-1', type: 'videoStoryNode', data: {
       rawResult: { video_story: { summary: '旧剧情摘要' } },
       referenceEvents: [{ narrative_inference: '开场提问' }, { narrative_inference: '结尾反转' }],
@@ -111,17 +112,14 @@ describe('createScriptFromBlueprint', () => {
     } }];
 
     createScriptFromBlueprint('story-1');
-    expect(addNode).toHaveBeenCalledWith('scriptNode', expect.anything(), expect.objectContaining({
-      blueprintNarrativeRole: '通过提问、反转推进故事。',
-      blueprintPreserveRule: '保留“提问 → 反转”的叙事节奏。',
-      blueprintReplaceRule: '',
-      remixBlueprintSeedRef: { artifactId: 'saved-blueprint', revision: 2 },
-    }));
+    const data = addNode.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(data.productionPlanBlueprintRef).toEqual({ artifactId: 'saved-blueprint', revision: 2 });
+    expect(data).not.toHaveProperty('blueprintPreserveRule');
   });
 
-  it('removes an unconnected new script and reports a failed connection', () => {
+  it('removes an unconnected new plan and reports a failed connection', () => {
     addEdge.mockReturnValueOnce(null as unknown as string);
-    expect(() => createScriptFromBlueprint('story-1')).toThrow('改编脚本连线失败');
+    expect(() => createScriptFromBlueprint('story-1')).toThrow('作品方案连线失败');
     expect(deleteNodes).toHaveBeenCalledWith(['script-new']);
   });
 });
