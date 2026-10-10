@@ -71,6 +71,9 @@ describe("ingest query error contract", () => {
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.error?.message).toBe("解析章节失败: 文件编码不支持");
     expect(post).toHaveBeenCalledWith("api/v1/projects/demo/ingest/upload", expect.objectContaining({ body: expect.any(FormData) }));
+    const body = post.mock.calls[0][1]?.body as FormData;
+    expect(body.get("spine_template")).toBe("drama");
+    expect(body.get("file")).toBeInstanceOf(File);
     post.mockRestore();
   });
 

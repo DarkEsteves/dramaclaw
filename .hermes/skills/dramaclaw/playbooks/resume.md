@@ -8,7 +8,7 @@
 
 读取响应：
 - `global` 段：全局准备是否完成（ingested, configured, characters, episodes, portraits_done）
-- `episode_status` 段：当前集各步骤（identity_plan, identity_images, script, scene_anchors, sketches, coloring, global_optimize, first_frames, tts, video）
+- `episode_status` 段：当前集各步骤（identity_plan, identity_images, script, sketches, coloring, global_optimize, first_frames, tts, video）
   - 辅助任务 type：`content_rewriter`（解说改写）、`script_writer`（剧本生成）。这些辅助步骤通过 `GET /projects/{P}/tasks/{task_type}/{N}` 主动查
   - 当前后端没有场景锚图 `anchor-image/*` 和 `scene_anchor` task
 - `next_step` + `next_step_name`：从断点继续
@@ -49,6 +49,7 @@
 ## 恢复执行
 
 **复用用户已选运行模式**：
+- 当前消息带有 `[DRAMACLAW_RUN_MODE] mode=episode_auto` 时，复用外围自动授权，按 run-modes.md 的后端协调器协议执行，不再次协商模式。
 - 若用户本会话已选 / 现在表示要**逐步确认模式** → `Read references/run-modes.md` 模式一，
   从断点起**每个写操作步骤前都停下问用户，一次只推进一步**。
 执行范围、是否逐步确认及连续推进统一遵循 `../references/run-modes.md`；不要额外设置每轮写操作数限制。
