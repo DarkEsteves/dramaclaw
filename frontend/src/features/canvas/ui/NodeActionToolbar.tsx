@@ -36,6 +36,7 @@ import {
   ImageUpscale,
   LayoutDashboard,
   LayoutGrid,
+  Layers3,
   Link2,
   Lightbulb,
   Loader2,
@@ -131,6 +132,8 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeVideoStory } from "@/features/canvas/application/videoAnalyzeStory";
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
+import { createDepthVideoNode, findDepthVideoModel } from "@/features/canvas/application/videoDepthCapture";
+import { useFreezoneVideoModels } from "@/features/canvas/hooks/useFreezoneVideoModels";
 import { openHtmlArtifact, readHtmlArtifact, exportHtmlArtifact } from "@/features/html-artifacts/api";
 import { readUrl } from "@/lib/url-params";
 import { sanitizeStoryboardText } from "@/features/canvas/application/storyboardText";
@@ -488,6 +491,10 @@ export const NodeActionToolbar = memo(
     onOpenRotate,
   }: NodeActionToolbarProps) => {
     const { t, i18n } = useTranslation();
+    const depthModelCatalog = useFreezoneVideoModels(isVideoNode(node) ? undefined : null);
+    const depthVideoModel = !depthModelCatalog.isLoading && !depthModelCatalog.isFallback
+      ? findDepthVideoModel(depthModelCatalog.models)
+      : undefined;
     const videoAnalyzeCreditCost = useGenerationCreditCost(
       "feature",
       isVideoNode(node) ? "freezone.video_analyze" : null,
@@ -2030,6 +2037,33 @@ export const NodeActionToolbar = memo(
                     >
                       <ImageUpscale className="h-3.5 w-3.5" />
                       {t("nodeToolbar.video.hd")}
+                    </UiChipButton>
+                    <UiChipButton
+                      key="video-depth-capture"
+                      className={`${stubButtonClass} ${!hasVideo || !depthVideoModel ? "opacity-50 cursor-not-allowed" : ""}`}
+                      aria-disabled={!hasVideo || !depthVideoModel}
+                      title={
+                        !hasVideo
+                          ? t("nodeToolbar.video.requiresVideo")
+                          : depthModelCatalog.isLoading
+                            ? t("nodeToolbar.video.depthModelsLoading")
+                            : depthModelCatalog.isFallback
+                              ? t("nodeToolbar.video.depthModelsUnavailable")
+                              : !depthVideoModel
+                                ? t("nodeToolbar.video.depthModelUnavailable")
+                                : undefined
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (!hasVideo || !depthVideoModel) return;
+                        closeDownloadMenu();
+                        if (!createDepthVideoNode(node.id, depthVideoModel, t("nodeToolbar.video.depthCapture"))) {
+                          toast.error(t("nodeToolbar.video.depthCreateFailed"));
+                        }
+                      }}
+                    >
+                      <Layers3 className="h-3.5 w-3.5" />
+                      {t("nodeToolbar.video.depthCapture")}
                     </UiChipButton>
                     <UiChipButton
                       key="video-analyze"

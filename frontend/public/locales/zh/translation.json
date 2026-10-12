@@ -5739,6 +5739,11 @@
       }
     },
     "video": {
+      "depthCapture": "深度动作捕捉",
+      "depthModelUnavailable": "未配置可用的深度视频模型，请联系管理员",
+      "depthModelsLoading": "正在加载视频模型…",
+      "depthModelsUnavailable": "视频模型列表暂不可用，请刷新后重试",
+      "depthCreateFailed": "无法创建深度视频节点，请刷新后重试",
       "clip": "剪辑",
       "hd": "高清",
       "analyze": "解析",

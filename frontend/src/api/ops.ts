@@ -1470,6 +1470,8 @@ export interface FreezoneVideoModelInfo extends ReferenceMediaLimits {
   defaultSceneOptimize?: "anime" | "realistic" | null;
   ratioOptions?: string[];
   supportedModes?: string[];
+  /** Catalog purpose used to find a model for toolbar shortcuts. */
+  processingKind?: string;
   referenceImageMax?: number | null;
   referenceVideoMax?: number | null;
   referenceAudioMax?: number | null;
@@ -1528,6 +1530,7 @@ function videoModelEntryFromObject(
   const id = pickString(entry, "id") ?? apiModel;
   const label = pickString(entry, "label", "displayName", "display_name") ?? apiModel;
   const catalogId = pickString(entry, "catalogId", "catalog_id");
+  const processingKind = pickString(entry, "processingKind", "processing_kind");
   const resolutionOptions = pickStringArray(entry, "resolutionOptions", "resolution_options");
   const sceneOptimizeOptions = pickStringArray(entry, "sceneOptimizeOptions", "scene_optimize_options")
     .map((value) => value.toLowerCase())
@@ -1559,6 +1562,7 @@ function videoModelEntryFromObject(
     defaultSceneOptimize,
     ratioOptions: pickStringArray(entry, "ratioOptions", "ratio_options"),
     supportedModes: pickStringArray(entry, "supportedModes", "supported_modes"),
+    ...(processingKind ? { processingKind } : {}),
     referenceImageMax: pickNumber(entry, "referenceImageMax", "reference_image_max"),
     ...readReferenceMediaLimits(entry),
     referenceVideoMax: pickNumber(entry, "referenceVideoMax", "reference_video_max"),

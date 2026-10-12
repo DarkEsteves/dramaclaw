@@ -5739,6 +5739,11 @@
       }
     },
     "video": {
+      "depthCapture": "Depth capture",
+      "depthModelUnavailable": "No depth video model is configured",
+      "depthModelsLoading": "Loading video models…",
+      "depthModelsUnavailable": "Video models are unavailable. Refresh and try again",
+      "depthCreateFailed": "Could not create a depth video node. Refresh and try again",
       "clip": "Clip",
       "hd": "HD",
       "analyze": "Analyze",

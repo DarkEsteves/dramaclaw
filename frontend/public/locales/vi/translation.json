@@ -5625,6 +5625,11 @@
       "sceneSettingSheet": "Bảng thiết kế bối cảnh"
     },
     "video": {
+      "depthCapture": "Tách độ sâu",
+      "depthModelUnavailable": "Chưa cấu hình mô hình video độ sâu",
+      "depthModelsLoading": "Đang tải mô hình video…",
+      "depthModelsUnavailable": "Danh sách mô hình video chưa khả dụng. Hãy tải lại",
+      "depthCreateFailed": "Không thể tạo nút video độ sâu. Hãy tải lại",
       "clip": "Cắt đoạn",
       "hd": "HD",
       "analyze": "Phân tích",
