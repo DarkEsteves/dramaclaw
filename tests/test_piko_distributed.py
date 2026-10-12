@@ -176,3 +176,68 @@ async def test_stale_browser_is_removed_and_broadcasts_player_left() -> None:
     finally:
         await first_hub.close()
         await second_hub.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_logins_keep_one_owner_and_stale_heartbeats_cannot_reclaim() -> None:
+    server = fakeredis.FakeServer()
+    hubs = [DistributedPikoWorldHub(FakeStore(), redis_url="redis://unused") for _ in range(2)]
+    for hub in hubs:
+        hub.redis = fakeredis.aioredis.FakeRedis(server=server, decode_responses=True)
+    sockets = [FakeWebSocket(), FakeWebSocket()]
+    try:
+        players = await asyncio.gather(*(
+            hub.join(socket, user_id="user-1", character=character(1))
+            for hub, socket in zip(hubs, sockets)
+        ))
+        route = hubs[0]._route_key(character(1).id)
+        owner = await hubs[0].redis.get(route)
+        winner = next(index for index, player in enumerate(players) if player.connection_token == owner)
+        loser = 1 - winner
+        assert not await hubs[loser]._refresh_player(players[loser])
+        assert await hubs[0].redis.get(route) == owner
+        await hubs[loser]._heartbeat_once()
+        await hubs[winner]._heartbeat_once()
+        assert sockets[loser].close_code == 4001
+        assert sockets[winner].close_code is None
+        assert await hubs[0].redis.get(route) == owner
+    finally:
+        for hub in hubs:
+            await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_presence_closes_with_a_reconnectable_code() -> None:
+    hub = DistributedPikoWorldHub(FakeStore(), redis_url="redis://unused")
+    hub.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    socket = FakeWebSocket()
+    try:
+        player = await hub.join(socket, user_id="user-1", character=character(1))
+        await hub.redis.delete(hub._route_key(player.character_id))
+        await hub._heartbeat_once()
+        assert socket.close_code == 1001
+        assert socket not in hub._players
+    finally:
+        await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_replacement_event_cannot_close_the_new_connection() -> None:
+    hub = DistributedPikoWorldHub(FakeStore(), redis_url="redis://unused")
+    hub.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    old_socket, new_socket = FakeWebSocket(), FakeWebSocket()
+    try:
+        old = await hub.join(old_socket, user_id="user-1", character=character(1))
+        current = await hub.join(new_socket, user_id="user-1", character=character(1))
+        await hub._publish(
+            "direct", {"type": "session.replaced"},
+            target_character_id=old.character_id,
+            target_instance=hub.instance_id,
+            target_connection_token=old.connection_token,
+        )
+        await hub._publish("direct", {"type": "marker"}, target_character_id=current.character_id)
+        await wait_for_frame(new_socket, "marker")
+        assert new_socket.close_code is None
+        assert await hub.redis.get(hub._route_key(current.character_id)) == current.connection_token
+    finally:
+        await hub.close()

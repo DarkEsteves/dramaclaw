@@ -209,15 +209,20 @@ class PikoWorldHub:
                 socket for socket, current in self._players.items()
                 if current.user_id == user_id and socket is not websocket
             ]
-            for socket in replaced:
-                self._players.pop(socket, None)
+            departures = [self._detach_connection(socket) for socket in replaced]
             self._players[websocket] = player
             snapshot = [
                 current.public_dict() for current in self._players.values()
                 if current.scene_id == player.scene_id and current.websocket is not websocket
             ]
-        for socket in replaced:
-            await self._close_replaced(socket)
+        for previous, peers in departures:
+            if previous is not None:
+                await self._notify_private_end(previous, peers)
+                if previous.scene_id != player.scene_id:
+                    await self._broadcast_scene(previous.scene_id, {
+                        "type": "player.left", "character_id": previous.character_id,
+                    })
+                await self._close_replaced(previous.websocket)
         await websocket.send_json({"type": "world.snapshot", "players": snapshot})
         await self._broadcast_scene(
             player.scene_id, {"type": "player.joined", "player": player.public_dict()},
@@ -226,6 +231,9 @@ class PikoWorldHub:
         return player
 
     async def handle(self, player: OnlinePlayer, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            if self._players.get(player.websocket) is not player:
+                return
         player.last_seen_at = monotonic()
         event_type = payload.get("type")
         if event_type == "player.move":
@@ -247,24 +255,10 @@ class PikoWorldHub:
 
     async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:
-            player = self._players.pop(websocket, None)
-            self._pending_chat_requests = {
-                request_id: pair
-                for request_id, pair in self._pending_chat_requests.items()
-                if websocket not in pair
-            }
-            peers = self._private_peers.pop(websocket, set())
-            for peer_socket in peers:
-                self._private_peers.get(peer_socket, set()).discard(websocket)
+            player, peers = self._detach_connection(websocket)
         if player is None:
             return
-        for peer_socket in peers:
-            try:
-                await peer_socket.send_json(
-                    {"type": "chat.private.ended", "character_id": player.character_id}
-                )
-            except Exception:  # noqa: BLE001 - disconnect cleanup is best effort
-                pass
+        await self._notify_private_end(player, peers)
         self.store.update_location(
             player.user_id, scene_id=player.scene_id, x=player.x, y=player.y,
             facing=player.facing,
@@ -273,6 +267,28 @@ class PikoWorldHub:
             player.scene_id,
             {"type": "player.left", "character_id": player.character_id},
         )
+
+    def _detach_connection(self, websocket: WebSocket) -> tuple[OnlinePlayer | None, set[WebSocket]]:
+        """Remove a connection and its relationships while holding ``_lock``."""
+        player = self._players.pop(websocket, None)
+        self._pending_chat_requests = {
+            request_id: pair
+            for request_id, pair in self._pending_chat_requests.items()
+            if websocket not in pair
+        }
+        peers = self._private_peers.pop(websocket, set())
+        for peer_socket in peers:
+            self._private_peers.get(peer_socket, set()).discard(websocket)
+        return player, peers
+
+    async def _notify_private_end(self, player: OnlinePlayer, peers: set[WebSocket]) -> None:
+        for peer_socket in peers:
+            try:
+                await peer_socket.send_json(
+                    {"type": "chat.private.ended", "character_id": player.character_id}
+                )
+            except Exception:  # noqa: BLE001 - disconnect cleanup is best effort
+                pass
 
     async def _move(self, player: OnlinePlayer, payload: dict[str, Any]) -> None:
         try:
