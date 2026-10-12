@@ -2,6 +2,7 @@
 // Copyright (c) 2026 ClaymoreLab
 import { retainDogWorldSession } from "./runtime/dog-world-session";
 import { PikoChatTranslation } from "./PikoChatTranslation";
+import { PikoChatTextBubble } from "./PikoChatTextBubble";
 import { PIKO_MAP_TRAVEL_TIMING } from "./piko-map-timing";
 import { usePikoCursors } from "./use-piko-cursors";
 import { PikoPrivateChat } from "./PikoPrivateChat";
@@ -48,6 +49,7 @@ import {
   PIKO_WORLD_OVERLAY_TRANSITION_CLASS,
   pikoWorldOverlayVisibilityClass,
 } from "./piko-world-overlay-motion";
+import { savePikoCharacter, usePikoWorldConnection, type PikoCharacter } from "./piko-world-client";
 
 const RETURN_CONTROL_SRC = "/piko/world/ui/piko-world-return-icon-v2.png";
 const CHAT_CONTROL_SRC = "/piko/world/ui/piko-world-chat-icon-v2.png";
@@ -67,7 +69,8 @@ const DAY_PAGE_BACKGROUND_SRC =
 
 type ChatMessage = {
   id: string;
-  authorKey: string;
+  authorKey?: string;
+  author?: string;
   bodyKey?: string;
   body?: string;
   time: string;
@@ -109,15 +112,38 @@ function currentChatTime(): string {
   }).format(new Date());
 }
 
-export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: { playerGender?: PikoPlayerGender; onMusicMapChange?: (mapId: MapLocation["mapId"]) => void; taskStatus?: PikoOwnTaskStatus } = {}) {
+export function PikoWorldShell({ character = null, playerGender, onMusicMapChange, taskStatus }: { character?: PikoCharacter | null; playerGender?: PikoPlayerGender; onMusicMapChange?: (mapId: MapLocation["mapId"]) => void; taskStatus?: PikoOwnTaskStatus } = {}) {
   useEffect(() => retainDogWorldSession(), []);
   usePikoCursors();
   const { t } = useTranslation();
   const username = useAuthStore(state => state.username);
   const { profile, saveProfile } = usePikoProfile(username);
+  const [savedCharacter, setSavedCharacter] = useState(character);
+  useEffect(() => setSavedCharacter(character), [character]);
+  const saveAccountProfile = useCallback(async (next: typeof profile) => {
+    if (!savedCharacter) return saveProfile(next);
+    try {
+      const updated = await savePikoCharacter(
+        savedCharacter.gender,
+        next.nickname,
+        next.bio,
+      );
+      if (!saveProfile({ nickname: updated.nickname, bio: updated.bio })) return false;
+      setSavedCharacter(updated);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [savedCharacter, saveProfile]);
   const { accessory, saveAccessory } = usePlayerAccessory(username);
   const nickname = profile.nickname || t("pikoWorld.defaultNickname");
-  const [location, setLocation] = useState<MapLocation>({ mapId: "welcome-courtyard" });
+  const [location, setLocation] = useState<MapLocation>(() => ({
+    mapId: character && isPikoMapId(character.scene_id) ? character.scene_id : "welcome-courtyard",
+  }));
+  const [restoredPosition, setRestoredPosition] = useState(() => character ? {
+    x: character.position_x, y: character.position_y, facing: character.facing,
+  } : undefined);
+  const world = usePikoWorldConnection(savedCharacter, location.mapId);
   useMapMusic(onMusicMapChange ? null : location.mapId);
   useEffect(() => { onMusicMapChange?.(location.mapId); }, [location.mapId, onMusicMapChange]);
   const [travelFade, setTravelFade] = useState<"idle" | "out" | "black" | "loading" | "in">("idle");
@@ -155,6 +181,7 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
   const wardrobeButtonRef = useRef<HTMLButtonElement>(null);
   const [musicOpen, setMusicOpen] = useState(false);
   const chatMessageListRef = useRef<HTMLDivElement>(null);
+  const receivedChatIds = useRef(new Set<string>());
   const unreadChatCount = chatMessages.reduce(
     (count, message) => count + (!message.mine && message.unread ? 1 : 0),
     0,
@@ -182,6 +209,7 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
       if (controller.signal.aborted) return;
       setFallback(prepared.fallback);
       setPreparedTravel(prepared.destination);
+      setRestoredPosition(undefined);
     } catch {
       if (!controller.signal.aborted) {
         // A failed parallel preflight must also cancel its remaining requests.
@@ -193,6 +221,20 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
       window.clearTimeout(timeout);
     }
   }, [location.mapId]);
+
+  useEffect(() => {
+    const incoming = world.chatMessages.filter(message => !receivedChatIds.current.has(message.id));
+    if (!incoming.length) return;
+    incoming.forEach(message => receivedChatIds.current.add(message.id));
+    setChatMessages(messages => [...messages, ...incoming.map(message => ({
+      id: message.id,
+      author: message.nickname,
+      body: message.body,
+      time: currentChatTime(),
+      mine: message.character_id === character?.id,
+      unread: message.character_id !== character?.id && !chatOpen,
+    }))]);
+  }, [world.chatMessages, character?.id, chatOpen]);
 
   const reloadMap = (destination: MapLocation) => {
     if (travelRequest.current || travelPending) return;
@@ -300,17 +342,11 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
       return;
     }
     const body = result.body;
+    if (character && !world.chat(body)) {
+      setChatError(t("pikoWorld.onboarding.saveError"));
+      return;
+    }
     setChatError(null);
-    setChatMessages((messages) => [
-      ...messages,
-      {
-        id: `local-${Date.now()}`,
-        authorKey: "pikoWorld.chatMockYouName",
-        body,
-        time: currentChatTime(),
-        mine: true,
-      },
-    ]);
     setChatDraft("");
   };
 
@@ -387,6 +423,10 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
           onExit={handleExit}
           nickname={nickname}
           speech={publicChat.speech}
+          initialPosition={restoredPosition}
+          remotePlayers={world.remotePlayers}
+          onRemoteChatRequest={world.requestChat}
+          onLocalState={world.move}
           taskStatus={taskStatus}
           residentId={selectedResidentId}
           playerGender={playerGender}
@@ -398,6 +438,11 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
         />
 
         <PikoPrivateChat key={`private-chat:${username ?? "guest"}`} ownNickname={nickname}
+          ownCharacterId={savedCharacter?.id}
+          requests={world.chatRequests} peers={world.privateChatPeers}
+          messages={world.privateChatMessages}
+          onRespond={world.respondToChatRequest} onSend={world.sendPrivateChat}
+          onEnd={world.endPrivateChat}
           active={entered && entryFade === "done" && !travelPending && mapTitleComplete && mapLoadState === "ready" && !settingsOpen && !profileOpen && !residentSelectorOpen}
           onOpenChange={setPrivateOpen} />
         <nav
@@ -525,7 +570,7 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
           key={`profile:${username ?? "guest"}`}
           open={profileOpen}
           profile={profile}
-          onSave={saveProfile}
+          onSave={saveAccountProfile}
           onOpenChange={open => { setProfileOpen(open); playPikoUiSound(open ? "open" : "close"); }}
         />
 
@@ -605,27 +650,26 @@ export function PikoWorldShell({ playerGender, onMusicMapChange, taskStatus }: {
                 <article
                   key={message.id}
                   className={cn(
-                    "flex max-w-[88%] flex-col gap-1",
+                    "flex w-fit min-w-0 max-w-[88%] flex-col gap-1",
                     message.mine ? "self-end items-end" : "self-start items-start",
                   )}
                 >
                   <div className="flex items-center gap-2 px-1 text-[10px] leading-4 text-primary-foreground/55">
                     <span className="font-medium text-primary-foreground/70">
-                      {message.mine ? nickname : t(message.authorKey)}
+                      {message.mine ? nickname : message.author ?? t(message.authorKey ?? "")}
                     </span>
                     <time>{message.time}</time>
                   </div>
                   <PikoChatTranslation text={message.body ?? t(message.bodyKey ?? "")} conversation="public:town">
-                  <p
+                  <PikoChatTextBubble
+                    body={message.body ?? t(message.bodyKey ?? "")}
                     className={cn(
-                      "whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-[min(var(--radius-sm),8px)] border px-2.5 py-1.5 text-xs leading-4 text-primary-foreground/80",
+                      "rounded-[min(var(--radius-sm),8px)] border px-2.5 py-1.5 text-xs leading-4 text-primary-foreground/80",
                       message.mine
                         ? "border-amber-900/15 bg-amber-100/55"
                         : "border-amber-950/10 bg-white/55",
                     )}
-                  >
-                    {message.body ?? t(message.bodyKey ?? "")}
-                  </p>
+                  />
                   </PikoChatTranslation>
                 </article>
               ))

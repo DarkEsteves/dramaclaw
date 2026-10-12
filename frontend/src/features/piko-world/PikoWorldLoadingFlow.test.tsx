@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MapExit } from "./runtime/map-travel";
+import type { PikoPrivateChatRequest } from "./piko-world-client";
 import { PIKO_MAP_TRANSITION_TIMING } from "./PikoMapTransition";
 import { PikoWorldShell } from "./PikoWorldShell";
 import * as localStorageQuota from "@/lib/localStorageQuota";
@@ -10,6 +11,23 @@ vi.mock("./piko-audio", () => ({ playPikoUiSound: vi.fn(), unlockPikoNotificatio
 
 const travel = vi.hoisted(() => ({ prepare: vi.fn() }));
 vi.mock("./runtime/map-travel", () => ({ prepareMapTravel: travel.prepare }));
+const connection = vi.hoisted(() => ({
+  remotePlayers: [],
+  chatMessages: [],
+  chatRequests: [] as PikoPrivateChatRequest[],
+  privateChatPeers: [],
+  privateChatMessages: [],
+  move: vi.fn(),
+  chat: vi.fn(() => true),
+  requestChat: vi.fn(() => true),
+  respondToChatRequest: vi.fn(() => true),
+  sendPrivateChat: vi.fn(() => true),
+  endPrivateChat: vi.fn(() => true),
+}));
+vi.mock("./piko-world-client", async (original) => ({
+  ...await original<typeof import("./piko-world-client")>(),
+  usePikoWorldConnection: () => connection,
+}));
 const map = vi.hoisted(() => ({ exit: (_exit: MapExit) => {}, report: (_state: "loading" | "ready" | "error") => {}, mounts: 0 }));
 vi.mock("./PikoWorldCanvas", () => ({
   PikoWorldCanvas: ({ onLoadStateChange, showMayorHint, mayorHintVisible, mapId, spawnId, onExit }: { mapId: string; spawnId?: string; onExit?: (exit: MapExit) => void; onLoadStateChange: typeof map.report; showMayorHint?: boolean; mayorHintVisible?: boolean }) => {
@@ -27,7 +45,12 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   Link: ({ to, children, ...props }: { to: string; children: React.ReactNode }) => <a href={to} {...props}>{children}</a>,
 }));
-beforeEach(() => { vi.useFakeTimers(); map.mounts = 0; travel.prepare.mockReset(); });
+beforeEach(() => {
+  vi.useFakeTimers();
+  map.mounts = 0;
+  travel.prepare.mockReset();
+  connection.chatRequests = [];
+});
 afterEach(() => { vi.useRealTimers(); });
 
 it("keeps map inert until automatic entry and covers the viewport with the map title", async () => {
@@ -200,7 +223,11 @@ it("aborts preparation and clears its deadline on unmount", async () => {
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it("preserves the same private request tray when switching maps repeatedly", async () => {
+it("preserves the same incoming multiplayer request tray when switching maps repeatedly", async () => {
+  connection.chatRequests = [
+    { id: "request-one", from_character_id: "player-one", from_nickname: "小叶", sent_at: "2026-10-10T10:00:00Z" },
+    { id: "request-two", from_character_id: "player-two", from_nickname: "小花", sent_at: "2026-10-10T10:00:00Z" },
+  ];
   render(<PikoWorldShell />);
   await enterWorld();
   act(() => vi.advanceTimersByTime(8000));
