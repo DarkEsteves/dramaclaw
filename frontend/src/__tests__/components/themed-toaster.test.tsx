@@ -11,8 +11,8 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  Toaster: ({ offset }: { offset: number }) => (
-    <div data-testid="toaster" data-offset={offset} />
+  Toaster: ({ offset, position }: { offset: { top: number }; position: string }) => (
+    <div data-testid="toaster" data-offset={offset.top} data-position={position} />
   ),
 }));
 
@@ -25,7 +25,7 @@ describe("ThemedToaster", () => {
 
   it.each([
     ["/", "60"],
-    ["/projects/demo/freezone", "60"],
+    ["/projects/demo/freezone", "94"],
     ["/projects/demo/characters", "102"],
     ["/login", "24"],
     ["/watch/demo", "24"],
@@ -36,5 +36,6 @@ describe("ThemedToaster", () => {
       "data-offset",
       expectedOffset,
     );
+    expect(screen.getByTestId("toaster")).toHaveAttribute("data-position", "top-left");
   });
 });

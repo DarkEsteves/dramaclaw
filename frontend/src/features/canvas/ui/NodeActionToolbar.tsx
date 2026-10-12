@@ -2071,14 +2071,17 @@ export const NodeActionToolbar = memo(
                       ) : (
                         <Wand2 className="h-3.5 w-3.5" />
                       )}
-                      {t("nodeToolbar.video.analyze")}
-                      <CreditCostPill
-                        display={videoAnalyzeCreditCostDisplay}
-                        promotion={videoAnalyzeCreditCost.data?.data.promotion}
-                        disabled={
-                          !hasVideo || isAnalyzing || videoAnalyzeBillingRuleMissing
-                        }
-                      />
+                      <span className="inline-flex items-center gap-1">
+                        {t("nodeToolbar.video.analyze")}
+                        <CreditCostPill
+                          display={videoAnalyzeCreditCostDisplay}
+                          promotion={videoAnalyzeCreditCost.data?.data.promotion}
+                          disabled={
+                            !hasVideo || isAnalyzing || videoAnalyzeBillingRuleMissing
+                          }
+                          className="h-auto rounded-none bg-transparent px-0"
+                        />
+                      </span>
                     </UiChipButton>
                     <DropdownMenu
                       onOpenChange={(open) => {

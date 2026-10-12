@@ -9439,7 +9439,7 @@ function SearchBar({
   }, []);
 
   return (
-    <div role="search" className="pointer-events-auto flex h-10 w-full items-center gap-2 rounded-xl border border-border/70 bg-background/90 px-2.5 shadow-lg backdrop-blur-xl">
+    <div role="search" className="pointer-events-auto flex h-10 w-full items-center gap-2 rounded-xl border border-border/70 bg-background/90 px-2.5 backdrop-blur-xl">
       <Search className="size-4 shrink-0 text-muted-foreground" />
       <Input
         ref={inputRef}
@@ -9450,7 +9450,7 @@ function SearchBar({
         }}
         placeholder={t("aiAssistant.search")}
         aria-label={t("aiAssistant.search")}
-        className="h-8 border-0 bg-transparent px-0 text-sm shadow-none focus-visible:ring-0"
+        className="h-8 border-0 bg-transparent px-0 text-sm shadow-none focus-visible:ring-0 dark:bg-transparent"
       />
       <Button variant="ghost" size="icon" className="size-7 shrink-0" onClick={onClose} aria-label={t("aiAssistant.closeSearch")}>
         <X className="size-4" />
@@ -10247,7 +10247,7 @@ function CanvasNodeReferenceThumb({
   return (
     <div
       ref={thumbRef}
-      className="group relative size-11 shrink-0 cursor-pointer overflow-visible focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+      className="group relative size-11 shrink-0 cursor-pointer overflow-visible rounded-[8px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
       aria-label={`${title} · ${node.nodeId}`}
       data-media-kind={fallbackKind}
       role="button"
@@ -10260,7 +10260,7 @@ function CanvasNodeReferenceThumb({
       onKeyDown={(event) => handleCanvasReferenceKeyDown(event, node.nodeId)}
       tabIndex={0}
     >
-      <div className="h-full w-full overflow-hidden rounded-md border border-white/10 bg-white/[0.07] transition group-hover:border-white/25 group-hover:ring-2 group-hover:ring-white/10">
+      <div className="h-full w-full overflow-hidden rounded-[inherit] border border-white/10 bg-white/[0.07] transition group-hover:border-white/25 group-hover:ring-2 group-hover:ring-white/10">
         {previewSrc && previewIsVideo ? (
           <CanvasReferenceVideoPreview src={previewSrc} title={title} iconClassName="size-4" />
         ) : previewSrc && (previewIsImage || isImage) ? (
@@ -10496,7 +10496,10 @@ function serializeFreezoneSkillEditor(root: HTMLElement): string {
 }
 
 const FREEZONE_CHIP_CLASS =
-  "mx-0.5 inline-flex max-w-[min(260px,80%)] select-none items-center gap-1.5 rounded-[7px] border border-white/[0.12] bg-white/[0.08] px-2 py-0.5 align-baseline text-xs text-foreground/90";
+  "mention-chip max-w-[min(260px,80%)] select-none";
+
+const FREEZONE_COMPOSER_ACTION_CLASS =
+  "h-7 gap-1.5 rounded-full border border-foreground/10 bg-transparent px-2 text-xs text-muted-foreground transition-colors duration-[var(--duration-fast)] hover:border-foreground/30 hover:bg-transparent hover:text-foreground dark:hover:bg-transparent aria-expanded:bg-transparent focus-visible:border-foreground/30 focus-visible:text-foreground";
 
 function buildFreezoneSkillChipElement(skillId: string, label: string): HTMLElement {
   const chip = document.createElement("span");
@@ -10511,7 +10514,7 @@ function buildFreezoneSkillChipElement(skillId: string, label: string): HTMLElem
   chip.appendChild(icon);
 
   const text = document.createElement("span");
-  text.className = "truncate";
+  text.className = "mention-chip-label";
   text.textContent = label;
   chip.appendChild(text);
   return chip;
@@ -10545,7 +10548,6 @@ function buildFreezoneNodeChipElement(
     thumb.src = meta.thumbnailUrl;
     thumb.alt = "";
     thumb.loading = "lazy";
-    thumb.className = "size-4 shrink-0 rounded-[3px] object-cover";
     chip.appendChild(thumb);
   } else if (meta?.column === "video" && meta.mediaUrl) {
     // 视频没记封面：拿片源取首帧当缩略图（对齐故事板 VideoThumb 的 #t=0.1 兜底）。
@@ -10554,7 +10556,6 @@ function buildFreezoneNodeChipElement(
     thumb.muted = true;
     thumb.preload = "metadata";
     thumb.playsInline = true;
-    thumb.className = "size-4 shrink-0 rounded-[3px] object-cover";
     chip.appendChild(thumb);
   } else {
     const icon = document.createElement("span");
@@ -10564,7 +10565,7 @@ function buildFreezoneNodeChipElement(
   }
 
   const text = document.createElement("span");
-  text.className = "truncate";
+  text.className = "mention-chip-label";
   text.textContent = label;
   chip.appendChild(text);
   return chip;
@@ -16113,7 +16114,7 @@ export function SuperChatPanel({
                       </DropdownMenu>
                     )}
                     {isFreezoneLayout && (
-                      <>
+                      <div className="flex items-center gap-2">
                         <DropdownMenu
                           open={canvasCommandModeMenuOpen}
                           onOpenChange={setCanvasCommandModeMenuOpen}
@@ -16125,8 +16126,8 @@ export function SuperChatPanel({
                                 variant="ghost"
                                 size="sm"
                                 className={cn(
-                                  "h-8 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-                                  canvasCommandModeMenuOpen && "bg-white/[0.08] text-foreground",
+                                  FREEZONE_COMPOSER_ACTION_CLASS,
+                                  canvasCommandModeMenuOpen && "border-foreground/30 text-foreground",
                                 )}
                               />
                             }
@@ -16193,8 +16194,8 @@ export function SuperChatPanel({
                           variant="ghost"
                           size="sm"
                           className={cn(
-                            "h-8 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-                            showFreezoneSkillSuggestions && freezoneSkillMenuExplicitOpen && "bg-white/[0.08] text-foreground",
+                            FREEZONE_COMPOSER_ACTION_CLASS,
+                            showFreezoneSkillSuggestions && freezoneSkillMenuExplicitOpen && "border-foreground/30 text-foreground",
                           )}
                           onMouseDown={(event) => {
                             event.preventDefault();
@@ -16213,10 +16214,10 @@ export function SuperChatPanel({
                           title="选择 Skill"
                           aria-expanded={showFreezoneSkillSuggestions}
                         >
-                          <Package className="size-4" />
+                          <Package className="size-3.5" />
                           <span>Skill</span>
                         </Button>
-                      </>
+                      </div>
                     )}
                     {ENABLE_SUPERCHAT_FILE_UPLOAD && (
                       <Button
