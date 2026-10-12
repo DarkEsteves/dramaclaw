@@ -16,7 +16,7 @@ from novelvideo.piko.translation import Language, Translation, TranslationBusy, 
 from novelvideo.project_context import user_id_from_api_user
 from novelvideo.ports.authz import AuthzError
 from novelvideo.piko.backend import character_store, world_hub
-from novelvideo.piko.world import parse_client_payload
+from novelvideo.piko.protocol import parse_client_payload
 from novelvideo.task_backend.subprocesses import EgressBoundaryError
 
 router = APIRouter(prefix="/piko")

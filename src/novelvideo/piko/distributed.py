@@ -17,14 +17,15 @@ import redis.asyncio as aioredis
 from fastapi import WebSocket
 
 from novelvideo.piko.world import (
-    CHAT_COOLDOWN_SECONDS,
-    CHAT_MAX_LENGTH,
     DEFAULT_SCENE_ID,
     DEFAULT_X,
     DEFAULT_Y,
-    PRIVATE_CHAT_COOLDOWN_SECONDS,
     OnlinePlayer,
     PikoCharacter,
+)
+from novelvideo.piko.protocol import (
+    CHAT_COOLDOWN_SECONDS, PRIVATE_CHAT_COOLDOWN_SECONDS,
+    message_body, message_correlation, message_error, message_receipt, private_session_ended,
 )
 
 KEY_PREFIX = "piko:v1:"
@@ -367,6 +368,17 @@ class DistributedPikoWorldHub:
                 await self._safe_send(player.websocket, {"type": "pong"})
             else:
                 await self._retire_connection(player)
+        elif event_type == "profile.update":
+            await self._update_profile(player)
+
+    async def _update_profile(self, player: OnlinePlayer) -> None:
+        character = await self.store.get(player.user_id)
+        if character is not None:
+            player.nickname, player.bio, player.gender = character.nickname, character.bio, character.gender
+            if await self._refresh_player(player):
+                await self._publish("room", {
+                    "type": "player.updated", "player": player.public_dict(),
+                }, room_id=player.instance_id, exclude_character_id=player.character_id)
 
     async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:
@@ -418,7 +430,7 @@ class DistributedPikoWorldHub:
         if peers:
             await self._publish(
                 "direct",
-                {"type": "chat.private.ended", "character_id": character_id},
+                private_session_ended(character_id),
                 target_character_ids=peers,
             )
 
@@ -523,8 +535,9 @@ class DistributedPikoWorldHub:
         )
 
     async def _chat(self, player: OnlinePlayer, payload: dict[str, Any]) -> None:
-        body = str(payload.get("body") or "").strip()
-        if not body or len(body) > CHAT_MAX_LENGTH:
+        body = message_body(payload)
+        if body is None:
+            await self._safe_send(player.websocket, message_error(payload, "invalid_message"))
             return
         allowed = await self.redis.set(
             f"{KEY_PREFIX}rate:scene-chat:{player.character_id}",
@@ -533,14 +546,16 @@ class DistributedPikoWorldHub:
             nx=True,
         )
         if not allowed:
-            await self._safe_send(player.websocket, {"type": "error", "code": "chat_cooldown"})
+            await self._safe_send(player.websocket, message_error(payload, "chat_cooldown"))
             return
+        message_id = str(uuid.uuid4())
         await self._publish(
             "room",
             {
                 "type": "chat.message",
                 "message": {
-                    "id": str(uuid.uuid4()),
+                    "id": message_id,
+                    **message_correlation(payload),
                     "character_id": player.character_id,
                     "nickname": player.nickname,
                     "body": body,
@@ -549,6 +564,8 @@ class DistributedPikoWorldHub:
             },
             room_id=player.instance_id,
         )
+        if receipt := message_receipt(payload, message_id):
+            await self._safe_send(player.websocket, receipt)
 
     async def _chat_request(self, player: OnlinePlayer, payload: dict[str, Any]) -> None:
         target_id = str(payload.get("target_character_id") or "").strip()
@@ -666,10 +683,15 @@ class DistributedPikoWorldHub:
 
     async def _private_chat(self, player: OnlinePlayer, payload: dict[str, Any]) -> None:
         target_id = str(payload.get("target_character_id") or "").strip()
-        body = str(payload.get("body") or "").strip()
-        if not target_id or not body or len(body) > CHAT_MAX_LENGTH:
+        body = message_body(payload)
+        if not target_id or body is None:
+            await self._safe_send(player.websocket, message_error(payload, "invalid_message"))
             return
         if not await self.redis.sismember(self._active_chat_key(player.character_id), target_id):
+            await self._safe_send(player.websocket, message_error(payload, "private_chat_unavailable"))
+            return
+        if await self._redis_player(target_id) is None:
+            await self._safe_send(player.websocket, message_error(payload, "private_chat_unavailable"))
             return
         allowed = await self.redis.set(
             f"{KEY_PREFIX}rate:private-chat:{player.character_id}",
@@ -678,6 +700,7 @@ class DistributedPikoWorldHub:
             nx=True,
         )
         if not allowed:
+            await self._safe_send(player.websocket, message_error(payload, "private_chat_cooldown"))
             return
         conversation_id = await self.store.open_conversation(player.character_id, target_id)
         stored = await self.store.append_message(conversation_id, player.character_id, body)
@@ -685,6 +708,7 @@ class DistributedPikoWorldHub:
             "type": "chat.private.message",
             "message": {
                 "id": stored["id"],
+                **message_correlation(payload),
                 "conversation_id": conversation_id,
                 "from_character_id": player.character_id,
                 "to_character_id": target_id,
@@ -696,6 +720,8 @@ class DistributedPikoWorldHub:
         await self._publish(
             "direct", frame, target_character_ids=[player.character_id, target_id]
         )
+        if receipt := message_receipt(payload, stored["id"]):
+            await self._safe_send(player.websocket, receipt)
 
     async def _private_chat_end(
         self, player: OnlinePlayer, payload: dict[str, Any]
@@ -709,7 +735,7 @@ class DistributedPikoWorldHub:
         await pipe.execute()
         await self._publish(
             "direct",
-            {"type": "chat.private.ended", "character_id": player.character_id},
+            private_session_ended(player.character_id),
             target_character_id=target_id,
         )
 

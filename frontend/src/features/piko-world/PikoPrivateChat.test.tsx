@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Elastic-2.0
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { PikoPrivateChat } from "./PikoPrivateChat";
 import type {
@@ -89,4 +89,23 @@ it("ends the real private session through the network callback", () => {
   fireEvent.click(screen.getByRole("button", { name: "关闭" }));
   fireEvent.click(screen.getByRole("button", { name: "关闭与在线小叶的聊天" }));
   expect(onEnd).toHaveBeenCalledWith(peer.character_id);
+});
+
+it("keeps the draft until confirmation and retains it after rejection", async () => {
+  let finish!: (accepted: boolean) => void;
+  const onSend = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+  render(<PikoPrivateChat active ownCharacterId="character-me" peers={[peer]}
+    onOpenChange={vi.fn()} onSend={onSend} />);
+  const input = screen.getByRole("textbox", { name: "输入私聊消息" });
+  fireEvent.change(input, { target: { value: "保留这条消息" } });
+  fireEvent.submit(input.closest("form")!);
+  fireEvent.submit(input.closest("form")!);
+  expect(onSend).toHaveBeenCalledTimes(1);
+  expect(input).toHaveValue("保留这条消息");
+  await act(async () => finish(false));
+  expect(input).toHaveValue("保留这条消息");
+  expect(screen.getByRole("alert")).toHaveTextContent("内容已保留");
+  fireEvent.submit(input.closest("form")!);
+  await act(async () => finish(true));
+  expect(input).toHaveValue("");
 });

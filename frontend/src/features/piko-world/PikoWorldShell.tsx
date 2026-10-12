@@ -13,6 +13,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -117,8 +118,11 @@ export function PikoWorldShell({ character = null, playerGender, onMusicMapChang
   usePikoCursors();
   const { t } = useTranslation();
   const username = useAuthStore(state => state.username);
-  const { profile, saveProfile } = usePikoProfile(username);
+  const { profile: cachedProfile, saveProfile, cacheProfile } = usePikoProfile(username);
   const [savedCharacter, setSavedCharacter] = useState(character);
+  const profile = useMemo(() => savedCharacter
+    ? { nickname: savedCharacter.nickname, bio: savedCharacter.bio }
+    : cachedProfile, [savedCharacter, cachedProfile]);
   useEffect(() => setSavedCharacter(character), [character]);
   const saveAccountProfile = useCallback(async (next: typeof profile) => {
     if (!savedCharacter) return saveProfile(next);
@@ -128,13 +132,13 @@ export function PikoWorldShell({ character = null, playerGender, onMusicMapChang
         next.nickname,
         next.bio,
       );
-      if (!saveProfile({ nickname: updated.nickname, bio: updated.bio })) return false;
+      if (!cacheProfile({ nickname: updated.nickname, bio: updated.bio })) return false;
       setSavedCharacter(updated);
       return true;
     } catch {
       return false;
     }
-  }, [savedCharacter, saveProfile]);
+  }, [savedCharacter, saveProfile, cacheProfile]);
   const { accessory, saveAccessory } = usePlayerAccessory(username);
   const nickname = profile.nickname || t("pikoWorld.defaultNickname");
   const [location, setLocation] = useState<MapLocation>(() => ({
@@ -172,6 +176,8 @@ export function PikoWorldShell({ character = null, playerGender, onMusicMapChang
   const publicChat = usePikoPublicChat(username);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatDraft, setChatDraft] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const chatSendingRef = useRef(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [
     ...CHAT_MOCK_MESSAGES,
   ]);
@@ -335,19 +341,34 @@ export function PikoWorldShell({ character = null, playerGender, onMusicMapChang
     list.scrollTop = list.scrollHeight;
   }, [chatMessages.length, chatOpen]);
 
-  const submitChatDraft = () => {
-    const result = publicChat.send(chatDraft);
+  const submitChatDraft = async () => {
+    if (chatSendingRef.current) return;
+    const result = publicChat.validate(chatDraft);
     if (!result.ok) {
       setChatError(result.reason === "length" ? t("pikoWorld.chatTooLong") : null);
       return;
     }
     const body = result.body;
-    if (character && !world.chat(body)) {
-      setChatError(t("pikoWorld.onboarding.saveError"));
-      return;
+    const submittedDraft = chatDraft;
+    if (character) {
+      chatSendingRef.current = true;
+      setChatSending(true);
+      try {
+        if (!await world.chat(body)) {
+          setChatError(t("pikoWorld.messageSendFailed"));
+          return;
+        }
+      } catch {
+        setChatError(t("pikoWorld.messageSendFailed"));
+        return;
+      } finally {
+        chatSendingRef.current = false;
+        setChatSending(false);
+      }
     }
+    publicChat.send(body);
     setChatError(null);
-    setChatDraft("");
+    setChatDraft(current => current === submittedDraft ? "" : current);
   };
 
   const handleChatDraftKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -686,10 +707,11 @@ export function PikoWorldShell({ character = null, playerGender, onMusicMapChang
               className="relative z-10 h-full min-h-0 resize-none border-0 !bg-transparent px-3 py-2.5 !text-xs text-primary-foreground shadow-none placeholder:text-primary-foreground/45 focus-visible:ring-0 dark:!bg-transparent"
               placeholder={t("pikoWorld.chatComposerPlaceholder")}
               aria-label={t("pikoWorld.chatComposerPlaceholder")}
+              aria-busy={chatSending}
             />
           </div>
           <div className="relative z-10 mx-4 mt-1 flex items-center justify-between gap-2 text-[10px] leading-4 text-amber-950/45">
-            <span role="status">{chatError ?? (publicChat.remaining > 0 ? t("pikoWorld.chatCooldown", { seconds: publicChat.remaining }) : t("pikoWorld.chatSendHint"))}</span>
+            <span role="status">{chatError ?? (chatSending ? t("pikoWorld.messageSending") : publicChat.remaining > 0 ? t("pikoWorld.chatCooldown", { seconds: publicChat.remaining }) : t("pikoWorld.chatSendHint"))}</span>
             <span>{Array.from(chatDraft.trim()).length}/{PIKO_CHAT_MAX_LENGTH}</span>
 
           </div>

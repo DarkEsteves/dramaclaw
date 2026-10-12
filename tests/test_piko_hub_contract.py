@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 import uuid
 
 import fakeredis.aioredis
@@ -107,3 +108,49 @@ async def test_replaced_connection_cannot_broadcast_messages(world) -> None:
     world.sockets[1].frames.clear()
     await world.hub.handle(world.players[0], {"type": "chat.send", "body": "stale connection"})
     assert not any(frame.get("type") == "chat.message" for frame in world.sockets[1].frames)
+
+
+async def test_private_message_receipt_and_rate_rejection_are_correlated(world) -> None:
+    await world.hub.handle(world.players[0], {
+        "type": "chat.private.send", "target_character_id": world.characters[1].id,
+        "body": "first", "client_message_id": "client-first",
+    })
+    receipt = await wait_for_frame(world.sockets[0], "chat.sent")
+    assert receipt["client_message_id"] == "client-first"
+    world.sockets[0].frames.clear()
+    await world.hub.handle(world.players[0], {
+        "type": "chat.private.send", "target_character_id": world.characters[1].id,
+        "body": "second", "client_message_id": "client-second",
+    })
+    rejected = await wait_for_frame(world.sockets[0], "error")
+    assert rejected == {"type": "error", "code": "private_chat_cooldown", "client_message_id": "client-second"}
+
+
+async def test_ended_private_session_rejects_messages_with_their_identifier(world) -> None:
+    await world.hub.disconnect(world.sockets[1])
+    world.sockets[0].frames.clear()
+    await world.hub.handle(world.players[0], {
+        "type": "chat.private.send", "target_character_id": world.characters[1].id,
+        "body": "still there?", "client_message_id": "client-ended",
+    })
+    rejected = await wait_for_frame(world.sockets[0], "error")
+    assert rejected == {"type": "error", "code": "private_chat_unavailable", "client_message_id": "client-ended"}
+
+
+async def test_profile_update_preserves_connection_and_existing_private_session(world) -> None:
+    if isinstance(world.hub, DistributedPikoWorldHub):
+        updated = replace(world.characters[0], nickname="Updated", bio="New bio")
+        world.hub.store.characters["alice"] = updated
+    else:
+        world.hub.store.create_or_update("alice", nickname="Updated", gender="female", bio="New bio")
+    await world.hub.handle(world.players[0], {"type": "profile.update"})
+    updated_frame = await wait_for_frame(world.sockets[1], "player.updated")
+    assert updated_frame["player"]["nickname"] == "Updated"
+    assert updated_frame["player"]["bio"] == "New bio"
+    assert world.sockets[0].close_code is None
+    world.sockets[1].frames.clear()
+    await world.hub.handle(world.players[0], {
+        "type": "chat.private.send", "target_character_id": world.characters[1].id, "body": "after update",
+    })
+    message = await wait_for_frame(world.sockets[1], "chat.private.message")
+    assert message["message"]["from_nickname"] == "Updated"
