@@ -2676,6 +2676,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "Đổi tên asset",
+      "confirmRename": "Đổi tên sẽ thay đổi ID asset. Các kế hoạch, bảng phân cảnh và kết quả đã tạo sẽ không được chuyển tự động. Sau khi lưu, bạn có thể cần lập kế hoạch và tạo lại. Bạn có muốn tiếp tục không?",
       "edit": "Sửa",
       "delete": "Xoá",
       "generated": "đã tạo",

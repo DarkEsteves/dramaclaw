@@ -2779,6 +2779,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "Rename asset",
+      "confirmRename": "Changing the name changes the asset ID. Existing plans, storyboards, and generated results will not migrate automatically. You may need to plan and generate again after saving. Continue?",
       "edit": "Edit",
       "delete": "Delete",
       "generated": "generated",

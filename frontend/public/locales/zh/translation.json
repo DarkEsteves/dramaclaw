@@ -2779,6 +2779,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "资产改名",
+      "confirmRename": "修改名称会改变资产 ID。已有规划、分镜及生成结果不会自动迁移，保存后可能需要重新规划并生成。是否继续？",
       "edit": "编辑",
       "delete": "删除",
       "generated": "已生成",

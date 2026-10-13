@@ -2322,6 +2322,7 @@ frontend/src/lib/browserDownload.ts,Elastic-2.0,2026 SuperTale contributors,REUS
 frontend/src/lib/character-main-copy.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/lib/chunk-load-recovery.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/lib/cluster-config.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
+frontend/src/lib/confirm-asset-rename.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/lib/custom-recharge.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/lib/derive-beat-states.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 frontend/src/lib/desktop-download.test.ts,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
