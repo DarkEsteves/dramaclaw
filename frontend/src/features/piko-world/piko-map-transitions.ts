@@ -93,6 +93,15 @@ export const PIKO_MAP_TRANSITIONS = {
 
 export type PikoMapId = keyof typeof PIKO_MAP_TRANSITIONS;
 
+export const PIKO_OPEN_MAP_IDS = [
+  "welcome-courtyard", "artisan-market", "town-hall-interior",
+  "amber-wilds", "cloudtop-slope", "lantern-canal-street",
+] as const satisfies readonly PikoMapId[];
+
+export function isPikoMapOpen(mapId: string): mapId is (typeof PIKO_OPEN_MAP_IDS)[number] {
+  return PIKO_OPEN_MAP_IDS.some(id => id === mapId);
+}
+
 export function isPikoMapId(mapId: string): mapId is PikoMapId {
   return Object.prototype.hasOwnProperty.call(PIKO_MAP_TRANSITIONS, mapId);
 }

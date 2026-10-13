@@ -19,10 +19,9 @@ const connection = vi.hoisted(() => ({
   privateChatMessages: [],
   move: vi.fn(),
   chat: vi.fn(() => true),
-  requestChat: vi.fn(() => true),
+  openPrivateChat: vi.fn(() => true),
   respondToChatRequest: vi.fn(() => true),
   sendPrivateChat: vi.fn(() => true),
-  endPrivateChat: vi.fn(() => true),
 }));
 vi.mock("./piko-world-client", async (original) => ({
   ...await original<typeof import("./piko-world-client")>(),
@@ -122,6 +121,24 @@ async function enterWorld() {
 }
 const marketExit: MapExit = { id: "to-artisan-market", targetMapId: "artisan-market",
   targetSpawnId: "welcome-courtyard-arrival", trigger: { id: "exit", points: [{x:30,y:245},{x:100,y:245},{x:100,y:295},{x:30,y:295}] } };
+
+it("shows a closed-scene notice without fading or fetching a destination", async () => {
+  render(<PikoWorldShell />);
+  await enterWorld();
+  await act(async () => { map.exit({ ...marketExit, targetMapId: "wind-garden-gate" }); });
+  expect(screen.getByText("风庭门暂未开放，敬请期待")).toBeVisible();
+  expect(screen.getByTestId("piko-travel-blackout")).toHaveAttribute("data-phase", "idle");
+  expect(screen.getByTestId("map-canvas")).toHaveAttribute("data-map", "welcome-courtyard");
+  expect(travel.prepare).not.toHaveBeenCalled();
+  act(() => vi.advanceTimersByTime(4000));
+  expect(screen.queryByText("风庭门暂未开放，敬请期待")).toBeNull();
+});
+
+it("returns a character saved in a closed scene to the courtyard", () => {
+  render(<PikoWorldShell character={{ id: "returning", nickname: "小叶", gender: "female", bio: "",
+    scene_id: "wind-garden-gate", position_x: 50, position_y: 60, facing: "south" }} />);
+  expect(screen.getByTestId("map-canvas")).toHaveAttribute("data-map", "welcome-courtyard");
+});
 
 it("switches to the requested arrival and can recover to the source when target rendering fails", async () => {
   travel.prepare.mockResolvedValue({ destination: { mapId: "artisan-market", spawnId: "welcome-courtyard-arrival" },
@@ -233,7 +250,7 @@ it("preserves the same incoming multiplayer request tray when switching maps rep
   act(() => vi.advanceTimersByTime(8000));
   const requests = screen.getAllByRole("region", { name: "私聊申请" });
   expect(requests).toHaveLength(2);
-  for (const mapId of ["artisan-market", "wind-garden-gate", "artisan-market"]) {
+  for (const mapId of ["artisan-market", "welcome-courtyard", "amber-wilds"]) {
     travel.prepare.mockResolvedValue({ destination: { mapId, spawnId: "arrival" },
       fallback: { mapId: "welcome-courtyard", spawnId: "artisan-market-arrival" } });
     await act(async () => map.exit({ ...marketExit, targetMapId: mapId }));
@@ -250,7 +267,7 @@ it("preserves the same incoming multiplayer request tray when switching maps rep
   }
 });
 
-it.each(["ready", "error"] as const)("records skyport discovery only after a successful first frame: %s", async state => {
+it.each(["ready", "error"] as const)("does not enter or record discovery for the closed skyport: %s", async state => {
   const save = vi.spyOn(localStorageQuota, "safeLocalStorageSet").mockReturnValue(true);
   try {
     render(<PikoWorldShell />);
@@ -261,7 +278,8 @@ it.each(["ready", "error"] as const)("records skyport discovery only after a suc
     act(() => vi.advanceTimersByTime(300));
     expect(save).not.toHaveBeenCalledWith("piko-world:whalesong-skyport-discovered", "true");
     act(() => map.report(state));
-    expect(save.mock.calls.some(([key]) => key === "piko-world:whalesong-skyport-discovered")).toBe(state === "ready");
+    expect(save.mock.calls.some(([key]) => key === "piko-world:whalesong-skyport-discovered")).toBe(false);
+    expect(travel.prepare).not.toHaveBeenCalled();
   } finally { save.mockRestore(); }
 });
 
