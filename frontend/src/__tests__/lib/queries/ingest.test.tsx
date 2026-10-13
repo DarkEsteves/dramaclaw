@@ -3,17 +3,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { setupServer } from "msw/node";
+import { server } from "@/__mocks__/msw/server";
 import ky from "ky";
+import { File as NodeFile } from "node:buffer";
 import type { ReactNode } from "react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/api", () => ({
   api: ky.create({ baseUrl: "http://localhost:3000/" }),
   uploadApi: ky.create({ baseUrl: "http://localhost:3000/" }),
 }));
 
-import { uploadApi } from "@/lib/api";
 import { BillingRuleNotConfiguredError } from "@/lib/api-errors";
 import {
   useChapters,
@@ -21,11 +21,10 @@ import {
   useUploadNovel,
 } from "@/lib/queries/ingest";
 
-const server = setupServer();
-
-beforeAll(() => server.listen());
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
+afterEach(() => {
+  server.resetHandlers();
+  vi.unstubAllGlobals();
+});
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -54,10 +53,21 @@ describe("ingest query error contract", () => {
   });
 
   it("rejects upload responses that return ok:false with a backend error", async () => {
-    // This contract exercises error unwrapping, not Node/jsdom multipart conversion.
-    const post = vi.spyOn(uploadApi, "post").mockResolvedValueOnce(
-      new Response(JSON.stringify({ ok: false, error: "解析章节失败: 文件编码不支持" }), {
-        headers: { "Content-Type": "application/json" },
+    // This test sends and parses a real multipart body through Node fetch.
+    // Use its matching File/FormData pair instead of mixing jsdom brands.
+    const nativeForm = await new Response("", {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    }).formData();
+    vi.stubGlobal("FormData", nativeForm.constructor);
+    vi.stubGlobal("File", NodeFile);
+    server.use(
+      http.post("http://localhost:3000/api/v1/projects/demo/ingest/upload", async ({ request }) => {
+        const body = await request.formData();
+        expect(body.get("spine_template")).toBe("drama");
+        const file = body.get("file") as File;
+        expect(file).toMatchObject({ name: "broken.txt", size: 3, type: "text/plain" });
+        expect(await file.text()).toBe("bad");
+        return HttpResponse.json({ ok: false, error: "解析章节失败: 文件编码不支持" });
       }),
     );
 
@@ -70,11 +80,6 @@ describe("ingest query error contract", () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.error?.message).toBe("解析章节失败: 文件编码不支持");
-    expect(post).toHaveBeenCalledWith("api/v1/projects/demo/ingest/upload", expect.objectContaining({ body: expect.any(FormData) }));
-    const body = post.mock.calls[0][1]?.body as FormData;
-    expect(body.get("spine_template")).toBe("drama");
-    expect(body.get("file")).toBeInstanceOf(File);
-    post.mockRestore();
   });
 
   it("rejects start responses that return ok:false with a backend error", async () => {

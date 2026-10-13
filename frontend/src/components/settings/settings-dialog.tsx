@@ -35,6 +35,10 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  ChannelModelInput,
+  ChannelModelsButton,
+} from "@/components/settings/channel-model-input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -3333,11 +3337,12 @@ function EmbeddingModelBlock({
               ))}
             </SelectContent>
           </Select>
-          <Input
+          <ChannelModelInput
+            provider={selectedProvider}
+            newApiBaseUrl={newApiBaseUrl}
+            database={database}
             value={upstreamModel}
-            onChange={(event) =>
-              updateLocal({ upstreamModel: event.target.value })
-            }
+            onChange={(model) => updateLocal({ upstreamModel: model })}
             placeholder={t(
               "settings.modelConfig.embeddingModel.upstreamModelPlaceholder",
             )}
@@ -3870,9 +3875,12 @@ function MediaModelsBlock({
                   {t("settings.modelConfig.mediaModels.officialOnly")}
                 </div>
               ) : (
-                <Input
+                <ChannelModelInput
+                  provider={value}
+                  newApiBaseUrl={newApiBaseUrl}
+                  database={database}
                   value={entry?.upstreamModel ?? ""}
-                  onChange={(event) =>
+                  onChange={(model) =>
                     setLocalMediaModels((prev) => ({
                       ...prev,
                       [row.model]: {
@@ -3881,7 +3889,7 @@ function MediaModelsBlock({
                           prev[row.model]?.provider ??
                           configuredProviders[0] ??
                           "ali",
-                        upstreamModel: event.target.value,
+                        upstreamModel: model,
                       },
                     }))
                   }
@@ -3959,6 +3967,8 @@ function MediaModelsBlock({
             <LocalMediaModelEditor
               key={editingModel ?? "__new_media_model__"}
               originalModel={editingModel}
+              newApiBaseUrl={newApiBaseUrl}
+              database={database}
               entry={editingModel ? mediaModels[editingModel] : undefined}
               configuredProviders={configuredProviders}
               comfyOnly={comfyOnly}
@@ -4020,6 +4030,8 @@ function MediaModelsBlock({
 }
 
 function LocalMediaModelEditor({
+  newApiBaseUrl,
+  database,
   originalModel,
   entry,
   configuredProviders,
@@ -4027,6 +4039,8 @@ function LocalMediaModelEditor({
   onCancel,
   onSave,
 }: {
+  newApiBaseUrl: string;
+  database: NewApiDatabaseConfigInput | undefined;
   originalModel: string | null;
   entry?: MediaModelEntry;
   configuredProviders: readonly FeatureModelProvider[];
@@ -4224,12 +4238,20 @@ function LocalMediaModelEditor({
           </Select>
         </div>
         <div className="col-span-2">
-          <FieldRow
-            label={t("settings.modelConfig.mediaModels.colUpstreamModel")}
-            value={upstreamModel}
-            onChange={setUpstreamModel}
-            placeholder={model || "upstream-model-name"}
-          />
+          <div className="grid grid-cols-[120px_1fr] items-center gap-3">
+            <Label className="justify-start text-[11px] font-normal text-muted-foreground">
+              {t("settings.modelConfig.mediaModels.colUpstreamModel")}
+            </Label>
+            <ChannelModelInput
+              provider={provider}
+              newApiBaseUrl={newApiBaseUrl}
+              database={database}
+              value={upstreamModel}
+              onChange={setUpstreamModel}
+              placeholder={model || "upstream-model-name"}
+              className="h-9"
+            />
+          </div>
         </div>
         <div className="grid grid-cols-[120px_1fr] items-center gap-3">
           <Label className="justify-start text-[11px] font-normal text-muted-foreground">
@@ -5063,7 +5085,21 @@ function ProviderChannelRow({
             className="mt-1.5 h-9 rounded-md border-input/80 focus-visible:border-ring/70 focus-visible:ring-1 focus-visible:ring-ring/30"
           />
         </div>
-        <div className="flex items-center justify-end gap-1.5 sm:self-end">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 sm:self-end">
+          {!isComfyUI ? (
+            <ChannelModelsButton
+              provider={provider}
+              newApiBaseUrl={newApiBaseUrl}
+              database={database}
+              disabled={
+                !savedChannel?.configured ||
+                syncProviderChannel.isPending ||
+                Boolean(upstreamKeyValue.trim()) ||
+                (channel?.baseUrl ?? "").trim().replace(/\/$/, "") !==
+                  (savedChannel?.baseUrl ?? "").replace(/\/$/, "")
+              }
+            />
+          ) : null}
           {!isComfyUI ? (
             <Button
               type="button"
@@ -5530,9 +5566,12 @@ function FeatureModelCapabilitySection({
             ))}
           </SelectContent>
         </Select>
-        <Input
+        <ChannelModelInput
+          provider={bulkProvider}
+          newApiBaseUrl={newApiBaseUrl}
+          database={database}
           value={bulkModel}
-          onChange={(event) => setBulkModel(event.target.value)}
+          onChange={setBulkModel}
           placeholder={t(
             "settings.modelConfig.featureModels.bulkModelPlaceholder",
           )}
@@ -5761,12 +5800,15 @@ function FeatureModelRow({
         </SelectContent>
       </Select>
       <div className="flex items-center gap-2">
-        <Input
+        <ChannelModelInput
+          provider={provider ?? ""}
+          newApiBaseUrl={newApiBaseUrl}
+          database={database}
           value={model}
-          onChange={(e) =>
+          onChange={(selectedModel) =>
             updateFeatureModel(featureId, {
               provider: provider ?? fallbackProvider,
-              model: e.target.value,
+              model: selectedModel,
             })
           }
           placeholder={t(
