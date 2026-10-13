@@ -461,8 +461,8 @@
       "world": "Piko Town"
     },
     "partyFounding105": "庆祝建党105周年",
-    "settings": "Settings",
-    "settingsWithWarning": "Settings, missing configuration",
+    "settings": "Feature Settings",
+    "settingsWithWarning": "Feature Settings, incomplete configuration",
     "settingsWarningBubble": "Missing setup",
     "dismissSettingsWarningBubble": "Dismiss missing setup reminder",
     "notifications": "Announcement Center",
@@ -919,6 +919,11 @@
     "taskFailedUnknownReason": "no specific reason was returned"
   },
   "freezone": {
+    "viewMode": {
+      "label": "Canvas view",
+      "workflow": "Workflow",
+      "board": "Storyboard"
+    },
     "chat": {
       "title": "Xia Director",
       "description": "Open Xia Director beside the Freezone canvas.",
@@ -2455,7 +2460,6 @@
     "translationLoading": "Translating…",
     "translationHide": "Hide translation",
     "translationRetry": "Retry translation",
-    "translationLanguage": "Translate to",
     "translationLabel": "Translation",
     "translationError": "Translation is unavailable. Please try again shortly.",
     "musicToggle": "Music",
@@ -2467,7 +2471,7 @@
     "residentComingSoon": "Animation in progress",
     "playableResident_f01": "Female · F01",
     "playableResident_m01": "Male · M01",
-    "profileSaveFailed": "Could not save. Check your browser storage and try again.",
+    "profileSaveFailed": "Could not save. Please try again shortly; your entries are preserved.",
     "profileDescription": "Let your neighbors get to know you.",
     "defaultNickname": "Town visitor",
     "saveProfile": "Save",
@@ -2551,11 +2555,7 @@
     "residentSelectorConfirm": "All set",
     "residentOptionLabel": "Resident {{number}}",
     "chatMockMayorName": "Mayor Piko",
-    "chatMockResidentName": "Town resident",
-    "chatMockYouName": "Me",
     "chatMockMayorWelcome": "Welcome to the courtyard. The breeze feels lovely today.",
-    "chatMockResidentLantern": "A new message lantern just lit up beside the fountain.",
-    "chatMockVisitorReply": "I'll come take a look in a moment!",
     "mapAriaLabel": "Welcome Courtyard, use arrow keys to move",
     "talkToMayor": "Talk to the mayor",
     "welcomeTitle": "Mayor · Piko",
@@ -2565,17 +2565,22 @@
     "welcomeDone": "Explore the courtyard",
     "mapLoading": "Loading {{mapName}}…",
     "mapLoadError": "{{mapName}} failed to load",
+    "mapNotOpen": "{{mapName}} is not open yet. Stay tuned.",
     "mapTransitionAnnouncement": "Entering {{mapName}}",
     "residentActions": "Interact with {{nickname}}",
     "viewResidentInfo": "View info",
-    "chatWithResident": "Have a chat",
+    "chatWithResident": "Send message",
     "simulatedResidentLabel": "Temporary simulated resident",
     "emptyResidentBio": "No bio yet.",
-    "chatRequestSent": "Chat request sent. Please wait for a reply.",
+    "localResidentChatNotice": "Town residents do not receive private requests. You can chat with online players.",
     "chatTooLong": "Messages can contain up to 80 characters",
+    "characterLoadFailed": "Couldn't load your character. Please try again.",
+    "messageSending": "Sending…",
+    "messageSendFailed": "Sending has not been confirmed. Your text is preserved; please try again shortly.",
     "chatCooldown": "Wait {{seconds}}s",
     "chatSendHint": "Enter to send · Shift+Enter for a new line",
     "chatSend": "Send",
+    "selfLabel": "You",
     "privateRequestTitle": "Chat request",
     "privateRequestFrom": "{{nickname}} requests a chat",
     "privateAccept": "Accept",
@@ -2583,10 +2588,9 @@
     "privateReopen": "Chat with {{nickname}}",
     "privateMessages": "Private messages",
     "privateMessageInput": "Type a private message",
-    "privateReplying": "Replying…",
+    "privateWaiting": "Waiting for acceptance. You can keep sending messages.",
+    "privateDeclined": "Request declined. You can send a new message.",
     "privateSendHint": "Enter to send · up to 80 characters",
-    "privateMockGreeting": "Hello! Nice to meet you in town.",
-    "privateMockReply": "Got it! This is a simulated reply from {{nickname}}. Nice chatting with you!",
     "privateUnread": "{{count}} unread messages",
     "privateEndChat": "Close chat with {{nickname}}",
     "transport": {
@@ -6285,6 +6289,7 @@
       "rows": "Rows"
     },
     "nodeHistory": {
+      "compactTitle": "History",
       "current": "Current",
       "daysAgo": "{{count}}d ago",
       "hoursAgo": "{{count}}h ago",
@@ -6380,6 +6385,7 @@
       "handleLabel": "Replace asset"
     },
     "reference": {
+      "preview": "Reference preview",
       "detach": "Detach this reference",
       "mention": "Reference \"{{name}}\" in the prompt"
     },
@@ -6491,6 +6497,8 @@
     "annotateResultTitle": "Annotation Result"
   },
   "nodeToolbar": {
+    "nodeId": "Node ID",
+    "copyNodeId": "Copy node ID",
     "aiEdit": "AI Edit",
     "panorama": "Panorama",
     "generateDirectorWorld": "Generate 3DGS World",
@@ -7710,6 +7718,9 @@
     }
   },
   "viewer": {
+    "videoIndex": "View video {{index}}",
+    "imageDetails": "View image details",
+    "imageIndex": "View image {{index}}",
     "imageAlt": "Image",
     "prev": "Previous",
     "next": "Next",
@@ -8145,9 +8156,9 @@
     "error": "Generation failed"
   },
   "settings": {
-    "title": "Settings",
+    "title": "Feature Settings",
     "close": "Close",
-    "navigationLabel": "Settings categories",
+    "navigationLabel": "Feature settings navigation",
     "statusConfigured": "{{page}} is configured",
     "statusNotConfigured": "{{page}} is not configured",
     "secretSavedBadge": "Saved",
@@ -8155,7 +8166,7 @@
     "pages": {
       "models": "Models & Channels",
       "storage": "Media Storage",
-      "freezoneSkills": "Freezone Skills",
+      "freezoneSkills": "Xiahua Skill",
       "freezoneRecipes": "Freezone Recipes"
     },
     "freezoneCatalog": {

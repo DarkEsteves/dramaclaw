@@ -150,6 +150,7 @@ import {
   useAlbumPendingTotal,
 } from "@/features/canvas/nodes/shared/albumPendingTotals";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
+import { nodeMediaViewerUrls, openNodeVideoViewer } from "@/features/canvas/application/nodeMediaViewer";
 import { useExternalFileHandoff } from "@/features/canvas/hooks/useExternalFileHandoff";
 import {
   extractUpstreamContent,
@@ -178,13 +179,12 @@ import {
   NODE_HEADER_FLOATING_POSITION_CLASS,
 } from "@/features/canvas/ui/NodeHeader";
 import { NodeResizeHandle } from "@/features/canvas/ui/NodeResizeHandle";
-import { NODE_OPS_PANEL_ENTER_CLASS } from "@/features/canvas/ui/OperationPanelShell";
 import { NodeGenerationOverlay } from "@/features/canvas/ui/NodeGenerationOverlay";
 import {
   CANVAS_NODE_INPUT_BODY_FRAME_CLASS,
   CANVAS_NODE_INPUT_BODY_SELECTED_FRAME_CLASS,
   CANVAS_NODE_INPUT_SURFACE_CLASS,
-  CANVAS_NODE_OPS_PANEL_CLASS,
+  CANVAS_NODE_MEDIA_FRAME_CLASS,
   CANVAS_NODE_PANEL_SURFACE_CLASS,
   CANVAS_NODE_TOOLBAR_PILL_CLASS,
   canvasNodeFrameClass,
@@ -261,7 +261,6 @@ import {
 import { generationTaskDescriptor } from "@/features/canvas/application/resumeGeneration";
 import { useNodeGenerationHistory } from "@/features/canvas/hooks/useNodeGenerationHistory";
 import {
-  NodeGenerationHistory,
   hasCompletedHistoryRecords,
   historyRecordOutputUrl,
 } from "@/features/canvas/ui/NodeGenerationHistory";
@@ -269,6 +268,7 @@ import type { FreezoneGenerationHistoryRecord } from "@/api/ops";
 import { readUrl } from "@/lib/url-params";
 import type { ModelOption } from "@/features/canvas/ui/ProviderModelPicker";
 import { CreditCostPill } from "@/components/credits/credit-visual";
+import { NodeHistoryRail } from "@/features/canvas/ui/NodeHistoryRail";
 import { VideoOperationsPanel } from "@/features/canvas/nodes/VideoOperationsPanel";
 import { StoryClipNarrativePanel } from "@/features/canvas/nodes/StoryClipNarrativePanel";
 import {
@@ -1373,7 +1373,6 @@ export const VideoNode = memo(
     );
     // 收起态浮动面板固定基础尺寸；放大用居中弹窗（见下方 OperationPanelShell）。
     const [panelExpanded, setPanelExpanded] = useState(false);
-    const panelHeight = OPERATIONS_PANEL_HEIGHT;
     const panelOverhang = OPERATIONS_PANEL_OVERHANG;
 
     // ── 叠卡画册（count > 1 的一组生成结果，与图片节点同构）──
@@ -3077,6 +3076,7 @@ export const VideoNode = memo(
         const total = Math.min(Math.max(count, 1), 4);
         // 各并发任务完成顺序不定，本地累积已完成的 URL，整组写回（避免读改写竞态）。
         const completedUrls: string[] = [];
+        let panelCollapsedAfterSubmit = false;
         // 收集每个子任务的失败，留到整批 settle 后统一决定是否弹错误框——避免
         // 「N 条里 1 条秒失败（如命中队列上限）、其余正常生成」时一边弹报错一边
         // 又冒加载动画的矛盾观感。
@@ -3084,6 +3084,10 @@ export const VideoNode = memo(
         const runOne = async (runIndex: number) => {
           try {
             const ref = await submitOnce(id);
+            if (!panelCollapsedAfterSubmit) {
+              panelCollapsedAfterSubmit = true;
+              setPanelExpanded(false);
+            }
             // Persist the task handle so a page refresh can resume this job.
             // N 个并发任务同节点只能存一个句柄——保留第 1 个（主视频）的。
             if (runIndex === 0) {
@@ -3669,7 +3673,14 @@ export const VideoNode = memo(
               setStoryEditNode(id);
             }
           }}
-          className={`relative flex h-full w-full items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${videoSource || storyPlayerMode ? "overflow-hidden" : "overflow-visible"} rounded-[var(--node-radius)] border ${bodySurfaceClass} transition-colors ${bodyFrameClass} ${
+          onDoubleClick={(event) => {
+            if ((event.target as HTMLElement).closest('button, input') || storyPlayerMode || isClipMode || subtitleEraseMode || isUploading) return;
+            const url = isGenerating ? historyPreviewUrl : videoSource;
+            if (!url) return;
+            event.stopPropagation();
+            void openNodeVideoViewer(url, id, nodeMediaViewerUrls(url, albumUrls, historyRecords, 'video'), data.displayName ?? undefined);
+          }}
+          className={`relative flex h-full w-full items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${videoSource || storyPlayerMode ? "overflow-hidden" : "overflow-visible"} rounded-[var(--node-radius)] ${videoSource || historyPreviewUrl ? CANVAS_NODE_MEDIA_FRAME_CLASS : "border"} ${bodySurfaceClass} transition-colors ${bodyFrameClass} ${
             // 画册展开时藏起节点本体——半透明的画册容器盖不严，底下的视频会透出来。
             albumExpanded && hasAlbum ? "invisible" : ""
           }`}
@@ -4327,31 +4338,8 @@ export const VideoNode = memo(
             expanded={panelExpanded}
             onExpandedChange={setPanelExpanded}
             onSubmit={handleSubmit}
-          />
-        )}
-
-        {selected &&
-          !isBoxSelecting &&
-          !albumExpanded &&
-          !isClipMode &&
-          !isCropMode &&
-          // 截「续写前置视频」时轨道占着节点底下那块，历史面板跟着操作面板一起
-          // 让位——它是按 panelHeight 往下推的，操作面板不在时会浮在半空。
-          !isExtendPickMode &&
-          !subtitleEraseMode &&
-          !data.referenceOnly &&
-          !storyPlayerMode &&
-          hasCompletedHistoryRecords(historyRecords) && (
-            <div
-              className={`nodrag absolute z-[300] rounded-[var(--node-radius)] ${CANVAS_NODE_OPS_PANEL_CLASS} ${NODE_OPS_PANEL_ENTER_CLASS} px-3 py-2`}
-              style={{
-                top: `calc(100% + ${OPERATIONS_PANEL_GAP * 2 + panelHeight}px)`,
-                left: -panelOverhang,
-                right: -panelOverhang,
-              }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <NodeGenerationHistory
+            historyPanel={hasCompletedHistoryRecords(historyRecords) ? (
+              <NodeHistoryRail
                 records={historyRecords}
                 isLoading={historyLoading}
                 onRestore={handleRestoreHistory}
@@ -4366,8 +4354,9 @@ export const VideoNode = memo(
                   return url === data.videoUrl;
                 }}
               />
-            </div>
-          )}
+            ) : undefined}
+          />
+        )}
 
         {subtitleEraseMode && (
           <div

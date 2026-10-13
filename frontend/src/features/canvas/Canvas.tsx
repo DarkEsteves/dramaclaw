@@ -142,6 +142,7 @@ import { CanvasContextMenu } from './ui/CanvasContextMenu';
 import { CanvasFileDropOverlay } from './ui/CanvasFileDropOverlay';
 import { NodeToolDialog } from './ui/NodeToolDialog';
 import { ImageViewerModal } from './ui/ImageViewerModal';
+import { openNodeVideoViewer } from './application/nodeMediaViewer';
 import { VideoViewerModal } from './ui/VideoViewerModal';
 import { CanvasZoomControl } from './ui/CanvasZoomControl';
 import { useEdgeVisibilityStore } from './ui/edgeVisibilityStore';
@@ -759,6 +760,8 @@ interface CanvasProps {
    * 故事板自己隐藏掉（见 src/index.css 的 viewer-immersive 规则）。
    */
   suspended?: boolean;
+  /** Keep selected-node drafts mounted while the assistant is in use. */
+  assistantActive?: boolean;
 }
 
 export function Canvas({
@@ -767,6 +770,7 @@ export function Canvas({
   onBlankPaneClick,
   controlsPlacement = 'bottom-right',
   suspended = false,
+  assistantActive = false,
 }: CanvasProps = {}) {
   const { t } = useTranslation();
   const reactFlowInstance = useReactFlow();
@@ -1180,14 +1184,13 @@ export function Canvas({
   const imageViewer = useCanvasStore((state) => state.imageViewer);
   const closeImageViewer = useCanvasStore((state) => state.closeImageViewer);
   const navigateImageViewer = useCanvasStore((state) => state.navigateImageViewer);
-  const [videoViewer, setVideoViewer] = useState<{
-    isOpen: boolean;
-    videoUrl: string;
-    title?: string;
-  }>({ isOpen: false, videoUrl: '', title: undefined });
-  const closeVideoViewer = useCallback(() => {
-    setVideoViewer((prev) => ({ ...prev, isOpen: false }));
-  }, []);
+  const selectImageViewer = useCanvasStore((state) => state.selectImageViewer);
+  const videoViewer = useCanvasStore((state) => state.videoViewer);
+  const closeVideoViewer = useCanvasStore((state) => state.closeVideoViewer);
+  const selectVideoViewer = useCanvasStore((state) => state.selectVideoViewer);
+  const navigateVideoViewer = useCanvasStore((state) => state.navigateVideoViewer);
+  const closeMediaViewers = useCanvasStore((state) => state.closeMediaViewers);
+  useEffect(() => closeMediaViewers, [closeMediaViewers]);
   const skillById = useMemo(
     () => new Map(skillRegistry.map((skill) => [skill.id, skill] as const)),
     [skillRegistry],
@@ -1241,7 +1244,8 @@ export function Canvas({
       if (isCanvasInputSuspended(suspendedRef.current)) {
         return;
       }
-      if (!isSpacePanKey(event) || isTypingTarget(event.target) || isImmersiveViewerActive()) {
+      if (!isSpacePanKey(event) || isTypingTarget(event.target) || isImmersiveViewerActive()
+        || (event.target instanceof Element && event.target.closest('button, [role="button"]'))) {
         return;
       }
       spacePanActiveRef.current = true;
@@ -1299,8 +1303,8 @@ export function Canvas({
     const unsubscribeClose = canvasEventBus.subscribe('tool-dialog/close', () => {
       closeToolDialog();
     });
-    const unsubscribeVideoOpen = canvasEventBus.subscribe('video-viewer/open', ({ videoUrl, title }) => {
-      setVideoViewer({ isOpen: true, videoUrl, title });
+    const unsubscribeVideoOpen = canvasEventBus.subscribe('video-viewer/open', ({ videoUrl, title, nodeId, videoList }) => {
+      void openNodeVideoViewer(videoUrl, nodeId, videoList, title);
     });
 
     return () => {
@@ -5029,6 +5033,7 @@ export function Canvas({
       ref={wrapperRef}
       data-canvas-tool={handToolActive ? 'hand' : 'move'}
       data-node-drag-focus={isNodeDragFocusActive ? 'true' : undefined}
+      data-assistant-selection-focus={assistantActive && selectedNodeIds.length > 0 ? 'true' : undefined}
       className="dc-canvas relative min-h-0 w-full flex-1 bg-background"
       onDragEnter={handleCanvasDragEnter}
       onDragOver={handleCanvasDragOver}
@@ -5382,12 +5387,17 @@ export function Canvas({
         currentIndex={imageViewer.currentIndex}
         onClose={closeImageViewer}
         onNavigate={navigateImageViewer}
+        onSelect={selectImageViewer}
       />
 
       <VideoViewerModal
-        open={videoViewer.isOpen}
-        videoUrl={videoViewer.videoUrl}
-        title={videoViewer.title}
+        open={videoViewer?.isOpen ?? false}
+        videoUrl={videoViewer?.videoUrl ?? ''}
+        title={videoViewer?.title}
+        videoList={videoViewer?.videoList}
+        currentIndex={videoViewer?.currentIndex}
+        onSelect={selectVideoViewer}
+        onNavigate={navigateVideoViewer}
         onClose={closeVideoViewer}
       />
     </div>

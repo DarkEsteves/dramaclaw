@@ -9,13 +9,10 @@ import {
   AlertTriangle,
   Bell,
   Bolt,
-  Camera,
-  Check,
   ChevronRight,
   Gamepad2,
   Map,
   Users,
-  Languages,
   LogOut,
   KeyRound,
   X,
@@ -27,8 +24,6 @@ import { playPikoUiSound } from "@/features/piko-world/piko-audio";
 import { Button } from "@/components/ui/button";
 import { NotificationDot } from "@/components/ui/notification-dot";
 import { useFeatureEntrySeen } from "@/lib/feature-entry-state";
-import { AvatarUploadDialog } from "@/components/account/avatar-upload-dialog";
-import { PasswordChangeDialog } from "@/components/account/password-change-dialog";
 import { PhoneBindingDialog } from "@/components/account/phone-binding-dialog";
 import {
   Tooltip,
@@ -39,7 +34,11 @@ import {
 import { CreditBalanceBadge } from "@/components/layout/credit-balance-badge";
 import { BrandLockup } from "@/components/layout/brand-lockup";
 import { NotificationDrawer } from "@/components/notifications/notification-drawer";
-import { SettingsDialog } from "@/components/settings/settings-dialog";
+import { SettingsDialog, type SettingsPage } from "@/components/settings/settings-dialog";
+import {
+  OPEN_SETTINGS_DIALOG_EVENT,
+  type OpenSettingsDialogDetail,
+} from "@/components/settings/settings-dialog-events";
 import {
   PetGalleryDialog,
   type CompanionSelection,
@@ -53,7 +52,6 @@ import { useModelGatewayConfig } from "@/lib/queries/model-gateway";
 import { useOrgBranding } from "@/lib/queries/org-branding";
 import { useAccountSecurity } from "@/lib/queries/auth";
 import { useReleaseNotifications } from "@/lib/queries/release-notifications";
-import { normalize, SUPPORTED, type Supported } from "@/i18n/languages";
 import {
   useAnnouncementReadState,
   useAnnouncements,
@@ -66,8 +64,10 @@ import {
   ProjectHeaderNavigation,
   ProjectSwitcher,
   ProjectXiajiMenu,
+  ProjectXiahuaMenu,
 } from "@/components/layout/project-header-navigation";
 import entryStyles from "./header-entry.module.css";
+import { APP_HEADER_HEIGHT } from "./layout-metrics";
 const ACCOUNT_PANEL_TRANSITION_MS = 150;
 
 export function Header({ ambientBackground = false }: { ambientBackground?: boolean }) {
@@ -76,10 +76,9 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
   const params = useParams({ strict: false }) as { project?: string };
   const [companionOpen, setCompanionOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>();
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [releaseNotificationStateVersion, setReleaseNotificationStateVersion] = useState(0);
-  const [avatarDialogOpen, setAvatarDialogOpen] = useState(false);
-  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [phoneBindingOpen, setPhoneBindingOpen] = useState(false);
   const [accountPanelOpen, setAccountPanelOpen] = useState(false);
   const [accountPanelVisible, setAccountPanelVisible] = useState(false);
@@ -97,8 +96,17 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
   const accountPanelRef = useRef<HTMLDivElement | null>(null);
   // 面板由点击/键盘打开时「钉住」：此时鼠标移开不再收走它。悬停打开的面板不钉。
   const accountPanelPinnedRef = useRef(false);
-  const settingsAnchorRef = useRef<HTMLDivElement | null>(null);
   const { username, displayName: storedDisplayName, logout } = useAuthStore();
+
+  useEffect(() => {
+    const handleOpenSettings = (event: Event) => {
+      const page = (event as CustomEvent<OpenSettingsDialogDetail>).detail?.page;
+      setSettingsInitialPage(page);
+      setSettingsOpen(true);
+    };
+    window.addEventListener(OPEN_SETTINGS_DIALOG_EVENT, handleOpenSettings);
+    return () => window.removeEventListener(OPEN_SETTINGS_DIALOG_EVENT, handleOpenSettings);
+  }, []);
   const { seen: pikoEntrySeen, markSeen: markPikoEntrySeen } =
     useFeatureEntrySeen("piko-hub-v1", username);
   const queryClient = useQueryClient();
@@ -115,7 +123,6 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
   const pikoAccessory = useAppStore((s) => s.pikoAccessory);
   const setCompanion = useAppStore((s) => s.setCompanion);
   const setPikoAccessory = useAppStore((s) => s.setPikoAccessory);
-  const setLanguage = useAppStore((s) => s.setLanguage);
   const showLogout = authRequired();
   const ceRuntime = isCeRuntime();
   const orgBranding = useOrgBranding(!ceRuntime && Boolean(username));
@@ -131,7 +138,6 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
     && accountSecurity.data?.phone === null && accountSecurity.data?.password_configured === true;
   const displayName = accountSecurity.data?.phone_masked ?? storedDisplayName ?? username ?? "User";
   const avatarInitial = displayName.slice(0, 1).toUpperCase();
-  const activeLanguage = normalize(i18n.resolvedLanguage ?? i18n.language);
   const modelGatewayConfig = useModelGatewayConfig(ceRuntime);
   const releaseNotifications = useReleaseNotifications(i18n.resolvedLanguage ?? i18n.language);
   const releaseFeed = releaseNotifications.data?.data;
@@ -153,8 +159,8 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
         gatewayConfig.mediaRelay?.configured === false),
   );
   const settingsWarningBubble = useFloatingBubblePosition(
-    settingsAnchorRef,
-    hasSettingsWarning && !settingsOpen && !settingsWarningBubbleDismissed,
+    accountAnchorRef,
+    hasSettingsWarning && !settingsOpen && !accountPanelOpen && !settingsWarningBubbleDismissed,
   );
   const project = params.project ?? null;
 
@@ -311,11 +317,6 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
       ?.focus();
   }, [accountPanelOpen]);
 
-  const switchLanguage = (lang: Supported) => {
-    void i18n.changeLanguage(lang);
-    setLanguage(lang);
-  };
-
   const openNotifications = () => {
     closeAccountPanelNow();
     markUpgradeSeen(releaseFeed?.latest_tag);
@@ -328,28 +329,14 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
     setReleaseNotificationStateVersion((version) => version + 1);
   }, []);
 
-  const openAvatarDialog = () => {
-    closeAccountPanelNow();
-    setAvatarDialogOpen(true);
-  };
-
-  const openPasswordDialog = () => {
-    closeAccountPanelNow();
-    setPasswordDialogOpen(true);
-  };
-
   const handlePasswordChanged = () => {
     resetUserSessionState({ queryClient });
     void navigate({ to: "/login", replace: true });
   };
 
   return (
-    <div
-      className={`relative z-20 shrink-0 text-sidebar-foreground ${
-        ambientBackground ? "bg-transparent" : "bg-background/58 backdrop-blur-xl"
-      }`}
-    >
-      <header className="relative flex h-[48px] items-center justify-between gap-3 px-4">
+    <div className="relative shrink-0 text-sidebar-foreground">
+      <header style={{ height: APP_HEADER_HEIGHT }} className={`relative z-20 flex items-center justify-between gap-3 px-4 ${ambientBackground ? "bg-transparent" : "bg-background/58 backdrop-blur-xl"}`}>
         <div className="flex min-w-0 flex-1 items-center">
           <TooltipProvider delay={80}>
             <Tooltip>
@@ -383,36 +370,21 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
 
         {/* Actions */}
         <div className="flex min-w-0 flex-1 shrink-0 items-center justify-end gap-1">
-          <div ref={settingsAnchorRef} className="relative">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="relative size-[32px] text-sidebar-foreground/82 transition-colors duration-150 ease-[var(--ease-out-quint)] hover:bg-white/[0.05] hover:text-white aria-expanded:bg-white/[0.05] aria-expanded:text-white"
-                aria-label={
-                  hasSettingsWarning ? t("header.settingsWithWarning") : t("header.settings")
-                }
-                aria-expanded={settingsOpen}
-                onClick={() => setSettingsOpen(true)}
-              >
-                <Bolt className="size-[17px]" />
-                {hasSettingsWarning ? (
-                  <span
-                    className="absolute right-[5px] top-[5px] flex size-[11px] items-center justify-center rounded-full bg-amber-400 text-black shadow-[0_0_7px_rgba(251,191,36,0.68)]"
-                    aria-hidden="true"
-                  >
-                    <AlertTriangle className="size-[8px]" strokeWidth={3} />
-                  </span>
-                ) : null}
-              </Button>
-          </div>
           <DropdownMenu modal={false} onOpenChange={(open, details) => {
             if (open && (details.reason === "trigger-press" || details.reason === "list-navigation")) {
               markPikoEntrySeen();
             }
           }}>
             <DropdownMenuTrigger openOnHover delay={100} closeDelay={180} onClick={markPikoEntrySeen}
-              render={<Button id="piko-hub-entry" variant="ghost" size="sm" className={`${entryStyles.trigger} px-2 text-xs font-medium`} />}>
+              render={<Button id="piko-hub-entry" variant="ghost" size="sm" className={`${entryStyles.trigger} ${entryStyles.pikoTrigger} gap-1.5 px-2 text-xs font-medium`} />}>
+              <span className={entryStyles.pikoCapsule} aria-hidden="true">
+                <img
+                  src="/piko/entry/companion-capsule.png"
+                  alt=""
+                  draggable={false}
+                  className={entryStyles.pikoCapsuleIcon}
+                />
+              </span>
               <span className={entryStyles.pikoLabel}>
                 Piko Piko
                 {!pikoEntrySeen ? <NotificationDot className={entryStyles.pikoDot} /> : null}
@@ -464,7 +436,7 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
                   avatarInitial
                 )}
               </span>
-              {hasUnreadNotification ? (
+              {hasUnreadNotification || hasSettingsWarning ? (
                 <NotificationDot className="absolute right-0 top-0" />
               ) : null}
             </Button>
@@ -472,27 +444,29 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
         </div>
       </header>
       {project ? <ProjectXiajiMenu project={project} /> : null}
+      {project ? <ProjectXiahuaMenu /> : null}
       {accountPanelOpen
         ? createPortal(
             <AccountPanel
-              activeLanguage={activeLanguage}
               avatarInitial={avatarInitial}
               avatarUrl={avatarUrl}
               displayName={displayName}
               hasUnreadNotification={hasUnreadNotification}
-              onChangeAvatar={openAvatarDialog}
-              onChangePassword={showLogout ? openPasswordDialog : undefined}
+              hasSettingsWarning={hasSettingsWarning}
+              onSettings={() => {
+                closeAccountPanelNow();
+                setSettingsInitialPage(undefined);
+                setSettingsOpen(true);
+              }}
               onBindPhone={canBindPhone ? () => {
                 closeAccountPanelNow();
                 setPhoneBindingOpen(true);
               } : undefined}
-              onLanguageChange={switchLanguage}
               onNotifications={openNotifications}
               onClose={scheduleCloseAccountPanel}
               onEnter={openAccountPanel}
               onLogout={showLogout ? () => void handleLogout() : undefined}
               panelRef={accountPanelRef}
-              passwordConfigured={passwordConfigured}
               position={accountPanelPosition}
               visible={accountPanelVisible}
               t={t}
@@ -514,24 +488,25 @@ export function Header({ ambientBackground = false }: { ambientBackground?: bool
         onUpgradeStateChange={handleUpgradeStateChange}
         announcements={announcements}
       />
-      <AvatarUploadDialog
-        avatarInitial={avatarInitial}
-        displayName={displayName}
-        open={avatarDialogOpen}
-        onOpenChange={setAvatarDialogOpen}
-      />
-      <PasswordChangeDialog
-        open={passwordDialogOpen}
-        onOpenChange={setPasswordDialogOpen}
-        onPasswordChanged={handlePasswordChanged}
-        passwordConfigured={passwordConfigured}
-      />
       {phoneBindingOpen && canBindPhone ? <PhoneBindingDialog
         key={username}
         onClose={() => setPhoneBindingOpen(false)}
         onBound={() => { void accountSecurity.refetch(); }}
       /> : null}
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog
+        open={settingsOpen}
+        initialPage={settingsInitialPage}
+        onOpenChange={(open) => {
+          setSettingsOpen(open);
+          if (!open) setSettingsInitialPage(undefined);
+        }}
+        account={{
+          avatarInitial,
+          displayName,
+          passwordConfigured,
+          onPasswordChanged: showLogout ? handlePasswordChanged : undefined,
+        }}
+      />
       {settingsWarningBubble
         ? createPortal(
             <div
@@ -607,56 +582,39 @@ function useFloatingBubblePosition(
   return position;
 }
 
-// The account menu renders one row per entry in `SUPPORTED`, so adding a
-// locale means adding it there plus its label key here — no JSX to touch.
-const LANGUAGE_LABEL_KEYS: Record<Supported, string> = {
-  zh: "header.account.languageChinese",
-  en: "header.account.languageEnglish",
-  vi: "header.account.languageVietnamese",
-};
-
 function AccountPanel({
-  activeLanguage,
   avatarInitial,
   avatarUrl,
   displayName,
   hasUnreadNotification,
-  onChangeAvatar,
-  onChangePassword,
+  hasSettingsWarning,
+  onSettings,
   onBindPhone,
-  onLanguageChange,
   onNotifications,
   onClose,
   onEnter,
   onLogout,
   panelRef,
-  passwordConfigured,
   position,
   visible,
   t,
 }: {
-  activeLanguage: Supported;
   avatarInitial: string;
   avatarUrl: string | null;
   displayName: string;
   hasUnreadNotification: boolean;
-  onChangeAvatar: () => void;
-  onChangePassword?: () => void;
+  hasSettingsWarning: boolean;
+  onSettings: () => void;
   onBindPhone?: () => void;
-  onLanguageChange: (lang: Supported) => void;
   onNotifications: () => void;
   onClose: () => void;
   onEnter: () => void;
   onLogout?: () => void;
   panelRef: RefObject<HTMLDivElement | null>;
-  passwordConfigured: boolean;
   position: { top: number; right: number };
   visible: boolean;
   t: (key: string) => string;
 }) {
-  const [languageOpen, setLanguageOpen] = useState(false);
-  const activeLanguageLabel = t(LANGUAGE_LABEL_KEYS[activeLanguage]);
-
   return (
     <div
       ref={panelRef}
@@ -683,6 +641,11 @@ function AccountPanel({
           </span>
         </div>
         <div className="space-y-0.5">
+          <HeaderMenuRow
+            icon={hasSettingsWarning ? <AlertTriangle className="size-3.5 text-amber-400" /> : <Bolt className="size-3.5" />}
+            label={t(hasSettingsWarning ? "header.settingsWithWarning" : "header.settings")}
+            onClick={onSettings}
+          />
           {onBindPhone ? <HeaderMenuRow
             icon={<KeyRound className="size-3.5" />}
             label={t("header.account.phoneBinding.title")}
@@ -694,41 +657,6 @@ function AccountPanel({
             unread={hasUnreadNotification}
             onClick={onNotifications}
           />
-          <HeaderMenuRow
-            icon={<Camera className="size-3.5" />}
-            label={t("header.account.changeAvatar")}
-            onClick={onChangeAvatar}
-          />
-          {onChangePassword ? (
-            <HeaderMenuRow
-              icon={<KeyRound className="size-3.5" />}
-              label={t(
-                passwordConfigured
-                  ? "header.account.changePassword"
-                  : "header.account.setPassword",
-              )}
-              onClick={onChangePassword}
-            />
-          ) : null}
-          <HeaderMenuRow
-            active={languageOpen}
-            icon={<Languages className="size-3.5" />}
-            label={t("header.account.selectLanguage")}
-            meta={activeLanguageLabel}
-            onClick={() => setLanguageOpen((open) => !open)}
-          />
-          {languageOpen ? (
-            <div className="ml-[30px] mr-1 space-y-0.5 pb-1">
-              {SUPPORTED.map((language) => (
-                <PreferenceOption
-                  key={language}
-                  active={activeLanguage === language}
-                  label={t(LANGUAGE_LABEL_KEYS[language])}
-                  onClick={() => onLanguageChange(language)}
-                />
-              ))}
-            </div>
-          ) : null}
           {onLogout ? (
             <HeaderMenuRow
               icon={<LogOut className="size-3.5" />}
@@ -757,21 +685,17 @@ function HeaderMenuPanel({ children, dropdown = false }: {
 function HeaderMenuRow({
   menuItem = false,
   id,
-  active = false,
   icon,
   label,
   badge,
-  meta,
   unread = false,
   onClick,
 }: {
   menuItem?: boolean;
   id?: string;
-  active?: boolean;
   icon: ReactNode;
   label: string;
   badge?: string;
-  meta?: string;
   unread?: boolean;
   onClick?: () => void;
 }) {
@@ -784,16 +708,11 @@ function HeaderMenuRow({
         <span className="truncate">{label}</span>
         {badge && <span className={entryStyles.newBadge}>{badge}</span>}
       </span>
-      {meta ? (
-        <span className="max-w-16 truncate text-[11px] text-slate-400">{meta}</span>
-      ) : null}
       {unread ? (
         <NotificationDot />
       ) : null}
       <ChevronRight
-        className={`${entryStyles.menuChevron} mr-1 size-3.5 shrink-0 transition-transform duration-150 motion-reduce:transition-none ${
-          active ? "rotate-90" : ""
-        }`}
+        className={`${entryStyles.menuChevron} mr-1 size-3.5 shrink-0`}
       />
     </>
   );
@@ -804,27 +723,6 @@ function HeaderMenuRow({
   return (
     <button id={id} type="button" className={className} onClick={onClick}>
       {content}
-    </button>
-  );
-}
-
-function PreferenceOption({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="flex h-7 w-full items-center justify-between rounded-[7px] px-2 text-left text-[11px] text-slate-100/78 transition-colors duration-150 hover:bg-white/[0.05] hover:text-white"
-      onClick={onClick}
-    >
-      <span>{label}</span>
-      {active ? <Check className="size-3.5 text-cyan-300" /> : null}
     </button>
   );
 }

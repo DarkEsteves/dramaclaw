@@ -10,6 +10,7 @@ import type {
 } from "./piko-world-client";
 import { PikoChatTranslation } from "./PikoChatTranslation";
 import { PikoChatTextBubble } from "./PikoChatTextBubble";
+import { PIKO_CHAT_MAX_LENGTH } from "./piko-public-chat";
 import inputStyles from "./piko-input.module.css";
 import styles from "./piko-private-chat.module.css";
 import popup from "./piko-popup.module.css";
@@ -35,15 +36,25 @@ function RequestSkin({ children, state = "open" }: {
 
 function IncomingRequest({ request, onRespond }: {
   request: PikoPrivateChatRequest;
-  onRespond: (requestId: string, accepted: boolean) => boolean;
+  onRespond: (requestId: string, accepted: boolean) => boolean | Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const [responding, setResponding] = useState(false);
   useEffect(() => { playPikoUiSound("notification"); }, []);
   const respond = (accepted: boolean) => {
-    if (responding || !onRespond(request.id, accepted)) return;
+    if (responding) return;
     setResponding(true);
-    playPikoUiSound(accepted ? "open" : "close");
+    const finish = (confirmed: boolean) => {
+      if (confirmed) playPikoUiSound(accepted ? "open" : "close");
+      else setResponding(false);
+    };
+    try {
+      const result = onRespond(request.id, accepted);
+      if (typeof result === "boolean") finish(result);
+      else void result.then(finish).catch(() => finish(false));
+    } catch {
+      finish(false);
+    }
   };
   return <RequestSkin>
     <div role="region" aria-label={t("pikoWorld.privateRequestTitle")}
@@ -62,24 +73,29 @@ function IncomingRequest({ request, onRespond }: {
 }
 
 function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickname, onOpenChange,
-  onSend, onEnd }: {
+  onSend }: {
   active: boolean;
   peer: PikoPrivateChatPeer;
   messages: PikoPrivateChatMessage[];
   ownCharacterId: string;
   ownNickname?: string;
   onOpenChange: (characterId: string, open: boolean) => void;
-  onSend: (characterId: string, body: string) => boolean;
-  onEnd: (characterId: string) => boolean;
+  onSend: (characterId: string, body: string) => boolean | Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(true);
+  const [dismissed, setDismissed] = useState(false);
   // The dialog portals out of the hidden tray, so it has to honour `active` itself.
-  const visible = active && open;
+  const visible = active && open && !dismissed;
   const openRef = useRef(true);
   openRef.current = visible;
   const [unread, setUnread] = useState(0);
   const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendFailed, setSendFailed] = useState(false);
+  const sendingRef = useRef(false);
+  const pending = peer.status === "pending";
+  useEffect(() => { setDismissed(false); setOpen(true); setUnread(0); }, [peer.openVersion]);
   const seenMessages = useRef(new Set(messages.map(message => message.id)));
   const log = useRef<HTMLDivElement>(null);
   useEffect(() => { playPikoUiSound("open"); }, []);
@@ -92,10 +108,11 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
     let incoming = 0;
     for (const message of messages) {
       if (seenMessages.current.has(message.id)) continue;
-      seenMessages.current.add(message.id);
       if (message.from_character_id !== ownCharacterId) incoming += 1;
     }
+    seenMessages.current = new Set(messages.map(message => message.id));
     if (incoming && !openRef.current) {
+      setDismissed(false);
       setUnread(count => count + incoming);
       playPikoUiSound("notification");
     }
@@ -105,9 +122,27 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
   }, [messages, visible]);
   const send = () => {
     const body = draft.trim();
-    if (!body || Array.from(body).length > 80 || !onSend(peer.character_id, body)) return;
-    setDraft("");
+    if (sendingRef.current || !body || Array.from(body).length > PIKO_CHAT_MAX_LENGTH) return;
+    setSendFailed(false);
+    const finish = (accepted: boolean) => {
+      if (accepted) setDraft(current => current === draft ? "" : current);
+      else setSendFailed(true);
+      sendingRef.current = false;
+      setSending(false);
+    };
+    try {
+      const result = onSend(peer.character_id, body);
+      if (typeof result === "boolean") finish(result);
+      else {
+        sendingRef.current = true;
+        setSending(true);
+        void result.then(finish).catch(() => finish(false));
+      }
+    } catch {
+      finish(false);
+    }
   };
+  if (dismissed) return null;
   return <>
     <RequestSkin>
       <div className="relative flex h-9 items-center gap-1 pb-1 pl-4 pr-5">
@@ -116,13 +151,13 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
           onClick={() => { setUnread(0); setOpen(true); playPikoUiSound("open"); }}>
           {t("pikoWorld.privateReopen", { nickname: peer.nickname })}
           {unread > 0 && <span aria-label={t("pikoWorld.privateUnread", { count: unread })}
-            className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-amber-950/45 bg-amber-400 px-1 text-[10px] font-bold leading-none text-amber-950">
+            className="inline-flex h-4 min-w-5 items-center justify-center rounded-[min(var(--radius-sm),8px)] border border-amber-950/45 bg-amber-400 px-1 text-[10px] font-bold leading-none text-amber-950">
             {unread > 99 ? "99+" : unread}
           </span>}
         </button>
         <button type="button" aria-label={t("pikoWorld.privateEndChat", { nickname: peer.nickname })}
           className="ml-1 inline-flex size-4 items-center justify-center rounded leading-none text-[#08214b]/55 focus-visible:outline-1 focus-visible:outline-[#08214b]"
-          onClick={() => { if (onEnd(peer.character_id)) playPikoUiSound("close"); }}>
+          onClick={() => { setOpen(false); setDismissed(true); setUnread(0); playPikoUiSound("close"); }}>
           <svg aria-hidden="true" viewBox="0 0 16 16" className="block size-3" fill="none"
             stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
             <path d="m4 4 8 8m0-8-8 8" />
@@ -138,7 +173,7 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
         finalFocus={() => document.getElementById("piko-map-control")}
         overlayClassName="!bg-black/25 !backdrop-blur-none"
         className={`${popup.surface} ${styles.dialog} w-[min(24rem,calc(100vw-6rem))] max-w-[calc(100%-6rem)] gap-0 overflow-visible sm:max-w-96`}>
-        <DialogTitle className="sr-only">{peer.nickname}</DialogTitle>
+        <DialogTitle className="mb-3 shrink-0 break-words px-5 pr-8 text-base font-semibold leading-6">{peer.nickname}</DialogTitle>
         <div ref={log} role="log" aria-label={t("pikoWorld.privateMessages")} aria-live="polite"
           className={styles.messages}>
           {messages.map(message => {
@@ -159,14 +194,15 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
           })}
         </div>
         <form className={styles.composer} onSubmit={event => { event.preventDefault(); send(); }}>
-          <input aria-label={t("pikoWorld.privateMessageInput")} value={draft}
+          <input aria-label={t("pikoWorld.privateMessageInput")} value={draft} aria-busy={sending}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={event => {
               if (event.key === "Enter" && event.nativeEvent.isComposing) event.preventDefault();
             }} className={inputStyles.input} />
           <p className="mb-0 mt-2 text-[10px] leading-4 text-amber-950/55">
-            {t("pikoWorld.privateSendHint")} · {Array.from(draft.trim()).length}/80
+            {t(sending ? "pikoWorld.messageSending" : pending ? "pikoWorld.privateWaiting" : peer.status === "declined" ? "pikoWorld.privateDeclined" : "pikoWorld.privateSendHint")} · {Array.from(draft.trim()).length}/{PIKO_CHAT_MAX_LENGTH}
           </p>
+          {sendFailed && <p role="alert" className="mt-2 text-xs text-amber-950">{t("pikoWorld.messageSendFailed")}</p>}
         </form>
         <DialogClose render={<button aria-label={t("common.close")}
           className={`${popup.close} ${icon.button}`} />}>
@@ -179,7 +215,7 @@ function PrivateConversation({ active, peer, messages, ownCharacterId, ownNickna
 
 export function PikoPrivateChat({ active, onOpenChange, ownNickname,
   ownCharacterId = "", requests = [], peers = [], messages = [], onRespond,
-  onSend, onEnd }: {
+  onSend }: {
   active: boolean;
   onOpenChange: (open: boolean) => void;
   ownNickname?: string;
@@ -187,9 +223,8 @@ export function PikoPrivateChat({ active, onOpenChange, ownNickname,
   requests?: PikoPrivateChatRequest[];
   peers?: PikoPrivateChatPeer[];
   messages?: PikoPrivateChatMessage[];
-  onRespond?: (requestId: string, accepted: boolean) => boolean;
-  onSend?: (characterId: string, body: string) => boolean;
-  onEnd?: (characterId: string) => boolean;
+  onRespond?: (requestId: string, accepted: boolean) => boolean | Promise<boolean>;
+  onSend?: (characterId: string, body: string) => boolean | Promise<boolean>;
 }) {
   useEffect(() => {
     document.addEventListener("pointerdown", unlockPikoNotifications, true);
@@ -201,9 +236,13 @@ export function PikoPrivateChat({ active, onOpenChange, ownNickname,
   }, []);
   const [openConversations, setOpenConversations] = useState<Record<string, boolean>>({});
   const handleConversationOpen = useCallback((characterId: string, open: boolean) => {
-    setOpenConversations(current => current[characterId] === open
-      ? current
-      : { ...current, [characterId]: open });
+    setOpenConversations(current => {
+      if (Boolean(current[characterId]) === open) return current;
+      if (open) return { ...current, [characterId]: true };
+      const next = { ...current };
+      delete next[characterId];
+      return next;
+    });
   }, []);
   useEffect(() => {
     onOpenChange(Object.values(openConversations).some(Boolean));
@@ -218,7 +257,6 @@ export function PikoPrivateChat({ active, onOpenChange, ownNickname,
       ownCharacterId={ownCharacterId} ownNickname={ownNickname}
       messages={messages.filter(message => message.from_character_id === peer.character_id
         || message.to_character_id === peer.character_id)}
-      onOpenChange={handleConversationOpen} onSend={onSend ?? (() => false)}
-      onEnd={onEnd ?? (() => false)} />)}
+      onOpenChange={handleConversationOpen} onSend={onSend ?? (() => false)} />)}
   </div>;
 }

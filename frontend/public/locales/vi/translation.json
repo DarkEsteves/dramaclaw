@@ -119,13 +119,12 @@
     "translationLoading": "Đang dịch…",
     "translationHide": "Ẩn bản dịch",
     "translationRetry": "Dịch lại",
-    "translationLanguage": "Dịch sang",
     "translationLabel": "Bản dịch",
     "translationError": "Hiện chưa dịch được. Vui lòng thử lại sau.",
     "residentComingSoon": "Đang làm hoạt ảnh",
     "playableResident_f01": "Nữ · F01",
     "playableResident_m01": "Nam · M01",
-    "profileSaveFailed": "Chưa lưu được. Hãy kiểm tra bộ nhớ trình duyệt rồi thử lại.",
+    "profileSaveFailed": "Chưa thể lưu. Hãy thử lại sau; nội dung đã nhập vẫn được giữ.",
     "profileDescription": "Để bạn bè trong thị trấn biết về bạn.",
     "defaultNickname": "Lữ khách thị trấn",
     "saveProfile": "Lưu",
@@ -137,6 +136,8 @@
     "loadingTitle": "Đến Thị trấn Piko",
     "loadingPreparing": "Đang chuẩn bị thị trấn, vui lòng chờ…",
     "loadingReady": "Thị trấn đã sẵn sàng, lên đường thôi!",
+    "mapNotOpen": "{{mapName}} chưa mở cửa. Hãy đón chờ nhé!",
+    "selfLabel": "Bạn",
     "loadingFailed": "Chưa tải xong. Hãy kiểm tra mạng rồi thử lại.",
     "loadingProgress": "Minh họa tiến độ tải thị trấn",
     "loadingEnter": "Vào Thị trấn Piko",
@@ -159,11 +160,7 @@
     "residentSelectorConfirm": "Chọn xong",
     "residentOptionLabel": "Cư dân {{number}}",
     "chatMockMayorName": "Thị trưởng Piko",
-    "chatMockResidentName": "Cư dân thị trấn",
-    "chatMockYouName": "Tôi",
     "chatMockMayorWelcome": "Chào mừng đến Sân Chào Đón, gió hôm nay thật dễ chịu.",
-    "chatMockResidentLantern": "Bên đài phun nước vừa sáng lên một chiếc đèn nhắn tin mới.",
-    "chatMockVisitorReply": "Lát nữa mình qua xem nhé!",
     "mapAriaLabel": "Sân Chào Đón, dùng phím mũi tên để di chuyển",
     "talkToMayor": "Trò chuyện với thị trưởng",
     "welcomeTitle": "Thị trưởng · Piko",
@@ -173,11 +170,14 @@
     "welcomeDone": "Dạo quanh sân",
     "residentActions": "Tương tác với {{nickname}}",
     "viewResidentInfo": "Xem thông tin",
-    "chatWithResident": "Trò chuyện",
+    "chatWithResident": "Gửi tin nhắn",
     "simulatedResidentLabel": "Cư dân mô phỏng tạm thời",
     "emptyResidentBio": "Chưa có giới thiệu.",
-    "chatRequestSent": "Đã gửi lời mời trò chuyện. Vui lòng chờ phản hồi.",
+    "localResidentChatNotice": "Cư dân thị trấn chưa nhận yêu cầu trò chuyện riêng. Bạn có thể trò chuyện với người chơi trực tuyến.",
     "chatTooLong": "Tin nhắn tối đa 80 ký tự",
+    "characterLoadFailed": "Không thể tải nhân vật. Vui lòng thử lại.",
+    "messageSending": "Đang gửi…",
+    "messageSendFailed": "Chưa xác nhận gửi thành công. Nội dung vẫn được giữ; hãy thử lại sau.",
     "chatCooldown": "Chờ {{seconds}} giây",
     "chatSendHint": "Enter để gửi · Shift+Enter để xuống dòng",
     "chatSend": "Gửi",
@@ -188,10 +188,9 @@
     "privateReopen": "Trò chuyện với {{nickname}}",
     "privateMessages": "Tin nhắn riêng",
     "privateMessageInput": "Nhập tin nhắn riêng",
-    "privateReplying": "Đang trả lời…",
+    "privateWaiting": "Người nhận chưa chấp nhận. Bạn vẫn có thể gửi tin nhắn.",
+    "privateDeclined": "Yêu cầu đã bị từ chối. Bạn có thể gửi tin nhắn mới.",
     "privateSendHint": "Enter để gửi · tối đa 80 ký tự",
-    "privateMockGreeting": "Xin chào! Rất vui được gặp bạn ở thị trấn.",
-    "privateMockReply": "Nhận được rồi! Đây là câu trả lời mô phỏng của {{nickname}}, rất vui được trò chuyện với bạn.",
     "privateUnread": "{{count}} tin chưa đọc",
     "privateEndChat": "Đóng trò chuyện với {{nickname}}",
     "privateYou": "Bạn",
@@ -784,8 +783,8 @@
   },
   "header": {
     "partyFounding105": "庆祝建党105周年",
-    "settings": "Cài đặt",
-    "settingsWithWarning": "Cài đặt — thiếu cấu hình",
+    "settings": "Cài đặt chức năng",
+    "settingsWithWarning": "Cài đặt chức năng, cấu hình chưa hoàn tất",
     "settingsWarningBubble": "Thiếu thiết lập",
     "dismissSettingsWarningBubble": "Bỏ qua nhắc nhở thiếu thiết lập",
     "notifications": "Thông báo",
@@ -1247,6 +1246,11 @@
     "canvasReferenceOnlyPrompt": "Hãy tiếp tục từ node đã chọn trên canvas."
   },
   "freezone": {
+    "viewMode": {
+      "label": "Chế độ xem canvas",
+      "workflow": "Quy trình",
+      "board": "Bảng phân cảnh"
+    },
     "chat": {
       "title": "Xia Director",
       "description": "Mở Xia Director bên cạnh canvas Freezone.",
@@ -6171,6 +6175,7 @@
       "rows": "Số hàng"
     },
     "nodeHistory": {
+      "compactTitle": "Lịch sử",
       "current": "Hiện tại",
       "daysAgo": "{{count}} ngày trước",
       "hoursAgo": "{{count}} giờ trước",
@@ -6266,6 +6271,7 @@
       "handleLabel": "Thay asset"
     },
     "reference": {
+      "preview": "Xem trước nội dung tham chiếu",
       "detach": "Gỡ tham chiếu này",
       "mention": "Nhắc tới \"{{name}}\" trong prompt"
     },
@@ -6377,6 +6383,8 @@
     "annotateResultTitle": "Kết quả chú thích"
   },
   "nodeToolbar": {
+    "nodeId": "ID nút",
+    "copyNodeId": "Sao chép ID nút",
     "aiEdit": "Sửa bằng AI",
     "panorama": "Panorama",
     "generateDirectorWorld": "Tạo thế giới 3DGS",
@@ -7587,6 +7595,9 @@
     }
   },
   "viewer": {
+    "imageDetails": "Xem chi tiết hình ảnh",
+    "imageIndex": "Xem hình ảnh {{index}}",
+    "videoIndex": "Xem video {{index}}",
     "imageAlt": "Ảnh",
     "prev": "Trước",
     "next": "Sau",
@@ -8022,9 +8033,9 @@
     "error": "Tạo thất bại"
   },
   "settings": {
-    "title": "Cài đặt",
+    "title": "Cài đặt chức năng",
     "close": "Đóng",
-    "navigationLabel": "Nhóm cài đặt",
+    "navigationLabel": "Điều hướng cài đặt chức năng",
     "statusConfigured": "{{page}} đã được cấu hình",
     "statusNotConfigured": "{{page}} chưa được cấu hình",
     "secretSavedBadge": "Đã lưu",
@@ -8032,7 +8043,7 @@
     "pages": {
       "models": "Model & Kênh",
       "storage": "Lưu trữ media",
-      "freezoneSkills": "Skill Freezone",
+      "freezoneSkills": "Skill Xiahua",
       "freezoneRecipes": "Recipe Freezone"
     },
     "modelConfig": {

@@ -19,7 +19,7 @@ it("shows the clicked resident profile and releases movement after closing", asy
   const user = userEvent.setup(), input = props();
   render(<PikoResidentInteraction {...input} />);
   await user.click(screen.getByRole("button", { name: "与小苔互动" }));
-  expect((await screen.findAllByRole("menuitem")).map(el => el.textContent)).toEqual(["查看信息", "聊一聊", "关闭"]);
+  expect((await screen.findAllByRole("menuitem")).map(el => el.textContent)).toEqual(["查看信息", "发送消息", "关闭"]);
   expect(input.onBusyChange).toHaveBeenLastCalledWith(true);
   await user.click(await screen.findByRole("menuitem", { name: "查看信息" }));
   expect(await screen.findByRole("dialog", { name: "小苔" })).toBeVisible();
@@ -32,7 +32,7 @@ it("shows the clicked resident profile and releases movement after closing", asy
   await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
   expect(input.onBusyChange).toHaveBeenLastCalledWith(false);
 });
-it("closes with Escape and shows a non-modal local chat request notice", async () => {
+it("closes with Escape and explains NPC chat support in a non-modal notice", async () => {
   const user = userEvent.setup(), input = props();
   render(<PikoResidentInteraction {...input} />);
   const trigger = screen.getByRole("button", { name: "与小苔互动" });
@@ -42,11 +42,26 @@ it("closes with Escape and shows a non-modal local chat request notice", async (
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(input.onBusyChange).toHaveBeenLastCalledWith(false);
   await user.click(trigger);
-  await user.click(await screen.findByRole("menuitem", { name: "聊一聊" }));
-  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("已发送聊天申请，请等待对方回复"));
+  await user.click(await screen.findByRole("menuitem", { name: "发送消息" }));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("小镇居民暂不接收私聊申请"));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(playPikoUiSound).toHaveBeenLastCalledWith("open");
   expect(input.onBusyChange).toHaveBeenLastCalledWith(false);
+});
+
+it("opens the online composer without announcing a request before a message is sent", async () => {
+  const user = userEvent.setup();
+  const onOpenPrivateChat = vi.fn(() => false);
+  render(<PikoResidentInteraction {...props()} onOpenPrivateChat={onOpenPrivateChat} />);
+  const trigger = screen.getByRole("button", { name: "与小苔互动" });
+  await user.click(trigger);
+  await user.click(await screen.findByRole("menuitem", { name: "发送消息" }));
+  expect(onOpenPrivateChat).toHaveBeenCalledOnce();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  onOpenPrivateChat.mockReturnValue(true);
+  await user.click(trigger);
+  await user.click(await screen.findByRole("menuitem", { name: "发送消息" }));
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
 });
 it("tracks position and viewport changes and clears interaction state on removal", () => {
   const input = props();

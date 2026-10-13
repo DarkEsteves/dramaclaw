@@ -118,11 +118,19 @@ it("sends public chat to the player bubble and blocks repeated Enter without los
   await user.type(input, "大家好{Enter}");
   expect(screen.getByTestId("map")).toHaveAttribute("data-speech", "大家好");
   expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
-  expect(screen.getByText(/请等待 [123] 秒/)).toBeVisible();
+  expect(screen.getByText(/请等待 [1-6] 秒/)).toBeVisible();
   await user.type(input, "再说一句{Enter}");
   expect(input).toHaveValue("再说一句");
   expect(screen.getByTestId("map")).toHaveAttribute("data-speech", "大家好");
   expect(screen.queryByText("再说一句", { selector: "article p" })).toBeNull();
+});
+
+it("uses a successful server profile in memory even when browser persistence is unavailable", () => {
+  const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+  const { result } = renderHook(() => usePikoProfile("cache-only-test"));
+  act(() => { expect(result.current.cacheProfile({ nickname: "已保存", bio: "服务器资料" })).toBe(true); });
+  expect(result.current.profile).toEqual({ nickname: "已保存", bio: "服务器资料" });
+  setItem.mockRestore();
 });
 
 vi.mock("./runtime/dog-world-session", () => ({ retainDogWorldSession: () => () => {} }));

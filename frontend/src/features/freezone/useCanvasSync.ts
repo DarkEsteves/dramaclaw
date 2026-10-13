@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
 import i18next from 'i18next';
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useReactFlow, type Viewport } from "@xyflow/react";
 import { useTranslation } from "react-i18next";
 import {
@@ -73,6 +73,7 @@ import {
   type StoredCanvasDraft,
 } from "./canvasDraftStorage";
 import { safeLocalStorageSet } from "@/lib/localStorageQuota";
+import { clearCanvasSelection } from "@/features/canvas/application/nodeSelection";
 import {
   beginCanvasHydrateBurst,
   notifyCanvasHydrateViewport,
@@ -1158,6 +1159,11 @@ export function useCanvasSync(
   }, [applyCanvasDataEdit, project, canvasId, setCanvasData]);
 
   // ---- 1. Hydrate ---- //
+  useLayoutEffect(() => {
+    // 缓存画布会在重新进入时立即渲染，首帧绘制前先清理旧选中态。
+    clearCanvasSelection();
+  }, [project, canvasId]);
+
   useEffect(() => {
     let cancelled = false;
     // 清理旧草稿要遍历并解析整个 localStorage（草稿动辄几 MB），放在挂载的关键路径上
@@ -1269,6 +1275,7 @@ export function useCanvasSync(
             history: draftDecision.draft.history,
             mutation: draftDecision.draft.mutation,
           });
+          clearCanvasSelection();
           storeCanvasKey = storeKeyOf(project, canvasId);
           useCanvasStore
             .getState()
@@ -1327,6 +1334,7 @@ export function useCanvasSync(
         // 这一次挂载的节点先出 shell，再由升级队列每帧 3 个补成完整组件。
         beginCanvasHydrateBurst();
         setCanvasData(nodes, edges);
+        clearCanvasSelection();
         storeCanvasKey = storeKeyOf(project, canvasId);
         // Seed the fingerprint from the normalized store state so the first
         // post-hydrate emission (measure/select) is recognized as a no-op.

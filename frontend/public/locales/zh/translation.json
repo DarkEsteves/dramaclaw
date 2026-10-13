@@ -461,8 +461,8 @@
       "world": "Piko 小镇"
     },
     "partyFounding105": "庆祝建党105周年",
-    "settings": "设置",
-    "settingsWithWarning": "设置，有未配置项",
+    "settings": "功能设置",
+    "settingsWithWarning": "功能设置，有未配置项",
     "settingsWarningBubble": "有未配置项",
     "dismissSettingsWarningBubble": "关闭未配置提醒",
     "notifications": "公告中心",
@@ -919,6 +919,11 @@
     "taskFailedUnknownReason": "未提供具体错误原因"
   },
   "freezone": {
+    "viewMode": {
+      "label": "画布视图切换",
+      "workflow": "工作流",
+      "board": "故事板"
+    },
     "chat": {
       "title": "虾导",
       "description": "在虾画画布旁打开虾导。",
@@ -2455,7 +2460,6 @@
     "translationLoading": "翻译中…",
     "translationHide": "收起译文",
     "translationRetry": "重试翻译",
-    "translationLanguage": "翻译为",
     "translationLabel": "译文",
     "translationError": "暂时无法翻译，请稍后重试。",
     "musicToggle": "音乐",
@@ -2467,7 +2471,7 @@
     "residentComingSoon": "动作制作中",
     "playableResident_f01": "女生 · F01",
     "playableResident_m01": "男生 · M01",
-    "profileSaveFailed": "暂时无法保存，请检查浏览器存储空间后重试。",
+    "profileSaveFailed": "暂时无法保存，请稍后重试。你的填写内容已保留。",
     "profileDescription": "让小镇里的朋友认识你。",
     "defaultNickname": "小镇旅人",
     "saveProfile": "保存",
@@ -2551,11 +2555,7 @@
     "residentSelectorConfirm": "选好了",
     "residentOptionLabel": "居民 {{number}}",
     "chatMockMayorName": "Piko 镇长",
-    "chatMockResidentName": "小镇居民",
-    "chatMockYouName": "我",
     "chatMockMayorWelcome": "欢迎来到初遇庭院，今天的风很舒服。",
-    "chatMockResidentLantern": "喷泉旁边刚刚亮起了新的留言灯。",
-    "chatMockVisitorReply": "我一会儿过去看看！",
     "mapAriaLabel": "初遇庭院，可使用方向键移动",
     "talkToMayor": "与镇长交谈",
     "welcomeTitle": "镇长 · Piko",
@@ -2565,17 +2565,22 @@
     "welcomeDone": "去庭院逛逛",
     "mapLoading": "正在加载{{mapName}}…",
     "mapLoadError": "{{mapName}}加载失败",
+    "mapNotOpen": "{{mapName}}暂未开放，敬请期待",
     "mapTransitionAnnouncement": "正在进入{{mapName}}",
     "residentActions": "与{{nickname}}互动",
     "viewResidentInfo": "查看信息",
-    "chatWithResident": "聊一聊",
+    "chatWithResident": "发送消息",
     "simulatedResidentLabel": "临时模拟居民",
     "emptyResidentBio": "还没有填写个人简介。",
-    "chatRequestSent": "已发送聊天申请，请等待对方回复",
+    "localResidentChatNotice": "小镇居民暂不接收私聊申请，可以与在线玩家发起聊天。",
     "chatTooLong": "消息最多 80 字",
+    "characterLoadFailed": "角色加载失败，请重试。",
+    "messageSending": "正在发送…",
+    "messageSendFailed": "暂未确认发送成功，内容已保留，请稍后重试。",
     "chatCooldown": "请等待 {{seconds}} 秒",
     "chatSendHint": "Enter 发送 · Shift+Enter 换行",
     "chatSend": "发送",
+    "selfLabel": "你",
     "privateRequestTitle": "私聊申请",
     "privateRequestFrom": "{{nickname}}申请聊天",
     "privateAccept": "接受",
@@ -2583,10 +2588,9 @@
     "privateReopen": "与{{nickname}}的聊天",
     "privateMessages": "私聊消息",
     "privateMessageInput": "输入私聊消息",
-    "privateReplying": "对方正在回复…",
+    "privateWaiting": "对方尚未接受，可继续发送消息",
+    "privateDeclined": "对方已拒绝申请，可以重新发送消息",
     "privateSendHint": "Enter 发送 · 最多 80 字",
-    "privateMockGreeting": "你好！很高兴在小镇遇见你。",
-    "privateMockReply": "收到啦！这是{{nickname}}的模拟回复，很高兴和你聊天。",
     "privateUnread": "{{count}} 条未读消息",
     "privateEndChat": "关闭与{{nickname}}的聊天",
     "transport": {
@@ -6285,6 +6289,7 @@
       "rows": "行数"
     },
     "nodeHistory": {
+      "compactTitle": "历史",
       "current": "当前",
       "daysAgo": "{{count}}天前",
       "hoursAgo": "{{count}}小时前",
@@ -6380,6 +6385,7 @@
       "handleLabel": "替换素材"
     },
     "reference": {
+      "preview": "引用素材预览",
       "detach": "取消引用此素材",
       "mention": "在提示词中引用「{{name}}」"
     },
@@ -6491,6 +6497,8 @@
     "annotateResultTitle": "标注结果"
   },
   "nodeToolbar": {
+    "nodeId": "节点 ID",
+    "copyNodeId": "复制节点 ID",
     "aiEdit": "AI 改图",
     "panorama": "全景",
     "generateDirectorWorld": "生成3DGS世界",
@@ -7710,6 +7718,9 @@
     }
   },
   "viewer": {
+    "videoIndex": "查看第 {{index}} 个视频",
+    "imageDetails": "查看图片详情",
+    "imageIndex": "查看第 {{index}} 张图片",
     "imageAlt": "图片",
     "prev": "上一张",
     "next": "下一张",
@@ -8145,9 +8156,9 @@
     "error": "生成失败"
   },
   "settings": {
-    "title": "设置",
+    "title": "功能设置",
     "close": "关闭",
-    "navigationLabel": "设置分类",
+    "navigationLabel": "功能设置导航",
     "statusConfigured": "{{page}}已配置",
     "statusNotConfigured": "{{page}}未配置",
     "secretSavedBadge": "已保存",
@@ -8155,7 +8166,7 @@
     "pages": {
       "models": "模型与渠道",
       "storage": "媒体存储",
-      "freezoneSkills": "虾画 Skills",
+      "freezoneSkills": "虾画 Skill",
       "freezoneRecipes": "虾画 Recipes"
     },
     "freezoneCatalog": {
