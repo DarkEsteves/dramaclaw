@@ -499,13 +499,22 @@ export function useImageGenerationForm(
     try {
     const projectId = readUrl().project;
     if (!projectId) {
-      console.error('[image-gen] no project in URL');
-      return;
+      throw new Error('缺少项目上下文，无法提交图片生成');
     }
     const generationAttempt = generationAttemptRef.current + 1;
     generationAttemptRef.current = generationAttempt;
     const isCurrentGenerationAttempt = () =>
       generationAttemptRef.current === generationAttempt;
+
+    // Recipe 节点在真正提交图片任务前还要先编译提示词。编译可能需要数秒，必须
+    // 从点击这一刻就给出反馈；若编译失败，外层 catch 会恢复按钮并展示错误。
+    updateNodeData(id, {
+      isGenerating: true,
+      generationStartedAt: Date.now(),
+      generationError: null,
+      generationErrorDetails: null,
+      generationErrorRequestId: null,
+    });
 
     // apiModel comes from the SAME reconciled model the picker displays, so the
     // backend always receives the model the user actually sees.
@@ -591,14 +600,7 @@ export function useImageGenerationForm(
     const resolvedCompletionMode = resolveImageGenerationCompletionMode(completionMode, total);
     // Clear any prior failure / album on resubmit — the on-node error banner
     // should only reflect the most recent attempt.
-    updateNodeData(id, {
-      isGenerating: true,
-      generationStartedAt: Date.now(),
-      generationError: null,
-      generationErrorDetails: null,
-      generationErrorRequestId: null,
-      generationBatch: null,
-    });
+    updateNodeData(id, { generationBatch: null });
     // 先完成的图立即入册展示，未完成的在画册里渲染占位骨架。
     setAlbumPendingTotal(id, total > 1 ? total : 0);
 
@@ -806,6 +808,24 @@ export function useImageGenerationForm(
       return actionOutput;
     }
     throw new Error('图片生成未提交任务，也没有返回图片地址');
+    } catch (error) {
+      console.error('[image-gen] image generation failed', error);
+      const rawErrorMessage =
+        error instanceof Error && error.message
+          ? error.message
+          : String(error || t('common.error'));
+      updateNodeData(id, {
+        isGenerating: false,
+        generationStartedAt: null,
+        generationTaskKey: null,
+        generationTaskType: null,
+        generationTaskJobId: null,
+        generationError: backendErrorToastMessage(error, t),
+        generationErrorDetails: rawErrorMessage,
+        generationErrorRequestId: extractRequestId(rawErrorMessage),
+      });
+      setAlbumPendingTotal(id, 0);
+      throw error;
     } finally {
       submittingRef.current = false;
       const waiters = submitWaitersRef.current;
@@ -907,7 +927,9 @@ export function useImageGenerationForm(
       totalCreditCostDisplay,
       creditPromotion,
       submitDisabled,
-      onSubmit: () => void handleSubmit(),
+      // 手动点击的错误已经写回节点；这里吞掉 rejected Promise，避免浏览器只留下
+      // 一条 unhandled rejection。工作流调用的是上面的 submit，仍能收到 reject。
+      onSubmit: () => void handleSubmit().catch(() => undefined),
     },
     isGenerating,
     submitDisabled,
