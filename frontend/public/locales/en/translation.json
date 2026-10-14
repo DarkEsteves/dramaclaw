@@ -5368,6 +5368,7 @@
         "captureFailed": "Could not capture the {{frameName}}.",
         "storyGroupCreated": "Interactive story group created. Set a start and choices to play.",
         "createStoryGroup": "Create interactive story group",
+        "storyGroupLimit": "Only one interactive story group is allowed per canvas. Edit the existing group or use a new canvas.",
         "storyGroupMinimum": "An interactive story group requires at least two video nodes.",
         "endingBadge": "Ending",
         "loadError": "Failed to load the story"
@@ -10313,6 +10314,10 @@
     "selectLeaf": "Select the innermost text element to preserve nested formatting."
   },
   "storyPublication": {
+    "deletionNotice": "Based on the current version list, this action is expected to remove {{versions}} and their media. Removed versions cannot be restored; their links and saves will no longer work. Cleanup waits for preparation tasks.",
+    "publishWithCleanupTitle": "Publish a new version and remove older versions?",
+    "confirmPublishAndCleanup": "Publish and clean up",
+    "retentionPolicy": "Keep the latest {{limit}} published versions, plus the active version even while unlisted. Cleanup waits for preparation tasks. Removed versions cannot be restored, and their links and saves no longer work.",
     "publish": "Publish story",
     "close": "Close",
     "back": "Back to editing",

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
+import { canAddStoryGroups, isStoryGroup } from '@/features/canvas/domain/storyGroupLimit';
 // 这里取的是 i18next 默认实例（`@/i18n` 初始化的就是它）。不 import `@/i18n`
 // 本身，是因为那个模块会顺带拉进 react-i18next / HttpBackend，把它塞进这条被
 // 到处 import 的底层链路上，会让所有 mock 掉 react-i18next 的测试在 import 期炸掉。
@@ -442,7 +443,7 @@ interface CanvasState {
     },
   ) => string | null;
   /** 把一份导入的故事(节点+边)整体追加进画布,作为一个 undo 步。 */
-  addStoryImport: (nodes: CanvasNode[], edges: CanvasEdge[]) => void;
+  addStoryImport: (nodes: CanvasNode[], edges: CanvasEdge[]) => boolean;
   /** 向故事组添加一个数值变量,自动生成 ink 合法 name(组内唯一)。返回 name。 */
   addStoryVariable: (groupId: string, label: string) => string;
   /** Patch 故事组某变量的 label / initial。 */
@@ -2315,7 +2316,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   duplicateNodeAsSibling: (sourceNodeId, index, dataOverrides = {}) => {
     const state = get();
     const source = state.nodes.find((n) => n.id === sourceNodeId);
-    if (!source) return null;
+    if (!source || isStoryGroup(source)) return null;
 
     const sourceHeight =
       source.measured?.height ??
@@ -2366,6 +2367,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   duplicateNodesAsSiblings: (nodeIds) => {
     const state = get();
     const sourceSet = new Set(nodeIds);
+    if (state.nodes.some((node) => sourceSet.has(node.id) && isStoryGroup(node))) return [];
     const newNodes: CanvasNode[] = [];
     const createdIds: string[] = [];
     // Maps each duplicated node's original id → its clone id, so edges between
@@ -3908,6 +3910,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   createStoryGroup: (nodeIds) => {
+    if (get().nodes.some(isStoryGroup)) return null;
     const groupId = get().groupNodes(nodeIds, { label: i18n.t('canvas.story.messages.storyGroup') });
     if (!groupId) return null;
     set((state) => ({
@@ -4008,6 +4011,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   addStoryImport: (importNodes, importEdges) => {
+    if (!canAddStoryGroups(get().nodes, importNodes)) return false;
     set((state) => ({
       nodes: [...state.nodes, ...importNodes],
       edges: [...state.edges, ...importEdges],
@@ -4018,6 +4022,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       dragHistorySnapshot: null,
       ...trackEdit(state),
     }));
+    return true;
   },
 
   addStoryVariable: (groupId, label) => {
