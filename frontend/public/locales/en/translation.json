@@ -2978,6 +2978,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "Rename asset",
+      "confirmRename": "Changing the name changes the asset ID. Existing plans, storyboards, and generated results will not migrate automatically. You may need to plan and generate again after saving. Continue?",
       "edit": "Edit",
       "delete": "Delete",
       "generated": "generated",
@@ -3244,7 +3246,7 @@
     "title": "Story Source",
     "subtitle": "Upload a script and start your creative journey.",
     "dropzoneHint": "Click or drop your novel file here",
-    "supportedFormats": "Supports .txt / .md / .docx · File up to 512KB · Text up to 100,000 characters",
+    "supportedFormats": "Supports .txt / .md / .docx · Structured import: 8 MiB / 1,000,000 characters; other pipelines: 512 KiB / 100,000 characters",
     "uploadingTitle": "Uploading novel…",
     "uploadingHint": "Please stay on this page until the upload finishes. It may take a moment on a slow connection.",
     "inputMode": {
@@ -8455,6 +8457,16 @@
         "enabled": "BrainClaw selected; it applies while Custom mode is active.",
         "missingEndpoint": "Enter the BrainClaw NewAPI URL.",
         "advancedEnabled": "Advanced custom LLM is enabled."
+      },
+      "agent": {
+        "title": "Agent model",
+        "description": "Configure the model used by Xia Director independently from image, video, audio, and embedding channels.",
+        "inherit": "Follow current channel",
+        "thirdParty": "Third party",
+        "model": "Model name",
+        "thirdPartyHint": "The service must support the OpenAI Responses API and tool calls. Re-enter the API key when changing the endpoint.",
+        "save": "Save Agent settings",
+        "saved": "Agent model settings saved. New sessions use the latest configuration."
       },
       "custom": {
         "description": "CE uses a local SQLite-backed NewAPI. DramaClaw connects the database, creates a runtime token, and enables the local channel automatically.",

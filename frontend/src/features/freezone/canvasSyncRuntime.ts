@@ -28,6 +28,7 @@ type RemoteCanvasApplier = (
 ) => boolean;
 
 type CanvasFlush = () => Promise<boolean>;
+type CanvasRevisionReader = () => number | null;
 
 export interface LocalProjectionPayload {
   projectionKey: string;
@@ -49,7 +50,7 @@ interface RemoteCanvasRuntime {
   applyLocalProjection?: LocalProjectionApplier;
   removeLocalProjection?: LocalProjectionRemover;
   /** Include hydration and local saves in the revision barrier. */
-  getRevision?: () => number | null;
+  getRevision?: CanvasRevisionReader;
   appliedRevision: number | null;
 }
 
@@ -67,7 +68,7 @@ export function registerFreezoneCanvasRuntime(
   flush?: CanvasFlush,
   applyLocalProjection?: LocalProjectionApplier,
   removeLocalProjection?: LocalProjectionRemover,
-  getRevision?: () => number | null,
+  getRevision?: CanvasRevisionReader,
 ): () => void {
   const runtime: RemoteCanvasRuntime = {
     project, canvasId, apply, flush, applyLocalProjection, removeLocalProjection,
@@ -79,6 +80,20 @@ export function registerFreezoneCanvasRuntime(
       currentRuntime = null;
     }
   };
+}
+
+export function readFreezoneCanvasRuntimeRevision(
+  project: string,
+  canvasId: string,
+): { revision: number | null } | null {
+  if (
+    !currentRuntime ||
+    currentRuntime.project !== project ||
+    currentRuntime.canvasId !== canvasId
+  ) {
+    return null;
+  }
+  return { revision: currentRuntime.getRevision?.() ?? null };
 }
 
 /** null means no runtime is registered; false means an active runtime refused the data.

@@ -928,6 +928,134 @@ def test_ecommerce_standard_plan_feeds_creative_outline_into_product_reference(m
     )
 
 
+def test_ecommerce_external_image_replaces_generated_asset_stage(monkeypatch):
+    """An existing product image is the asset; recovery must not generate an anchor."""
+    catalog = _load_catalog_module()
+    _install_real_builtin_catalog(monkeypatch, catalog)
+    plan = {
+        "schema_version": "freezone_workflow_plan.v1",
+        "skill": {"id": "ecommerce-ad", "version": 1},
+        "summary": "Use the selected red cup as the only image input and remix it.",
+        "external_inputs": [
+            {"id": "red_cup", "node_id": "red-cup-source", "media_kind": "image"}
+        ],
+        "nodes": [
+            {
+                "id": "result",
+                "node_type": "imageGenNode",
+                "stage": "images",
+                "data": {
+                    "prompt": "Keep the cup shape, use a blue background, and add no text.",
+                    "workflowCatalog": {"recipeId": "ecommerce-remix-image"},
+                },
+            }
+        ],
+        "edges": [
+            {"source": "red_cup", "target": "result", "link_type": "media_input_for"}
+        ],
+    }
+
+    missing_planning = catalog.validate_agent_workflow_plan(plan)
+
+    assert missing_planning["ok"] is True, missing_planning
+    assert [
+        (blocker["code"], blocker["stage"])
+        for blocker in missing_planning["preflight"]["blockers"]
+    ] == [("skill_stage_missing", "planning")]
+
+    plan["nodes"].insert(
+        0,
+        {
+            "id": "planning_brief",
+            "node_type": "textAnnotationNode",
+            "stage": "planning",
+            "data": {
+                "prompt": "Plan the requested red-cup background replacement.",
+                "workflowCatalog": {"recipeId": "general-text"},
+            },
+        },
+    )
+    plan["edges"].append(
+        {"source": "planning_brief", "target": "result", "link_type": "prompt_for"}
+    )
+
+    ready = catalog.validate_agent_workflow_plan(plan)
+
+    assert ready["ok"] is True, ready
+    assert ready["preflight"]["status"] == "ready"
+    assert ready["preflight"]["blockers"] == []
+    assert [
+        node["id"]
+        for node in ready["plan"]["nodes"]
+        if node["node_type"] == "imageGenNode"
+    ] == ["result"]
+    assert ready["plan"]["edges"][0] == {
+        "source": "red_cup",
+        "target": "result",
+        "link_type": "media_input_for",
+    }
+
+
+def test_ecommerce_standard_planner_binds_external_image_to_requested_recipe(
+    monkeypatch,
+):
+    """CORE-RCP-02: compact planning owns the topology and reaches ready once."""
+    catalog = _load_catalog_module()
+    _install_real_builtin_catalog(monkeypatch, catalog)
+    intent = {
+        "schema_version": "freezone_workflow_intent.v1",
+        "skill_id": "ecommerce-ad",
+        "user_goal": (
+            "Use ecommerce-remix-image with the selected red cup only; preserve its shape, "
+            "replace the background with blue, and add no text."
+        ),
+        "external_inputs": [
+            {"id": "red_cup", "node_id": "red-cup-source", "media_kind": "image"}
+        ],
+        "planner": {
+            "mode": "standard",
+            "deliverable": "images",
+            "item_count": 1,
+            "image_recipe_id": "ecommerce-remix-image",
+        },
+        "include_audio": False,
+        "include_compose": False,
+    }
+
+    result = catalog.compile_workflow_intent(intent)
+
+    assert result["ok"] is True, result
+    Draft202012Validator(workflow_intent_json_schema()).validate(intent)
+    assert result["planner"]["mode"] == "deterministic_standard"
+    assert result["preflight"]["status"] == "ready"
+    assert result["preflight"]["blockers"] == []
+    plan = result["plan"]
+    planning_nodes = [node for node in plan["nodes"] if node.get("stage") == "planning"]
+    image_nodes = [
+        node for node in plan["nodes"] if node.get("node_type") == "imageGenNode"
+    ]
+    assert len(planning_nodes) == 1
+    assert len(image_nodes) == 1
+    assert (
+        image_nodes[0]["data"]["workflowCatalog"]["recipeId"] == "ecommerce-remix-image"
+    )
+    assert not any(node.get("stage") == "assets" for node in plan["nodes"])
+    edges = {
+        (edge["source"], edge["target"]): edge["link_type"] for edge in plan["edges"]
+    }
+    assert edges[(planning_nodes[0]["id"], image_nodes[0]["id"])] == "prompt_for"
+    assert edges[("red_cup", image_nodes[0]["id"])] == "media_input_for"
+    assert [
+        edge for edge in plan["edges"] if edge["link_type"] == "media_input_for"
+    ] == [
+        {
+            "source": "red_cup",
+            "target": image_nodes[0]["id"],
+            "link_type": "media_input_for",
+        }
+    ]
+
+
 def _raw_plan_from_standard(catalog, intent: dict, *, deviate: bool = True) -> dict:
     """A raw plan derived from the standard planner output.
 

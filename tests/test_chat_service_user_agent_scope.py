@@ -1886,14 +1886,91 @@ async def test_codex_stage_confirmation_is_bound_to_existing_story_and_user_inte
     assert thread_id == (None if blocked else "codex-thread")
 
 
-def test_recipe_generation_on_an_existing_standalone_node_routes_to_node_action():
+def test_codex_freezone_thread_advertises_exact_agent_skill_locator(
+    monkeypatch,
+    tmp_path,
+):
+    workspace = tmp_path / "project-workspace"
+    skill = workspace / ".agents" / "skills" / "dramaclaw-workflows" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Workflow skill\n", encoding="utf-8")
+    captured = {}
+
+    class FakeCodexClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def thread_start(self):
+            return "new-thread"
+
+    monkeypatch.setattr(
+        chat_service,
+        "ensure_user_codex_workspace",
+        lambda *_args, **_kwargs: (workspace, tmp_path / "codex-home"),
+    )
+    monkeypatch.setattr(chat_service, "_build_codex_env", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        chat_service,
+        "_codex_turn_gateway_credentials",
+        lambda _authorization: ("turn-key", "https://gateway.example/v1"),
+    )
+    monkeypatch.setattr(
+        chat_service, "_codex_gateway_config_overrides", lambda _url: ()
+    )
+    monkeypatch.setattr(
+        chat_service, "_codex_mcp_config_overrides", lambda _servers: ()
+    )
+    monkeypatch.setattr(
+        chat_service, "_get_codex_thread_id", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(chat_service, "CodexClient", FakeCodexClient)
+
+    thread = chat_service._build_codex_thread(
+        "admin",
+        "project-a",
+        "agent-token",
+        authorization=None,
+        agent_profile="freezone:main",
+        tool_mode="freezone_canvas",
+    )
+
+    match = re.search(
+        r"\[DRAMACLAW_AGENT_SKILL_LOCATORS\]\n(.*?)\n"
+        r"\[/DRAMACLAW_AGENT_SKILL_LOCATORS\]",
+        captured["developer_instructions"],
+        re.DOTALL,
+    )
+    assert thread == "new-thread"
+    assert match is not None
+    assert json.loads(match.group(1)) == {
+        "agent_skills": [
+            {
+                "name": "dramaclaw-workflows",
+                "server": "dramaclaw",
+                "uri": skill.resolve().as_uri(),
+            }
+        ],
+        "workflow_catalog_server": "dramaclaw_workflows",
+    }
+
+
+def test_named_recipe_distinguishes_existing_output_from_external_media_input():
     for instructions in (
         chat_service._codex_developer_instructions("freezone_canvas"),
         chat_service._FREEZONE_CANVAS_ASSISTANT_INSTRUCTIONS,
     ):
-        assert "generate content through a named Recipe" in instructions
+        assert (
+            "named Recipe already bound to an existing standalone output node"
+            in instructions
+        )
         assert "freezone_run_node_action" in instructions
         assert "never substitute freezone_update_node_data" in instructions
+        assert "existing media node is only the source or reference" in instructions
+        assert "external_inputs" in instructions
+        assert "reference_inputs" in instructions
+        assert "never use freezone_get_node_action_catalog" in instructions
+        assert "do not recreate" in instructions
+        assert "copy the source node" in instructions
 
 
 def test_explicit_standalone_node_edit_does_not_trigger_recipe_generation():

@@ -134,16 +134,25 @@ _TEXT_FIRST_BUILTIN_RECIPE_IDS = {
     "video-storyboard-script",
 }
 
+
 def _stage(
-    stage_id: str, node_type: str, recipes: list[str], *, required: bool
+    stage_id: str,
+    node_type: str,
+    recipes: list[str],
+    *,
+    required: bool,
+    accepts_external_media: list[str] | None = None,
 ) -> dict[str, Any]:
     """One stage of a standard planner template (see ``stages`` below)."""
-    return {
+    stage = {
         "id": stage_id,
         "node_type": node_type,
         "recipes": list(recipes),
         "required": required,
     }
+    if accepts_external_media:
+        stage["accepts_external_media"] = list(accepts_external_media)
+    return stage
 
 
 # ``stages`` is the machine-comparable shape of what ``_standard_skill_items``
@@ -185,6 +194,7 @@ _DETERMINISTIC_SKILL_PLANNERS = {
                 "imageGenNode",
                 ["general-image", "ecommerce-style-reference"],
                 required=True,
+                accepts_external_media=["image"],
             ),
             _stage(
                 "images",
@@ -200,7 +210,9 @@ _DETERMINISTIC_SKILL_PLANNERS = {
             _stage("video", "videoNode", ["video-clip-generation"], required=False),
             _stage("audio", "audioNode", ["general-audio"], required=False),
         ],
-        "edges": [["planning", "assets"], ["assets", "images"], ["images", "video"]],
+        # A supplied product image replaces generated assets. In either case the
+        # creative plan and the product asset must both reach the output images.
+        "edges": [["planning", "images"], ["assets", "images"], ["images", "video"]],
     },
     "text-to-image-video": {
         "default_item_count": 3,
@@ -425,7 +437,10 @@ def _node_fills_stage(
 
 
 def skill_stage_blockers(
-    skill_id: str, nodes: Any, edges: Any = None
+    skill_id: str,
+    nodes: Any,
+    edges: Any = None,
+    external_inputs: Any = None,
 ) -> list[dict[str, Any]]:
     """Preflight blockers for standard-planner stages a plan skips or bypasses.
 
@@ -454,6 +469,13 @@ def skill_stage_blockers(
             for node in nodes
             if _node_fills_stage(node, stage, kind_is_unique=kind_is_unique)
         ]
+        accepted_media = set(stage.get("accepts_external_media") or [])
+        for source in external_inputs if isinstance(external_inputs, list) else []:
+            if not isinstance(source, dict):
+                continue
+            source_id = _text(source.get("id"))
+            if source_id and _text(source.get("media_kind")) in accepted_media:
+                filled[stage["id"]].append(source_id)
     blockers: list[dict[str, Any]] = []
     for stage in stages:
         if not stage.get("required") or filled[stage["id"]]:
@@ -474,8 +496,15 @@ def skill_stage_blockers(
                 "hint": (
                     f"Add a {stage['node_type']} node for the {stage['id']} stage (set its "
                     f"stage to \"{stage['id']}\" or use one of {recipes}) and feed the "
-                    "downstream nodes from it, or drop the custom items and let the "
-                    "standard planner (planner.mode=standard) produce every required stage."
+                    "downstream nodes from it"
+                    + (
+                        f", or declare and connect existing {', '.join(stage['accepts_external_media'])} "
+                        "media as external_inputs"
+                        if stage.get("accepts_external_media")
+                        else ""
+                    )
+                    + ", or drop the custom items and let the standard planner "
+                    "(planner.mode=standard) produce every required stage."
                 ),
             }
         )
@@ -522,7 +551,12 @@ def _attach_skill_stage_blockers(result: dict[str, Any], skill_id: str) -> None:
         return
     _attach_preflight_blockers(
         result,
-        skill_stage_blockers(skill_id, plan.get("nodes") or [], plan.get("edges") or []),
+        skill_stage_blockers(
+            skill_id,
+            plan.get("nodes") or [],
+            plan.get("edges") or [],
+            plan.get("external_inputs") or [],
+        ),
     )
 
 
@@ -2033,6 +2067,8 @@ def _standard_skill_items(
     include_audio: bool,
     units: list[dict[str, Any]],
     user_goal: str,
+    external_inputs: list[dict[str, Any]] | None = None,
+    image_recipe_id: str = "",
     include_unit_facts: bool = True,
     video_dependency: str = "independent",
 ) -> list[dict[str, Any]]:
@@ -2048,26 +2084,42 @@ def _standard_skill_items(
                 stage="planning",
             )
         )
-        items.append(
-            _planned_item(
-                item_id="product_reference",
-                title="商品视觉锚点",
-                prompt=f"{user_goal}，生成稳定一致的商品主体参考图",
-                recipe_id="general-image",
-                depends_on=["creative_outline"],
-                reference_inputs=["creative_outline"],
-                stage="assets",
+        external_image_ids = [
+            _text(source.get("id"))
+            for source in external_inputs or []
+            if isinstance(source, dict)
+            and source.get("media_kind") == "image"
+            and _text(source.get("id"))
+        ]
+        asset_ids = external_image_ids
+        if not asset_ids:
+            asset_ids = ["product_reference"]
+            items.append(
+                _planned_item(
+                    item_id="product_reference",
+                    title="商品视觉锚点",
+                    prompt=f"{user_goal}，生成稳定一致的商品主体参考图",
+                    recipe_id="general-image",
+                    depends_on=["creative_outline"],
+                    reference_inputs=["creative_outline"],
+                    stage="assets",
+                )
             )
-        )
         for index, unit in enumerate(units, 1):
             image_id = f"scene_{index}"
+            image_dependencies = (
+                ["creative_outline", *asset_ids] if external_image_ids else asset_ids
+            )
             items.append(
                 _planned_item(
                     item_id=image_id,
                     title=unit["title"],
                     prompt=unit["prompt"],
-                    recipe_id="ecommerce-scene-image",
-                    depends_on=["product_reference"],
+                    recipe_id=image_recipe_id or "ecommerce-scene-image",
+                    depends_on=image_dependencies,
+                    reference_inputs=(
+                        image_dependencies if external_image_ids else None
+                    ),
                     stage="images",
                 )
             )
@@ -2594,6 +2646,28 @@ def _expand_standard_skill_intent(
                 path="planner.video_dependency",
             ),
         )
+    image_recipe_id = _text(planner.get("image_recipe_id"))
+    if image_recipe_id:
+        image_stage = next(
+            (
+                stage
+                for stage in profile.get("stages") or []
+                if stage.get("id") == "images"
+            ),
+            {},
+        )
+        if skill_id != "ecommerce-ad" or image_recipe_id not in (
+            image_stage.get("recipes") or []
+        ):
+            return (
+                intent,
+                None,
+                _intent_error(
+                    f"planner.image_recipe_id is not supported by Skill {skill_id}: "
+                    f"{image_recipe_id}",
+                    path="planner.image_recipe_id",
+                ),
+            )
     units = _standard_planner_units(
         planner=planner,
         item_count=item_count,
@@ -2657,6 +2731,12 @@ def _expand_standard_skill_intent(
         include_audio=include_audio,
         units=units,
         user_goal=user_goal,
+        external_inputs=(
+            intent.get("external_inputs")
+            if isinstance(intent.get("external_inputs"), list)
+            else []
+        ),
+        image_recipe_id=image_recipe_id,
         include_unit_facts=include_unit_facts,
         video_dependency=video_dependency,
     )
@@ -2691,6 +2771,7 @@ def _expand_standard_skill_intent(
         "deliverable": deliverable,
         "item_count": len(units),
         "include_audio": include_audio,
+        **({"image_recipe_id": image_recipe_id} if image_recipe_id else {}),
         **(
             {"video_dependency": video_dependency}
             if video_dependency != "independent"

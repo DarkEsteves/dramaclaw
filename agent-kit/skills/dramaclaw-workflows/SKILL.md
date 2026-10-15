@@ -61,6 +61,10 @@ Build one coherent workflow transaction, not a sequence of standalone canvas edi
   bypassing WorkflowPlan validation. A user selection cannot authorize that bypass. When a Skill's
   required stage conflicts with an exact node-only constraint, report the conflict or ask whether
   the required stage may be added; do not offer an invalid direct-write alternative.
+- During exact-Plan recovery, preserve the user's explicit media/result cardinality and existing
+  external-input edges. If the planning contract says a stage `accepts_external_media`, a connected
+  input of that kind fills the stage; never add a generated replacement anchor for it. Add only the
+  genuinely missing stage named by preflight (for example a required planning text node).
 - Never resubmit an unchanged workflow payload. After one correction, if the same validation path
   fails again in the same turn, stop retrying and report that blocker instead of increasing the
   failure counter.
@@ -254,17 +258,26 @@ Route between the normal draft flow and the exact topology path in this priority
    planner: set `planner.item_count=N` and `planner.video_dependency="sequential"`. Do not author
    `items`, nodes, or edges for that pattern. The compiler adds execution-only `dependency_for`
    edges between consecutive clips, so earlier clips are not sent as media references.
-2. Otherwise, when the user explicitly names required nodes and their dependency order that
-   deviate from the matching Skill's template, or requests images for an existing interactive story
-   with exact asset or shot-to-existing-video mappings, use the exact topology path in
+   For `ecommerce-ad`, when the user names one of the Skill's allowed images-stage Recipes, set
+   `planner.image_recipe_id` to that Recipe. If selected canvas images are supplied as
+   `external_inputs`, do not add `items` merely to bind them or to preserve the Recipe: the
+   standard planner uses those images as the asset stage, creates the planning text, and emits
+   `prompt_for` from planning plus `media_input_for` from each external image to every result.
+2. Otherwise, when the user explicitly requires an exact canvas node count or node set, or names
+   required nodes and a dependency order that deviates from the matching Skill's template, or requests
+   images for an existing interactive story with exact asset or shot-to-existing-video mappings, use
+   the exact topology path in
    [references/custom-topology.md](references/custom-topology.md), preparing the complete Plan as
-   a persisted draft even when a production Skill also matches. The Plan must include top-level
+   a persisted draft even when its stages resemble the standard template or a production Skill
+   matches. Exact cardinality words such as "exactly", "only", and "唯一" are topology
+   requirements when they refer to canvas nodes; do not reinterpret them as a compact planner item
+   count. The Plan must include top-level
    `schema_version` and `skill.id`/`skill.version` copied from the selected production Skill;
    `generation_answers` never substitutes for the complete Plan.
    Episode totals, Beat totals, shot totals, duration, and other business counts alone do not enter
    this path. Keep them in compact Intent inputs or the standard planner. Only treat them as exact
    topology when the user explicitly requires those items to exist as individual canvas nodes and
-   specifies a dependency graph that differs from the standard template.
+   specifies their exact set or a dependency graph that differs from the standard template.
 3. When an explicit planner instruction and the listed topology genuinely conflict (for example
    the standard planner is named but a mandatory template stage is dropped), ask one
    single-question clarification with `freezone_request_user_clarification` before choosing a

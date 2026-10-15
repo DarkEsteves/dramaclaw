@@ -147,6 +147,7 @@ try:
         find_clarification_bridge_message,
         put_pending_clarification_event,
         put_pending_canvas_command,
+        put_or_reuse_pending_canvas_command,
         put_pending_canvas_context,
         put_pending_skill_studio_event,
         wait_clarification_result,
@@ -164,6 +165,7 @@ except Exception as exc:
     find_clarification_bridge_message = None
     put_pending_clarification_event = None
     put_pending_canvas_command = None
+    put_or_reuse_pending_canvas_command = None
     put_pending_canvas_context = None
     put_pending_skill_studio_event = None
     wait_clarification_result = None
@@ -5083,6 +5085,66 @@ def _create_mcp_canvas_approval(
     )
 
 
+def _workflow_run_turn_key(project: str, canvas: str) -> str | None:
+    """Reuse the durable bridge receipt for the sole run request in this turn."""
+    turn_id = os.environ.get("DRAMACLAW_TURN_ID", "").strip()
+    if not turn_id or canvas_command_idempotency_key is None:
+        return None
+    return canvas_command_idempotency_key(
+        project_id=project,
+        canvas_id=canvas,
+        commands=[{"workflow_run_turn": turn_id}],
+    )
+
+
+def _workflow_run_timeout_result(result: dict[str, Any]) -> dict[str, Any]:
+    # A missing receipt cannot prove that persistence or execution did not happen.
+    return {
+        **result,
+        "cancelled": False,
+        "user_message": "工作流提交结果尚未确认，请查看画布状态。",
+        "agent_instruction": (
+            "Stop this turn; do not call freezone_run_workflow again. The original request "
+            "may already be running. Inspect its existing canvas status before "
+            "any user-requested recovery."
+        ),
+    }
+
+
+def _workflow_run_missing_turn_result() -> str:
+    return tool_result({
+        "ok": False,
+        "tool_call_status": "failed",
+        "canvas_apply_status": "failed",
+        "applied": False,
+        "message": "Workflow run requires a stable turn identity; nothing was submitted.",
+        "agent_instruction": "Stop this turn and report the workflow submission failure.",
+    })
+
+
+def _put_frontend_canvas_command(
+    *,
+    key: str,
+    project: str,
+    canvas: str,
+    commands: list[Any],
+    envelope: dict[str, Any],
+    reuse_live_request: bool,
+    bridge_dir: Path | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    arguments = {
+        "key": key,
+        "project_id": project,
+        "canvas_id": canvas,
+        "commands": commands,
+        "envelope": envelope,
+        "bridge_dir": bridge_dir,
+    }
+    if reuse_live_request:
+        return put_or_reuse_pending_canvas_command(**arguments)
+    return key, put_pending_canvas_command(**arguments)
+
+
 def _dispatch_mcp_approved_frontend_commands(
     *,
     project: str,
@@ -5093,6 +5155,7 @@ def _dispatch_mcp_approved_frontend_commands(
     if (
         canvas_command_bridge_key is None
         or put_pending_canvas_command is None
+        or put_or_reuse_pending_canvas_command is None
         or wait_canvas_command_result is None
     ):
         return tool_error(
@@ -5133,7 +5196,12 @@ def _dispatch_mcp_approved_frontend_commands(
         and str(command["data"].get("workflowInstanceId") or "").strip()
         for command in commands
     )
-    if is_workflow_batch and canvas_command_idempotency_key is not None:
+    is_workflow_run = _commands_include_type(commands, "run_workflow")
+    if is_workflow_run:
+        key = _workflow_run_turn_key(project, canvas)
+        if key is None:
+            return _workflow_run_missing_turn_result()
+    elif is_workflow_batch and canvas_command_idempotency_key is not None:
         key = canvas_command_idempotency_key(
             project_id=project,
             canvas_id=canvas,
@@ -5150,12 +5218,13 @@ def _dispatch_mcp_approved_frontend_commands(
     # which the API's candidate-path resolver never polls, so the approval card
     # and the browser refresh both disappear.
     bridge_dir = Path(bridge_root) if bridge_root else None
-    immediate_result = put_pending_canvas_command(
+    key, immediate_result = _put_frontend_canvas_command(
         key=key,
-        project_id=project,
-        canvas_id=canvas,
+        project=project,
+        canvas=canvas,
         commands=commands,
         envelope=envelope,
+        reuse_live_request=is_workflow_run,
         bridge_dir=bridge_dir,
     )
     if immediate_result is not None:
@@ -5194,13 +5263,15 @@ def _dispatch_mcp_approved_frontend_commands(
             "them to keep the Freezone page open or retry."
         ),
     }
+    if is_workflow_run:
+        timeout_result = _workflow_run_timeout_result(timeout_result)
     resolved = wait_canvas_command_result(
         key,
         timeout_seconds=timeout_seconds,
         # A workflow confirmation is a durable project task. A tool-level wait
         # timeout is not its business outcome; keep the bridge pending so a late
         # browser result can still complete that task safely.
-        timeout_result=None if is_workflow_batch else timeout_result,
+        timeout_result=None if is_workflow_batch or is_workflow_run else timeout_result,
         bridge_dir=bridge_dir,
     )
     if resolved is not None:
@@ -5226,6 +5297,7 @@ def _dispatch_frontend_canvas_commands(
     if (
         canvas_command_bridge_key is None
         or put_pending_canvas_command is None
+        or put_or_reuse_pending_canvas_command is None
         or wait_canvas_command_result is None
     ):
         return tool_error(
@@ -5241,9 +5313,15 @@ def _dispatch_frontend_canvas_commands(
         "canvas_id": canvas,
         "commands": commands,
     }
-    key = canvas_command_bridge_key(
-        project_id=project, canvas_id=canvas, commands=commands
-    )
+    is_workflow_run = _commands_include_type(commands, "run_workflow")
+    if is_workflow_run:
+        key = _workflow_run_turn_key(project, canvas)
+        if key is None:
+            return _workflow_run_missing_turn_result()
+    else:
+        key = canvas_command_bridge_key(
+            project_id=project, canvas_id=canvas, commands=commands
+        )
     is_workflow_batch = any(
         isinstance(command, dict)
         and command.get("type") == "create_node"
@@ -5251,13 +5329,24 @@ def _dispatch_frontend_canvas_commands(
         and str(command["data"].get("workflowInstanceId") or "").strip()
         for command in commands
     )
-    put_pending_canvas_command(
+    key, immediate_result = _put_frontend_canvas_command(
         key=key,
-        project_id=project,
-        canvas_id=canvas,
+        project=project,
+        canvas=canvas,
         commands=commands,
         envelope=envelope,
+        reuse_live_request=is_workflow_run,
     )
+    if immediate_result is not None:
+        return tool_result(
+            _summarize_canvas_command_result(
+                immediate_result,
+                bridge_key=key,
+                commands=commands,
+            )
+            if slim_result
+            else immediate_result
+        )
     try:
         timeout_seconds = max(
             1,
@@ -5284,10 +5373,12 @@ def _dispatch_frontend_canvas_commands(
             "them to retry after checking the canvas connection."
         ),
     }
+    if is_workflow_run:
+        timeout_result = _workflow_run_timeout_result(timeout_result)
     resolved = wait_canvas_command_result(
         key,
         timeout_seconds=timeout_seconds,
-        timeout_result=None if is_workflow_batch else timeout_result,
+        timeout_result=None if is_workflow_batch or is_workflow_run else timeout_result,
     )
     if resolved is not None:
         return tool_result(
@@ -6028,7 +6119,14 @@ def _summarize_canvas_command_result(
     agent_instruction = resolved.get("agent_instruction") or (
         "Canvas command result has been summarized. Do not ask for or print the full commands."
     )
-    if resolved.get("ok") and resolved.get("canvas_apply_status") == "accepted":
+    if not resolved.get("ok") and _commands_include_type(commands, "run_workflow"):
+        agent_instruction = (
+            "Stop this turn and report the workflow submission failure; "
+            "do not call freezone_run_workflow again or resubmit through another canvas tool. "
+            "When the user explicitly requests recovery, inspect the existing run first "
+            "if its submission outcome is uncertain."
+        )
+    elif resolved.get("ok") and resolved.get("canvas_apply_status") == "accepted":
         if _commands_include_type(commands, "run_workflow"):
             agent_instruction = (
                 "Report briefly that the workflow was accepted and is continuing on the canvas. "
@@ -6376,9 +6474,12 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
         preview_instruction
         + "Do not call freezone_get_workflow: this result is the durable draft receipt. "
         "Do not mention credits, billing, pricing, or editions. "
-        "Wait for user confirmation, then call freezone_confirm_workflow_draft with the exact "
-        "draft_id and revision. To change the topology, prepare a new complete Plan draft; never "
-        "fall back to direct canvas commands."
+        "Wait for user confirmation and end this turn without another workflow write. "
+        "Only after a later user message explicitly requests a change, call "
+        "freezone_patch_workflow_draft on this draft with changes.step_updates and/or "
+        "changes.bindings and its expected_revision. Confirm the exact draft_id and revision "
+        "only after confirmation; never prepare a replacement draft or fall back to direct "
+        "canvas commands."
     )
     return tool_result(result)
 
@@ -6417,10 +6518,9 @@ def _delivered_workflow_draft_for_operation(
         _request(
             "GET",
             _workflow_draft_api_path(project_id, canvas_id, draft_id),
-            query={"view": "summary"},
         )
     )
-    if payload is None:
+    if payload is None or not isinstance((payload.get("intent") or {}).get("plan"), dict):
         return None
     result = public_workflow_draft(payload, compact_preview=True)
     result["next_action"] = "review_and_confirm"
@@ -7280,7 +7380,7 @@ def _handle_patch_workflow_draft(args: dict[str, Any], **_: Any) -> str:
     problems = []
     if not isinstance(changes, dict):
         problems.append(
-            "changes must be an object holding only the changed intent fields"
+            "changes must be an object holding only the changed workflow fields"
         )
     if raw_revision is None:
         problems.append(
@@ -7302,12 +7402,12 @@ def _handle_patch_workflow_draft(args: dict[str, Any], **_: Any) -> str:
                 "expected_arguments": {
                     "draft_id": "<current draft_id>",
                     "expected_revision": "<current revision integer>",
-                    "changes": {"<changed intent field>": "<new value>"},
+                    "changes": {"<changed workflow field>": "<new value>"},
                 },
                 "agent_instruction": (
                     "Retry freezone_patch_workflow_draft exactly once with ALL of: "
                     "draft_id, integer expected_revision matching the current draft "
-                    "revision and changes as an object holding only the changed intent "
+                    "revision and changes as an object holding only the changed workflow "
                     "fields. Apply every "
                     "requested change in this single call."
                 ),
@@ -7334,14 +7434,32 @@ def _handle_patch_workflow_draft(args: dict[str, Any], **_: Any) -> str:
                 "current_revision": current_revision,
             }
         )
-    patch_body, error = build_workflow_draft_patch(
-        payload=payload,
-        changes=changes,
-        compile_intent=compile_workflow_intent,
-        run_after_create=_run_after_create_arg(args),
-    )
-    if patch_body is None:
-        return tool_result(error)
+    if isinstance((payload.get("intent") or {}).get("plan"), dict) or {
+        "step_updates", "bindings"
+    } & set(changes):
+        # The server owns exact-plan validation, settings and binding revisions.
+        # Forward the existing changes contract instead of compiling it as Intent.
+        policy = _run_after_create_arg(args)
+        if policy is not None and "run_after_create" in changes and (
+            not isinstance(changes["run_after_create"], bool)
+            or changes["run_after_create"] != policy
+        ):
+            return tool_result({
+                "ok": False, "status": "invalid_workflow_draft_patch",
+                "error": "run_after_create must match the explicit policy",
+            })
+        patch_body = {"changes": dict(changes)}
+        if policy is not None:
+            patch_body["changes"]["run_after_create"] = policy
+    else:
+        patch_body, error = build_workflow_draft_patch(
+            payload=payload,
+            changes=changes,
+            compile_intent=compile_workflow_intent,
+            run_after_create=_run_after_create_arg(args),
+        )
+        if patch_body is None:
+            return tool_result(error)
     payload, error = _workflow_draft_response(
         _request(
             "PATCH",
@@ -9999,8 +10117,8 @@ _WORKFLOW_INTENT_OBJECT_SCHEMA = {
         "planner": {
             "type": "object",
             "description": (
-                "Preferred for supported common Skills. The Agent supplies only count, "
-                "deliverable, and content units; the tool selects Recipes and dependencies."
+                "Preferred for supported common Skills. The Agent supplies count, deliverable, "
+                "content units, and supported Recipe overrides; the tool owns dependencies."
             ),
             "properties": {
                 "mode": {"type": "string", "enum": ["standard"]},
@@ -10009,6 +10127,14 @@ _WORKFLOW_INTENT_OBJECT_SCHEMA = {
                     "enum": ["images", "video", "mixed"],
                 },
                 "item_count": {"type": "integer", "minimum": 1, "maximum": 25},
+                "image_recipe_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "For ecommerce-ad, select an allowed images-stage Recipe while "
+                        "the standard planner still owns nodes and consuming edges."
+                    ),
+                },
                 "total_duration_seconds": {
                     "type": "integer",
                     "minimum": 1,
@@ -10093,16 +10219,16 @@ _WORKFLOW_INTENT_OBJECT_SCHEMA = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Execution dependencies. A media dependency is not automatically "
-                            "sent to the provider as a reference."
+                            "Execution-order dependencies. Text-to-media dependencies become "
+                            "dependency_for and do not feed the text into the media prompt."
                         ),
                     },
                     "reference_inputs": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Item ids whose generated media must be consumed as actual provider "
-                            "references. These also imply execution dependencies."
+                            "Outputs consumed by this item. Text references become prompt_for; "
+                            "media references become media_input_for."
                         ),
                     },
                     "stage": {"type": "string"},
@@ -11780,7 +11906,7 @@ TOOLS = (
         "freezone_prepare_workflow",
         _schema(
             "freezone_prepare_workflow",
-            "Prepare a persisted workflow using server-owned compilation. Provide exactly one of intent or plan; user_goal belongs in intent, while a plan can use summary for the user goal and does not accept user_goal. Optional bindings declare prompt/context/reference/dependency/composition usage. A planning-to-generator prompt binding requires actual prompt text and preserves the original planning role. Returns compact preview; does not create canvas nodes or execute. Follow normal product admission and confirm the returned revision via freezone_confirm_workflow_draft.",
+            "Prepare a persisted workflow using server-owned compilation. Provide exactly one of intent or plan; user_goal belongs in intent, while a plan can use summary for the user goal and does not accept user_goal. Use plan when the user requires an exact node count, exact node set, or exact dependency graph; use intent for the selected Skill's standard topology. Optional bindings declare prompt/context/reference/dependency/composition usage. A planning-to-generator prompt binding requires actual prompt text and preserves the original planning role. Returns compact preview; does not create canvas nodes or execute. Follow normal product admission and confirm the returned revision via freezone_confirm_workflow_draft.",
             {
                 **_SCOPE_PROPS,
                 "intent": _WORKFLOW_INTENT_OBJECT_SCHEMA,
@@ -11846,6 +11972,9 @@ TOOLS = (
                 "Do not invent low/medium quality or a recommended model id. On preflight "
                 "failure, fix all returned blockers together using allowed_values or "
                 "available_models. Ask the user before changing an explicit requirement. "
+                "Use this compact Intent entry point only for the Skill's standard topology. "
+                "When the user requires an exact node count, node set, or dependency graph, use "
+                "freezone_prepare_workflow_plan_draft with one complete Plan instead. "
                 "Do not pass draft_id, do not pass intent as a string, and "
                 "do not use execute_code. Use freezone_patch_workflow_draft for an existing draft."
             ),
@@ -11876,9 +12005,10 @@ TOOLS = (
         _schema(
             "freezone_patch_workflow_draft",
             (
-                "Apply a small user-requested change to an existing workflow draft, recompile it, "
-                "and return the exact updated preview. Keep the selected skill_id unchanged and "
-                "send only changed intent fields."
+                "Apply a small user-requested change to an existing workflow draft and return "
+                "the updated preview. Keep the selected skill_id unchanged. For an exact Plan, "
+                "send changes.step_updates and/or changes.bindings; for compact Intent, send "
+                "only changed intent fields. Do not prepare a replacement draft."
             ),
             {
                 **_SCOPE_PROPS,
@@ -11890,10 +12020,16 @@ TOOLS = (
                 "changes": {
                     "type": "object",
                     "description": (
-                        "Changed compact-intent fields only. Supported fields: user_goal, title, "
+                        "Exact Plan: step_updates (array of objects with node_id, optional prompt "
+                        "and settings) and/or bindings (array of source, target, usage objects). "
+                        "Settings: model, aspect_ratio, quality, resolution, duration_seconds, "
+                        "generate_audio, variants, voice_ref, generation_mode, as supported by "
+                        "the node type. Do not mix these with compact-intent fields. "
+                        "Compact Intent fields: user_goal, title, "
                         "summary, inputs, planner, items, include_audio, include_compose, "
                         "assumptions. "
-                        "Null removes an optional field; inputs are merged."
+                        "Null removes an optional intent field; inputs are merged. "
+                        "run_after_create changes execution policy for either source."
                     ),
                 },
                 **_WORKFLOW_RUN_AFTER_CREATE_PROPS,
@@ -11934,7 +12070,9 @@ TOOLS = (
             "freezone_prepare_workflow_plan_draft",
             "Validate and prepare one complete agent-authored freezone_workflow_plan.v1 as a "
             "persisted draft. This is the only custom-topology entry point and returns an exact "
-            "preview. It never writes canvas nodes directly. After the user reviews the "
+            "preview. Use it when the user requires an exact node count, exact node set, or "
+            "exact dependency graph, even when its stages resemble the standard template. "
+            "It never writes canvas nodes directly. After the user reviews the "
             "preview, use freezone_confirm_workflow_draft with its draft_id and revision.",
             {
                 **_SCOPE_PROPS,
@@ -12338,9 +12476,11 @@ TOOLS = (
             "Single-operation tool only: run or open exactly one standalone frontend node action "
             "listed by node_detail action_summary. A one-node workflow is still a workflow: never "
             "use this tool to run, continue, or resume a target the user identifies as a workflow; "
-            "use freezone_run_workflow instead. When the user asks to generate content through a "
-            "named Recipe on an existing standalone node, use its catalog action here; never "
-            "substitute freezone_update_node_data. If the standalone node has "
+            "use freezone_run_workflow instead. Use this tool when a named Recipe is already bound "
+            "to this standalone output node; never substitute freezone_update_node_data. If an "
+            "existing media node is only the source or reference for a new Recipe result, do not "
+            "use this tool: use a Workflow Skill draft with external_inputs and reference_inputs "
+            "and preserve the source node. If the standalone node has "
             "workflowConfigConfirmed=true, reuse its persisted generation parameters and do not "
             "ask the user to choose them again unless a required field is missing or the user "
             "changed it. For non-default action parameters, inspect freezone_get_node_action_catalog "

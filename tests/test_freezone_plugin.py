@@ -376,7 +376,9 @@ def test_recipe_generation_and_plain_edit_tool_descriptions_remain_distinct():
     run_action = schemas["freezone_run_node_action"]["description"]
     update_data = schemas["freezone_update_node_data"]["description"]
 
-    assert "generate content through a named Recipe" in run_action
+    assert "named Recipe is already bound to this standalone output node" in run_action
+    assert "source or reference for a new Recipe result" in run_action
+    assert "external_inputs and reference_inputs" in run_action
     assert "never substitute freezone_update_node_data" in run_action
     assert "edit fields without generating" in update_data
     assert "not a substitute for Recipe generation" in update_data
@@ -416,6 +418,13 @@ def test_freezone_plugin_registers_canvas_command_tools():
     assert "freezone_prepare_workflow_plan_draft" in names
     assert "freezone_patch_workflow_draft" in names
     assert "freezone_confirm_workflow_draft" in names
+    assert "exact node count" in schemas["freezone_prepare_workflow"]["description"]
+    assert "freezone_prepare_workflow_plan_draft" in (
+        schemas["freezone_prepare_workflow_draft"]["description"]
+    )
+    assert "exact node count" in (
+        schemas["freezone_prepare_workflow_plan_draft"]["description"]
+    )
     assert "freezone_create_workflow_from_intent" not in names
     assert "freezone_create_workflow_graph" not in names
     assert "freezone_present_agent_catalog_draft" in names
@@ -1110,7 +1119,16 @@ def test_dynamic_workflow_plan_is_rejected_before_canvas_bridge():
     assert result["errors"][0]["path"] == "nodes[0].node_type"
 
 
-def test_duplicate_invalid_plan_reuses_delivered_operation_draft(monkeypatch):
+@pytest.mark.parametrize(
+    ("stored_intent", "expected_status"),
+    [
+        ({"plan": {"schema_version": "freezone_workflow_plan.v1"}}, "workflow_draft_ready"),
+        ({"skill_id": "video-ad", "user_goal": "广告"}, "invalid_dynamic_workflow_plan"),
+    ],
+)
+def test_duplicate_invalid_plan_only_reuses_delivered_exact_plan_draft(
+    monkeypatch, stored_intent, expected_status
+):
     plugin = _load_plugin_module()
     calls = []
     monkeypatch.setattr(
@@ -1147,6 +1165,7 @@ def test_duplicate_invalid_plan_reuses_delivered_operation_draft(monkeypatch):
                 "status": "workflow_draft_ready",
                 "draft_id": "draft-a",
                 "revision": 1,
+                "intent": stored_intent,
             },
         }
 
@@ -1160,9 +1179,13 @@ def test_duplicate_invalid_plan_reuses_delivered_operation_draft(monkeypatch):
         }
     )
 
-    assert result["ok"] is True
-    assert result["status"] == "workflow_draft_ready"
-    assert result["draft_id"] == "draft-a"
+    assert result["status"] == expected_status
+    if expected_status == "workflow_draft_ready":
+        assert result["ok"] is True
+        assert result["draft_id"] == "draft-a"
+    else:
+        assert result["ok"] is False
+        assert "draft_id" not in result
     assert [call[0] for call in calls] == ["GET", "GET"]
 
 

@@ -1437,6 +1437,56 @@ def test_metered_workflow_run_admits_each_model_recipe_before_run_creation(
     assert not deterministic_action["product_operation_id"]
 
 
+def test_metered_workflow_run_fails_unbound_operation_when_admission_is_rejected(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.agent_product_operations import (
+        read_agent_product_operation,
+    )
+    from novelvideo.shared.billing_errors import BillingRuleNotConfiguredError
+
+    class RejectingTaskBackend:
+        async def enqueue_project_task(self, _ctx, **_kwargs):
+            raise BillingRuleNotConfiguredError(
+                kind="feature", key="freezone.agent.recipe_result"
+            )
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: RejectingTaskBackend())
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    request = {
+        "idempotency_key": "missing-recipe-price",
+        "actions": [
+            {
+                "node_id": "text-1",
+                "action": "generate_text",
+                "recipe_id": "general-text",
+                "recipe_version": "1.0.0",
+                "generation_attempt_id": "attempt-text",
+            }
+        ],
+    }
+
+    with pytest.raises(BillingRuleNotConfiguredError):
+        workflow_run_client.post(base, json=request)
+
+    with sqlite3.connect(workflow_run_client.state_dir / "data.db") as conn:
+        run_rows = conn.execute("SELECT status FROM workflow_runs").fetchall()
+        rows = conn.execute(
+            "SELECT operation_id FROM freezone_agent_product_operations"
+        ).fetchall()
+    assert run_rows == [("failed",)]
+    assert len(rows) == 1
+    operation = read_agent_product_operation(
+        project_dir=workflow_run_client.state_dir,
+        operation_id=rows[0][0],
+    )
+    assert operation is not None
+    assert operation["status"] == "failed"
+    assert operation["task_id"] == ""
+
+
 def test_metered_html_recipe_workflow_admits_and_binds_operation(
     workflow_run_client: TestClient, monkeypatch
 ) -> None:
@@ -2010,6 +2060,19 @@ def test_metered_workflow_result_is_delivered_once_before_canvas_confirmation(
     assert duplicate.status_code == 200
     draft = first.json()["data"]
     assert duplicate.json()["data"]["draft_id"] == draft["draft_id"]
+    conflicting_source = workflow_run_client.post(
+        base,
+        json={
+            "operation_id": operation["operation_id"],
+            "intent": {"plan": _valid_draft_compiled()["plan"]},
+            "compiled": _valid_draft_compiled(),
+        },
+    )
+    assert conflicting_source.status_code == 409
+    detail = conflicting_source.json()["detail"]
+    assert detail["status"] == "workflow_result_source_conflict"
+    assert detail["draft_id"] == draft["draft_id"]
+    assert detail["retryable"] is False
     stored_operation = workflow_run_client.get(
         "/api/v1/projects/proj_demo/freezone/agent-product-operations/"
         + operation["operation_id"]
@@ -2026,6 +2089,51 @@ def test_metered_workflow_result_is_delivered_once_before_canvas_confirmation(
         + operation["operation_id"]
     ).json()["data"]
     assert after_confirm["status"] == "delivered"
+
+
+def test_metered_workflow_result_with_bindings_replays_delivered_draft(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.agent_product_operations import (
+        bind_agent_product_model_execution,
+    )
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    operation = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={
+            "product_kind": "workflow_result",
+            "generation_session_id": "generation-with-bindings",
+            "canvas_id": "default",
+            "artifact_id": "video-ad@1.0.0",
+            "normalized_inputs_hash": "inputs-with-bindings",
+            "metadata": {"skill_id": "video-ad", "skill_version": "1.0.0"},
+        },
+    ).json()["data"]
+    bind_agent_product_model_execution(
+        project_dir=workflow_run_client.state_dir,
+        operation_id=operation["operation_id"],
+        model_call_id="agent-turn:turn-bindings:tool:call-bindings",
+        executed_at=1.0,
+        source="server_observed_agent_turn",
+        turn_id="turn-bindings",
+        tool_call_id="call-bindings",
+    )
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-drafts"
+    request = {
+        "operation_id": operation["operation_id"],
+        "intent": {"skill_id": "video-ad", "user_goal": "广告"},
+        "compiled": _valid_draft_compiled(),
+        "bindings": [],
+    }
+
+    first = workflow_run_client.post(base, json=request)
+    retry = workflow_run_client.post(base, json=request)
+
+    assert first.status_code == 200, first.text
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["data"]["draft_id"] == first.json()["data"]["draft_id"]
 
 
 def test_workflow_result_rejects_operation_for_another_compiled_skill(

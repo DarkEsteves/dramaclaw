@@ -2864,6 +2864,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "Đổi tên asset",
+      "confirmRename": "Đổi tên sẽ thay đổi ID asset. Các kế hoạch, bảng phân cảnh và kết quả đã tạo sẽ không được chuyển tự động. Sau khi lưu, bạn có thể cần lập kế hoạch và tạo lại. Bạn có muốn tiếp tục không?",
       "edit": "Sửa",
       "delete": "Xoá",
       "generated": "đã tạo",
@@ -3130,7 +3132,7 @@
     "title": "Nguồn truyện",
     "subtitle": "Tải kịch bản lên và bắt đầu hành trình sáng tạo.",
     "dropzoneHint": "Bấm hoặc kéo thả file truyện vào đây",
-    "supportedFormats": "Hỗ trợ .txt / .md / .docx · File tối đa 512KB · Văn bản tối đa 100.000 ký tự",
+    "supportedFormats": "Hỗ trợ .txt / .md / .docx · Nhập có cấu trúc: 8 MiB / 1.000.000 ký tự; quy trình khác: 512 KiB / 100.000 ký tự",
     "uploadingTitle": "Đang tải truyện lên…",
     "uploadingHint": "Vui lòng ở lại trang này cho tới khi tải lên xong. Mạng chậm có thể mất một lúc.",
     "inputMode": {
@@ -8391,6 +8393,16 @@
         "enabled": "Đã chọn BrainClaw; lựa chọn này có hiệu lực khi chế độ Tuỳ chỉnh đang bật.",
         "missingEndpoint": "Nhập URL NewAPI của BrainClaw.",
         "advancedEnabled": "Đã bật LLM tuỳ chỉnh nâng cao."
+      },
+      "agent": {
+        "title": "Mô hình Agent",
+        "description": "Cấu hình riêng mô hình dùng cho Xia Director, không ảnh hưởng đến kênh hình ảnh, video, âm thanh và embedding.",
+        "inherit": "Theo kênh hiện tại",
+        "thirdParty": "Bên thứ ba",
+        "model": "Tên mô hình",
+        "thirdPartyHint": "Dịch vụ phải tương thích với OpenAI Responses API và gọi công cụ. Hãy nhập lại API Key khi đổi endpoint.",
+        "save": "Lưu cấu hình Agent",
+        "saved": "Đã lưu cấu hình mô hình Agent. Phiên mới sẽ dùng cấu hình mới nhất."
       }
     },
     "mediaStorage": {

@@ -2978,6 +2978,8 @@
   },
   "assets": {
     "common": {
+      "renameTitle": "资产改名",
+      "confirmRename": "修改名称会改变资产 ID。已有规划、分镜及生成结果不会自动迁移，保存后可能需要重新规划并生成。是否继续？",
       "edit": "编辑",
       "delete": "删除",
       "generated": "已生成",
@@ -3244,7 +3246,7 @@
     "title": "虾料",
     "subtitle": "上传剧本，开启你的创意之旅",
     "dropzoneHint": "点击或拖拽上传小说文件",
-    "supportedFormats": "支持 .txt / .md / .docx · 文件不超过 512KB · 正文不超过 10 万字",
+    "supportedFormats": "支持 .txt / .md / .docx · 结构化导入：8 MiB / 100 万字；其他流水线：512 KiB / 10 万字",
     "uploadingTitle": "正在上传小说…",
     "uploadingHint": "上传完成前请勿离开本页面，网络较慢时可能需要多等一会儿。",
     "inputMode": {
@@ -8455,6 +8457,16 @@
         "enabled": "已选用虾驿 BrainClaw，自定义模式下生效。",
         "missingEndpoint": "请填写 BrainClaw NewAPI 地址。",
         "advancedEnabled": "已切换为高级自定义 LLM。"
+      },
+      "agent": {
+        "title": "Agent 模型",
+        "description": "单独配置虾导使用的模型，不影响图片、视频、音频和 Embedding 渠道。",
+        "inherit": "跟随当前渠道",
+        "thirdParty": "第三方",
+        "model": "模型名称",
+        "thirdPartyHint": "第三方服务需兼容 OpenAI Responses API 和工具调用；切换地址时需要重新输入 API Key。",
+        "save": "保存 Agent 配置",
+        "saved": "Agent 模型配置已保存，新会话将使用最新配置。"
       },
       "custom": {
         "description": "CE 使用本机 SQLite NewAPI。DramaClaw 会自动连接数据库、创建运行令牌并启用本地渠道。",

@@ -103,7 +103,7 @@ Lý do và các câu hỏi thường gặp: <a href="https://github.com/dramacla
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/guilingsi/guilingsi-ep01.mp4">▶ Tập 1</a>
     </td>
     <td align="center" width="205" valign="top">
-      <img src="https://nfg-web-assets.cdnfg.com/dramaclaw/luban/luban-cover.png?v=2" width="185" alt="鲁班"/><br/>
+      <img src="../assets/readme/luban-cover.png" width="185" alt="鲁班"/><br/>
       <b>鲁班</b><br/>
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/luban/luban-ep01.mp4">▶ Tập 1</a>
     </td>
@@ -115,7 +115,7 @@ Lý do và các câu hỏi thường gặp: <a href="https://github.com/dramacla
   </tr>
   <tr>
     <td align="center" width="205" valign="top">
-      <img src="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-cover.png?v=2" width="185" alt="天命不可欺"/><br/>
+      <img src="../assets/readme/tianmingbukeqi-cover.png" width="185" alt="天命不可欺"/><br/>
       <b>天命不可欺</b><br/>
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-ep02.mp4">▶ Tập 02</a> &nbsp;·&nbsp; <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-ep58.mp4">Tập 58</a>
     </td>
@@ -154,6 +154,64 @@ Nó được xây cho người sáng tạo, studio độc lập và kỹ sư sá
 <br/>
 
 ## Năng lực cốt lõi
+
+### Xia Director — agent
+
+Xia Director chuyển yêu cầu sáng tạo bằng ngôn ngữ tự nhiên thành workflow thực thi trên canvas, kết nối phát triển kịch bản, tạo tài sản và ghép video.
+
+<p align="center">
+  <img src="../assets/readme/freezone-agent.gif" width="900" alt="Xia Director — canvas workflow"/>
+</p>
+<p align="center"><sub>Lập kế hoạch workflow, điều phối node, tạo tài sản và ghép video từ yêu cầu bằng ngôn ngữ tự nhiên.</sub></p>
+
+- **Điều phối workflow trên canvas** &mdash; lập kế hoạch, tạo, kết nối và bố trí node theo yêu cầu sáng tạo; thực thi workflow đã xác nhận, theo dõi tiến độ và khôi phục khi thất bại.
+- **Danh mục workflow và mở rộng skill** &mdash; 11 workflow skill và 60 recipe cho phim ngắn, quảng cáo thương mại điện tử, nhân vật IP và nội dung mạng xã hội; cài đặt, xuất và chia sẻ bundle skill / recipe.
+- **Tích hợp agent bên ngoài** &mdash; [Agent Kit](../agent-kit/README.md) cung cấp cùng workflow sản xuất cho Codex, Claude Code, OpenClaw, Hermes, WorkBuddy và các MCP client khác.
+- **Ngữ cảnh dự án và quản lý tác vụ** &mdash; kiểm tra tiến độ dự án, triển khai tác vụ kịch bản và cảnh quay, kiểm tra sản phẩm bàn giao và đề xuất bước sản xuất tiếp theo.
+
+<br/>
+
+### Sân khấu đạo diễn 3D (Previz)
+
+**Đang thử nghiệm kín**
+
+Công cụ previz 3D trong trình duyệt để bố trí bối cảnh, dàn cảnh nhân vật và thiết kế camera, tích hợp vào canvas dưới dạng node có thể tái sử dụng.
+
+<p align="center">
+  <img src="../assets/readme/previz-canvas-node-0.jpg" width="900" alt="Previz — reference image and canvas node"/>
+</p>
+<p align="center"><sub>Ảnh tham chiếu và node Previz được kết nối.</sub></p>
+
+<p align="center">
+  <img src="../assets/readme/previz-canvas-node.gif" width="800" alt="Previz — stage editing and canvas output"/>
+</p>
+
+- **Dựng bối cảnh blockout** &mdash; tạo bối cảnh 3D từ ảnh tham chiếu và bố trí đạo cụ để xác định cấu trúc không gian.
+- **Dàn cảnh và chuyển động nhân vật** &mdash; phối hợp nhân vật, clip chuyển động và đường đi trên timeline đa track.
+- **Điều khiển camera và ống kính** &mdash; điều chỉnh tiêu cự, kích thước cảm biến và vị trí camera để xem trước khung hình và theo dõi cận cảnh.
+- **Đầu ra canvas** &mdash; chụp khung hình hoặc ghi hình vào các node được kết nối để tham chiếu khi tạo ảnh và video tiếp theo.
+
+<br/>
+
+### Truyện tương tác
+
+**Đang thử nghiệm kín**
+
+Tạo video tương tác trên cùng một canvas, từ lập kế hoạch cốt truyện và biên tập nhánh đến sản xuất tư liệu, chơi thử và nhiều kết thúc. Lựa chọn của khán giả quyết định diễn biến câu chuyện.
+
+<p align="center">
+  <img src="../assets/readme/interactive-story.gif" width="900" alt="Interactive stories — branching workflow and player"/>
+</p>
+<p align="center"><sub>Tạo truyện phân nhánh, biên tập trên canvas, phát tương tác và trải nghiệm nhiều kết thúc.</sub></p>
+
+- **Lập kế hoạch truyện với AI** — Chuyển yêu cầu bằng ngôn ngữ tự nhiên thành đề cương và cốt truyện phân nhánh có thể chỉnh sửa, với điểm lựa chọn, kết thúc và thời lượng xem dự kiến cho từng tuyến
+- **Biên tập nhánh trực quan** — Sắp xếp các đoạn truyện, video và lựa chọn trên canvas; chỉnh sửa lời thoại, thứ tự lựa chọn và liên kết giữa các nhánh
+- **Biến truyện và điều kiện** — Dùng mức độ thiện cảm, điểm số và các biến khác để ghi nhận quyết định của khán giả, kiểm soát lựa chọn và kết thúc; hỗ trợ lựa chọn có giới hạn thời gian và tuyến mặc định
+- **Sản xuất tư liệu tích hợp** — Tạo hình tham chiếu cho nhân vật, cảnh và storyboard, tạo video cho từng đoạn truyện và tái sử dụng tư liệu trên canvas
+- **Chơi thử và kiểm tra tuyến truyện** — Chơi thử bằng tư liệu tạm trước khi video hoàn tất; kiểm tra kết nối nhánh và tuyến có điều kiện, rồi xem thống kê lựa chọn, tỷ lệ đạt kết thúc và độ phủ tuyến truyện
+- **Xuất trình phát** — Xuất trình phát HTML độc lập hoặc gói ngoại tuyến kèm video, hỗ trợ phát theo nhánh, theo dõi tiến độ khám phá và chơi lại từ các đoạn đã mở khóa
+
+<br/>
 
 ### XiaHua — bảng vẽ vô hạn
 
@@ -208,27 +266,11 @@ Mỗi bước có giao diện riêng — chạy theo thứ tự, bỏ qua bướ
 </p>
 <p align="center"><sub>Minh họa tính năng dựa trên ảnh chụp có sẵn; giao diện có thể khác phiên bản hiện tại.</sub></p>
 
-### Xia Director — agent
-
-<p align="center">
-  <img src="../assets/readme/xia-director.jpg" width="900" alt="Xia Director — project context and reviewed actions"/>
-</p>
-<p align="center"><sub>Minh họa tính năng dựa trên ảnh chụp có sẵn; giao diện có thể khác phiên bản hiện tại.</sub></p>
-
-**Hiện tại**
-
-- **Hiểu dự án của bạn** &mdash; kiểm tra tiến độ, đẩy các tác vụ kịch bản / cảnh quay, rà soát mức độ hoàn chỉnh của sản phẩm bàn giao và gợi ý bước tiếp theo
-- **Mở cho các agent khác** &mdash; một MCP server cục bộ đưa DramaClaw đến Claude Code, Codex và bất kỳ MCP client nào (chỉ loopback, cần cờ tin cậy rõ ràng); xem [MCP cho Claude Code](../docs/en/guides/mcp-claude-code.md)
-
-**Tiếp theo**
-
-- **Làm việc trên canvas** &mdash; ảnh chụp màn hình phía trên là hướng đi: bạn mô tả bộ phim, Xia Director tạo và kết nối các node, bố trí chúng, chạy chúng và review kết quả, với mọi lệnh canvas đều được duyệt trong trình duyệt của bạn trước. Canvas + agent là cốt lõi của DramaClaw từ đây trở đi; xem [Đang phát triển](#in-development).
-
 <br/>
 
 ## Tại sao chọn DramaClaw?
 
-**Một canvas hiểu phim drama, và một agent làm việc trên đó.** Các canvas node đa dụng nối được mọi thứ nhưng chẳng biết gì về tập, nhân vật hay cảnh quay; các công cụ series hiểu nghề nhưng nhốt bạn trong một wizard. XiaHua cho bạn canvas tự do với các node và skill hiểu phim drama, còn Xia Director đang được xây để bố trí, chạy và review những đồ thị đó thay bạn. Sự kết hợp ấy chính là nơi DramaClaw đang hướng tới.
+**Một canvas hiểu phim drama, và một agent làm việc trên đó.** Các canvas node đa dụng nối được mọi thứ nhưng chẳng biết gì về tập, nhân vật hay cảnh quay; các công cụ series hiểu nghề nhưng nhốt bạn trong một wizard. XiaHua cho bạn canvas tự do với các node và skill hiểu phim drama, còn Xia Director lập kế hoạch, bố trí và chạy những đồ thị đó sau khi bạn xác nhận. Canvas và agent cùng hoạt động xuyên suốt workflow sản xuất.
 
 **Xây cho việc chuyển tiểu thuyết thành phim drama ngắn.** Các công cụ workflow chung có thể nối node với nhau, nhưng chúng không biết "beat của tập" là gì, không hiểu vì sao sự nhất quán danh tính nhân vật xuyên cảnh lại quan trọng, và sẽ không bảo vệ cung cảm xúc của một chương xuyên suốt ảnh + giọng nói + dựng phim. DramaClaw đưa toàn bộ những phán đoán đó vào công cụ.
 
@@ -246,8 +288,11 @@ Lợi thế không phải là "sinh nội dung nhiều hơn" — mà là tổ ch
 
 | Năng lực | L\*TV | R\*Hub | T\*Now | S\*ko | U\*dream | O\*II | J\*/K\* | **DramaClaw** |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Agent tích hợp (lập kế hoạch workflow, điều phối canvas, thực thi) | ✅ | ✅ | ✅ | ○ | ✅ | ○ | ✅ | ✅ |
+| Workflow skill và recipe (tái sử dụng, cài đặt, xuất, chia sẻ) | — | — | — | — | — | — | — | ✅ |
+| Sân khấu đạo diễn 3D (dàn cảnh, chuyển động, timeline, ghi hình) | — | — | — | — | — | — | — | Đang thử nghiệm kín |
+| Series tương tác (đa tập, phân nhánh, IP) | ◐ | ◐ | ◐ | ✅ | ◐ | ❌ | ❌ | Đang thử nghiệm kín |
 | Xem trước storyboard (kịch bản→cảnh quay, bảng phân cảnh) | ◐ | ✅ | ◐ | ✅ | ◐ | ❌ | ❌ | ✅ |
-| Series tương tác (đa tập, phân nhánh, IP) | ◐ | ◐ | ◐ | ✅ | ◐ | ❌ | ❌ | ✅ |
 | Thư viện tài sản (nhân vật/bối cảnh/đạo cụ/giọng nói) | ◐ | ❌ | ◐ | ✅ | ◐ | ○ | ❌ | ✅ |
 | Nhất quán bối cảnh (biến thể, 360°, đa trạng thái) | ✅ | ◐ | ❌ | ❌ | ○ | ❌ | ❌ | ✅ |
 | Thế giới đạo diễn (bối cảnh 360°/3D, camera, khung hình) | ✅ | ◐ | ❌ | ❌ | ◐ | ❌ | ❌ | ✅ |
@@ -256,9 +301,10 @@ Lợi thế không phải là "sinh nội dung nhiều hơn" — mà là tổ ch
 | Bảng vẽ vô hạn (dạng node, khám phá tự do) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Hai đường ray (pipeline chính + khám phá trên canvas) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Phong cách tùy chỉnh (mẫu, prompt, negative prompt) | ✅ | ◐ | ○ | ✅ | ◐ | ○ | ◐ | ✅ |
-| Agent tích hợp (trợ lý, skill, gợi ý) | ✅ | ✅ | ✅ | ○ | ✅ | ○ | ✅ | ✅ |
 | Bạn đồng hành sáng tạo (nhân cách, nhắc nhở, phản hồi) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Mã nguồn công khai (tự lưu trữ, fork, tùy biến) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+<sub>Trong cột DramaClaw, ✅ chỉ tính năng đã có trên nhánh mã nguồn main; tính năng đang thử nghiệm kín chưa được mở rộng rãi. — nghĩa là chưa xác minh tính năng của đối thủ ở các hàng mới.</sub>
 
 <br/>
 
@@ -375,19 +421,6 @@ Các adapter nhà cung cấp có sẵn trong gateway hiện nay (xem [ma trận 
 
 <br/>
 
-## <a name="in-development"></a>Đang phát triển
-
-Những tính năng này đang được xây dựng công khai và chưa có trong bản phát hành nào. Hãy theo dõi các nhánh, hoặc đến góp sức.
-
-- **Xia Director trên canvas** &mdash; agent tạo và kết nối node, cập nhật dữ liệu node, bố trí và nhóm node, chạy các hành động node và dựng cả đồ thị workflow, với mọi lệnh canvas đều được duyệt trong trình duyệt đang mở trước.
-- **Danh mục workflow và skill cộng đồng** &mdash; một danh mục gồm 11 workflow skill và 60 recipe (phim drama ngắn, quảng cáo thương mại điện tử, quảng cáo nhân vật IP, chiến dịch mạng xã hội, phong cách anime / Pixar / LEGO / kung-fu…) tự bố trí trọn đồ thị sinh nội dung; skill và recipe dưới dạng bundle cài đặt, xuất và chia sẻ được
-- **agent-kit** &mdash; một gói di động mang cùng các workflow DramaClaw tới Hermes, OpenClaw, WorkBuddy, Claude Code và Codex
-- **Sân khấu previz** &mdash; một sân khấu dàn cảnh 3D ngay trong trình duyệt dưới dạng node canvas: timeline đa track, rig và đường di chuyển nhân vật, mô hình camera với ống kính / cảm biến thật, theo dõi cận cảnh, rồi chụp cảnh quay đã lấy khung thẳng vào node tiếp theo. Nhánh: `feat/previz-canvas-node`
-- **Truyện tương tác** &mdash; các điểm lựa chọn phân nhánh trên canvas, biên dịch thành truyện ink và xuất ra trình phát HTML độc lập, kèm thống kê playtest và độ phủ đường đi. Nhánh: `feat/canvas-fmv`
-- **Quảng cáo tương tác** &mdash; các skill và recipe quảng cáo ở trên, kết hợp với phát lại phân nhánh, cho những video sản phẩm mà người xem có thể tự điều hướng
-
-<br/>
-
 ## <a name="documentation"></a>Tài liệu
 
 - [**Sổ tay người dùng sản phẩm**](https://neo-flying.feishu.cn/docx/JGNTdsjJuo748TxJkxecoYs2nth) — hướng dẫn đầy đủ giao diện (Feishu)
@@ -409,35 +442,6 @@ Những tính năng này đang được xây dựng công khai và chưa có tro
 - [Chính sách bảo mật](../SECURITY.md)
 
 Chúng tôi liên tục chọn lọc và gắn nhãn [`good first issue`](https://github.com/dramaclaw/dramaclaw/labels/good%20first%20issue) — một nơi tuyệt vời để bắt đầu.
-
-<br/>
-
-## Người đóng góp
-
-Những người đang xây dựng DramaClaw — cảm ơn các bạn. 💜
-
-<table>
-  <tr>
-    <td align="center"><a href="https://github.com/bopy-zou"><img src="https://github.com/bopy-zou.png?size=100" width="72" alt="bopy-zou"/><br/><sub>bopy-zou</sub></a></td>
-    <td align="center"><a href="https://github.com/Handanhhhy"><img src="https://github.com/Handanhhhy.png?size=100" width="72" alt="Handanhhhy"/><br/><sub>Handanhhhy</sub></a></td>
-    <td align="center"><a href="https://github.com/Hanlin-Gabriel"><img src="https://github.com/Hanlin-Gabriel.png?size=100" width="72" alt="Hanlin-Gabriel"/><br/><sub>Hanlin-Gabriel</sub></a></td>
-    <td align="center"><a href="https://github.com/ryanhuang-duat"><img src="https://github.com/ryanhuang-duat.png?size=100" width="72" alt="ryanhuang-duat"/><br/><sub>ryanhuang-duat</sub></a></td>
-    <td align="center"><a href="https://github.com/lywaterman"><img src="https://github.com/lywaterman.png?size=100" width="72" alt="lywaterman"/><br/><sub>lywaterman</sub></a></td>
-    <td align="center"><a href="https://github.com/n7s4"><img src="https://github.com/n7s4.png?size=100" width="72" alt="n7s4"/><br/><sub>n7s4</sub></a></td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://github.com/NewYuee"><img src="https://github.com/NewYuee.png?size=100" width="72" alt="NewYuee"/><br/><sub>NewYuee</sub></a></td>
-    <td align="center"><a href="https://github.com/SimonRen"><img src="https://github.com/SimonRen.png?size=100" width="72" alt="SimonRen"/><br/><sub>SimonRen</sub></a></td>
-    <td align="center"><a href="https://github.com/vkiki"><img src="https://github.com/vkiki.png?size=100" width="72" alt="vkiki"/><br/><sub>vkiki</sub></a></td>
-    <td align="center"><a href="https://github.com/wangwenqq"><img src="https://github.com/wangwenqq.png?size=100" width="72" alt="wangwenqq"/><br/><sub>wangwenqq</sub></a></td>
-    <td align="center"><a href="https://github.com/zhen2025109"><img src="https://github.com/zhen2025109.png?size=100" width="72" alt="zhen2025109"/><br/><sub>zhen2025109</sub></a></td>
-    <td align="center"><a href="https://github.com/revolutionarybukhari"><img src="https://github.com/revolutionarybukhari.png?size=100" width="72" alt="revolutionarybukhari"/><br/><sub>revolutionarybukhari</sub></a></td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://github.com/yhay81"><img src="https://github.com/yhay81.png?size=100" width="72" alt="yhay81"/><br/><sub>yhay81</sub></a></td>
-    <td align="center"><a href="https://github.com/hoanglongggggggggg"><img src="https://github.com/hoanglongggggggggg.png?size=100" width="72" alt="hoanglongggggggggg"/><br/><sub>hoanglongggggggggg</sub></a></td>
-  </tr>
-</table>
 
 <br/>
 
