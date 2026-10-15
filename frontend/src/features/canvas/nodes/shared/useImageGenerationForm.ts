@@ -698,7 +698,7 @@ export function useImageGenerationForm(
           nodeId: id,
         });
         taskKey = ref.task_key;
-        if (!isCurrentRequest()) return;
+        if (!isCurrentRequest()) return 'ignored';
         // Persist the task handle so a page refresh can resume polling this
         // job. With N concurrent runs on one node only one handle can persist —
         // keep the first (main-image) run's.
