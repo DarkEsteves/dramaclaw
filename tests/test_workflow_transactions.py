@@ -451,6 +451,19 @@ def test_source_rejects_mixed_input_without_compiling(monkeypatch):
         prepare_workflow_source({"intent": {}, "plan": {}}, username="alice")
 
 
+def test_step_prompt_update_removes_legacy_top_level_prompt():
+    plan = _plan()
+    plan["nodes"][1]["prompt"] = "Old top-level prompt"
+
+    result = update_workflow_steps(
+        plan, [{"node_id": "image", "prompt": "New image prompt"}]
+    )
+
+    node = result["nodes"][1]
+    assert node["data"]["prompt"] == "New image prompt"
+    assert "prompt" not in node
+
+
 def test_text_prompt_update_does_not_leave_old_recipe_prompt():
     plan = _plan()
     plan["nodes"][0]["data"]["prompt"] = "Old recipe prompt"

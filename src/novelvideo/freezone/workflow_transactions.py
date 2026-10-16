@@ -292,6 +292,10 @@ def update_workflow_steps(plan: dict, updates: Any) -> dict:
             data[field] = prompt
             if node_type == "textAnnotationNode" and "prompt" in data:
                 data["prompt"] = prompt
+            # ``data`` is the canonical node payload. A legacy top-level
+            # prompt can otherwise shadow this revision in downstream
+            # consumers, leaving the draft with two different values.
+            node.pop("prompt", None)
         settings = update.get("settings", {})
         if not isinstance(settings, dict):
             raise WorkflowOperationError("settings must be an object")
