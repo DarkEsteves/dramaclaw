@@ -3659,6 +3659,7 @@
       "submitting": "任务正在投递",
       "queued": "任务已进入队列",
       "workflowDraftDeliveryFailed": "Agent 交付工作流草稿失败",
+      "agentProductDeliveryFailed": "Agent 产品交付失败",
       "characters": {
         "chunking": "切分原文...",
         "nothingToAnalyze": "无可分析内容",
@@ -10325,6 +10326,19 @@
     "aligncenter": "居中",
     "alignright": "右对齐",
     "selectLeaf": "请选择最内层文字元素修改内容，避免覆盖内部排版。"
+  },
+  "resizeEditor": {
+    "title": "调整像素",
+    "original": "原像素：{{width}} × {{height}} 像素",
+    "loading": "正在读取原图尺寸…",
+    "width": "宽度（px）",
+    "height": "高度（px）",
+    "lockRatio": "锁定宽高比",
+    "submit": "调整",
+    "resultTitle": "已调整像素",
+    "loadFailed": "无法读取原图，请重试。",
+    "saveFailed": "无法创建结果，请确认图片和当前项目可用。",
+    "invalidSize": "请输入正整数，单边不超过 16384 像素，总像素不超过 4000 万。"
   },
   "storyPublication": {
     "deletionNotice": "根据当前版本列表，本次操作预计清理 {{versions}} 及其媒体。清理后无法回滚，旧链接和对应存档无法继续使用。有准备任务时会延后清理。",

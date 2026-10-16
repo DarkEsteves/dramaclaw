@@ -3659,6 +3659,7 @@
       "submitting": "Submitting task…",
       "queued": "Task queued",
       "workflowDraftDeliveryFailed": "Agent workflow draft delivery failed",
+      "agentProductDeliveryFailed": "Agent product delivery failed",
       "characters": {
         "chunking": "Splitting the source text…",
         "nothingToAnalyze": "Nothing to analyze",
@@ -10325,6 +10326,19 @@
     "aligncenter": "Center",
     "alignright": "Align right",
     "selectLeaf": "Select the innermost text element to preserve nested formatting."
+  },
+  "resizeEditor": {
+    "title": "Resize image",
+    "original": "Original: {{width}} × {{height}} pixels",
+    "loading": "Loading original dimensions…",
+    "width": "Width (px)",
+    "height": "Height (px)",
+    "lockRatio": "Lock aspect ratio",
+    "submit": "Resize",
+    "resultTitle": "Resized image",
+    "loadFailed": "Unable to load the original image. Please retry.",
+    "saveFailed": "Unable to create the result. Check the image and current project.",
+    "invalidSize": "Enter positive integers. Maximum edge: 16384 pixels; maximum total: 40 million pixels."
   },
   "storyPublication": {
     "deletionNotice": "Based on the current version list, this action is expected to remove {{versions}} and their media. Removed versions cannot be restored; their links and saves will no longer work. Cleanup waits for preparation tasks.",

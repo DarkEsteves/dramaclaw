@@ -3545,6 +3545,7 @@
       "submitting": "Đang gửi tác vụ…",
       "queued": "Tác vụ đã vào hàng đợi",
       "workflowDraftDeliveryFailed": "Agent không thể bàn giao bản nháp quy trình",
+      "agentProductDeliveryFailed": "Agent không thể bàn giao sản phẩm",
       "characters": {
         "chunking": "Đang cắt văn bản gốc…",
         "nothingToAnalyze": "Không có gì để phân tích",
@@ -10325,6 +10326,19 @@
     "confirm": "Xác nhận",
     "saving": "Đang lưu...",
     "resultTitle": "Kết quả cắt ảnh"
+  },
+  "resizeEditor": {
+    "title": "Điều chỉnh kích thước",
+    "original": "Kích thước gốc: {{width}} × {{height}} pixel",
+    "loading": "Đang đọc kích thước ảnh gốc…",
+    "width": "Chiều rộng (px)",
+    "height": "Chiều cao (px)",
+    "lockRatio": "Khóa tỷ lệ khung hình",
+    "submit": "Điều chỉnh",
+    "resultTitle": "Ảnh đã đổi kích thước",
+    "loadFailed": "Không thể đọc ảnh gốc. Vui lòng thử lại.",
+    "saveFailed": "Không thể tạo kết quả. Hãy kiểm tra ảnh và dự án hiện tại.",
+    "invalidSize": "Nhập số nguyên dương. Mỗi cạnh tối đa 16384 pixel; tổng tối đa 40 triệu pixel."
   },
   "storyPublication": {
     "deletionNotice": "Dựa trên danh sách hiện tại, thao tác này dự kiến xóa {{versions}} cùng tệp phương tiện. Các phiên bản đã xóa không thể khôi phục; liên kết và bản lưu tương ứng sẽ không dùng được. Việc dọn dẹp chờ các tác vụ chuẩn bị hoàn tất.",

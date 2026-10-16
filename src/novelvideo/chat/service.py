@@ -175,6 +175,7 @@ from novelvideo.chat.tool_policy import (
 )
 from novelvideo.freezone.workflow_plan import MAX_WORKFLOW_PLANNING_TEXT_CHARS
 from novelvideo.ports import get_auth_session_port
+from novelvideo.project_context import ProjectContext
 from novelvideo.utils.document_parsers import count_billable_text_chars
 from novelvideo.utils.error_redaction import redact_secrets
 
@@ -286,7 +287,8 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "top-level schema_version plus skill.id and skill.version copied from the selected production "
     "Skill; use text-to-image for a pure image workflow and text-to-image-video only "
     "when the user requests a video stage. generation_answers supplements that Plan and "
-    "never replaces it. "
+    "never replaces it, but a confirmed video_generate_audio answer is authoritative and "
+    "replaces conflicting generateAudio values on every video node. "
     "Before authoring or submitting any workflow result, call "
     "freezone_begin_agent_product_generation and copy its returned operation_id exactly. Never "
     "invent, abbreviate, or reconstruct an operation_id, and never call a workflow prepare tool "
@@ -344,7 +346,9 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "Only a later explicit user retry after a terminal failure may start another run. For a "
     "Freezone speech uses custom/reference voices only and must never use a preset/system voice. "
     "Preserve a valid voiceRef. If no valid custom voice is selected, skip that audio node without "
-    "submitting TTS and continue the remaining workflow. Never choose the first available voice or "
+    "submitting TTS and continue the remaining workflow. A draft that requires that speech for "
+    "voice-over or final composition must remain blocked until a valid voiceRef is bound. "
+    "Never choose the first available voice or "
     "call open_voice_picker unless the user explicitly requests voice selection. "
     "request whose actual next step will generate image or video media, inspect the user's message, "
     "the selected Recipe, and existing target-node data before any canvas write. Obey the injected "
@@ -369,7 +373,8 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "choices for each relevant field; do not submit a generic recommended preset. Never include "
     "an audio voice-source question in this preliminary "
     "clarification: do not ask the user to choose system voice versus custom voice. Freezone speech "
-    "uses an already selected custom voiceRef or skips generation when none is selected. "
+    "uses an already selected custom voiceRef or skips generation when none is selected; if that "
+    "speech is required by the plan, preflight blocks the draft instead of marking it ready. "
     "Never bundle these fields into one preset such "
     "as 'recommended settings'. The clarification tool constructs one question per "
     "required field and the frontend resolves exact live options, including 480P "
@@ -395,8 +400,12 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "video node's genMode equal to it; "
     "imageToVideo (whole-picture image reference) and firstFrame (locked first frame) are "
     "different modes, never substitute one for the other. A node genMode without a shared "
-    "video_generation_mode blocks the draft. If the selected model does not "
-    "support the mode, choose a model that does, or ask the user. The Skill-specific "
+    "video_generation_mode blocks the draft. If a model cannot satisfy the mode or a shot "
+    "duration, use only the preflight's compatible_models, which already satisfy every shot "
+    "using that model and all confirmed generation fields. If preparation returns "
+    "video_model_clarification_required, show that exact question and never choose the "
+    "replacement yourself. If it reports no compatible model, stop trying model ids and ask "
+    "which mode, duration, or other confirmed constraint the user wants to change. The Skill-specific "
     "image_count/video_count fields describe "
     "workflow deliverable or node counts and must never be copied to a node's data.count. If a "
     "canvas write returns code=generation_parameters_required, never retry unchanged. Pass "
@@ -470,7 +479,7 @@ _CODEX_FMV_INTERACTIVE_STORY_INSTRUCTIONS = (
 # Freezone browser-bridge contract changes so a turn cannot silently resume a
 # thread with incompatible tool definitions.
 _CODEX_THREAD_PROTOCOL_VERSION = "tool-discovery-v4"
-_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v33"
+_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v34"
 
 
 def _codex_agent_skill_locator_instructions(workspace: Path) -> str:
@@ -779,7 +788,8 @@ Canvas write contract:
   planner.item_count=N and planner.video_dependency=sequential; the deterministic planner creates
   the nodes and execution-only dependency_for edges. The Plan must include top-level schema_version plus skill.id and skill.version
   copied from the selected production Skill; generation_answers supplements the complete Plan and
-  never replaces it. Recipe-backed text nodes must not use the reserved input/resource/asset stages,
+  never replaces it, but a confirmed video_generate_audio answer is authoritative for every video
+  node. Recipe-backed text nodes must not use the reserved input/resource/asset stages,
   which identify recipe-less user resources. Beat counts, shot counts, episode counts, and other
   business totals stay in compact Intent or standard-planner inputs and do not by themselves require
   a raw Plan. Only explicit canvas nodes plus a nonstandard dependency graph take the exact-topology
@@ -1346,6 +1356,130 @@ async def _bind_server_observed_agent_product_execution(
             evidence_metrics.observe("agent_product_binding_failed")
             logger.warning(
                 "could not bind observed Agent product execution operation=%s",
+                operation_id,
+                exc_info=True,
+            )
+
+
+def _agent_product_admission_operation_id(event: Any) -> str:
+    """Read one server-issued product operation from a completed begin tool."""
+    if (
+        _codex_freezone_tool_name(event)
+        != "freezone_begin_agent_product_generation"
+        or str(getattr(event, "status", "") or "").strip().lower()
+        not in {"completed", "success", "succeeded"}
+        or getattr(event, "error", None)
+    ):
+        return ""
+    from novelvideo.freezone.agent_product_operations import (
+        PENDING_STATUSES,
+        TERMINAL_STATUSES,
+    )
+
+    admission_statuses = PENDING_STATUSES | TERMINAL_STATUSES | {
+        "agent_product_generation_admitted"
+    }
+    for value in (getattr(event, "structured", None), getattr(event, "output", None)):
+        for payload in _json_objects_from_codex_tool_value(value):
+            operation_id = str(payload.get("operation_id") or "").strip()
+            if (
+                payload.get("ok") is True
+                and payload.get("status") in admission_statuses
+                and operation_id.startswith("agent_product_")
+            ):
+                return operation_id
+    return ""
+
+
+_WORKFLOW_OPERATION_CLARIFICATION_STATUSES = {
+    "generation_mode_clarification_required",
+    "video_model_clarification_required",
+}
+
+
+def _workflow_operation_awaiting_clarification_id(event: Any) -> str:
+    """Return the operation whose preflight requires a resumable user choice."""
+    if (
+        _codex_freezone_tool_name(event)
+        not in {
+            "freezone_prepare_workflow",
+            "freezone_prepare_workflow_draft",
+            "freezone_prepare_workflow_plan_draft",
+        }
+        or str(getattr(event, "status", "") or "").strip().lower()
+        not in {"completed", "success", "succeeded"}
+    ):
+        return ""
+    has_clarification = any(
+        payload.get("status") in _WORKFLOW_OPERATION_CLARIFICATION_STATUSES
+        and payload.get("draft_created") is False
+        for value in (getattr(event, "structured", None), getattr(event, "output", None))
+        for payload in _json_objects_from_codex_tool_value(value)
+    )
+    if not has_clarification:
+        return ""
+    for payload in _json_objects_from_codex_tool_value(getattr(event, "input", None)):
+        operation_id = str(payload.get("operation_id") or "").strip()
+        if operation_id.startswith("agent_product_"):
+            return operation_id
+    return ""
+
+
+def _clarification_is_pending_user_input(event: Any) -> bool:
+    """Whether a completed clarification card remains answerable across turns."""
+    if _codex_freezone_tool_name(event) != "freezone_request_user_clarification":
+        return False
+    return any(
+        payload.get("clarification_status") == "pending_user_input"
+        for value in (getattr(event, "structured", None), getattr(event, "output", None))
+        for payload in _json_objects_from_codex_tool_value(value)
+    )
+
+
+class _TurnAgentProductOperationTracker:
+    """Choose which turn-owned admissions are safe to cancel at turn end."""
+
+    def __init__(self) -> None:
+        self._admitted: set[str] = set()
+        self._awaiting_clarification: set[str] = set()
+        self._pending_clarification: set[str] = set()
+
+    def observe(self, event: Any) -> None:
+        admitted_operation_id = _agent_product_admission_operation_id(event)
+        if admitted_operation_id:
+            self._admitted.add(admitted_operation_id)
+        clarification_operation_id = _workflow_operation_awaiting_clarification_id(
+            event
+        )
+        if clarification_operation_id:
+            self._awaiting_clarification.add(clarification_operation_id)
+        if _clarification_is_pending_user_input(event):
+            self._pending_clarification.update(self._awaiting_clarification)
+
+    def cancellation_ids(self) -> set[str]:
+        return self._admitted - self._pending_clarification
+
+
+async def _cancel_turn_agent_product_operations(
+    operation_ids: set[str], *, project_dir: str | Path | None, ctx: ProjectContext
+) -> None:
+    """Best-effort cleanup for admissions this turn did not deliver."""
+    if not operation_ids or project_dir is None:
+        return
+    from novelvideo.freezone.agent_product_operations import (
+        cancel_pending_agent_product_operation,
+    )
+
+    for operation_id in sorted(operation_ids):
+        try:
+            await cancel_pending_agent_product_operation(
+                project_dir=Path(project_dir),
+                ctx=ctx,
+                operation_id=operation_id,
+            )
+        except Exception:  # noqa: BLE001 - cleanup must not replace the chat result
+            logger.warning(
+                "could not cancel undelivered turn product operation %s",
                 operation_id,
                 exc_info=True,
             )
@@ -3914,7 +4048,10 @@ async def stream_assistant_reply(
     egress_project_id: str | None = None,
     backend: str | None = None,
     execution_context: AgentExecutionContext | None = None,
+    project_context: ProjectContext | None = None,
 ) -> dict[str, Any]:
+    if project_context is not None and project != project_context.project_id:
+        raise ValueError("project context project mismatch")
     if execution_context is not None:
         if project != execution_context.project_id:
             raise ValueError("agent execution context project mismatch")
@@ -3983,6 +4120,7 @@ async def stream_assistant_reply(
                     if execution_context is not None
                     else None
                 ),
+                project_context=project_context,
             )
         if backend == "hermes":
             return await _stream_assistant_reply_hermes(
@@ -4009,6 +4147,7 @@ async def stream_assistant_reply(
                     if execution_context is not None
                     else None
                 ),
+                project_context=project_context,
             )
         if backend != "claude":
             raise RuntimeError(f"Unsupported chat backend: {backend}")
@@ -4237,6 +4376,7 @@ async def _stream_assistant_reply_hermes(
     requester_user_id: str | None = None,
     agent_profile: str | None = None,
     canvas_id: str | None = None,
+    project_context: ProjectContext | None = None,
 ) -> dict[str, Any]:
     """Stream via Hermes ACP subprocess (per-user, sandboxed).
 
@@ -4334,6 +4474,7 @@ async def _stream_assistant_reply_hermes(
     persisted_message: dict[str, Any] | None = None
     seen_display_calls: set[str] = set()
     seen_tool_chat_errors: set[str] = set()
+    turn_agent_product_operations = _TurnAgentProductOperationTracker()
 
     # One claim per business turn, settled exactly once at this boundary. The
     # retries below re-send the prompt but are still this turn, so they share
@@ -4681,6 +4822,7 @@ async def _stream_assistant_reply_hermes(
                     project_dir=project_dir,
                     project_state_dir=project_state_dir,
                 )
+                turn_agent_product_operations.observe(event)
                 if event.raw is not None:
                     tool_chat_error = None
                     raw = event.raw
@@ -4878,7 +5020,15 @@ async def _stream_assistant_reply_hermes(
         try:
             await _settle_turn_operation()
         finally:
-            await persist_partial_reply()
+            try:
+                if project_context is not None:
+                    await _cancel_turn_agent_product_operations(
+                        turn_agent_product_operations.cancellation_ids(),
+                        project_dir=project_state_dir or project_dir,
+                        ctx=project_context,
+                    )
+            finally:
+                await persist_partial_reply()
 
 
 async def _stream_assistant_reply_claude(
@@ -5099,6 +5249,7 @@ async def _stream_assistant_reply_codex(
     route_prompt: str | None = None,
     agent_profile: str | None = None,
     canvas_id: str | None = None,
+    project_context: ProjectContext | None = None,
 ) -> dict[str, Any]:
     assistant_text = ""
     tool_text = ""
@@ -5123,6 +5274,7 @@ async def _stream_assistant_reply_codex(
     # input schema rejected was only a slip; a receipt for them supersedes it.
     canvas_argument_rejections: dict[str, str] = {}
     ready_workflow_draft: dict[str, Any] | None = None
+    turn_agent_product_operations = _TurnAgentProductOperationTracker()
     authorization = await authorize_hermes_launch(
         egress_context=egress_context,
         username=username,
@@ -5351,6 +5503,7 @@ async def _stream_assistant_reply_codex(
                     project_state_dir=project_state_dir,
                 )
                 if event.type == "tool_updated":
+                    turn_agent_product_operations.observe(event)
                     prepared_draft = _codex_freezone_ready_workflow_draft(event)
                     if prepared_draft is not None:
                         ready_workflow_draft = prepared_draft
@@ -5582,6 +5735,12 @@ async def _stream_assistant_reply_codex(
                 await get_auth_session_port().revoke_agent_session(agent_token)
             except Exception:
                 logger.warning("failed to revoke Codex turn token", exc_info=True)
+        if project_context is not None:
+            await _cancel_turn_agent_product_operations(
+                turn_agent_product_operations.cancellation_ids(),
+                project_dir=project_state_dir or project_dir,
+                ctx=project_context,
+            )
         if turn_operation is not None:
             await turn_operation.finish(turn_disposition)
 

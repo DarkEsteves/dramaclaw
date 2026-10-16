@@ -28,6 +28,74 @@ def _safe_error_string(value: Any, limit: int) -> str:
     return cleaned
 
 
+def _safe_compatible_video_model_clarification(
+    source: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Copy only the bounded server-owned model question across the HTTP boundary."""
+    if source.get("required_choice") != "compatible_video_model":
+        return None
+    question = source.get("question")
+    if not isinstance(question, dict):
+        return None
+    if question.get("id") != "compatible_video_model" or question.get("mode") != "single":
+        return None
+    raw_options = question.get("options")
+    if not isinstance(raw_options, list) or not 1 <= len(raw_options) <= 20:
+        return None
+    options: list[dict[str, str]] = []
+    option_ids: set[str] = set()
+    for raw in raw_options:
+        if not isinstance(raw, dict):
+            return None
+        option_id = _safe_error_string(raw.get("id"), 160)
+        label = _safe_error_string(raw.get("label"), 160)
+        description = _safe_error_string(raw.get("description"), 300)
+        if (
+            not option_id
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]+", option_id)
+            or option_id in option_ids
+            or not label
+        ):
+            return None
+        option_ids.add(option_id)
+        options.append(
+            {
+                "id": option_id,
+                "label": label,
+                **({"description": description} if description else {}),
+            }
+        )
+    raw_node_ids = source.get("affected_node_ids")
+    if not isinstance(raw_node_ids, list) or not 1 <= len(raw_node_ids) <= 50:
+        return None
+    affected_node_ids = [
+        _safe_error_string(node_id, 160) for node_id in raw_node_ids
+    ]
+    if any(
+        not node_id or not re.fullmatch(r"[A-Za-z0-9_.:-]+", node_id)
+        for node_id in affected_node_ids
+    ):
+        return None
+    title = _safe_error_string(question.get("title"), 160)
+    prompt = _safe_error_string(question.get("prompt"), 500)
+    if not title or not prompt:
+        return None
+    instruction = _safe_error_string(source.get("agent_instruction"), 2000)
+    return {
+        "required_choice": "compatible_video_model",
+        "affected_node_ids": affected_node_ids,
+        "draft_created": False,
+        "question": {
+            "id": "compatible_video_model",
+            "title": title,
+            "prompt": prompt,
+            "mode": "single",
+            "options": options,
+        },
+        **({"agent_instruction": instruction} if instruction else {}),
+    }
+
+
 def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, Any]:
     """Expose only bounded validation diagnostics from the project API."""
     result: dict[str, Any] = {
@@ -75,6 +143,10 @@ def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, An
         result["error"] = _safe_error_string(detail, 300) or result["error"]
     if isinstance(source.get("retryable"), bool):
         result["retryable"] = source["retryable"]
+    if result.get("code") == "video_model_incompatible":
+        clarification = _safe_compatible_video_model_clarification(source)
+        if clarification is not None:
+            result.update(clarification)
     if result.get("code") == "generation_parameters_required":
         # Bounded copy of the standard clarification request so the agent can
         # answer it; anything malformed is dropped rather than forwarded.

@@ -205,6 +205,7 @@ from novelvideo.freezone.agent_product_operations import (
     read_agent_product_operation,
     read_recipe_model_prompt,
     save_agent_generation_session,
+    terminalize_undelivered_agent_product_task,
 )
 from novelvideo.freezone.workflow_runs import (
     RECIPE_ATTEMPT_ENDED_MARKER,
@@ -15111,6 +15112,7 @@ async def _check_workflow_runtime(compiled: dict, *, project: str, user: dict) -
         from novelvideo.freezone.workflow_preflight import (
             generation_clarification_request,
             preflight_failure_blocker,
+            video_model_reselection_clarification,
         )
 
         clarification = generation_clarification_request(preflight)
@@ -15130,6 +15132,24 @@ async def _check_workflow_runtime(compiled: dict, *, project: str, user: dict) -
                     "next_action": "request_user_clarification",
                 },
             )
+        video_response = (
+            results[requested.index("videoNode")]
+            if "videoNode" in requested
+            else {}
+        )
+        video_catalog = (
+            video_response.get("data")
+            if isinstance(video_response, dict)
+            and isinstance(video_response.get("data"), list)
+            else []
+        )
+        model_clarification = video_model_reselection_clarification(
+            preflight,
+            compiled,
+            [item for item in video_catalog if isinstance(item, dict)],
+        )
+        if model_clarification is not None:
+            raise HTTPException(400, model_clarification)
         raise HTTPException(
             400,
             {
@@ -16176,7 +16196,12 @@ async def complete_agent_product_operation(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+    if operation.get("status") == "delivered":
+        await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+    else:
+        await terminalize_undelivered_agent_product_task(
+            ctx=ctx, operation=operation
+        )
     return {"ok": True, "data": operation}
 
 

@@ -6079,6 +6079,83 @@ async def test_freezone_hermes_assistant_message_keeps_turn_id(monkeypatch, tmp_
 
 
 @pytest.mark.anyio
+async def test_freezone_hermes_turn_cancels_undelivered_agent_product_admission(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("NOVELVIDEO_OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setenv("DRAMACLAW_CHAT_BACKEND", "hermes")
+    state_dir = tmp_path / "project-state"
+    operation_id = "agent_product_pending"
+    scope = ChatScope(
+        kind="project",
+        id="project-a",
+        surface="freezone",
+        canvas_id="canvas-a",
+        agent_id="agent-2",
+        state_dir=str(state_dir),
+    )
+
+    class FakeThread:
+        async def stream(self, _prompt, *, current_project=None, **_kwargs):
+            yield backend_sdk.ChatBackendEvent(
+                type="thread_started", thread_id="thread-a", turn_id="turn-a"
+            )
+            yield backend_sdk.ChatBackendEvent(
+                type="tool_updated",
+                name="dramaclaw.freezone_begin_agent_product_generation",
+                call_id="call-admit",
+                status="completed",
+                structured={
+                    "ok": True,
+                    # The live begin tool returns the durable operation state,
+                    # not a synthetic admission status.
+                    "status": "reserved",
+                    "operation_id": operation_id,
+                },
+                text="admitted",
+            )
+            yield backend_sdk.ChatBackendEvent(type="assistant_delta", text="已停止。")
+            yield backend_sdk.ChatBackendEvent(type="complete", text="")
+
+    class FakePool:
+        async def get_for_user(self, *_args, **_kwargs):
+            return FakeThread()
+
+    cancelled = []
+
+    async def cancel_turn_operations(operation_ids, *, project_dir, ctx):
+        cancelled.append((set(operation_ids), project_dir, ctx.project_id))
+
+    async def on_event(_event):
+        return None
+
+    monkeypatch.setattr(
+        chat_service, "_write_hermes_tool_mode", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(chat_service, "is_hermes_backend_available", lambda: True)
+    monkeypatch.setattr(
+        chat_service, "_cancel_turn_agent_product_operations", cancel_turn_operations
+    )
+    monkeypatch.setattr("novelvideo.chat.hermes_pool.pool", FakePool())
+
+    await chat_service.stream_assistant_reply(
+        "admin",
+        "project-a",
+        "prepare a workflow",
+        on_event,
+        project_state_dir=state_dir,
+        project_context=SimpleNamespace(project_id="project-a"),
+        surface="freezone",
+        surface_context={"canvasId": "canvas-a"},
+        store_scope=scope,
+        turn_id="turn-a",
+    )
+
+    assert cancelled == [({operation_id}, state_dir, "project-a")]
+
+
+@pytest.mark.anyio
 async def test_freezone_hermes_retries_once_when_cached_session_is_unavailable(
     monkeypatch,
     tmp_path,
@@ -7802,6 +7879,173 @@ _READ_NODE_DETAIL = SimpleNamespace(
 
 _READ_ONLY_ANSWER = "工作流失败，未生成视频。"
 _FORMAT_FAILURE = "回复未通过操作结果校验：未返回结构化结果，请重试。"
+
+
+def _completed_tool_event(name, *, call_id, tool_input, structured):
+    return backend_sdk.ChatBackendEvent(
+        type="tool_updated",
+        text=f"[mcp:completed] dramaclaw.{name}",
+        name=f"dramaclaw.{name}",
+        call_id=call_id,
+        turn_id="runtime-turn",
+        status="completed",
+        input=tool_input,
+        structured=structured,
+    )
+
+
+def _pending_workflow_clarification_tool_events(operation_id):
+    return [
+        _completed_tool_event(
+            "freezone_begin_agent_product_generation",
+            call_id="call-admit",
+            tool_input={"product_kind": "workflow_result"},
+            structured={
+                "ok": True,
+                "status": "reserved",
+                "operation_id": operation_id,
+            },
+        ),
+        _completed_tool_event(
+            "freezone_prepare_workflow_plan_draft",
+            call_id="call-prepare",
+            tool_input={"operation_id": operation_id, "plan": {}},
+            structured={
+                "ok": True,
+                "status": "video_model_clarification_required",
+                "draft_created": False,
+                "required_choice": "compatible_video_model",
+            },
+        ),
+        _completed_tool_event(
+            "freezone_request_user_clarification",
+            call_id="call-clarification",
+            tool_input={"clarification_id": "clarify-model"},
+            structured={
+                "ok": False,
+                "status": "clarification_frontend_timeout",
+                "clarification_status": "pending_user_input",
+                "clarification_id": "clarify-model",
+            },
+        ),
+    ]
+
+
+@pytest.mark.anyio
+async def test_codex_turn_cancels_undelivered_agent_product_admission(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("NOVELVIDEO_RUNTIME_DIR", str(tmp_path / "runtime"))
+    operation_id = "agent_product_pending"
+    admission = SimpleNamespace(
+        type="tool_updated",
+        text="[mcp:completed] dramaclaw.freezone_begin_agent_product_generation",
+        name="dramaclaw.freezone_begin_agent_product_generation",
+        call_id="call-admit",
+        status="completed",
+        input={"product_kind": "workflow_result"},
+        output={
+            "structuredContent": {
+                "ok": True,
+                # Mirror the actual MCP envelope returned by the begin tool.
+                "status": "reserved",
+                "operation_id": operation_id,
+            }
+        },
+        structured=None,
+        error=None,
+    )
+
+    class FakeThread:
+        async def stream(self, _prompt):
+            for event in _codex_turn_events(_READ_ONLY_ANSWER, tool=admission):
+                yield event
+
+    async def fake_create_token(*_args, **_kwargs):
+        return "agent-token"
+
+    class FakeAuthPort:
+        async def revoke_agent_session(self, _token):
+            return None
+
+    cancelled = []
+
+    async def cancel_turn_operations(operation_ids, *, project_dir, ctx):
+        cancelled.append((set(operation_ids), project_dir, ctx.project_id))
+
+    monkeypatch.setattr(
+        chat_service, "_create_page_agent_session_token", fake_create_token
+    )
+    monkeypatch.setattr(
+        chat_service, "_build_codex_thread", lambda *_args, **_kwargs: FakeThread()
+    )
+    monkeypatch.setattr(chat_service, "get_auth_session_port", lambda: FakeAuthPort())
+    monkeypatch.setattr(hermes_sdk, "_issue_turn_capability", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        chat_service,
+        "_cancel_turn_agent_product_operations",
+        cancel_turn_operations,
+        raising=False,
+    )
+
+    async def collect_event(_event):
+        return None
+
+    state_dir = tmp_path / "project-state"
+    project_ctx = SimpleNamespace(project_id="project-a")
+    await chat_service._stream_assistant_reply_codex(
+        "admin",
+        "project-a",
+        "prepare a workflow",
+        collect_event,
+        project_state_dir=state_dir,
+        project_context=project_ctx,
+        tool_mode="freezone_canvas",
+        surface_context={"freezone_canvas_id": "canvas-a"},
+        store_scope=ChatScope(
+            kind="project",
+            id="project-a",
+            surface="freezone",
+            canvas_id="canvas-a",
+            agent_id="main",
+            state_dir=str(state_dir),
+        ),
+        turn_id="business-turn",
+        route_prompt="prepare a workflow",
+    )
+
+    assert cancelled == [({operation_id}, state_dir, "project-a")]
+
+
+@pytest.mark.parametrize(
+    "clarification_status",
+    ["video_model_clarification_required", "generation_mode_clarification_required"],
+)
+def test_pending_workflow_clarification_is_not_cancelled(clarification_status):
+    operation_id = "agent_product_pending_clarification"
+    unrelated_operation_id = "agent_product_unrelated"
+    events = _pending_workflow_clarification_tool_events(operation_id)
+    events[1].structured["status"] = clarification_status
+    events.insert(
+        1,
+        _completed_tool_event(
+            "freezone_begin_agent_product_generation",
+            call_id="call-admit-unrelated",
+            tool_input={"product_kind": "recipe_result"},
+            structured={
+                "ok": True,
+                "status": "reserved",
+                "operation_id": unrelated_operation_id,
+            },
+        ),
+    )
+    tracker = chat_service._TurnAgentProductOperationTracker()
+
+    for event in events:
+        tracker.observe(event)
+
+    assert tracker.cancellation_ids() == {unrelated_operation_id}
 
 
 @pytest.mark.anyio

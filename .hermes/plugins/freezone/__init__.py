@@ -196,6 +196,12 @@ _PENDING_SKILL_STUDIO_DRAFTS: dict[str, dict[str, Any]] = {}
 # with values copied from the original prompt. The turn id prevents answers from
 # leaking into a later request on the same canvas.
 _PENDING_GENERATION_ANSWERS: dict[tuple[str, str, str], dict[str, Any]] = {}
+# Video model decisions are server-owned. A preflight result authorizes exactly
+# one following clarification card in the same project/canvas scope; this
+# prevents an agent from inventing candidates before submitting a plan.
+_PENDING_SERVER_VIDEO_MODEL_CLARIFICATIONS: dict[
+    tuple[str, str], dict[str, Any]
+] = {}
 # A revision conflict is a user-authorization boundary, not a retryable canvas
 # write error. Keep the canvas blocked until the user explicitly confirms the
 # current draft revision. This process-local guard covers the follow-up tool
@@ -1022,6 +1028,100 @@ def _workflow_bypass_clarification_error(
     }
 
 
+def _video_model_clarification_scope_key(
+    project: str | None, canvas: str | None
+) -> tuple[str, str]:
+    return (str(project or "").strip(), str(canvas or "").strip())
+
+
+def _remember_server_video_model_clarification(
+    project: str | None,
+    canvas: str | None,
+    result: dict[str, Any],
+) -> None:
+    question = result.get("question")
+    if not isinstance(question, dict) or question.get("id") not in {
+        "compatible_video_model",
+        "video_model_constraint_adjustment",
+    }:
+        return
+    _PENDING_SERVER_VIDEO_MODEL_CLARIFICATIONS[
+        _video_model_clarification_scope_key(project, canvas)
+    ] = {
+        "expires_at": time.monotonic() + 300,
+        "question": deepcopy(question),
+    }
+
+
+def _take_server_video_model_clarification(
+    project: str | None,
+    canvas: str | None,
+    question_id: str,
+) -> dict[str, Any] | None:
+    key = _video_model_clarification_scope_key(project, canvas)
+    pending = _PENDING_SERVER_VIDEO_MODEL_CLARIFICATIONS.get(key)
+    if not isinstance(pending, dict):
+        return None
+    question = pending.get("question")
+    if (
+        pending.get("expires_at", 0) < time.monotonic()
+        or not isinstance(question, dict)
+        or question.get("id") != question_id
+    ):
+        _PENDING_SERVER_VIDEO_MODEL_CLARIFICATIONS.pop(key, None)
+        return None
+    _PENDING_SERVER_VIDEO_MODEL_CLARIFICATIONS.pop(key, None)
+    return deepcopy(question)
+
+
+def _unverified_video_model_clarification_result() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "unverified_video_model_clarification_rejected",
+        "code": "unverified_video_model_clarification_rejected",
+        "error": "Video model alternatives must be produced by WorkflowPlan preflight.",
+        "retryable": False,
+        "next_action": "submit_workflow_plan_for_preflight",
+        "agent_instruction": (
+            "Do not show this question. Submit the unchanged complete WorkflowPlan to "
+            "preflight, then show only the model question returned by the server."
+        ),
+    }
+
+
+def _unverified_video_model_clarification_error(
+    questions: list[Any],
+) -> dict[str, Any] | None:
+    """Require model replacement choices to originate from workflow preflight."""
+    allowed_question_ids = {
+        "video_model",
+        "compatible_video_model",
+        "video_model_constraint_adjustment",
+    }
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or "").strip()
+        if question_id in allowed_question_ids:
+            continue
+        text = " ".join(
+            str(question.get(field) or "")
+            for field in ("id", "title", "description")
+        ).casefold()
+        asks_for_compatible_video_model = (
+            "video_model" in question_id.casefold()
+            or "model_mode" in question_id.casefold()
+            or (
+                ("compatible" in text or "兼容" in text or "替代" in text)
+                and ("video model" in text or "视频模型" in text)
+            )
+        )
+        if not asks_for_compatible_video_model:
+            continue
+        return _unverified_video_model_clarification_result()
+    return None
+
+
 def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
     project = (
         str(
@@ -1044,6 +1144,63 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
     questions = _safe_list(args.get("questions"))
     generation_media_types = args.get("generation_media_types")
     generation_required_choices = args.get("generation_required_choices")
+    has_model_constraint_adjustment_question = any(
+        isinstance(question, dict)
+        and question.get("id") == "video_model_constraint_adjustment"
+        for question in questions
+    )
+    model_constraint_adjustment_requested = (
+        generation_media_types is None
+        and (
+            (
+                isinstance(generation_required_choices, dict)
+                and set(generation_required_choices) == {"video"}
+                and generation_required_choices["video"]
+                == ["video_model_constraint_adjustment"]
+            )
+            or (
+                generation_required_choices is None
+                and has_model_constraint_adjustment_question
+            )
+        )
+    )
+    compatible_model_questions = [
+        question
+        for question in questions
+        if isinstance(question, dict)
+        and question.get("id") == "compatible_video_model"
+    ]
+    requested_server_question_id = (
+        "video_model_constraint_adjustment"
+        if model_constraint_adjustment_requested
+        else "compatible_video_model" if compatible_model_questions else ""
+    )
+    if requested_server_question_id:
+        question = _take_server_video_model_clarification(
+            project, canvas, requested_server_question_id
+        )
+        if question is None:
+            return tool_result(_unverified_video_model_clarification_result())
+        questions = [
+            {
+                "id": requested_server_question_id,
+                "title": str(question.get("prompt") or "请选择下一步"),
+                "mode": str(question.get("mode") or "single"),
+                "options": _safe_list(question.get("options")),
+            }
+        ]
+        if model_constraint_adjustment_requested:
+            generation_required_choices = None
+        args = {
+            **args,
+            "title": str(question.get("title") or "选择下一步"),
+            "description": "",
+            "allow_recommended": False,
+            "allow_skip": False,
+        }
+    unverified_model_error = _unverified_video_model_clarification_error(questions)
+    if unverified_model_error is not None:
+        return tool_result(unverified_model_error)
     if generation_media_types is not None or generation_required_choices is not None:
         if generation_media_types is not None and generation_required_choices is not None:
             return tool_result({
@@ -4111,8 +4268,10 @@ def _finalize_generation_clarification_result(
         "agent_instruction": (
             "Concrete generation values are in node_data keyed by node type. Apply each "
             "node_data.<node_type> field only where the matching image/video node does not "
-            "already state an explicit value; retain each shot's own duration and audio "
-            "requirement. Do not translate question ids yourself. For a new workflow draft, "
+            "already state an explicit value, except video generateAudio: the user's direct "
+            "choice replaces every conflicting video-node value. Retain each shot's own "
+            "duration and other step-local requirements. Do not translate question ids yourself. "
+            "For a new workflow draft, "
             "pass only this result's "
             "answers field: generation_answers = result['answers']; do not pass the entire "
             "clarification result. If using plan, put the user goal in plan.summary, never "
@@ -4475,6 +4634,22 @@ def _workflow_preflight_failure(
                 "conflict instead of asking how to bypass it."
             ),
         )
+    elif (
+        blocker.get("code") == "model_capability_unsupported"
+        and blocker.get("recovery") == "ask_user"
+        and blocker.get("compatible_models") == []
+    ):
+        result.update(
+            code="no_compatible_video_model",
+            retryable=False,
+            next_action="ask_user_to_change_constraints",
+            agent_instruction=(
+                "No user-visible video model satisfies the already confirmed mode, shot "
+                "durations, and generation parameters together. Do not retry another model "
+                "or silently change those values. Ask the user which constraint to relax, "
+                "then collect the changed generation choice before retrying once."
+            ),
+        )
     return result
 
 
@@ -4490,6 +4665,37 @@ _VIDEO_MODE_LABELS = {
     "imageReference": "图片参考生成视频",
     "allReference": "全参考生成视频",
 }
+
+
+def _workflow_model_reselection_clarification(
+    preflight: dict[str, Any], compiled: dict[str, Any], *, project_id: str
+) -> dict[str, Any] | None:
+    """Require confirmation before replacing an explicitly selected video model."""
+    from novelvideo.freezone.workflow_preflight import (
+        no_compatible_video_model_clarification,
+    )
+
+    no_compatible = no_compatible_video_model_clarification(preflight)
+    if no_compatible is not None:
+        return no_compatible
+    try:
+        response = _request(
+            "GET", f"/projects/{quote(project_id, safe='')}/freezone/video/models"
+        )
+    except Exception:  # noqa: BLE001 - preserve the original preflight failure
+        return None
+    catalog = response.get("data") if response.get("ok") is not False else None
+    if not isinstance(catalog, list):
+        return None
+    from novelvideo.freezone.workflow_preflight import (
+        video_model_reselection_clarification,
+    )
+
+    return video_model_reselection_clarification(
+        preflight,
+        compiled,
+        [item for item in catalog if isinstance(item, dict)],
+    )
 
 
 def _workflow_generation_mode_clarification(
@@ -6415,6 +6621,14 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
     )
     validated["preflight"] = preflight
     if preflight["blockers"]:
+        model_clarification = _workflow_model_reselection_clarification(
+            preflight, validated, project_id=project
+        )
+        if model_clarification is not None:
+            _remember_server_video_model_clarification(
+                project, canvas, model_clarification
+            )
+            return tool_result(model_clarification)
         mode_clarification = _workflow_generation_mode_clarification(
             preflight, validated, project_id=project
         )
@@ -6729,8 +6943,11 @@ def _handle_begin_agent_product_generation(args: dict[str, Any], **_: Any) -> st
     return _structured_tool_result(
         {
             "ok": True,
-            "status": "agent_product_generation_admitted",
             **payload,
+            # The tool reports the admission outcome; the durable operation's
+            # internal state (normally ``reserved``) remains available through
+            # the operation read API.
+            "status": "agent_product_generation_admitted",
             "confirmation_required": False,
             "next_action": "generate_product_result",
             "agent_instruction": (
@@ -7189,6 +7406,42 @@ def _handle_workflow_operation(args: dict[str, Any], *, action: str) -> str:
                 "retryable": True,
                 "next_action": "request_user_clarification",
             }
+        elif action == "prepare" and error.get("code") == "no_compatible_video_model":
+            from novelvideo.freezone.workflow_preflight import (
+                video_model_constraint_adjustment_clarification,
+            )
+
+            error = video_model_constraint_adjustment_clarification()
+        elif (
+            action == "prepare"
+            and error.get("code") == "video_model_incompatible"
+            and error.get("required_choice") == "compatible_video_model"
+            and isinstance(error.get("affected_node_ids"), list)
+            and isinstance(error.get("question"), dict)
+        ):
+            error = {
+                "ok": True,
+                "status": "video_model_clarification_required",
+                "code": "video_model_incompatible",
+                "draft_created": False,
+                "retryable": False,
+                "next_action": "request_user_clarification",
+                "required_choice": "compatible_video_model",
+                "affected_node_ids": error["affected_node_ids"],
+                "question": error["question"],
+                **(
+                    {"agent_instruction": error["agent_instruction"]}
+                    if isinstance(error.get("agent_instruction"), str)
+                    else {}
+                ),
+            }
+        if action == "prepare" and error.get("required_choice") in {
+            "compatible_video_model",
+            "video_model_constraint_adjustment",
+        }:
+            _remember_server_video_model_clarification(
+                project_id, canvas_id, error
+            )
         error.setdefault("retryable", False)
         error.setdefault(
             "next_action",
@@ -7313,6 +7566,14 @@ def _handle_prepare_workflow_draft(args: dict[str, Any], **_: Any) -> str:
     preflight = _workflow_runtime_preflight(compiled, project_id=project_id)
     compiled["preflight"] = preflight
     if preflight["blockers"]:
+        model_clarification = _workflow_model_reselection_clarification(
+            preflight, compiled, project_id=project_id
+        )
+        if model_clarification is not None:
+            _remember_server_video_model_clarification(
+                project_id, canvas_id, model_clarification
+            )
+            return tool_result(model_clarification)
         mode_clarification = _workflow_generation_mode_clarification(
             preflight, compiled, project_id=project_id
         )
@@ -7498,12 +7759,20 @@ _GENERATION_ANSWER_DATA_FIELDS = {
     "video_variants_per_node": ("videoNode", "count"),
 }
 
+# A generation card is the user's direct confirmation. Most fields remain
+# defaults because a shot can legitimately pin its own model, ratio, or
+# duration. Sound generation is a workflow-wide yes/no policy, though: an
+# agent-authored node must not reverse the user's explicit answer (issue #677).
+_AUTHORITATIVE_GENERATION_ANSWER_IDS = frozenset({"video_generate_audio"})
+
 # These clarification answers are shared Plan inputs rather than per-node
 # create fields.  Keep them out of the regular generation-question registry so
 # an ordinary custom clarification does not accidentally become a full media
 # settings card, while still accepting the answer when it is carried alongside
 # the card's concrete video settings at draft preparation time.
-_GENERATION_ANSWER_PLAN_INPUT_FIELDS = frozenset({"video_generation_mode"})
+_GENERATION_ANSWER_PLAN_INPUT_FIELDS = frozenset(
+    {"video_generate_audio", "video_generation_mode"}
+)
 
 
 def _workflow_generation_draft(
@@ -7854,7 +8123,7 @@ def _apply_generation_choices_to_plan(
         if not isinstance(node, dict):
             continue
         node_choices = [
-            (field, value)
+            (question_id, field, value)
             for question_id, value in choices.items()
             if question_id in _GENERATION_ANSWER_DATA_FIELDS
             for node_type, field in (_GENERATION_ANSWER_DATA_FIELDS[question_id],)
@@ -7863,13 +8132,18 @@ def _apply_generation_choices_to_plan(
         if not node_choices:
             continue
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
-        for field, value in node_choices:
+        for question_id, field, value in node_choices:
             current = data.get(field)
             symbolic = (
                 isinstance(current, str)
                 and current.strip().casefold() in _RECOMMENDED_GENERATION_MODEL_VALUES
             )
-            if missing_only and not symbolic and _generation_parameter_value_present(field, current):
+            if (
+                missing_only
+                and question_id not in _AUTHORITATIVE_GENERATION_ANSWER_IDS
+                and not symbolic
+                and _generation_parameter_value_present(field, current)
+            ):
                 continue
             data[field] = value
         node["data"] = data
@@ -9003,6 +9277,7 @@ _WORKFLOW_RESULT_FIELDS = (
     "clarification",
     "draft_created",
     "required_choice",
+    "affected_node_ids",
     "question",
 )
 
@@ -9015,6 +9290,7 @@ _RESULT_ARRAY_FIELDS = frozenset(
         "assets",
         "blockers",
         "available_ids",
+        "affected_node_ids",
         "candidates",
         "commands",
         "command_results",
@@ -9656,6 +9932,7 @@ def _success_contract(name: str) -> dict[str, Any]:
         }
     if name in _WORKFLOW_RESULT_TOOLS:
         if name in {
+            "freezone_prepare_workflow",
             "freezone_prepare_workflow_draft",
             "freezone_prepare_workflow_plan_draft",
         }:
@@ -9664,7 +9941,10 @@ def _success_contract(name: str) -> dict[str, Any]:
                     {
                         "properties": {
                             "status": {
-                                "const": "generation_mode_clarification_required"
+                                "enum": [
+                                    "generation_mode_clarification_required",
+                                    "video_model_clarification_required",
+                                ]
                             },
                             "draft_created": {"const": False},
                         },
