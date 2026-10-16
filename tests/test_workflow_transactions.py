@@ -464,6 +464,26 @@ def test_step_prompt_update_removes_legacy_top_level_prompt():
     assert "prompt" not in node
 
 
+def test_prepare_then_prompt_patch_keeps_only_revision_two_prompt():
+    plan = _exact_media_plan()
+    plan["nodes"][0]["prompt"] = "Old top-level prompt"
+
+    prepared = prepare_workflow_source({"plan": plan}, username="tester")
+    image = prepared["compiled"]["plan"]["nodes"][0]
+    assert image["data"]["prompt"] == "make image"
+    assert "prompt" not in image
+
+    revised = revise_workflow_source(
+        prepared,
+        {"step_updates": [{"node_id": "image", "prompt": "New image prompt"}]},
+        username="tester",
+    )
+
+    image = revised["compiled"]["plan"]["nodes"][0]
+    assert image["data"]["prompt"] == "New image prompt"
+    assert "prompt" not in image
+
+
 def test_text_prompt_update_does_not_leave_old_recipe_prompt():
     plan = _plan()
     plan["nodes"][0]["data"]["prompt"] = "Old recipe prompt"

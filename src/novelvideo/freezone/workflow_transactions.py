@@ -121,6 +121,40 @@ def _node_index(plan: dict) -> dict[str, dict]:
     return index
 
 
+def _canonicalize_plan_prompts(plan: dict) -> dict:
+    """Keep workflow prompts in ``node.data`` and remove legacy root copies.
+
+    Early workflow plans accepted ``node.prompt``.  Once a revision writes
+    ``node.data.prompt``, retaining the root field lets consumers see two
+    different prompt values.  Prepare and patch both pass through this helper
+    so the stored revision has one authoritative prompt payload.
+    """
+    normalized = deepcopy(plan)
+    nodes = normalized.get("nodes")
+    if not isinstance(nodes, list):
+        return normalized
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data")
+        if not isinstance(data, dict):
+            data = {}
+            node["data"] = data
+        legacy_prompt = node.pop("prompt", None)
+        if not isinstance(legacy_prompt, str) or not legacy_prompt.strip():
+            continue
+        if node.get("node_type") == "textAnnotationNode":
+            # Text nodes consume ``data.content``.  Keep the compatibility
+            # mirror in sync with that canonical value instead of copying a
+            # stale root prompt over newer content.
+            canonical = data.get("content") or data.get("prompt") or legacy_prompt
+            data["content"] = canonical
+            data["prompt"] = canonical
+        else:
+            data.setdefault("prompt", legacy_prompt)
+    return normalized
+
+
 def _add_edge(plan: dict, source: str, target: str, kind: str) -> None:
     edges = plan.setdefault("edges", [])
     if not isinstance(edges, list):
@@ -440,6 +474,10 @@ def prepare_workflow_source(
             raise WorkflowOperationError("intent must be an object")
         if not isinstance(plan, dict):
             raise WorkflowOperationError("plan must be an object")
+        # Normalize legacy root-level prompts before both initial preparation
+        # and revision validation.  Patch callers enter this same function,
+        # so a revision cannot retain a stale ``node.prompt`` copy.
+        plan = _canonicalize_plan_prompts(plan)
         if "bindings" in body:
             plan = bind_workflow_inputs(plan, body["bindings"])
             intent = {"schema_version": "freezone_workflow_plan_draft.v1", "plan": plan}
