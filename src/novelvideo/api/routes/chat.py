@@ -3485,6 +3485,7 @@ async def _stream_project_turn(
                     "status": event.get("status"),
                     "disposition": event.get("disposition"),
                     "error": event.get("error"),
+                    "result": event.get("result"),
                 },
                 send_lock,
             )
@@ -4177,6 +4178,7 @@ async def _stream_home_turn(
                         "status": event.status,
                         "disposition": event.disposition,
                         "error": event.error,
+                        "result": event.structured,
                     },
                     send_lock,
                 )

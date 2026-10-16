@@ -31,6 +31,7 @@ def lifecycle_event(event: Any) -> dict[str, Any]:
         payload.update(
             status=event.status or "completed",
             error=event.error,
+            result=getattr(event, "structured", None),
             disposition=event.disposition,
         )
     return payload

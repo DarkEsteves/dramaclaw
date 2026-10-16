@@ -52,6 +52,10 @@ class TurnOperationFinalizer:
         self._finalized = False
 
     @property
+    def operation_id(self) -> str:
+        return self._operation_id
+
+    @property
     def submitted(self) -> bool:
         return self._submitted
 

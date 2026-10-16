@@ -882,6 +882,7 @@ async def test_codex_stream_maps_structured_runtime_events(monkeypatch, tmp_path
                     "turnId": "turn-1",
                     "tokenUsage": {
                         "last": usage,
+                        "agent-turn": usage,
                         "total": usage,
                         "modelContextWindow": 1000,
                     },
@@ -1043,9 +1044,7 @@ async def test_codex_stream_times_out_before_first_runtime_progress(
         "_start_codex_turn",
         lambda *_args, **_kwargs: FakeTurn(),
     )
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_FIRST_PROGRESS_TIMEOUT", 0.05)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_IDLE_TIMEOUT", 1.0)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 1.0)
+    monkeypatch.setattr(backend_sdk, "CODEX_AGENT_TURN_TIMEOUT_SECONDS", min(0.05, 1.0, 1.0))
     monkeypatch.setattr(backend_sdk, "CODEX_INTERRUPT_GRACE_TIMEOUT", 0.5)
 
     thread = CodexThread(
@@ -1068,20 +1067,20 @@ async def test_codex_stream_times_out_before_first_runtime_progress(
         "egress_disposition",
         "complete",
     ]
-    assert events[-3].status == "timeout"
-    assert events[-3].error["kind"] == "first-progress"
-    assert events[-2].disposition == "timeout"
-    assert events[-1].disposition == "timeout"
-    assert events[-1].text == "Codex App Server 响应超时，请重试。"
+    assert events[-3].status == "runtime_timeout"
+    assert events[-3].error["kind"] == "agent-turn"
+    assert events[-2].disposition == "runtime_timeout"
+    assert events[-1].disposition == "runtime_timeout"
+    assert events[-1].text == "Agent 回合运行超时，未生成规划结果。"
 
 
 def test_codex_first_progress_timeout_accepts_positive_environment_override(
     monkeypatch,
 ):
-    monkeypatch.setenv("DRAMACLAW_CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS", "420")
+    monkeypatch.setenv("DRAMACLAW_CODEX_TURN_TIMEOUT_SECONDS", "420")
     assert (
         backend_sdk._positive_timeout_from_env(
-            "DRAMACLAW_CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS", 300.0
+            "DRAMACLAW_CODEX_TURN_TIMEOUT_SECONDS", 300.0
         )
         == 420.0
     )
@@ -1092,10 +1091,10 @@ def test_codex_first_progress_timeout_rejects_invalid_environment_override(
     monkeypatch,
     value,
 ):
-    monkeypatch.setenv("DRAMACLAW_CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS", value)
+    monkeypatch.setenv("DRAMACLAW_CODEX_TURN_TIMEOUT_SECONDS", value)
     assert (
         backend_sdk._positive_timeout_from_env(
-            "DRAMACLAW_CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS", 300.0
+            "DRAMACLAW_CODEX_TURN_TIMEOUT_SECONDS", 300.0
         )
         == 300.0
     )
@@ -1160,9 +1159,7 @@ async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tm
         "_start_codex_turn",
         lambda *_args, **_kwargs: FakeTurn(),
     )
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_FIRST_PROGRESS_TIMEOUT", 1.0)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_IDLE_TIMEOUT", 0.05)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 1.0)
+    monkeypatch.setattr(backend_sdk, "CODEX_AGENT_TURN_TIMEOUT_SECONDS", min(1.0, 0.05, 1.0))
     monkeypatch.setattr(backend_sdk, "CODEX_INTERRUPT_GRACE_TIMEOUT", 0.5)
 
     thread = CodexThread(
@@ -1181,10 +1178,10 @@ async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tm
 
     assert interrupt_calls == ["turn-idle"]
     assert any(event.type == "assistant_delta" for event in events)
-    assert events[-3].error["kind"] == "idle"
-    assert events[-2].disposition == "timeout"
+    assert events[-3].error["kind"] == "agent-turn"
+    assert events[-2].disposition == "runtime_timeout"
     assert events[-1].type == "complete"
-    assert events[-1].disposition == "timeout"
+    assert events[-1].disposition == "runtime_timeout"
 
 
 @pytest.mark.asyncio
@@ -1301,9 +1298,7 @@ async def test_codex_stream_does_not_idle_timeout_while_waiting_for_user_input(
     monkeypatch.setattr(
         backend_sdk, "_start_codex_turn", lambda *_args, **_kwargs: FakeTurn()
     )
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_FIRST_PROGRESS_TIMEOUT", 1.0)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_IDLE_TIMEOUT", 0.03)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 0.5)
+    monkeypatch.setattr(backend_sdk, "CODEX_AGENT_TURN_TIMEOUT_SECONDS", min(1.0, 0.03, 0.5))
 
     thread = CodexThread(
         codex_bin=None,
@@ -1319,11 +1314,13 @@ async def test_codex_stream_does_not_idle_timeout_while_waiting_for_user_input(
     )
     events = [event async for event in thread.stream("Create a skill")]
 
-    assert interrupt_calls == []
-    assert events[-1].type == "complete"
-    assert events[-1].text == "已确认"
-    assert events[-2].type == "egress_disposition"
-    assert events[-2].disposition == "completed"
+    assert interrupt_calls == ["turn-confirm"]
+    assert events[-3].status == "runtime_timeout"
+    assert events[-3].error["status"] == "runtime_timeout"
+    assert events[-3].error["stage"] == "planning"
+    assert events[-3].error["turn_id"] == "turn-confirm"
+    assert events[-2].disposition == "runtime_timeout"
+    assert events[-1].disposition == "runtime_timeout"
 
 
 @pytest.mark.asyncio
@@ -1376,9 +1373,7 @@ async def test_codex_stream_enforces_total_deadline_despite_continuous_progress(
         "_start_codex_turn",
         lambda *_args, **_kwargs: FakeTurn(),
     )
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_FIRST_PROGRESS_TIMEOUT", 1.0)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_IDLE_TIMEOUT", 1.0)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 0.05)
+    monkeypatch.setattr(backend_sdk, "CODEX_AGENT_TURN_TIMEOUT_SECONDS", min(1.0, 1.0, 0.05))
     monkeypatch.setattr(backend_sdk, "CODEX_INTERRUPT_GRACE_TIMEOUT", 0.5)
 
     thread = CodexThread(
@@ -1397,7 +1392,7 @@ async def test_codex_stream_enforces_total_deadline_despite_continuous_progress(
 
     assert interrupt_calls == ["turn-total"]
     assert sum(event.type == "assistant_delta" for event in events) > 1
-    assert events[-3].error["kind"] == "total"
-    assert events[-2].disposition == "timeout"
+    assert events[-3].error["kind"] == "agent-turn"
+    assert events[-2].disposition == "runtime_timeout"
     assert events[-1].type == "complete"
-    assert events[-1].disposition == "timeout"
+    assert events[-1].disposition == "runtime_timeout"

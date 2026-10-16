@@ -27,15 +27,9 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
-# Codex App Server may keep a turn open indefinitely when its upstream model
-# request never produces a notification. Hermes already has idle and total
-# stream deadlines; keep the same lifecycle guarantee here, with a tighter
-# first-progress deadline so an upstream request that never emits its first
-# model/tool event cannot leave the UI spinning indefinitely. Large canvas
-# workflows can legitimately spend more than two minutes planning before the
-# runtime emits its first reasoning/tool notification, so keep the default in
-# line with the active-stream idle deadline. Operators may tune it without a
-# code change when their model gateway has a different latency envelope.
+# The App Server and this adapter must share one wall-clock budget. Separate
+# first-progress, idle, and total timers can disagree about which component
+# owns a turn and leave the caller with no deterministic terminal result.
 def _positive_timeout_from_env(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -47,11 +41,9 @@ def _positive_timeout_from_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-CODEX_STREAM_FIRST_PROGRESS_TIMEOUT = _positive_timeout_from_env(
-    "DRAMACLAW_CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS", 300.0
+CODEX_AGENT_TURN_TIMEOUT_SECONDS = _positive_timeout_from_env(
+    "DRAMACLAW_CODEX_TURN_TIMEOUT_SECONDS", 600.0
 )
-CODEX_STREAM_IDLE_TIMEOUT = 300.0
-CODEX_STREAM_TOTAL_TIMEOUT = max(1800.0, CODEX_STREAM_IDLE_TIMEOUT)
 CODEX_INTERRUPT_GRACE_TIMEOUT = 5.0
 
 _CODEX_LIFECYCLE_ONLY_EVENTS = {
@@ -1304,7 +1296,11 @@ class CodexThread:
         self._thread_config = dict(thread_config)
         self._turn_metadata = dict(turn_metadata)
         self._output_schema = output_schema
+        self._turn_operation = None
         self.id = thread_id
+
+    def bind_turn_operation(self, operation: Any | None) -> None:
+        self._turn_operation = operation
 
     async def stream(self, prompt: str) -> AsyncIterator[ChatBackendEvent]:
         loop = asyncio.get_running_loop()
@@ -1819,26 +1815,12 @@ class CodexThread:
 
         worker_task = asyncio.create_task(run_worker())
         started_at = loop.time()
-        first_progress_deadline = started_at + CODEX_STREAM_FIRST_PROGRESS_TIMEOUT
-        idle_deadline = started_at + CODEX_STREAM_IDLE_TIMEOUT
-        total_deadline = started_at + CODEX_STREAM_TOTAL_TIMEOUT
-        saw_runtime_progress = False
+        deadline = started_at + CODEX_AGENT_TURN_TIMEOUT_SECONDS
         user_input_calls: set[str] = set()
         timed_out = False
 
         try:
             while True:
-                if user_input_calls:
-                    deadline = total_deadline
-                else:
-                    deadline = min(
-                        total_deadline,
-                        (
-                            idle_deadline
-                            if saw_runtime_progress
-                            else first_progress_deadline
-                        ),
-                    )
                 remaining = deadline - loop.time()
                 try:
                     if remaining <= 0:
@@ -1849,14 +1831,16 @@ class CodexThread:
                 except asyncio.TimeoutError:
                     timed_out = True
                     now = loop.time()
-                    if user_input_calls:
-                        timeout_kind = "user-input"
-                    elif now >= total_deadline:
-                        timeout_kind = "total"
-                    elif saw_runtime_progress:
-                        timeout_kind = "idle"
-                    else:
-                        timeout_kind = "first-progress"
+                    timeout_kind = "agent-turn"
+                    elapsed_seconds = int(max(0.0, now - started_at))
+                    operation_id = getattr(self._turn_operation, "operation_id", None)
+                    timeout_result = {
+                        "status": "runtime_timeout",
+                        "stage": "planning",
+                        "elapsed_seconds": elapsed_seconds,
+                        "turn_id": current_turn_id,
+                        "operation_id": operation_id,
+                    }
                     _log.warning(
                         "Codex App Server stream timed out: kind=%s thread=%s turn=%s",
                         timeout_kind,
@@ -1881,12 +1865,9 @@ class CodexThread:
                                 exc_info=True,
                             )
 
-                    timeout_message = (
-                        "等待用户确认超时，请重新提交确认卡。"
-                        if timeout_kind == "user-input"
-                        else "Codex App Server 响应超时，请重试。"
-                    )
+                    timeout_message = "Agent 回合运行超时，未生成规划结果。"
                     timeout_error = {
+                        **timeout_result,
                         "message": timeout_message,
                         "kind": timeout_kind,
                     }
@@ -1894,34 +1875,31 @@ class CodexThread:
                         type="turn_completed",
                         thread_id=self.id,
                         turn_id=current_turn_id,
-                        status="timeout",
-                        disposition="timeout",
+                        status="runtime_timeout",
+                        disposition="runtime_timeout",
                         error=timeout_error,
+                        structured=timeout_result,
                     )
                     yield ChatBackendEvent(
                         type="egress_disposition",
                         thread_id=self.id,
                         turn_id=current_turn_id,
-                        disposition="timeout",
+                        disposition="runtime_timeout",
+                        structured=timeout_result,
                     )
                     yield ChatBackendEvent(
                         type="complete",
                         thread_id=self.id,
                         turn_id=current_turn_id,
-                        disposition="timeout",
+                        disposition="runtime_timeout",
                         text=timeout_message,
                         error=timeout_error,
+                        structured=timeout_result,
                     )
                     break
                 if kind == "error":
                     raise RuntimeError(str(payload))
                 event = payload
-                if event.type not in _CODEX_LIFECYCLE_ONLY_EVENTS:
-                    saw_runtime_progress = True
-                    idle_deadline = min(
-                        total_deadline,
-                        loop.time() + CODEX_STREAM_IDLE_TIMEOUT,
-                    )
                 if event.type == "tool_started" and _codex_tool_waits_for_user_input(
                     event.name
                 ):

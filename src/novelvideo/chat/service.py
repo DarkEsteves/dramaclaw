@@ -5003,6 +5003,8 @@ async def _stream_assistant_reply_codex(
             project_state_dir=project_state_dir,
             agent_token_file=token_file,
         )
+        if hasattr(thread, "bind_turn_operation"):
+            thread.bind_turn_operation(turn_operation)
         agent_prompt = _prompt_with_user_context(
             username,
             project,
@@ -5305,7 +5307,9 @@ async def _stream_assistant_reply_codex(
     # A transport timeout/cancellation is not a canvas receipt failure. Keep
     # the runtime's actionable reason instead of replacing it with the
     # misleading "no canvas write" postcondition message.
-    canvas_postcondition_applies = turn_disposition not in {"timeout", "cancelled"}
+    canvas_postcondition_applies = turn_disposition not in {
+        "timeout", "runtime_timeout", "cancelled"
+    }
     if structured_canvas_reply and turn_disposition == "cancelled":
         # Interrupted turns can complete with partial structured JSON. None of
         # that unvalidated payload may reach presentation or persisted history.
