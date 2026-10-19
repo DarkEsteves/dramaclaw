@@ -137,7 +137,6 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { useFreezoneVideoModels } from "@/features/canvas/hooks/useFreezoneVideoModels";
 import { findSeedance25VideoModel } from "@/features/canvas/nodes/shared/videoModelCapabilities";
-import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { analyzeVideoStory } from "@/features/canvas/application/videoAnalyzeStory";
 import { separateVideoAudio } from "@/features/canvas/application/videoSeparateAudio";
