@@ -182,7 +182,7 @@ def finalize_canvas_reply(
             parts.append("本轮画布修改已保存。")
         if any(key for key, _ in receipts):
             parts.append("本轮画布执行请求已受理，生成进度请以画布任务状态为准。")
-        return "".join(parts) + "回复确认信息不完整，与本轮实际写入回执不一致，请查看画布结果，无需重复提交已成功的操作。"
+        return "".join(parts) + "回复确认信息不完整，请查看画布结果，无需重复提交已成功的操作。"
 
     reply, envelope_error = _parse_canvas_envelope(text)
     if reply is None:
@@ -193,8 +193,6 @@ def finalize_canvas_reply(
     if mode == "mutation":
         if attempts and receipts and not claims:
             return verified_status()
-        if attempts and len(claims) < len(receipts):
-            return "画布操作回执未覆盖全部成功写入，请查看画布结果，无需重复提交已成功的操作。"
         if not attempts or not claims:
             return "画布操作未完成：本轮没有可验证的画布写入回执，请重试。"
         references = set()

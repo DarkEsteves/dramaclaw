@@ -895,15 +895,11 @@ def _load_recent_freezone_tool_result(
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(raw, dict) or raw.get("tool_name") != name:
-            continue
-        recorded_hash = raw.get("input_hash")
-        # Older Freezone workers wrote a result without an input hash. Keep
-        # that receipt readable only when this notification carries no input;
-        # new calls remain bound to their exact normalized arguments.
-        if recorded_hash is not None and recorded_hash != input_hash:
-            continue
-        if recorded_hash is None and tool_input is not None:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("tool_name") != name
+            or raw.get("input_hash") != input_hash
+        ):
             continue
         created_at = raw.get("created_at")
         if (
