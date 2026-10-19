@@ -17,6 +17,7 @@ import { completeDerivedMedia } from './derivedMedia';
 import type { CanvasNode, CanvasNodeType } from '@/features/canvas/domain/canvasNodes';
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
 import {
+  fetchFreezoneImageToBlockoutResult,
   fetchFreezoneJobResult,
   fetchFreezoneReversePromptResult,
   fetchFreezoneStoryScriptResult,
@@ -39,9 +40,18 @@ import {
 import {
   shouldWriteGenerationError,
 } from '@/features/canvas/application/generationTaskArbitration';
+import {
+  holdUnfetchedBlockout,
+  landBlockoutResult,
+  reportBlockoutFailure,
+} from '@/features/previz/blockoutLanding';
+import { sessionOwnsGenerationTask } from './generationTaskDescriptor';
 import { resumePersistedHtmlGeneration } from './workflowHtmlRuntime';
 
-export { generationTaskDescriptor } from './generationTaskDescriptor';
+export {
+  generationTaskDescriptor,
+  handedOffGenerationTaskDescriptor,
+} from './generationTaskDescriptor';
 export type { GenerationTaskDescriptor } from './generationTaskDescriptor';
 
 type FreezoneTaskType = FreezoneJobRef['task_type'];
@@ -154,11 +164,13 @@ type ResumeKind =
   | 'derived-media'
   | 'image'
   | 'video'
+  | 'video-compose'
   | 'audio'
   | 'ply'
   | 'script'
   | 'reverse-prompt'
   | 'text-generate'
+  | 'blockout'
   | 'html';
 
 function resumeKindForNode(type: CanvasNodeType, taskType: FreezoneTaskType): ResumeKind | null {
@@ -172,6 +184,8 @@ function resumeKindForNode(type: CanvasNodeType, taskType: FreezoneTaskType): Re
       return 'image';
     case CANVAS_NODE_TYPES.video:
       return 'video';
+    case CANVAS_NODE_TYPES.videoCompose:
+      return taskType === 'freezone_video_compose' ? 'video-compose' : null;
     case CANVAS_NODE_TYPES.audio:
       return 'audio';
     case CANVAS_NODE_TYPES.threeDWorld:
@@ -180,6 +194,8 @@ function resumeKindForNode(type: CanvasNodeType, taskType: FreezoneTaskType): Re
       return 'script';
     case CANVAS_NODE_TYPES.textAnnotation:
       return taskType === 'freezone_text_generate' ? 'text-generate' : 'reverse-prompt';
+    case CANVAS_NODE_TYPES.previz:
+      return 'blockout';
     case CANVAS_NODE_TYPES.htmlArtifact:
       return taskType === 'freezone_text_generate' ? 'html' : null;
     default:
@@ -238,13 +254,22 @@ export const CLEARED_GENERATION_TASK_FIELDS = {
   generationTaskJobId: null,
 } as const;
 
+/** 白模落地要读节点上的最新数据（导入模式、编辑器关着时的场景），这一步之前的 patch 不够用。 */
+interface ResumeNodeContext {
+  nodeId: string;
+  readNodeData: () => Record<string, unknown>;
+  /** 节点上的任务句柄还是不是这一个。取结果要等，等完得再问一次。 */
+  stillOwnsTask: () => boolean;
+}
+
 async function buildSuccessPatch(
   kind: ResumeKind,
   completed: TaskState,
   taskType: FreezoneTaskType,
   jobId: string,
   projectId: string,
-): Promise<Record<string, unknown>> {
+  context: ResumeNodeContext,
+): Promise<Record<string, unknown> | null> {
   switch (kind) {
     case 'derived-media': return {};
     case 'image': {
@@ -269,6 +294,28 @@ async function buildSuccessPatch(
         ...CLEARED_GENERATION_TASK_FIELDS,
         videoUrl: url,
         sourceFileName: null,
+        generationError: null,
+        generationErrorDetails: null,
+        generationErrorRequestId: null,
+      };
+    }
+    case 'video-compose': {
+      let url = resolveUrlFromResult(completed.result, ['video_url', 'output_url', 'url']);
+      let coverUrl = resolveUrlFromResult(completed.result, ['cover_url', 'preview_image_url']);
+      if (!url && jobId) {
+        const result = await fetchFreezoneJobResult(projectId, taskType, jobId).catch(() => null);
+        url = result?.url ?? null;
+        coverUrl = coverUrl ?? result?.cover_url ?? null;
+      }
+      if (!url) {
+        return { ...CLEARED_GENERATION_TASK_FIELDS, generationError: i18n.t('canvas.resumeGeneration.noVideoResult') };
+      }
+      return {
+        ...CLEARED_GENERATION_TASK_FIELDS,
+        resultVideoUrl: url,
+        ...(coverUrl ? { previewImageUrl: coverUrl } : {}),
+        resultVideoTaskKey: completed.task_key,
+        resultVideoJobId: jobId,
         generationError: null,
         generationErrorDetails: null,
         generationErrorRequestId: null,
@@ -313,12 +360,44 @@ async function buildSuccessPatch(
         model: result.model,
       };
     }
+    case 'blockout': {
+      let body: unknown;
+      try {
+        body = await fetchFreezoneImageToBlockoutResult(projectId, jobId);
+      } catch (error) {
+        if (!context.stillOwnsTask()) return null;
+        // 到这里任务已经完成、积分已经扣了，失败的只是取结果这一趟。走通用错误分支会把
+        // 节点清成什么都没发生，花了钱的结果就丢了；留着任务号让人按号再取。
+        return {
+          ...CLEARED_GENERATION_TASK_FIELDS,
+          blockoutImportMode: null,
+          blockoutHeld: holdUnfetchedBlockout(jobId, error),
+        };
+      }
+      // 落地不只是算补丁：编辑器开着时它当场改 store、弹提示，事后拦不回来。任务
+      // 句柄在取结果期间被清掉或换成别的任务，这份结果就不该再进场景。
+      if (!context.stillOwnsTask()) return null;
+      // 节点数据也要等结果回来再读：等的这段时间里用户可能改了场景并关掉编辑器，
+      // 拿等之前读的那份去落地，会把刚存进节点的修改盖掉。
+      const nodeData = context.readNodeData();
+      const mode = nodeData.blockoutImportMode === 'append' ? 'append' : 'replace';
+      return {
+        ...CLEARED_GENERATION_TASK_FIELDS,
+        blockoutImportMode: null,
+        ...landBlockoutResult({ nodeId: context.nodeId, nodeData, jobId, body, mode }),
+      };
+    }
     default:
       return { ...CLEARED_GENERATION_TASK_FIELDS };
   }
 }
 
 function buildErrorPatch(kind: ResumeKind, error: unknown): Record<string, unknown> {
+  if (kind === 'blockout') {
+    // 预演台节点卡片上没有错误位，取消/失败都用 toast 说；生成态照常清掉。
+    reportBlockoutFailure(error);
+    return { ...CLEARED_GENERATION_TASK_FIELDS, blockoutImportMode: null };
+  }
   if (isTaskCancelledError(error)) {
     // 用户主动终止过的任务恢复时只清理生成态，不当错误展示。
     return { ...CLEARED_GENERATION_TASK_FIELDS };
@@ -327,8 +406,8 @@ function buildErrorPatch(kind: ResumeKind, error: unknown): Record<string, unkno
     const message = error instanceof Error ? error.message : String(error);
     return { ...CLEARED_GENERATION_TASK_FIELDS, taskKey: null, errorMessage: i18n.t('canvas.resumeGeneration.failedWithMessage', { message }) };
   }
-  if (kind === 'image' || kind === 'video' || kind === 'derived-media') {
-    const resolved = resolveErrorContent(error, kind === 'video'
+  if (kind === 'image' || kind === 'video' || kind === 'video-compose' || kind === 'derived-media') {
+    const resolved = resolveErrorContent(error, kind === 'video' || kind === 'video-compose'
       ? i18n.t('canvas.resumeGeneration.videoFailed')
       : i18n.t('canvas.resumeGeneration.imageFailed'));
     const rawMessage = resolved.message;
@@ -383,11 +462,9 @@ export async function resumeNodeGeneration(params: {
   }
 
   const readLatestNodeData = () =>
-    getNodeData ? getNodeData(node.id) : data;
-  const stillNeedsResult = () => {
-    const latest = readLatestNodeData();
-    return latest?.isGenerating === true && latest.generationTaskKey === taskKey;
-  };
+    getNodeData?.(node.id)
+    ?? (node.data as Record<string, unknown>);
+  const stillOwnsTask = () => readLatestNodeData().generationTaskKey === taskKey;
 
   // Quick pre-check: if the task no longer exists server-side (expired/cleaned),
   // avoid hanging on the full poll budget — clear the stuck 生成中 state now.
@@ -399,7 +476,10 @@ export async function resumeNodeGeneration(params: {
   // 连续 miss 才算数:确认窗口约 10 秒,相对 20~35 分钟的完整预算可以忽略,
   // 却足以盖住瞬时漏项。
   if (await confirmTaskMissing(projectId, taskKey)) {
-    if (!stillNeedsResult()) return;
+    if (!stillOwnsTask()) {
+      return;
+    }
+
     updateNodeData(node.id, buildErrorPatch(kind, new Error(i18n.t('canvas.resumeGeneration.taskGone'))));
     return;
   }
@@ -411,8 +491,8 @@ export async function resumeNodeGeneration(params: {
       return;
     }
     const completed = await awaitTaskCompletion(taskKey, projectId, { taskType });
-    if (!stillNeedsResult()) return;
     if (kind === 'html') {
+      if (!stillOwnsTask()) return;
       if (!canvasId) {
         updateNodeData(node.id, buildErrorPatch(kind, new Error('HTML canvas identity is unavailable')));
         return;
@@ -426,8 +506,13 @@ export async function resumeNodeGeneration(params: {
       });
       return;
     }
-    const patch = await buildSuccessPatch(kind, completed, taskType, jobId, projectId);
-    if (stillNeedsResult()) updateNodeData(node.id, patch);
+    const patch = await buildSuccessPatch(kind, completed, taskType, jobId, projectId, {
+      nodeId: node.id,
+      readNodeData: readLatestNodeData,
+      stillOwnsTask,
+    });
+    if (!patch || !stillOwnsTask()) return;
+    updateNodeData(node.id, patch);
   } catch (error) {
     console.warn('[resume-generation] task resume failed', { nodeId: node.id, taskKey, error });
     // 轮询超时只说明这一轮不再等了，任务还在后端跑：保留 isGenerating 与句柄，
@@ -435,9 +520,9 @@ export async function resumeNodeGeneration(params: {
     if (isTaskPollTimeoutError(error)) {
       return;
     }
-    if (!stillNeedsResult()) return;
-    if (kind === 'image' || kind === 'video') {
-      const latestNodeData = readLatestNodeData()!;
+    if (!stillOwnsTask()) return;
+    if (kind === 'image' || kind === 'video' || kind === 'video-compose') {
+      const latestNodeData = readLatestNodeData();
       if (!shouldWriteGenerationError({ nodeData: latestNodeData, taskKey, error })) {
         updateNodeData(node.id, { ...CLEARED_GENERATION_TASK_FIELDS });
         return;
@@ -449,12 +534,12 @@ export async function resumeNodeGeneration(params: {
 }
 
 /**
- * Whether a node restored from storage needs {@link resumeNodeGeneration}.
- * This includes SPA navigation: a submit callback may have updated an old canvas
- * snapshot while the persisted node still needs its completed result.
+ * Whether a node restored from storage needs {@link resumeNodeGeneration}. Returns
+ * false for tasks already being awaited by an in-session flow (see
+ * {@link sessionOwnedTaskKeys}).
  */
 export function nodeNeedsGenerationResume(node: CanvasNode): boolean {
   const data = node.data as Record<string, unknown>;
   const taskKey = typeof data.generationTaskKey === 'string' ? data.generationTaskKey : '';
-  return data.isGenerating === true && taskKey.length > 0;
+  return data.isGenerating === true && taskKey.length > 0 && !sessionOwnsGenerationTask(taskKey);
 }

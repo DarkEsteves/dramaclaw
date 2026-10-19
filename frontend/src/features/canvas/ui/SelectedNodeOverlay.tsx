@@ -48,6 +48,7 @@ import {
   type CanvasNode,
   type ExportImageNodeResultKind,
 } from '@/features/canvas/domain/canvasNodes';
+import { isNodeStoryClip } from '@/features/canvas/story/storySelectors';
 import { createUpscaleResultNode } from '@/features/canvas/application/imageUpscale';
 import {
   createRotateResultNode,
@@ -70,6 +71,7 @@ import {
 } from '@/features/canvas/ui/ProviderModelPicker';
 import { OutpaintEditorOverlay } from './OutpaintEditorOverlay';
 import { RotateEditorOverlay } from './RotateEditorOverlay';
+import { ImageResizeOverlay } from './ImageResizeOverlay';
 import type { GridActionKey } from '@/features/canvas/application/gridTemplateAction';
 import type { GridActionRequest } from './NodeActionToolbar';
 import { spawnAssetBoardImageOpNode } from '@/features/canvas/application/assetBoardImageOps';
@@ -250,6 +252,19 @@ export const SelectedNodeOverlay = memo(() => {
   const [eraseNodeId, setEraseNodeId] = useState<string | null>(null);
   const [outpaintNodeId, setOutpaintNodeId] = useState<string | null>(null);
   const [rotateNodeId, setRotateNodeId] = useState<string | null>(null);
+  const [resizeNodeId, setResizeNodeId] = useState<string | null>(null);
+  const resizeNode = nodes.find((node) => node.id === resizeNodeId) ?? null;
+  const resizeImageSource = resolveNodeSourceImageUrl(resizeNode);
+  const handleOpenResize = useCallback((nodeId: string) => {
+    setResizeNodeId(nodeId);
+    clearFlowSelection();
+    setSelectedNode(null);
+  }, [clearFlowSelection, setSelectedNode]);
+  const handleCloseResize = useCallback(() => setResizeNodeId(null), []);
+  useEffect(() => {
+    if (resizeNodeId && !resizeNode) setResizeNodeId(null);
+  }, [resizeNodeId, resizeNode]);
+
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) {
@@ -963,6 +978,7 @@ export const SelectedNodeOverlay = memo(() => {
     ?? eraseNodeId
     ?? outpaintNodeId
     ?? rotateNodeId
+    ?? resizeNodeId
     ?? null;
 
   useEffect(() => {
@@ -984,6 +1000,14 @@ export const SelectedNodeOverlay = memo(() => {
   const externalOverlayNodeId = useCanvasStore((state) => state.activeOverlayNodeId);
   const effectiveOverlayNodeId = activeOverlayNodeId ?? externalOverlayNodeId;
 
+  // 故事片段「播放器形态」(故事组内视频节点且未进入编辑态):抑制顶部视频工具条
+  // (剪辑/高清/去字幕/...) 与智能素材把手 —— 这些是画布创作能力,故事语境下收起。
+  const storyEditNodeId = useCanvasStore((state) => state.storyEditNodeId);
+  const selectedIsStoryPlayer =
+    selectedNode != null &&
+    isNodeStoryClip(nodes, selectedNodeId) &&
+    storyEditNodeId !== selectedNodeId;
+
   return (
     <>
       {selectedNode
@@ -1004,6 +1028,7 @@ export const SelectedNodeOverlay = memo(() => {
       {selectedNode
         && !rotateNodeId
         && !effectiveOverlayNodeId
+        && !selectedIsStoryPlayer
         && nodeHasResourceForToolbar(selectedNode) && (
         <NodeActionToolbar
           // 按节点 id 重挂载，确保每次「激活某个节点」都重放顶部菜单的入场动画
@@ -1020,6 +1045,7 @@ export const SelectedNodeOverlay = memo(() => {
           onOpenRedraw={handleOpenRedraw}
           onOpenErase={handleOpenErase}
           onOpenRotate={handleOpenRotate}
+          onOpenResize={handleOpenResize}
         />
       )}
       {/* 逐帧拉片产出的图片/视频/音频卡片把这颗按钮画在卡片内右上角
@@ -1029,6 +1055,7 @@ export const SelectedNodeOverlay = memo(() => {
       {selectedNode &&
         !rotateNodeId &&
         !effectiveOverlayNodeId &&
+        !selectedIsStoryPlayer &&
         !hasInlineCommitButton(selectedNode) && (
           <AssetCommitHandle node={selectedNode} />
         )}
@@ -1073,6 +1100,10 @@ export const SelectedNodeOverlay = memo(() => {
           imageSource={outpaintImageSource}
           onClose={handleCloseOutpaint}
         />
+      )}
+      {resizeNode && resizeImageSource && (
+        <ImageResizeOverlay node={resizeNode} imageSource={resizeImageSource}
+          onClose={handleCloseResize} onCreated={selectAndFocusCanvasNode} />
       )}
       {rotateNode && rotateImageSource && (
         <RotateEditorOverlay

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -472,6 +473,11 @@ FREEZONE_LEAF_EGRESS: dict[str, LeafEgressRule] = {
     "reverse_prompt_from_image": LeafEgressRule(
         "novelvideo.freezone.image_node", LeafEgress.NETWORK, "EG-18b"
     ),
+    "generate_blockout_from_image": LeafEgressRule(
+        "novelvideo.director_world.blockout.generation_agent",
+        LeafEgress.NETWORK,
+        "EG-18b",
+    ),
     # EG-18a `freezone.text.generate` / `.structured`（:51，`gateway-routed`）
     "translate_freezone_text": LeafEgressRule(
         "novelvideo.freezone.text_node", LeafEgress.NETWORK, "EG-18a"
@@ -600,6 +606,103 @@ def _append_node_history(
         canvas_id=str(payload.get("canvas_id") or "default"),
         node_id=node_id,
         record=record,
+    )
+
+
+def _project_video_compose_result_to_canvas(
+    *,
+    ctx: ProjectContext,
+    payload: dict[str, Any],
+    job_id: str,
+    output_url: str,
+    cover_url: str,
+) -> bool:
+    """Persist a completed compose result when this task still owns the node."""
+    from novelvideo.freezone import canvas_store
+
+    canvas_id = str(payload.get("canvas_id") or "").strip()
+    node_id = str(payload.get("node_id") or "").strip()
+    if not canvas_id or not node_id:
+        return False
+    task_key = project_task_state_key(
+        "freezone_video_compose", ctx.project_id, 0, scope=job_id
+    )
+
+    def target_node(canvas: dict | None) -> dict | None:
+        if not isinstance(canvas, dict):
+            return None
+        return next(
+            (
+                node
+                for node in canvas.get("nodes") or []
+                if isinstance(node, dict)
+                and node.get("id") == node_id
+                and node.get("type") == "videoComposeNode"
+            ),
+            None,
+        )
+
+    def skip_if(existing: dict | None) -> dict | None:
+        node = target_node(existing)
+        data = node.get("data") if isinstance(node, dict) else None
+        if not isinstance(data, dict):
+            return {"projected": False, "reason": "target_missing"}
+        if (
+            data.get("resultVideoTaskKey") == task_key
+            and data.get("resultVideoJobId") == job_id
+            and data.get("resultVideoUrl") == output_url
+        ):
+            return {"projected": False, "reason": "already_projected"}
+        if (
+            data.get("generationTaskKey") != task_key
+            or data.get("generationTaskType") != "freezone_video_compose"
+            or data.get("generationTaskJobId") != job_id
+        ):
+            return {"projected": False, "reason": "task_superseded"}
+        return None
+
+    def build_payload(existing: dict | None) -> dict:
+        if not isinstance(existing, dict):
+            raise ValueError("compose canvas disappeared during projection")
+        updated = deepcopy(existing)
+        node = target_node(updated)
+        if node is None or not isinstance(node.get("data"), dict):
+            raise ValueError("compose node disappeared during projection")
+        data = node["data"]
+        data.update(
+            {
+                "resultVideoUrl": output_url,
+                "resultVideoTaskKey": task_key,
+                "resultVideoJobId": job_id,
+                "isGenerating": False,
+                "generationStartedAt": None,
+                "generationTaskKey": None,
+                "generationTaskType": None,
+                "generationTaskJobId": None,
+                "generationError": None,
+            }
+        )
+        if cover_url:
+            data["previewImageUrl"] = cover_url
+        revision = existing.get("revision")
+        updated["revision"] = revision + 1 if isinstance(revision, int) else 1
+        updated["updated_at"] = canvas_store.utc_now_iso()
+        updated["updated_by"] = str(getattr(ctx, "requester_user_id", "") or "")
+        updated["save_source"] = "task_projection"
+        return updated
+
+    state_dir = Path(getattr(ctx, "state_dir", ctx.output_dir))
+    saved = canvas_store.save_canvas(
+        state_dir,
+        canvas_id,
+        base_revision=None,
+        build_payload=build_payload,
+        skip_if=skip_if,
+        enforce_revision=False,
+        save_source="task_projection",
+    )
+    return not bool(
+        saved.response_cache and saved.response_cache.get("projected") is False
     )
 
 
@@ -1424,6 +1527,36 @@ async def _run_freezone_video_compose_async(
     )
     if history_record:
         result["generation_history_record"] = history_record
+    try:
+        projected = await asyncio.to_thread(
+            _project_video_compose_result_to_canvas,
+            ctx=ctx,
+            payload=payload,
+            job_id=job_id,
+            output_url=str(result["output_url"]),
+            cover_url=cover_url,
+        )
+        logger.info(
+            "video_compose.canvas_projection project_id=%s canvas_id=%s "
+            "node_id=%s job_id=%s projected=%s",
+            ctx.project_id,
+            str(payload.get("canvas_id") or ""),
+            str(payload.get("node_id") or ""),
+            job_id,
+            projected,
+        )
+    except Exception:
+        # The media output remains valid even if a transient Canvas lock/storage
+        # failure prevents this best-effort projection. The persisted task handle
+        # lets the frontend retry the same convergence after refresh.
+        logger.exception(
+            "video_compose.canvas_projection_failed project_id=%s canvas_id=%s "
+            "node_id=%s job_id=%s",
+            ctx.project_id,
+            str(payload.get("canvas_id") or ""),
+            str(payload.get("node_id") or ""),
+            job_id,
+        )
     return result
 
 
@@ -1814,6 +1947,63 @@ async def _run_freezone_image_reverse_prompt_async(
     return result
 
 
+async def _run_freezone_image_to_blockout_async(
+    envelope: dict[str, Any],
+    ctx: ProjectContext,
+) -> dict[str, Any]:
+    from novelvideo.api.deps import make_static_url_for_context
+    from novelvideo.director_world.blockout.artifacts import (
+        RESULT_FILENAME,
+        BlockoutGenerationError,
+        write_blockout_artifacts,
+        write_blockout_failure_artifacts,
+    )
+    from novelvideo.director_world.blockout.generation_agent import (
+        generate_blockout_from_image,
+    )
+    from novelvideo.freezone.jobs import ensure_freezone_dirs
+    from novelvideo.freezone.paths import outputs_dir
+
+    payload = envelope.get("payload") or {}
+    job_id = str(payload["job_id"])
+    project_dir = Path(str(payload.get("project_dir") or ctx.output_dir))
+    ensure_freezone_dirs(project_dir)
+    source_path = Path(str(payload["source_path"]))
+    out_dir = outputs_dir(project_dir, "freezone_image_to_blockout") / job_id
+    _update(ctx, "freezone_image_to_blockout", job_id, 0.1, "正在根据参考图搭建白模...")
+    try:
+        generation = await _call_freezone_leaf(
+            envelope,
+            generate_blockout_from_image,
+            "generate_blockout_from_image",
+            image_path=source_path,
+            description=str(payload.get("description") or ""),
+            picture_check=bool(payload.get("picture_check", False)),
+            render_check=bool(payload.get("render_check", False)),
+            model=str(payload.get("model") or "") or None,
+        )
+    except BlockoutGenerationError as exc:
+        write_blockout_failure_artifacts(out_dir, exc)
+        raise
+    _update(ctx, "freezone_image_to_blockout", job_id, 0.9, "正在保存白模...")
+    written = write_blockout_artifacts(out_dir, generation)
+    out = out_dir / RESULT_FILENAME
+    rel = out.relative_to(project_dir).as_posix()
+    # 物件清单只落盘，不进任务状态：任务状态会随进度事件反复下发，150 件物件不该跟着走。
+    return {
+        "job_id": job_id,
+        "output_format": "json",
+        "output_path": str(out),
+        "output_url": make_static_url_for_context(ctx, rel),
+        "reference_camera_id": written["reference_camera_id"],
+        "counts": written["counts"],
+        "warnings": written["warnings"],
+        "compiler_version": written["compiler_version"],
+        "model": generation.model,
+        "retries": max(len(generation.attempts) - 1, 0),
+    }
+
+
 def run_freezone_text_translate(
     envelope: dict[str, Any], ctx: ProjectContext
 ) -> dict[str, Any]:
@@ -1838,6 +2028,15 @@ def run_freezone_image_reverse_prompt(
 ) -> dict[str, Any]:
     return _run_cancellable(
         envelope, _run_freezone_image_reverse_prompt_async(envelope, ctx)
+    )
+
+
+def run_freezone_image_to_blockout(
+    envelope: dict[str, Any],
+    ctx: ProjectContext,
+) -> dict[str, Any]:
+    return _run_cancellable(
+        envelope, _run_freezone_image_to_blockout_async(envelope, ctx)
     )
 
 
@@ -2048,6 +2247,11 @@ register_project_task_runner(
 register_project_task_runner(
     "freezone_image_reverse_prompt",
     run_freezone_image_reverse_prompt,
+    requires_home_node=False,
+)
+register_project_task_runner(
+    "freezone_image_to_blockout",
+    run_freezone_image_to_blockout,
     requires_home_node=False,
 )
 register_project_task_runner(

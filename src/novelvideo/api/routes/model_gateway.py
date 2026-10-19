@@ -10,7 +10,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from novelvideo import config as app_config
+from novelvideo.chat.codex_app_server import restart_shared_codex_runtime_when_idle
 from novelvideo.model_gateway_settings import (
+    AGENT_LLM_MODE_INHERIT,
+    AGENT_LLM_MODE_THIRD_PARTY,
     MODE_CUSTOM,
     CUSTOM_LLM_MODE_ADVANCED,
     CUSTOM_LLM_MODE_RELAYCLAW_BRAINCLAW,
@@ -18,12 +21,14 @@ from novelvideo.model_gateway_settings import (
     MODE_HYBRID,
     build_media_relay_status,
     build_model_gateway_status,
+    get_model_gateway_settings,
     get_effective_media_relay_config,
     get_official_media_catalog_update_status,
     normalize_relay_base_url,
     normalize_api_key,
     parse_comfyui_channel_workflows,
     save_media_relay_config,
+    save_agent_llm_config,
     save_official_media_catalog_auto_update,
     save_official_newapi_key,
     save_relayclaw_brainclaw_key,
@@ -48,7 +53,11 @@ from novelvideo.service_operation_gate import (
     require_legacy_local_service_operation,
 )
 from novelvideo.shared.runtime_env import is_ce_effective
-from novelvideo.media_model_request_schema import validate_media_model_catalog_config
+from novelvideo.media_model_request_schema import (
+    MEDIA_MODEL_CATALOG_TYPES,
+    default_media_model_request,
+    validate_media_model_catalog_config,
+)
 from novelvideo.newapi_provisioner import (
     build_channel_payload,
     build_provisioner_status,
@@ -68,6 +77,14 @@ from novelvideo.newapi_provisioner import (
 )
 
 router = APIRouter(prefix="/model-gateway")
+
+
+def _refresh_runtime_after_gateway_write() -> dict[str, Any]:
+    """Refresh caches and invalidate the effective Agent route on every worker."""
+
+    runtime = refresh_model_gateway_runtime()
+    runtime["codexAppServer"] = restart_shared_codex_runtime_when_idle()
+    return runtime
 
 
 OFFICIAL_ONLY_MEDIA_MODEL_NAMES = {
@@ -174,6 +191,13 @@ class BrainClawGatewayBody(BaseModel):
 
 class CustomLlmModeBody(BaseModel):
     mode: str
+
+
+class AgentLlmConfigBody(BaseModel):
+    mode: str
+    base_url: str | None = Field(default=None, alias="baseUrl")
+    api_key: str | None = Field(default=None, alias="apiKey")
+    model: str | None = None
 
 
 class MediaRelayConfigBody(BaseModel):
@@ -395,21 +419,11 @@ def _build_media_model_channel_specs(
                 media_type = "audio"
             else:
                 media_type = "video"
-        if media_type not in {"image", "video", "audio"}:
+        if media_type not in {*MEDIA_MODEL_CATALOG_TYPES, "audio"}:
             raise ValueError(f"invalid mediaType for media model {model}")
         model_config = dict(item.config)
-        if media_type in {"image", "video"}:
-            model_config.setdefault(
-                "request",
-                {
-                    "endpoint": (
-                        "images/generations"
-                        if media_type == "image"
-                        else "video/generations"
-                    ),
-                    "parameters": [],
-                },
-            )
+        if media_type in MEDIA_MODEL_CATALOG_TYPES:
+            model_config.setdefault("request", default_media_model_request(media_type))
             validate_media_model_catalog_config(model_config, media_type)
         grouped.setdefault(provider, {})[model] = upstream_model
         normalized[model] = {
@@ -585,7 +599,7 @@ async def enable_official_gateway() -> dict[str, Any]:
             detail="official NewAPI gateway is not configured",
         )
     set_model_gateway_mode(MODE_OFFICIAL)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -611,7 +625,7 @@ async def enable_custom_gateway() -> dict[str, Any]:
             status_code=400, detail="local NewAPI gateway is not configured"
         )
     set_model_gateway_mode(MODE_CUSTOM)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -638,7 +652,7 @@ async def enable_hybrid_gateway() -> dict[str, Any]:
             detail="local and official NewAPI gateways must both be configured",
         )
     set_model_gateway_mode(MODE_HYBRID)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -659,7 +673,53 @@ async def save_official_gateway_config(body: OfficialGatewayBody) -> dict[str, A
     if not api_key:
         raise HTTPException(status_code=400, detail="newApiApiKey is required")
     save_official_newapi_key(api_key=api_key, activate=True)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
+    return {
+        "ok": True,
+        "data": build_model_gateway_status(
+            official_base_url=app_config.OFFICIAL_NEWAPI_BASE_URL,
+            official_api_key=app_config.NEWAPI_API_KEY,
+        ),
+        "runtime": runtime,
+    }
+
+
+@router.post("/agent/config")
+async def save_agent_gateway_config(body: AgentLlmConfigBody) -> dict[str, Any]:
+    """Save the CE Agent route independently from media gateway selection."""
+    try:
+        require_ce_gateway_management()
+    except PermissionError as exc:
+        raise _permission_error(exc) from exc
+    if body.mode not in {AGENT_LLM_MODE_INHERIT, AGENT_LLM_MODE_THIRD_PARTY}:
+        raise HTTPException(status_code=400, detail="unsupported Agent LLM mode")
+
+    if body.mode == AGENT_LLM_MODE_THIRD_PARTY:
+        settings = get_model_gateway_settings()
+        saved_base_url = normalize_relay_base_url(
+            settings.get("agent_llm_base_url", "")
+        )
+        base_url = normalize_relay_base_url(body.base_url or saved_base_url)
+        api_key = normalize_api_key(body.api_key)
+        model = str(body.model or settings.get("agent_llm_model", "")).strip()
+        endpoint_changed = bool(body.base_url) and base_url != saved_base_url
+        has_saved_key = bool(normalize_api_key(settings.get("agent_llm_api_key", "")))
+        if not base_url:
+            raise HTTPException(status_code=400, detail="baseUrl is required")
+        if not model:
+            raise HTTPException(status_code=400, detail="model is required")
+        if not api_key and (not has_saved_key or endpoint_changed):
+            raise HTTPException(status_code=400, detail="apiKey is required")
+        save_agent_llm_config(
+            mode=body.mode,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+        )
+    else:
+        save_agent_llm_config(mode=body.mode)
+
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -706,7 +766,7 @@ async def save_custom_brainclaw_config(
         api_key=api_key,
         base_url=base_url,
     )
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -732,7 +792,7 @@ async def enable_custom_brainclaw() -> dict[str, Any]:
             status_code=400, detail="RelayClaw API key is not configured"
         )
     set_custom_llm_mode(CUSTOM_LLM_MODE_RELAYCLAW_BRAINCLAW)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -764,7 +824,7 @@ async def save_custom_llm_routing_mode(body: CustomLlmModeBody) -> dict[str, Any
                 status_code=400, detail="RelayClaw API key is not configured"
             )
     set_custom_llm_mode(body.mode)
-    runtime = refresh_model_gateway_runtime()
+    runtime = _refresh_runtime_after_gateway_write()
     return {
         "ok": True,
         "data": build_model_gateway_status(
@@ -886,7 +946,7 @@ async def init_custom_newapi(body: NewApiInitBody = NewApiInitBody()) -> dict[st
             activate=True,
         )
         _save_request_database_config(cfg, body.database)
-        runtime = refresh_model_gateway_runtime()
+        runtime = _refresh_runtime_after_gateway_write()
     except PermissionError as exc:
         raise _permission_error(exc) from exc
     except ValueError as exc:

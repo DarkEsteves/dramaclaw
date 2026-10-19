@@ -11,7 +11,7 @@
  */
 import { useCanvasStore } from '@/stores/canvasStore';
 
-/** Clear view-only selection on entry without changing content or undo history. */
+/** 进入画布时清掉仅属于上一视图会话的选中态，不改内容和撤销历史。 */
 export function clearCanvasSelection(): void {
   useCanvasStore.setState((state) => {
     const hasSelectedNodes = state.nodes.some((node) => node.selected);

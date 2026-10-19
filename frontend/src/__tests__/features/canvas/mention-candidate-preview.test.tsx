@@ -18,7 +18,7 @@ it('previews the hovered @ candidate and removes the preview on Escape', () => {
   Object.defineProperty(range, 'getBoundingClientRect', { value: () => new DOMRect(180, 180, 0, 14) });
   window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
   fireEvent.input(editor);
-  const row = screen.getByText('@图片2').closest('button')!;
+  const row = screen.getByText((_, element) => element?.textContent === '@图片2').closest('button')!;
   fireEvent.mouseEnter(row);
   expect(screen.getByRole('img', { name: '引用素材预览' }).querySelector('img')).toHaveAttribute('src', '/static/b.png');
   fireEvent.keyDown(editor, { key: 'Escape' });
@@ -30,7 +30,7 @@ it('previews replacement candidates without changing the referenced asset until 
   const change = vi.fn();
   const { container } = render(<PromptMentionEditor value="@图片1 " onChange={change} candidates={candidates} />);
   fireEvent.doubleClick(container.querySelector('.mention-chip')!);
-  const row = screen.getByText('@图片2').closest('button')!;
+  const row = screen.getByText((_, element) => element?.textContent === '@图片2').closest('button')!;
   fireEvent.mouseEnter(row);
   expect(screen.getByRole('img', { name: '引用素材预览' }).querySelector('img')).toHaveAttribute('src', '/static/b.png');
   expect(change).not.toHaveBeenCalled();

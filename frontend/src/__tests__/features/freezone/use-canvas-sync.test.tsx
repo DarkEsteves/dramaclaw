@@ -18,14 +18,19 @@ import {
 } from "@/features/freezone/canvasDraftStorage";
 import {
   applyRemoteFreezoneCanvas,
+  refreshRemoteFreezoneCanvas,
   consumeQueuedLocalFreezoneProjections,
   queueLocalFreezoneProjection,
+  registerFreezoneCanvasRuntime,
   removeLocalFreezoneProjection,
 } from "@/features/freezone/canvasSyncRuntime";
 import { holdCanvasAutosave } from "@/features/freezone/canvasAutosaveHold";
 import { projectionScopedId } from "@/features/freezone/projectionGraphIds";
 import { useShotMetadataStore } from "@/features/freezone/shotMetadataStore";
 import { CANVAS_NODE_TYPES } from "@/features/canvas/domain/canvasNodes";
+import {
+  reconcileCompletedVideoComposeProjection,
+} from "@/features/canvas/application/videoComposeProjection";
 import { useCanvasStore } from "@/stores/canvasStore";
 
 vi.mock("@/api/canvas", async (importOriginal) => {
@@ -61,20 +66,24 @@ describe("useCanvasSync hydrate lifecycle", () => {
     useShotMetadataStore.getState().hydrate({});
   });
 
-  it("opens a saved canvas without restoring selected nodes or edges", async () => {
+  it("打开已保存画布时不恢复节点或连线选中态", async () => {
     const nodes = [
       { id: "saved-a", type: CANVAS_NODE_TYPES.upload, position: { x: 12, y: 34 }, data: {}, selected: true },
       { id: "saved-b", type: CANVAS_NODE_TYPES.upload, position: { x: 220, y: 34 }, data: {}, selected: false },
     ];
     vi.mocked(getFreezoneCanvas).mockResolvedValue({
-      nodes, edges: [{ id: "saved-edge", source: "saved-a", target: "saved-b", selected: true }], revision: 1,
+      nodes,
+      edges: [{ id: "saved-edge", source: "saved-a", target: "saved-b", selected: true }],
+      revision: 1,
     });
+
     const hook = renderHook(() => useCanvasSync("entry-project", "saved-selection"));
     await waitFor(() => expect(hook.result.current.status).toBe("ready"));
+
     const state = useCanvasStore.getState();
     expect(state.nodes).toHaveLength(2);
-    expect(state.nodes.every(node => !node.selected)).toBe(true);
-    expect(state.edges.every(edge => !edge.selected)).toBe(true);
+    expect(state.nodes.every((node) => !node.selected)).toBe(true);
+    expect(state.edges.every((edge) => !edge.selected)).toBe(true);
     expect(state.selectedNodeId).toBeNull();
     expect(state.nodes[0].position).toEqual({ x: 12, y: 34 });
     expect(state.userEditsSinceHydrate).toBe(0);
@@ -84,25 +93,28 @@ describe("useCanvasSync hydrate lifecycle", () => {
     hook.unmount();
   });
 
-  it("clears cached selection immediately on re-entry and allows later manual selection", async () => {
+  it("重新进入缓存画布时立即清除旧选择，之后仍可手动选择", async () => {
     const nodes = [{ id: "cached-node", type: CANVAS_NODE_TYPES.upload, position: { x: 0, y: 0 }, data: {} }];
     vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes, edges: [], revision: 1 });
     const first = renderHook(() => useCanvasSync("entry-project", "cached-selection"));
     await waitFor(() => expect(first.result.current.status).toBe("ready"));
     act(() => {
-      useCanvasStore.setState(state => ({
-        nodes: state.nodes.map(node => ({ ...node, selected: true })), selectedNodeId: "cached-node",
+      useCanvasStore.setState((state) => ({
+        nodes: state.nodes.map((node) => ({ ...node, selected: true })),
+        selectedNodeId: "cached-node",
       }));
     });
     first.unmount();
+
     vi.mocked(getFreezoneCanvas).mockImplementation(() => new Promise(() => {}));
     const second = renderHook(() => useCanvasSync("entry-project", "cached-selection"));
-    expect(useCanvasStore.getState().nodes.every(node => !node.selected)).toBe(true);
+    expect(useCanvasStore.getState().nodes.every((node) => !node.selected)).toBe(true);
     expect(useCanvasStore.getState().selectedNodeId).toBeNull();
     await waitFor(() => expect(second.result.current.status).toBe("ready"));
     act(() => {
-      useCanvasStore.setState(state => ({
-        nodes: state.nodes.map(node => ({ ...node, selected: true })), selectedNodeId: "cached-node",
+      useCanvasStore.setState((state) => ({
+        nodes: state.nodes.map((node) => ({ ...node, selected: true })),
+        selectedNodeId: "cached-node",
       }));
     });
     second.rerender();
@@ -111,23 +123,53 @@ describe("useCanvasSync hydrate lifecycle", () => {
     second.unmount();
   });
 
-  it("restores a dirty local draft and its undo history without its old selection", async () => {
+  it("恢复本地草稿及撤销历史时不恢复旧选中态", async () => {
     writeCanvasDraft("entry-project", "draft-selection", {
       baseRevision: 1,
       nodes: [{ id: "draft-selected", type: CANVAS_NODE_TYPES.upload, position: { x: 56, y: 78 }, data: {}, selected: true }],
-      edges: [], viewport: null, metadata: null, history: { past: [{ nodes: [], edges: [] }], future: [] },
+      edges: [],
+      viewport: null,
+      metadata: null,
+      history: { past: [{ nodes: [], edges: [] }], future: [] },
       mutation: { userEditsSinceHydrate: 2, lastMutationSource: "user_edit", pendingClearIntent: false },
       updatedAt: Date.now(),
     });
     vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [], edges: [], revision: 1 });
+
     const hook = renderHook(() => useCanvasSync("entry-project", "draft-selection"));
     await waitFor(() => expect(hook.result.current.status).toBe("ready"));
+
     const state = useCanvasStore.getState();
-    expect(state.nodes[0]).toMatchObject({ id: "draft-selected", position: { x: 56, y: 78 }, selected: false });
+    expect(state.nodes[0]).toMatchObject({
+      id: "draft-selected",
+      position: { x: 56, y: 78 },
+      selected: false,
+    });
     expect(state.selectedNodeId).toBeNull();
     expect(state.history.past).toHaveLength(1);
     expect(state.userEditsSinceHydrate).toBe(2);
     hook.unmount();
+  });
+
+  it("repairs story prompt mentions for image links saved before prompt synchronization", async () => {
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({
+      revision: 1,
+      nodes: [
+        { id: "image", type: CANVAS_NODE_TYPES.imageGen, position: { x: 0, y: 0 },
+          data: { displayName: "主角", imageUrl: "/static/character.png", keyElementCategory: "character" } },
+        { id: "video", type: CANVAS_NODE_TYPES.video, position: { x: 400, y: 0 },
+          data: { storySegmentId: "opening", prompt: "主角走进车站。" } },
+      ],
+      edges: [{ id: "reference", source: "image", target: "video", data: { link_type: "media_input_for" } }],
+      viewport: null,
+    } as unknown as Awaited<ReturnType<typeof getFreezoneCanvas>>);
+
+    renderHook(() => useCanvasSync("project-a", "story_reference_repair"));
+
+    await waitFor(() => {
+      const prompt = useCanvasStore.getState().nodes.find((node) => node.id === "video")?.data.prompt;
+      expect(prompt).toContain("@图片1（主角） 是人物身份参考");
+    });
   });
 
   // Canvas 现在跨项目常驻（_app.tsx 不再按项目重挂 freezone），所以 hydrate 必须
@@ -1126,6 +1168,474 @@ describe("useCanvasSync hydrate lifecycle", () => {
       for (let i = 0; i < 12; i += 1) await Promise.resolve();
     });
     expect(putBaseRevisions).toEqual([7, 100]);
+
+    hook.unmount();
+  });
+
+  it("rebases a completed compose projection before saving the browser result node", async () => {
+    vi.useFakeTimers();
+    const taskKey = "task:freezone_video_compose:project:project-a:0:compose-job-1";
+    const localComposeNode = {
+      id: "compose-1",
+      type: CANVAS_NODE_TYPES.videoCompose,
+      position: { x: 20, y: 30 },
+      data: {
+        displayName: "Final cut",
+        draftTimeline: { resolution: "1080p", tracks: [] },
+        isGenerating: true,
+        generationTaskKey: taskKey,
+        generationTaskType: "freezone_video_compose",
+        generationTaskJobId: "compose-job-1",
+      },
+    } as any;
+    vi.mocked(getFreezoneCanvas)
+      .mockResolvedValueOnce({
+        nodes: [localComposeNode],
+        edges: [],
+        revision: 7,
+      })
+      .mockResolvedValueOnce({
+        nodes: [
+          {
+            ...localComposeNode,
+            data: {
+              ...localComposeNode.data,
+              resultVideoUrl: "/static/project/compose-job-1.mp4",
+              resultVideoTaskKey: taskKey,
+              resultVideoJobId: "compose-job-1",
+              isGenerating: false,
+              generationStartedAt: null,
+              generationTaskKey: null,
+              generationTaskType: null,
+              generationTaskJobId: null,
+              generationError: null,
+            },
+          },
+        ],
+        edges: [],
+        revision: 8,
+        save_source: "task_projection" as any,
+      });
+    let serverRevision = 8;
+    vi.mocked(putFreezoneCanvas).mockImplementation(
+      async (_project, _canvasId, payload) => {
+        expect(payload.base_revision).toBe(serverRevision);
+        serverRevision += 1;
+        return { saved: true, revision: serverRevision };
+      },
+    );
+
+    const hook = renderHook(() =>
+      useCanvasSync("project-a", "compose_projection_user_eric"),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.revision).toBe(7);
+
+    await act(async () => {
+      expect(
+        await reconcileCompletedVideoComposeProjection({
+          projectId: "project-a",
+          canvasId: "compose_projection_user_eric",
+          nodeId: "compose-1",
+          taskKey,
+          jobId: "compose-job-1",
+        }),
+      ).toBe("applied");
+    });
+    expect(hook.result.current.revision).toBe(8);
+
+    act(() => {
+      const store = useCanvasStore.getState();
+      const resultNodeId = store.addNode(
+        CANVAS_NODE_TYPES.video,
+        { x: 600, y: 30 },
+        {
+          videoUrl: "/static/project/compose-job-1.mp4",
+          composeSourceNodeId: "compose-1",
+        },
+      );
+      store.addEdge("compose-1", resultNodeId);
+      store.updateNodeData("compose-1", {
+        resultVideoUrl: "/static/project/compose-job-1.mp4",
+        resultVideoTaskKey: taskKey,
+        resultVideoJobId: "compose-job-1",
+      });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(800);
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+
+    expect(putFreezoneCanvas).toHaveBeenCalled();
+    const saveCalls = vi.mocked(putFreezoneCanvas).mock.calls;
+    const saved = saveCalls[saveCalls.length - 1][2];
+    expect(saved.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "compose-1",
+          data: expect.objectContaining({
+            resultVideoUrl: "/static/project/compose-job-1.mp4",
+            resultVideoTaskKey: taskKey,
+            resultVideoJobId: "compose-job-1",
+            isGenerating: false,
+            generationTaskKey: null,
+          }),
+        }),
+        expect.objectContaining({
+          data: expect.objectContaining({ composeSourceNodeId: "compose-1" }),
+        }),
+      ]),
+    );
+    expect(hook.result.current.status).toBe("ready");
+
+    hook.unmount();
+  });
+
+  it("does not adopt a compose projection revision that also contains another writer", async () => {
+    vi.useFakeTimers();
+    const taskKey = "task:freezone_video_compose:project:project-a:0:compose-job-2";
+    const localComposeNode = {
+      id: "compose-1",
+      type: CANVAS_NODE_TYPES.videoCompose,
+      position: { x: 20, y: 30 },
+      data: {
+        isGenerating: true,
+        generationTaskKey: taskKey,
+        generationTaskType: "freezone_video_compose",
+        generationTaskJobId: "compose-job-2",
+      },
+    } as any;
+    const projectedComposeNode = {
+      ...localComposeNode,
+      data: {
+        ...localComposeNode.data,
+        resultVideoUrl: "/static/project/compose-job-2.mp4",
+        resultVideoTaskKey: taskKey,
+        resultVideoJobId: "compose-job-2",
+        isGenerating: false,
+        generationTaskKey: null,
+        generationTaskType: null,
+        generationTaskJobId: null,
+      },
+    };
+    const remoteAfterConcurrentWrite = {
+      nodes: [
+        projectedComposeNode,
+        {
+          id: "added-by-other-tab",
+          type: CANVAS_NODE_TYPES.upload,
+          position: { x: 400, y: 30 },
+          data: { imageUrl: "/static/project/other.png" },
+        },
+      ],
+      edges: [],
+      revision: 9,
+      save_source: "task_projection" as any,
+    };
+    vi.mocked(getFreezoneCanvas)
+      .mockResolvedValueOnce({
+        nodes: [localComposeNode],
+        edges: [],
+        revision: 7,
+      })
+      .mockResolvedValue(remoteAfterConcurrentWrite);
+    vi.mocked(putFreezoneCanvas).mockRejectedValue(
+      new ApiError("conflict", 409, {}),
+    );
+
+    const hook = renderHook(() =>
+      useCanvasSync("project-a", "compose_concurrent_user_eric"),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.revision).toBe(7);
+
+    await act(async () => {
+      expect(
+        await reconcileCompletedVideoComposeProjection({
+          projectId: "project-a",
+          canvasId: "compose_concurrent_user_eric",
+          nodeId: "compose-1",
+          taskKey,
+          jobId: "compose-job-2",
+        }),
+      ).toBe("unsafe_remote");
+    });
+    expect(hook.result.current.revision).toBe(7);
+
+    act(() => {
+      const store = useCanvasStore.getState();
+      const resultNodeId = store.addNode(
+        CANVAS_NODE_TYPES.video,
+        { x: 600, y: 30 },
+        {
+          videoUrl: "/static/project/compose-job-2.mp4",
+          composeSourceNodeId: "compose-1",
+        },
+      );
+      store.addEdge("compose-1", resultNodeId);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(800);
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+
+    expect(putFreezoneCanvas).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(putFreezoneCanvas).mock.calls[0][2]).toMatchObject({
+      base_revision: 7,
+    });
+    expect(hook.result.current.status).toBe("conflict");
+    expect(readCanvasDraft("project-a", "compose_concurrent_user_eric")).not.toBeNull();
+
+    hook.unmount();
+  });
+
+  it.each([false, true])("ignores late Agent refreshes without disturbing local edits or the next save (dirty: %s)", async dirty => {
+    vi.useFakeTimers();
+    const canvasId = `agent_refresh_reordered_${dirty}`;
+    const remote = (revision: number, id: string) => ({
+      nodes: [{ id, type: CANVAS_NODE_TYPES.upload, position: { x: 0, y: 0 },
+        data: { imageUrl: `/static/${id}.png` } }],
+      edges: [], revision, metadata: null,
+    });
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [], edges: [], revision: 7, metadata: null });
+    vi.mocked(putFreezoneCanvas).mockResolvedValue({ saved: true, revision: 10 });
+    const hook = renderHook(() => useCanvasSync("project-a", canvasId));
+    await act(async () => {
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+    });
+    expect(hook.result.current.status).toBe("ready");
+    let resolveOld!: (value: ReturnType<typeof remote>) => void;
+    let resolveNew!: (value: ReturnType<typeof remote>) => void;
+    vi.mocked(getFreezoneCanvas)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveNew = resolve; }));
+    const old = refreshRemoteFreezoneCanvas("project-a", canvasId, { protectUnsavedLocalEdits: true });
+    const fresh = refreshRemoteFreezoneCanvas("project-a", canvasId, { protectUnsavedLocalEdits: true });
+    await act(async () => {
+      resolveNew(remote(9, "newest"));
+      expect(await fresh).toBe(true);
+    });
+    expect(hook.result.current.revision).toBe(9);
+    if (dirty) {
+      act(() => { useCanvasStore.getState().addNode(CANVAS_NODE_TYPES.upload, { x: 10, y: 10 }, {}); });
+    }
+    const nodesBeforeOldResponse = useCanvasStore.getState().nodes;
+    await act(async () => {
+      resolveOld(remote(8, "outdated"));
+      expect(await old).toBe(false);
+    });
+    expect(hook.result.current.revision).toBe(9);
+    expect(hook.result.current.status).toBe("ready");
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.readConflictSnapshot()).toBeNull();
+    expect(useCanvasStore.getState().nodes).toEqual(nodesBeforeOldResponse);
+    if (!dirty) {
+      act(() => { useCanvasStore.getState().addNode(CANVAS_NODE_TYPES.upload, { x: 10, y: 10 }, {}); });
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(800);
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+    });
+    expect(putFreezoneCanvas).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(putFreezoneCanvas).mock.calls[0][2].base_revision).toBe(9);
+    expect(hook.result.current.revision).toBe(10);
+    const savedNodes = useCanvasStore.getState().nodes;
+    act(() => {
+      expect(applyRemoteFreezoneCanvas("project-a", canvasId, remote(9, "outdated-after-save"))).toBe(false);
+    });
+    expect(hook.result.current.revision).toBe(10);
+    expect(useCanvasStore.getState().nodes).toEqual(savedNodes);
+    hook.unmount();
+  });
+
+  it("adopts consecutive Agent remote refreshes when normalized local state is fully saved", async () => {
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({
+      nodes: [],
+      edges: [],
+      revision: 7,
+      metadata: null,
+    });
+
+    const hook = renderHook(() =>
+      useCanvasSync("project-a", "agent_refresh_clean_user_eric"),
+    );
+    await waitFor(() => expect(hook.result.current.status).toBe("ready"));
+
+    let applied: boolean | null = false;
+    act(() => {
+      applied = applyRemoteFreezoneCanvas(
+        "project-a",
+        "agent_refresh_clean_user_eric",
+        {
+          nodes: [
+            {
+              id: "agent-story-node",
+              type: CANVAS_NODE_TYPES.upload,
+              position: { x: 0, y: 0 },
+              data: { imageUrl: "/static/agent.png" },
+            },
+          ],
+          edges: [],
+          revision: 8,
+          metadata: null,
+        },
+        undefined,
+        { protectUnsavedLocalEdits: true },
+      );
+    });
+
+    expect(applied).toBe(true);
+    expect(hook.result.current.status).toBe("ready");
+    expect(hook.result.current.revision).toBe(8);
+    expect(useCanvasStore.getState().nodes.map((node) => node.id)).toEqual([
+      "agent-story-node",
+    ]);
+
+    act(() => {
+      applied = applyRemoteFreezoneCanvas(
+        "project-a",
+        "agent_refresh_clean_user_eric",
+        {
+          nodes: [
+            {
+              id: "agent-story-node-v2",
+              type: CANVAS_NODE_TYPES.upload,
+              position: { x: 20, y: 20 },
+              data: { imageUrl: "/static/agent-v2.png" },
+            },
+          ],
+          edges: [],
+          revision: 9,
+          metadata: null,
+        },
+        undefined,
+        { protectUnsavedLocalEdits: true },
+      );
+    });
+
+    expect(applied).toBe(true);
+    expect(hook.result.current.status).toBe("ready");
+    expect(hook.result.current.revision).toBe(9);
+    expect(useCanvasStore.getState().nodes.map((node) => node.id)).toEqual([
+      "agent-story-node-v2",
+    ]);
+
+    hook.unmount();
+  });
+
+  it.each([
+    ["was not written by task projection", "autosave", "compose-job-3"],
+    ["belongs to a different task", "task_projection", "other-job"],
+  ])(
+    "does not adopt a next compose revision that %s",
+    async (_label, saveSource, resultJobId) => {
+      const taskKey = "task:freezone_video_compose:project:project-a:0:compose-job-3";
+      vi.mocked(getFreezoneCanvas).mockResolvedValue({
+        nodes: [
+          {
+            id: "compose-1",
+            type: CANVAS_NODE_TYPES.videoCompose,
+            position: { x: 20, y: 30 },
+            data: {
+              resultVideoUrl: "/static/project/compose-job-3.mp4",
+              resultVideoTaskKey: taskKey,
+              resultVideoJobId: resultJobId,
+            },
+          },
+        ],
+        edges: [],
+        revision: 8,
+        save_source: saveSource as any,
+      });
+      const applyRemote = vi.fn();
+      const unregister = registerFreezoneCanvasRuntime(
+        "project-a",
+        "compose_guard_user_eric",
+        applyRemote,
+        undefined,
+        undefined,
+        undefined,
+        () => 7,
+      );
+
+      expect(
+        await reconcileCompletedVideoComposeProjection({
+          projectId: "project-a",
+          canvasId: "compose_guard_user_eric",
+          nodeId: "compose-1",
+          taskKey,
+          jobId: "compose-job-3",
+        }),
+      ).toBe("unsafe_remote");
+      expect(applyRemote).not.toHaveBeenCalled();
+
+      unregister();
+    },
+  );
+
+  it("preserves genuinely unsaved local edits when an Agent remote refresh arrives", async () => {
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({
+      nodes: [],
+      edges: [],
+      revision: 7,
+      metadata: null,
+    });
+
+    const canvasId = "agent_refresh_dirty_user_eric";
+    const hook = renderHook(() => useCanvasSync("project-a", canvasId));
+    await waitFor(() => expect(hook.result.current.status).toBe("ready"));
+
+    act(() => {
+      useCanvasStore
+        .getState()
+        .addNode(CANVAS_NODE_TYPES.upload, { x: 10, y: 10 }, {});
+    });
+
+    let applied: boolean | null = true;
+    act(() => {
+      applied = applyRemoteFreezoneCanvas(
+        "project-a",
+        canvasId,
+        {
+          nodes: [
+            {
+              id: "agent-story-node",
+              type: CANVAS_NODE_TYPES.upload,
+              position: { x: 0, y: 0 },
+              data: { imageUrl: "/static/agent.png" },
+            },
+          ],
+          edges: [],
+          revision: 8,
+          metadata: null,
+        },
+        undefined,
+        {
+          protectUnsavedLocalEdits: true,
+          conflictMessage: "Agent update overlaps unsaved local edits",
+        },
+      );
+    });
+
+    expect(applied).toBe(false);
+    expect(hook.result.current.status).toBe("conflict");
+    expect(hook.result.current.error).toBe(
+      "Agent update overlaps unsaved local edits",
+    );
+    expect(hook.result.current.revision).toBe(7);
+    expect(useCanvasStore.getState().nodes).toHaveLength(1);
+    expect(useCanvasStore.getState().nodes[0]?.id).not.toBe("agent-story-node");
+    expect(hook.result.current.readConflictSnapshot()).toMatchObject({
+      canvas_id: canvasId,
+    });
 
     hook.unmount();
   });

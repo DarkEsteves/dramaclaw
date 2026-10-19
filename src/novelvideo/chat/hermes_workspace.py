@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -31,7 +32,7 @@ DEFAULT_HERMES_SKILLS = {
 }
 DEFAULT_HERMES_PLUGINS = {"dramaclaw"}
 DEFAULT_HERMES_TOOLSETS = {"hermes-acp"}
-FREEZONE_HERMES_SKILLS = {"freezone", "workflows"}
+FREEZONE_HERMES_SKILLS = {"freezone", "interactive-story", "workflows"}
 FREEZONE_HERMES_PLUGINS = {"freezone"}
 _GENERATED_WORKFLOW_SKILL_MARKER = ".dramaclaw-workflow-skill.json"
 FREEZONE_HERMES_PYTHON_HOOK_DIR = ".dramaclaw-python"
@@ -331,9 +332,9 @@ def _root_value(*names: str) -> str:
 
 def _effective_newapi_gateway() -> tuple[str, str]:
     """Return the independent LLM gateway used by Hermes."""
-    from novelvideo.model_gateway_settings import get_effective_llm_config
+    from novelvideo.model_gateway_settings import get_effective_agent_llm_config
 
-    gateway = get_effective_llm_config()
+    gateway = get_effective_agent_llm_config()
     return gateway.api_key, gateway.base_url
 
 
@@ -348,20 +349,42 @@ def effective_gateway_fingerprint() -> str:
     return hashlib.sha256(material).hexdigest()
 
 
+def effective_gateway_runtime_fingerprint() -> str:
+    """Fingerprint the non-secret route baked into a Hermes worker.
+
+    Credentials are injected per turn and deliberately excluded. The endpoint,
+    model, and wire protocol are worker configuration, so changing any of them
+    must rotate an existing worker before it serves another turn.
+    """
+    _api_key, base_url = _effective_newapi_gateway()
+    parsed = urlsplit(str(base_url or "").strip().rstrip("/"))
+    normalized_base_url = (
+        f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+    )
+    material = (
+        f"{normalized_base_url}\n{_hermes_model_default()}\n{_hermes_model_api_mode()}"
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def effective_gateway_credentials() -> tuple[str, str]:
     """Return the NewAPI credentials injected into a newly spawned worker."""
     return _effective_newapi_gateway()
 
 
 def _hermes_model_default() -> str:
-    from novelvideo.model_gateway_settings import get_effective_llm_config
+    from novelvideo.model_gateway_settings import get_effective_agent_llm_config
     from novelvideo.shared.runtime_env import is_ce_effective
 
     # Only CE resolves the route from its gateway settings database. EE keeps
     # the deployment environment in charge, so HERMES_MODEL selects the alias
     # and BrainClaw is reached by pointing it at the BrainClaw alias.
-    if is_ce_effective() and get_effective_llm_config().is_brainclaw:
-        return "brainclaw"
+    if is_ce_effective():
+        gateway = get_effective_agent_llm_config()
+        if gateway.is_brainclaw:
+            return "brainclaw"
+        if gateway.model:
+            return gateway.model
     return (
         _root_value(
             "HERMES_MODEL",
@@ -373,6 +396,21 @@ def _hermes_model_default() -> str:
 
 
 def _hermes_model_api_mode() -> str:
+    from novelvideo.model_gateway_settings import (
+        AGENT_LLM_MODE_THIRD_PARTY,
+        get_effective_agent_llm_config,
+    )
+    from novelvideo.shared.runtime_env import is_ce_effective
+
+    # The CE third-party Agent contract is shared with Codex App Server and
+    # explicitly requires the OpenAI Responses API. Hermes calls this transport
+    # ``codex_responses``; forcing it here keeps both runtimes on the same wire
+    # protocol instead of silently using Chat Completions in local development.
+    if (
+        is_ce_effective()
+        and get_effective_agent_llm_config().mode == AGENT_LLM_MODE_THIRD_PARTY
+    ):
+        return "codex_responses"
     return _root_value("HERMES_MODEL_API_MODE") or _DEFAULT_HERMES_MODEL_API_MODE
 
 
@@ -770,11 +808,11 @@ def _render_workflow_skill(item: dict) -> tuple[str, dict[str, object]]:
 ## 执行规则
 
 1. 本 Skill 已由用户明确选择。只调用一次 `freezone_get_workflow_skill`，固定传入 `skill_id=\"{skill_id}\"`；不要再次选择或替换 Skill。只补充 `input_contract.missing_required`，不要重复询问已经推断或有默认值的参数。
-2. 生成精简 `freezone_workflow_intent.v1`，以结构化 JSON 对象（不是字符串）调用 `freezone_prepare_workflow_draft`。不要传 `draft_id` 或调用 `execute_code`。
+2. 先用 `freezone_begin_agent_product_generation(product_kind="workflow_result", generation_session_id=本次会话ID, skill_id="{skill_id}", skill_version=规划包版本, normalized_inputs=已确认输入)` 取得本次 `operation_id`；`skill_version` 使用第 1 步返回值，不猜版本。普通需求生成精简 `freezone_workflow_intent.v1` 并调用 `freezone_prepare_workflow_draft`；用户已确认逐镜头清单或指定精确拓扑时，按已加载 Skill 的可用 Recipe 编写完整 `freezone_workflow_plan.v1`，调用 `freezone_prepare_workflow_plan_draft`。两者都以结构化 JSON 对象（不是字符串）提交 `operation_id`，并显式传入 `run_after_create`：创建并生成/运行时为 `true`，仅创建时为 `false`；“可以”“确认”等简短回复沿用上一轮方案的执行策略。不要传 `draft_id` 或调用 `execute_code`。
 3. 返回草稿后，严格按预览向用户确认。
 4. 用户调整方案时调用 `freezone_patch_workflow_draft`，只提交发生变化的字段。
 5. 用户确认方案后调用 `freezone_confirm_workflow_draft`，始终使用已确认的 draft_id 和 revision。
-6. Recipe 选择、节点展开、稳定 ID、连线、布局和合成全部交给工具；不要手写 WorkflowPlan 或逐节点创建。
+6. 普通 Intent 的节点展开、稳定 ID、连线、布局和合成由工具完成；精确拓扑只填写完整 Plan 的语义节点、依赖和分组，最终画布命令仍由工具编译。不得手写画布命令或逐节点创建。
 
 ## 业务说明
 
@@ -838,17 +876,19 @@ def _sync_freezone_workflow_skills(skills_dir: Path, username: str) -> None:
 def _materialize_skill_links(skills_dir: Path, *, profile: str = "director") -> None:
     """Create / refresh symlinks from skills_dir/<name> → repo-pinned skills.
 
-    The source of truth is ``DramaClaw/.hermes/skills/`` so a fresh checkout
-    has the same Hermes skills on every machine.
+    Hermes-native skills come from ``DramaClaw/.hermes/skills/``. Runtime-
+    neutral skills come from ``src/novelvideo/agent_skills/``; ``agent-kit``
+    contains synchronized publication copies, not runtime dependencies.
 
     Idempotent: stale links to dirs that no longer exist in the source are
     removed; new skills are added; existing real directories are left alone.
     """
-    src_skills = DRAMACLAW_ROOT / ".hermes" / "skills"
-    if not src_skills.is_dir():
+    hermes_skills = DRAMACLAW_ROOT / ".hermes" / "skills"
+    shared_skills = DRAMACLAW_ROOT / "src" / "novelvideo" / "agent_skills"
+    if not hermes_skills.is_dir() and not shared_skills.is_dir():
         _log.info(
-            "hermes skills source not found at %s — skipping skill links",
-            src_skills,
+            "hermes skill sources not found under %s — skipping skill links",
+            DRAMACLAW_ROOT,
         )
         return
 
@@ -863,10 +903,20 @@ def _materialize_skill_links(skills_dir: Path, *, profile: str = "director") -> 
         for name in os.environ.get(env_name, ",".join(sorted(defaults))).split(",")
         if name.strip()
     }
+    available: dict[str, Path] = {}
+    if hermes_skills.is_dir():
+        available.update(
+            (path.name, path.resolve())
+            for path in hermes_skills.iterdir()
+            if path.is_dir()
+        )
+    shared_interactive_story = shared_skills / "interactive-story"
+    if (shared_interactive_story / "SKILL.md").is_file():
+        available["interactive-story"] = shared_interactive_story.resolve()
     want = {
-        p.name: p.resolve()
-        for p in src_skills.iterdir()
-        if p.is_dir() and (not allowed or p.name in allowed)
+        name: target
+        for name, target in available.items()
+        if not allowed or name in allowed
     }
 
     # Add / refresh links
@@ -1371,6 +1421,7 @@ def _materialize_plugin_links(plugins_dir: Path, *, profile: str = "director") -
 __all__ = [
     "effective_gateway_credentials",
     "effective_gateway_fingerprint",
+    "effective_gateway_runtime_fingerprint",
     "ensure_user_hermes_workspace",
     "list_freezone_hermes_workflow_skills",
     "sync_freezone_hermes_workflow_skills",

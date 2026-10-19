@@ -380,7 +380,9 @@ export function NodeGenerationHistory({
   if (!isLoading && sorted.length === 0) return null;
 
   return (
-    <div className={`flex min-h-0 flex-col gap-1.5 ${layout === 'vertical' ? 'max-h-full' : ''} ${disabled ? 'cursor-not-allowed opacity-50' : ''} ${className ?? ''}`}>
+    <div
+      className={`flex min-h-0 flex-col gap-1.5 ${layout === 'vertical' ? 'max-h-full' : ''} ${disabled ? 'cursor-not-allowed opacity-50' : ''} ${className ?? ''}`}
+    >
       <div className="flex items-center justify-between px-0.5">
         <span className="inline-flex items-center gap-1 text-[11px] font-medium text-text-muted">
           {layout === 'horizontal' && <History className="h-3 w-3" />}

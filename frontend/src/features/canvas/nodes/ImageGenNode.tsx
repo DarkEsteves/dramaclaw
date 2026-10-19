@@ -44,9 +44,7 @@ import {
 import { AddNodeToChatButton } from '@/features/canvas/ui/AddNodeToChatButton';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
 import { PanelExpandButton } from '@/features/canvas/ui/PanelExpandButton';
-import {
-  OperationPanelShell,
-} from '@/features/canvas/ui/OperationPanelShell';
+import { OperationPanelShell } from '@/features/canvas/ui/OperationPanelShell';
 import { NodeGenerationOverlay } from '@/features/canvas/ui/NodeGenerationOverlay';
 import { CanvasNodeImage } from '@/features/canvas/ui/CanvasNodeImage';
 import { useAlbumPendingTotal } from '@/features/canvas/nodes/shared/albumPendingTotals';
@@ -148,8 +146,6 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
   const updateNodeSize = useCanvasStore((state) => state.updateNodeSize);
   const addNodeAction = useCanvasStore((state) => state.addNode);
   const addEdgeAction = useCanvasStore((state) => state.addEdge);
-  const [panelExpanded, setPanelExpanded] = useState(false);
-  const handleGenerationSubmitted = useCallback(() => setPanelExpanded(false), []);
 
   // Per-node generation history. Only fetch while the node is selected so an
   // unselected canvas full of nodes doesn't fan out a request each. `refresh`
@@ -175,13 +171,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
     closeReferenceErrors,
     openReferenceErrors,
     invalidateInFlightGeneration,
-  } = useImageGenerationForm(id, {
-    onGenerationSettled: refreshHistory,
-    onGenerationSubmitted: handleGenerationSubmitted,
-  });
-  const handleGenerateClick = useCallback(() => {
-    void handleSubmit().catch((error) => console.warn('[image-gen] submission failed', error));
-  }, [handleSubmit]);
+  } = useImageGenerationForm(id, { onGenerationSettled: refreshHistory });
 
   // 功能节点（工具条「九宫格」下拉点某一项后建出来的那种）：输入框里多一枚可切可删
   // 的功能 chip、功能说明当占位文案、↑ 走对应模板。与故事板详情共用同一个 hook，
@@ -297,6 +287,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
   const resolvedWidth = Math.max(MIN_WIDTH, Math.round(width ?? DEFAULT_WIDTH));
   const resolvedHeight = Math.max(MIN_HEIGHT, Math.round(height ?? DEFAULT_HEIGHT));
   // 收起态浮动面板固定基础尺寸；放大用居中弹窗（见下方 OperationPanelShell）。
+  const [panelExpanded, setPanelExpanded] = useState(false);
   const [stylePickerOpen, setStylePickerOpen] = useState(false);
   const panelHeight = OPERATIONS_PANEL_HEIGHT;
   const panelWidth = Math.max(resolvedWidth, OPERATIONS_PANEL_MIN_WIDTH);
@@ -339,11 +330,11 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
     if (!Array.isArray(raw)) return [];
     return raw.filter((u): u is string => typeof u === 'string' && u.length > 0);
   }, [data.generationBatch]);
-  const albumTotalSlots = Math.max(albumUrls.length, albumPendingTotal);
   const viewerImageList = useMemo(
     () => nodeImageViewerUrls(visiblePreviewUrl ?? '', albumUrls, historyRecords),
     [visiblePreviewUrl, albumUrls, historyRecords],
   );
+  const albumTotalSlots = Math.max(albumUrls.length, albumPendingTotal);
   const albumPendingCount = Math.max(0, albumPendingTotal - albumUrls.length);
   const hasAlbum = albumTotalSlots > 1;
 
@@ -515,7 +506,11 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
       if (nodeId !== id || action !== 'generate_image') return;
       publishNodeActionAccepted(requestId, id, action);
       void handleSubmit({
-        completionMode: executionMode === 'single' ? 'submitted' : 'completed',
+        // 虾导外层会在任务受理后立即进入后台态；节点动作本身必须等真实产物
+        // 终态再回报成功，否则对话会把“已提交”误显示成“图片已完成”。
+        completionMode: 'completed',
+        executionSource: 'workflow',
+        attachStoryFrame: executionMode !== 'workflow',
       })
         .then((output) => publishNodeActionSuccess(requestId, id, action, output))
         .catch((error) => publishNodeActionError(requestId, id, action, error));
@@ -987,7 +982,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
               {/* 功能节点重试要走它自己的模板，别退回常规文生图（那样重试出来的
                   东西跟失败的那次不是一回事）。 */}
               <RegenerateButton
-                onClick={() => (opFormProps ? opFormProps.onSubmit() : handleGenerateClick())}
+                onClick={() => (opFormProps ? opFormProps.onSubmit() : void handleSubmit())}
                 busy={isGenerating}
                 disabled={opFormProps ? opFormProps.submitDisabled : submitDisabled}
               />
@@ -1162,10 +1157,7 @@ export const ImageGenNode = memo(({ id, data, selected, width, height }: ImageGe
               isActive={(record) => {
                 const url = historyRecordOutputUrl(record);
                 if (!url) return false;
-                // 预览态下高亮正在预览的历史条，否则高亮当前主图。
-                if (isGenerating && historyPreviewUrl) {
-                  return url === historyPreviewUrl;
-                }
+                if (isGenerating && historyPreviewUrl) return url === historyPreviewUrl;
                 return url === data.imageUrl;
               }}
             />

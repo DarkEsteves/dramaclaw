@@ -431,8 +431,7 @@ export function CanvasHistoryAssetsModal({
     onClose();
   };
 
-  // Match the asset library: escape the canvas stacking context so the backdrop
-  // covers project navigation and intercepts clicks across the whole viewport.
+  // 脱离画布自身的 stacking context，让遮罩真正覆盖项目导航和整个视口。
   return createPortal(
     <div ref={modalRef} className="fixed inset-0 z-[300] flex items-center justify-center p-4">
       <div

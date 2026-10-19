@@ -102,7 +102,7 @@ DramaClaw 采用 <a href="../LICENSE">Elastic License 2.0</a>。自己跑、自�
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/guilingsi/guilingsi-ep01.mp4">▶ 第 1 集</a>
     </td>
     <td align="center" width="205" valign="top">
-      <img src="https://nfg-web-assets.cdnfg.com/dramaclaw/luban/luban-cover.png?v=2" width="185" alt="鲁班"/><br/>
+      <img src="../assets/readme/luban-cover.png" width="185" alt="鲁班"/><br/>
       <b>鲁班</b><br/>
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/luban/luban-ep01.mp4">▶ 第 1 集</a>
     </td>
@@ -114,7 +114,7 @@ DramaClaw 采用 <a href="../LICENSE">Elastic License 2.0</a>。自己跑、自�
   </tr>
   <tr>
     <td align="center" width="205" valign="top">
-      <img src="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-cover.png?v=2" width="185" alt="天命不可欺"/><br/>
+      <img src="../assets/readme/tianmingbukeqi-cover.png" width="185" alt="天命不可欺"/><br/>
       <b>天命不可欺</b><br/>
       <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-ep02.mp4">▶ 第 02 集</a> &nbsp;·&nbsp; <a href="https://nfg-web-assets.cdnfg.com/dramaclaw/tianmingbukeqi/tianmingbukeqi-ep58.mp4">第 58 集</a>
     </td>
@@ -153,6 +153,64 @@ DramaClaw 是一条**源码可见的 AI 漫剧工业化生产线** —— 而且
 <br/>
 
 ## 核心能力
+
+### 虾导 —— 智能体
+
+虾导将自然语言创作需求转化为可执行的画布工作流，串联剧本开发、素材生成与视频合成。
+
+<p align="center">
+  <img src="../assets/readme/freezone-agent.gif" width="900" alt="Xia Director — canvas workflow"/>
+</p>
+<p align="center"><sub>自然语言需求驱动的工作流规划、节点编排、素材生成与视频合成。</sub></p>
+
+- **画布工作流编排** &mdash; 根据创作需求规划、创建、连接与布局节点；确认后执行工作流，支持进度追踪与失败恢复
+- **工作流目录与技能扩展** &mdash; 内置 11 个工作流技能与 60 个配方，覆盖快速漫剧、电商广告、IP 角色广告、社媒内容等场景；支持技能与配方包的安装、导出和分享
+- **外部智能体集成** &mdash; 通过 [Agent Kit](../agent-kit/README.md)，为 Codex、Claude Code、OpenClaw、Hermes、WorkBuddy 及其它 MCP 客户端提供统一的生产工作流接入
+- **项目上下文与任务管理** &mdash; 查询项目进度、推进剧本与镜头任务、检查交付完整性，并提供后续生产步骤建议
+
+<br/>
+
+### 3D 导演台（预演台）
+
+**内测中**
+
+浏览器内的 3D 镜头预演工具，以画布节点组织场景、角色与相机，支持空间布局、动作调度和镜头设计。
+
+<p align="center">
+  <img src="../assets/readme/previz-canvas-node-0.jpg" width="900" alt="Previz — reference image and canvas node"/>
+</p>
+<p align="center"><sub>参考图与关联的预演台节点。</sub></p>
+
+<p align="center">
+  <img src="../assets/readme/previz-canvas-node.gif" width="800" alt="Previz — stage editing and canvas output"/>
+</p>
+
+- **场景构建** &mdash; 从参考图生成 3D 场景，配置道具与空间布局
+- **角色调度与动作预演** &mdash; 在多轨时间线上编排角色动作、运动路径与走位
+- **机位与镜头控制** &mdash; 调整焦距、传感器尺寸与相机位置，预览镜头构图和特写跟踪
+- **画布输出** &mdash; 将截帧与预演录制输出至关联节点，作为后续图像与视频生成的参考
+
+<br/>
+
+### 互动剧
+
+**内测中**
+
+将剧情策划、分支编排、素材制作与交互播放整合在同一画布中，支持多结局互动视频创作。观众通过选择影响剧情走向，创作者可完成从故事大纲到试玩与导出的制作流程。
+
+<p align="center">
+  <img src="../assets/readme/interactive-story.gif" width="900" alt="Interactive stories — branching workflow and player"/>
+</p>
+<p align="center"><sub>分支剧情生成、画布编排、交互播放与多结局体验。</sub></p>
+
+- **智能剧情规划** — 根据自然语言创作需求生成故事大纲与可编辑的分支剧情，规划选择点、多结局及各条路线的观看时长
+- **可视化分支编排** — 在画布上组织剧情片段、视频素材与互动选项，编辑剧情文案、选项顺序和分支连接
+- **剧情变量与条件控制** — 通过好感度、积分等变量记录观众选择，控制选项开放条件与结局走向；支持限时选择和默认路径
+- **素材制作与画布协同** — 制作角色、场景与分镜参考图，按剧情片段生成视频，并复用画布中的已有素材
+- **交互试玩与路径验证** — 视频生成前即可使用占位素材试玩，检查分支连通性与条件路径；结合选项统计、结局到达率和路径覆盖评估剧情结构
+- **播放器导出** — 导出独立 HTML 播放器或包含视频素材的离线包，支持分支播放、探索进度查看及从已解锁片段重玩
+
+<br/>
 
 ### 虾画 —— 无限画布
 
@@ -207,27 +265,11 @@ DramaClaw 是一条**源码可见的 AI 漫剧工业化生产线** —— 而且
 </p>
 <p align="center"><sub>基于已有截图重新制作的功能展示图；界面细节可能与当前版本不同。</sub></p>
 
-### 虾导 —— 智能体
-
-<p align="center">
-  <img src="../assets/readme/xia-director.jpg" width="900" alt="Xia Director — project context and reviewed actions"/>
-</p>
-<p align="center"><sub>基于已有截图重新制作的功能展示图；界面细节可能与当前版本不同。</sub></p>
-
-**现在**
-
-- **懂你的项目** &mdash; 查询进度、推进脚本 / 镜头任务、检查交付完整性并给出下一步建议
-- **对其它 agent 开放** &mdash; 本地 MCP 服务把 DramaClaw 暴露给 Claude Code、Codex 和任何 MCP 客户端（仅本机回环，需显式信任开关），见 [MCP 接入 Claude Code](../docs/en/guides/mcp-claude-code.md)
-
-**接下来**
-
-- **直接上画布干活** &mdash; 上面那张截图就是方向：你描述这部片子，虾导负责创建并连接节点、排版、运行、审校结果，每条画布指令都先在你的浏览器里确认。画布 + 智能体是 DramaClaw 往后的核心，见[正在开发](#in-development)。
-
 <br/>
 
 ## 为什么是 DramaClaw？
 
-**一张懂剧的画布，加一个在画布上干活的智能体。** 通用节点画布什么都能连，但不知道什么是剧集、角色、镜头；剧集工具懂行，却把你锁在向导里。虾画给你自由画布，节点和技能都懂剧；虾导正在被做成替你铺图、跑图、审图的那个人。这个组合就是 DramaClaw 要去的地方。
+**一张懂剧的画布，加一个在画布上干活的智能体。** 通用节点画布什么都能连，但不知道什么是剧集、角色、镜头；剧集工具懂行，却把你锁在向导里。虾画给你自由画布，节点和技能都懂剧；虾导在你确认后规划、铺图并运行工作流。画布与智能体一起贯穿创作生产过程。
 
 **为小说转短剧而生。** 通用的工作流工具确实可以把节点拼起来，但它们不知道「剧集节拍」是什么，不懂为什么角色的跨场景身份一致性那么重要，也不会在图像 + 配音 + 剪辑里去守护一整章节的情绪弧。DramaClaw 把这些判断全部内建到工具里。
 
@@ -245,8 +287,11 @@ DramaClaw 是一条**源码可见的 AI 漫剧工业化生产线** —— 而且
 
 | 能力维度 | L\*TV | R\*Hub | T\*Now | S\*ko | U\*dream | O\*II | 即\*/可\* | **DramaClaw** |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| 内置 Agent（工作流规划、画布编排、执行） | ✅ | ✅ | ✅ | ○ | ✅ | ○ | ✅ | ✅ |
+| 工作流技能与配方（复用、安装、导出、分享） | — | — | — | — | — | — | — | ✅ |
+| 3D 导演台（走位、动作、时间线、录制） | — | — | — | — | — | — | — | 内测中 |
+| 互动影游（多剧集、分支叙事、IP 连续） | ◐ | ◐ | ◐ | ✅ | ◐ | ❌ | ❌ | 内测中 |
 | 分镜预览（脚本拆分镜、分镜图、故事板） | ◐ | ✅ | ◐ | ✅ | ◐ | ❌ | ❌ | ✅ |
-| 互动影游（多剧集、分支叙事、IP 连续） | ◐ | ◐ | ◐ | ✅ | ◐ | ❌ | ❌ | ✅ |
 | 资产库（角色/场景/道具/声线复用） | ◐ | ❌ | ◐ | ✅ | ◐ | ○ | ❌ | ✅ |
 | 场景一致性（变体、背面图、360、多状态） | ✅ | ◐ | ❌ | ❌ | ○ | ❌ | ❌ | ✅ |
 | 导演世界（360/3D 片场、机位、构图） | ✅ | ◐ | ❌ | ❌ | ◐ | ❌ | ❌ | ✅ |
@@ -255,9 +300,10 @@ DramaClaw 是一条**源码可见的 AI 漫剧工业化生产线** —— 而且
 | 无限画布（节点创作、多素材编排、自由探索） | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | 双线模式（主线生产 + 自由画布探索） | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | 自定义风格（风格模板、提示词、避免指令） | ✅ | ◐ | ○ | ✅ | ◐ | ○ | ◐ | ✅ |
-| 内置 Agent（助手、技能调用、任务建议） | ✅ | ✅ | ✅ | ○ | ✅ | ○ | ✅ | ✅ |
 | 创作搭子（陪伴形象、任务气泡、创作反馈） | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | 开放源代码（可私有化二开与深度定制） | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+<sub>DramaClaw 列中，✅ 表示 main 源码已支持；内测中的功能尚未正式开放。新增行的 — 表示竞品能力未核实。</sub>
 
 <br/>
 
@@ -374,19 +420,6 @@ DramaClaw 对模型侧保持中立 —— 所有文本 / 图片 / 视频 / 音�
 
 <br/>
 
-## <a name="in-development"></a>正在开发
-
-以下功能公开开发中，还没进正式版。可以盯着分支看，更欢迎来一起做。
-
-- **虾导直接上画布干活** &mdash; 智能体创建并连接节点、更新节点数据、排版与分组、运行节点动作、一次搭出整张工作流图，每条画布指令都先在打开的浏览器里确认再执行
-- **工作流目录与社区技能** &mdash; 一套 11 个工作流技能 + 60 个配方（快速漫剧、电商广告、IP 角色广告、社媒内容、日漫 / 皮克斯 / 乐高 / 功夫喜剧等风格），自动铺好整张生成图；技能与配方做成可安装、可导出、可分享的 bundle
-- **agent-kit** &mdash; 便携包，把同一套 DramaClaw 工作流带给 Hermes、OpenClaw、WorkBuddy、Claude Code、Codex
-- **预演台** &mdash; 浏览器内的 3D 走位预演台，以画布节点的形式存在：多轨时间线、角色绑定与路径、真实镜头 / 传感器参数的相机模型、特写跟踪，取好的镜头直接送进下一个节点。分支：`feat/previz-canvas-node`
-- **互动剧** &mdash; 在画布上设置分支选择点，编译成 ink 故事并导出为独立 HTML 播放器，带试玩统计与路径覆盖。分支：`feat/canvas-fmv`
-- **互动广告** &mdash; 把上面的广告技能与配方和分支播放结合，做观众能自己选的产品视频
-
-<br/>
-
 ## <a name="documentation"></a>文档
 
 - [**产品使用手册**](https://neo-flying.feishu.cn/docx/JGNTdsjJuo748TxJkxecoYs2nth) —— 全功能 UI 操作手册（飞书）
@@ -408,35 +441,6 @@ DramaClaw 对模型侧保持中立 —— 所有文本 / 图片 / 视频 / 音�
 - [安全策略](../SECURITY.md)
 
 我们会持续整理并标记 [`good first issue`](https://github.com/dramaclaw/dramaclaw/labels/good%20first%20issue) —— 欢迎从这里起手。
-
-<br/>
-
-## 贡献者
-
-构建 DramaClaw 的伙伴们 —— 谢谢你们。💜
-
-<table>
-  <tr>
-    <td align="center"><a href="https://github.com/bopy-zou"><img src="https://github.com/bopy-zou.png?size=100" width="72" alt="bopy-zou"/><br/><sub>bopy-zou</sub></a></td>
-    <td align="center"><a href="https://github.com/Handanhhhy"><img src="https://github.com/Handanhhhy.png?size=100" width="72" alt="Handanhhhy"/><br/><sub>Handanhhhy</sub></a></td>
-    <td align="center"><a href="https://github.com/Hanlin-Gabriel"><img src="https://github.com/Hanlin-Gabriel.png?size=100" width="72" alt="Hanlin-Gabriel"/><br/><sub>Hanlin-Gabriel</sub></a></td>
-    <td align="center"><a href="https://github.com/honggui-duat"><img src="https://github.com/honggui-duat.png?size=100" width="72" alt="honggui-duat"/><br/><sub>honggui-duat</sub></a></td>
-    <td align="center"><a href="https://github.com/lywaterman"><img src="https://github.com/lywaterman.png?size=100" width="72" alt="lywaterman"/><br/><sub>lywaterman</sub></a></td>
-    <td align="center"><a href="https://github.com/n7s4"><img src="https://github.com/n7s4.png?size=100" width="72" alt="n7s4"/><br/><sub>n7s4</sub></a></td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://github.com/NewYuee"><img src="https://github.com/NewYuee.png?size=100" width="72" alt="NewYuee"/><br/><sub>NewYuee</sub></a></td>
-    <td align="center"><a href="https://github.com/SimonRen"><img src="https://github.com/SimonRen.png?size=100" width="72" alt="SimonRen"/><br/><sub>SimonRen</sub></a></td>
-    <td align="center"><a href="https://github.com/vkiki"><img src="https://github.com/vkiki.png?size=100" width="72" alt="vkiki"/><br/><sub>vkiki</sub></a></td>
-    <td align="center"><a href="https://github.com/wangwenqq"><img src="https://github.com/wangwenqq.png?size=100" width="72" alt="wangwenqq"/><br/><sub>wangwenqq</sub></a></td>
-    <td align="center"><a href="https://github.com/zhen2025109"><img src="https://github.com/zhen2025109.png?size=100" width="72" alt="zhen2025109"/><br/><sub>zhen2025109</sub></a></td>
-    <td align="center"><a href="https://github.com/revolutionarybukhari"><img src="https://github.com/revolutionarybukhari.png?size=100" width="72" alt="revolutionarybukhari"/><br/><sub>revolutionarybukhari</sub></a></td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://github.com/yhay81"><img src="https://github.com/yhay81.png?size=100" width="72" alt="yhay81"/><br/><sub>yhay81</sub></a></td>
-    <td align="center"><a href="https://github.com/hoanglongggggggggg"><img src="https://github.com/hoanglongggggggggg.png?size=100" width="72" alt="hoanglongggggggggg"/><br/><sub>hoanglongggggggggg</sub></a></td>
-  </tr>
-</table>
 
 <br/>
 

@@ -42,18 +42,20 @@ describe('selectNodeExclusively', () => {
   });
 });
 
-it('clears node and edge selection without editing content or undo history', () => {
+it('清除节点和连线选中态时不修改内容或撤销历史', () => {
   seedNodes();
   useCanvasStore.setState({ edges: [{ id: 'edge', source: 'a', target: 'b', selected: true }] });
-  useCanvasStore.getState().updateNodeData('a', { prompt: 'Keep the existing edit and its undo history.' });
+  useCanvasStore.getState().updateNodeData('a', { prompt: '保留已有编辑和撤销历史' });
   const before = useCanvasStore.getState();
   expect(before.userEditsSinceHydrate).toBeGreaterThan(0);
   expect(before.history.past.length).toBeGreaterThan(0);
+
   clearCanvasSelection();
+
   const after = useCanvasStore.getState();
   expect(after.selectedNodeId).toBeNull();
-  expect(after.nodes.every(node => !node.selected)).toBe(true);
-  expect(after.edges.every(edge => !edge.selected)).toBe(true);
+  expect(after.nodes.every((node) => !node.selected)).toBe(true);
+  expect(after.edges.every((edge) => !edge.selected)).toBe(true);
   expect(after.nodes[0].position).toBe(before.nodes[0].position);
   expect(after.nodes[0].data).toBe(before.nodes[0].data);
   expect(after.nodes[1]).toBe(before.nodes[1]);
@@ -61,7 +63,7 @@ it('clears node and edge selection without editing content or undo history', () 
   expect(after.userEditsSinceHydrate).toBe(before.userEditsSinceHydrate);
 });
 
-it('does not emit another store update when nothing is selected', () => {
+it('没有选中内容时不产生额外 store 更新', () => {
   seedNodes();
   clearCanvasSelection();
   const before = useCanvasStore.getState();

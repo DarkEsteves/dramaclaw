@@ -19,6 +19,10 @@ Use Python 3.11-compatible code and keep imports/package paths rooted in `src/no
 
 For the first frontend visual change in a session, read the relevant sections of `DESIGN.md`; reuse that context unless the file changes or the task enters a different design area. It is the source of truth for design tokens and documented scene exceptions. When tokens or documented component specifications change, update the corresponding section and run the design linter once (0 errors; do not increase existing warnings). Pure component fixes do not require unrelated design documentation updates. Derived design-tool context must follow this source, not introduce a competing specification.
 
+## Engineering Principles
+
+工业化方案 + 禁止过度设计。
+
 ## Testing Guidelines
 
 Tests use `pytest` with `pytest-asyncio` set to auto mode. Name test files `test_*.py` and colocate fixtures in `tests/conftest.py` unless they are narrowly scoped. Mark enterprise-only or full end-to-end tests with `@pytest.mark.ee` or `@pytest.mark.e2e` so default runs stay community-edition friendly. Add focused regression tests for API contracts, task lifecycle changes, storage migrations, and provider error handling.

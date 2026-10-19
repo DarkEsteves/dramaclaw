@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from novelvideo.media_model_request_schema import MEDIA_MODEL_CATALOG_TYPES
 from novelvideo.official_defaults import (
     DEFAULT_COGNEE_EMBEDDING_DIM,
     DEFAULT_COGNEE_EMBEDDING_MODEL,
@@ -33,6 +34,9 @@ from novelvideo.official_media_catalog_schema import (
 from novelvideo.shared.runtime_env import uses_local_ce_runtime
 from novelvideo.sqlite_pragmas import configure_sqlite_connection
 
+# 媒体模型映射可声明的类型：目录类型（图片/视频/白模）加上只做名称映射的音频。
+_MEDIA_MAPPING_TYPES = frozenset({*MEDIA_MODEL_CATALOG_TYPES, "audio"})
+
 MODE_OFFICIAL = "official"
 MODE_CUSTOM = "custom"
 MODE_HYBRID = "hybrid"
@@ -43,6 +47,9 @@ VALID_CUSTOM_LLM_MODES = {
     CUSTOM_LLM_MODE_RELAYCLAW_BRAINCLAW,
     CUSTOM_LLM_MODE_ADVANCED,
 }
+AGENT_LLM_MODE_INHERIT = "inherit"
+AGENT_LLM_MODE_THIRD_PARTY = "third_party"
+VALID_AGENT_LLM_MODES = {AGENT_LLM_MODE_INHERIT, AGENT_LLM_MODE_THIRD_PARTY}
 PLACEHOLDER_API_KEYS = {
     "your_newapi_token",
     "your_model_api_key",
@@ -133,6 +140,11 @@ def normalize_gateway_mode(value: str | None) -> str:
 def normalize_custom_llm_mode(value: str | None) -> str:
     mode = str(value or "").strip().lower()
     return mode if mode in VALID_CUSTOM_LLM_MODES else CUSTOM_LLM_MODE_ADVANCED
+
+
+def normalize_agent_llm_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in VALID_AGENT_LLM_MODES else AGENT_LLM_MODE_INHERIT
 
 
 def normalize_relay_base_url(value: str | None) -> str:
@@ -265,6 +277,25 @@ def save_relayclaw_brainclaw_key(
     _write_many(values)
 
 
+def save_agent_llm_config(
+    *, mode: str, base_url: str = "", api_key: str = "", model: str = ""
+) -> None:
+    """Persist an Agent-only LLM route without changing media gateway mode."""
+    normalized_mode = normalize_agent_llm_mode(mode)
+    values = {"agent_llm_mode": normalized_mode}
+    if normalized_mode == AGENT_LLM_MODE_THIRD_PARTY:
+        clean_base_url = normalize_relay_base_url(base_url)
+        clean_api_key = normalize_api_key(api_key)
+        clean_model = str(model or "").strip()
+        if clean_base_url:
+            values["agent_llm_base_url"] = clean_base_url
+        if clean_api_key:
+            values["agent_llm_api_key"] = clean_api_key
+        if clean_model:
+            values["agent_llm_model"] = clean_model
+    _write_many(values)
+
+
 def save_official_newapi_key(
     *,
     api_key: str,
@@ -374,7 +405,7 @@ def _decode_media_model_mappings(value: str | None) -> dict[str, dict[str, Any]]
             "provider": provider,
             "upstreamModel": str(item.get("upstreamModel") or "").strip(),
         }
-        if media_type in {"image", "video", "audio"}:
+        if media_type in _MEDIA_MAPPING_TYPES:
             mapping["mediaType"] = media_type
         if str(item.get("label") or "").strip():
             mapping["label"] = str(item.get("label") or "").strip()
@@ -615,6 +646,7 @@ def save_newapi_media_model_mappings(
     mappings: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     from novelvideo.media_model_request_schema import (
+        MEDIA_MODEL_CATALOG_TYPES,
         normalize_media_model_catalog_config,
         validate_media_model_catalog_config,
     )
@@ -629,14 +661,14 @@ def save_newapi_media_model_mappings(
             raise ValueError(f"provider is required for media model {model_name}")
         media_type = str(item.get("mediaType") or "").strip().lower()
         config = item.get("config") if isinstance(item.get("config"), dict) else {}
-        if media_type in {"image", "video"}:
+        if media_type in MEDIA_MODEL_CATALOG_TYPES:
             config = normalize_media_model_catalog_config(config)
             validate_media_model_catalog_config(config, media_type)
         normalized_item: dict[str, Any] = {
             "provider": provider,
             "upstreamModel": str(item.get("upstreamModel") or "").strip(),
         }
-        if media_type in {"image", "video", "audio"}:
+        if media_type in _MEDIA_MAPPING_TYPES:
             normalized_item["mediaType"] = media_type
         label = str(item.get("label") or "").strip()
         if label:
@@ -846,10 +878,15 @@ def _media_model_catalog(
     provider: str | None = None,
     include_disabled: bool = False,
 ) -> list[dict[str, Any]]:
-    from novelvideo.media_model_request_schema import normalize_media_model_catalog_config
+    from novelvideo.media_model_request_schema import (
+        MEDIA_MODEL_CATALOG_TYPES,
+        default_media_model_request,
+        media_model_api_model,
+        normalize_media_model_catalog_config,
+    )
 
     wanted = str(media_type or "").strip().lower()
-    if wanted not in {"image", "video"}:
+    if wanted not in MEDIA_MODEL_CATALOG_TYPES:
         return []
     result: list[dict[str, Any]] = []
     for model, item in mappings.items():
@@ -860,17 +897,9 @@ def _media_model_catalog(
             continue
         config = item.get("config") if isinstance(item.get("config"), dict) else {}
         config = normalize_media_model_catalog_config(config)
-        config.setdefault(
-            "request",
-            {
-                "endpoint": (
-                    "images/generations" if wanted == "image" else "video/generations"
-                ),
-                "parameters": [],
-            },
-        )
+        config.setdefault("request", default_media_model_request(wanted))
         gateway_model = str(item.get("upstreamModel") or model)
-        api_model = model if wanted == "image" else f"newapi_{model}"
+        api_model = media_model_api_model(wanted, model)
         aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
         result.append(
             {
@@ -1166,6 +1195,25 @@ def get_effective_llm_config() -> EffectiveLlmConfig:
     )
 
 
+def get_effective_agent_llm_config() -> EffectiveLlmConfig:
+    """Resolve the Agent-only LLM route without affecting business text models."""
+    if not _uses_ce_gateway_settings():
+        return get_effective_llm_config()
+
+    settings = get_model_gateway_settings()
+    agent_llm_mode = normalize_agent_llm_mode(settings.get("agent_llm_mode"))
+    if agent_llm_mode != AGENT_LLM_MODE_THIRD_PARTY:
+        return get_effective_llm_config()
+    return EffectiveLlmConfig(
+        mode=AGENT_LLM_MODE_THIRD_PARTY,
+        source=AGENT_LLM_MODE_THIRD_PARTY,
+        base_url=normalize_relay_base_url(settings.get("agent_llm_base_url", "")),
+        api_key=normalize_api_key(settings.get("agent_llm_api_key", "")),
+        model=str(settings.get("agent_llm_model", "")).strip(),
+        is_brainclaw=False,
+    )
+
+
 def _int_setting(value: str | None, default: int) -> int:
     try:
         return int(str(value or "").strip())
@@ -1395,6 +1443,12 @@ def build_model_gateway_status(
         official_api_key=official_api_key,
     )
     effective_llm = get_effective_llm_config()
+    agent_llm_mode = normalize_agent_llm_mode(settings.get("agent_llm_mode"))
+    agent_llm_base_url = normalize_relay_base_url(
+        settings.get("agent_llm_base_url", "")
+    )
+    agent_llm_api_key = normalize_api_key(settings.get("agent_llm_api_key", ""))
+    agent_llm_model = str(settings.get("agent_llm_model", "")).strip()
     custom_llm_mode = normalize_custom_llm_mode(settings.get("custom_llm_mode"))
     brainclaw_base_url = normalize_relay_base_url(
         settings.get("brainclaw_newapi_base_url", "") or OFFICIAL_NEWAPI_BASE_URL
@@ -1423,6 +1477,15 @@ def build_model_gateway_status(
             "configured": bool(effective_llm.base_url and effective_llm.api_key),
             "model": effective_llm.model,
             "brainclaw": effective_llm.is_brainclaw,
+        },
+        "agent": {
+            "mode": agent_llm_mode,
+            "baseUrl": agent_llm_base_url,
+            "apiKeyPreview": mask_secret(agent_llm_api_key),
+            "model": agent_llm_model,
+            "configured": bool(
+                agent_llm_base_url and agent_llm_api_key and agent_llm_model
+            ),
         },
         "official": {
             "baseUrl": official_base_url_value,

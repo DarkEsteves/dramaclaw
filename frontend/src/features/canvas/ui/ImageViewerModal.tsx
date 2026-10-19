@@ -12,7 +12,7 @@ export interface ImageViewerModalProps {
   currentIndex: number;
   onClose: () => void;
   onNavigate: (direction: 'prev' | 'next') => void;
-  onSelect: (index: number) => void;
+  onSelect?: (index: number) => void;
 }
 
 export function ImageViewerModal({ open, imageUrl, imageList, currentIndex, onClose, onNavigate, onSelect }: ImageViewerModalProps): ReactElement {

@@ -1,8 +1,10 @@
 # Exact custom workflow topology
 
-Use this path when the user explicitly names required nodes and dependencies that deviate from the
-matching Skill's standard template. A matching production Skill does not turn a genuinely custom
-topology request into the normal draft flow. An explicit planner instruction takes priority over
+Use this path when the user explicitly requires an exact canvas node count or node set, or names
+required nodes and dependencies that deviate from the matching Skill's standard template. Exact
+node cardinality remains on this path even when its stages resemble the standard template. A
+matching production Skill does not turn a genuinely custom topology request into the normal draft
+flow. An explicit planner instruction takes priority over
 this heuristic: when the user names the standard planner or the Skill's standard flow and the
 listed nodes merely restate that template (same stages, order, and dependencies), stay on the
 normal Intent path; when the instruction and the listed topology conflict, ask one single-question
@@ -28,7 +30,15 @@ order) stays an agent-authored draft with the difference recorded in
    identities from the loaded production Workflow Skill and keep them identical to the admitted
    operation. `generation_answers` supplements this complete Plan; it never replaces the Plan or
    either required identity field.
-   When the Skill has a standard planner, `planning_contract.standard_planner.stages` lists its
+   Existing-story image batches are a supported exception: with `text-to-image-video`, a real
+   `source_context.story_id`, and every image mapped exactly once across `asset_targets` and
+   `targets`, the saved story supplies planning and video destinations. Include only new images
+   and optional recipe-less input briefs; keep video nodes outside the Plan. For character,
+   product or scene references, read the `interactive-story` Skill's
+   `references/reference-images.md` for a complete example and live-asset checks. If this image
+   batch reports `skill_stage_missing`, repair its mapping or extraneous executable nodes;
+   never add planning/video stages to satisfy that error.
+   For other workflows, when the Skill has a standard planner, `planning_contract.standard_planner.stages` lists its
    stages; every stage marked `required` must appear in a custom plan too (for example the
    shot-planning stage of a short drama). A node fills a stage when it has that stage's
    `node_type` and either sets `stage` to the stage id or uses one of the stage's `recipes`.
@@ -40,6 +50,12 @@ order) stays an agent-authored draft with the difference recorded in
    `code="skill_stage_missing"` naming the stage; a stage node that nothing downstream consumes
    reports `code="skill_stage_unused"` with the bypassed node ids. Add the node and feed the
    downstream nodes from it, or use the standard planner instead.
+   A stage whose planning contract advertises `accepts_external_media` may instead be filled by a
+   declared `external_inputs` item of that media kind when a consuming edge feeds it into the
+   required downstream stage. Reuse that existing media as the stage input; do not generate a
+   replacement anchor for a stage the external input already fills. Required text planning remains
+   separate and must feed the downstream generated result. When the user requires a unique image
+   result, adding that text planning node does not authorize a second generated image node.
    Node prompts are short task briefs, not final production prompts. Describe the node's task and
    which actual upstream outputs/reference assets it must consume. Do not prewrite generated
    scripts, shot-by-shot storyboards, dialogue, or camera/sound details. Preserve user-supplied
@@ -121,15 +137,20 @@ order) stays an agent-authored draft with the difference recorded in
    Every edge endpoint must match an `id` in `nodes` or a declared external input alias. Never
    invent a source such as `source` or `input` without a matching declaration.
    Never ask the user to choose a direct-canvas or standalone-node fallback after Plan validation
-   fails. Such a choice cannot authorize bypassing the validator. Add the required Skill stages to
-   the same Plan once, or report that they conflict with the user's exact topology.
-7. Call `freezone_prepare_workflow(plan=...)` once. It strictly validates the complete Plan,
+   fails. Such a choice cannot authorize bypassing the validator. Correct only the unsatisfied
+   stages named by the blocker: preserve explicit media/result node counts and direct external-input
+   edges, and never insert a generated anchor for a stage already fulfilled by external media. Add
+   any genuinely missing required Skill stage to the same Plan once, or report that it conflicts
+   with the user's exact topology.
+7. Choose `run_after_create=true` for an approved create-and-run request or `false` for create-only.
+   Story-bound plans must pass this choice; ordinary plans may omit it and default to `false`.
+   Call `freezone_prepare_workflow(operation_id=..., plan=..., run_after_create=...)` once. It strictly validates the complete Plan,
    obtains an operation-bound planning quote and server receipt, then persists an exact preview
    without writing canvas nodes. After the user reviews that preview, call
    `freezone_confirm_workflow_draft` with its exact `draft_id` and `revision`. Do not call
    `workflow_graph_compile` as a routine preflight before preparing the first draft. Use the read-only compiler
    only to diagnose and correct a validation failure. After a recovery compile succeeds, immediately
-   prepare that exact corrected Plan with `freezone_prepare_workflow(plan=...)`; do not stop after
+   prepare that exact corrected Plan with `freezone_prepare_workflow(operation_id=..., plan=..., run_after_create=...)`; do not stop after
    reporting that compilation passed.
 
 The user's imperative does not replace an exact billing confirmation receipt. Follow the quote
