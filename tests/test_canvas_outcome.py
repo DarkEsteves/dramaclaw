@@ -33,6 +33,22 @@ def test_read_only_answer_needs_no_canvas_receipt():
     )
 
 
+def test_requested_canvas_write_cannot_end_as_read_only_without_receipt():
+    result = finalize_canvas_reply(
+        reply(
+            message=(
+                "正在通过节点绑定的 drama-background-music Recipe 编译提示词并执行 "
+                "generate_audio。"
+            )
+        ),
+        attempts={},
+        receipts=set(),
+        write_requested=True,
+    )
+
+    assert result == "画布操作未完成：本轮没有可验证的画布写入回执，请重试。"
+
+
 def test_fenced_read_only_json_is_recovered_without_write_receipt():
     fenced = "```json\n" + reply(message="视频按九段规划。") + "\n```"
     assert finalize_canvas_reply(fenced, attempts={}, receipts=set()) == "视频按九段规划。"
