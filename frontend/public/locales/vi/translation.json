@@ -1099,6 +1099,7 @@
     }
   },
   "aiAssistant": {
+    "systemNotice": "Hệ thống",
     "clearChat": {
       "title": "Xóa cuộc trò chuyện này?",
       "description": "Lịch sử trò chuyện này sẽ bị xóa. Tin nhắn tiếp theo sẽ bắt đầu ngữ cảnh Agent mới. Canvas, dự án và các cuộc trò chuyện khác không bị ảnh hưởng. Tác vụ tạo đang chạy sẽ tiếp tục.",
@@ -3394,6 +3395,13 @@
     "beatThumbnails": "Ảnh thu nhỏ theo beat"
   },
   "tasks": {
+    "planValidation": {
+      "start": "bắt đầu",
+      "end": "kết thúc",
+      "range": "bắt đầu hoặc kết thúc",
+      "speechSourceCycle": "Xác thực phương án thất bại: thời điểm {{edge}} của nguồn thoại {{placement}} phụ thuộc vào chính câu thoại {{turn}} chưa được xác định thời gian, tạo thành vòng lặp. Hãy xác định khoảng thời gian của nguồn thoại trước. Bản nháp này chưa được lưu.",
+      "otherIssue": "Xác thực phương án thất bại tại {{path}} ({{code}}). Bản nháp này chưa được lưu."
+    },
     "taskCount": "{{count}} tác vụ",
     "noTasks": "Không có tác vụ",
     "cancelled": "Đã huỷ tác vụ",
@@ -3431,6 +3439,9 @@
       "episode_prop_planner": "Lên kế hoạch đạo cụ",
       "content_rewriter": "AI viết lại",
       "remix_generate_script_draft": "Tạo lời thoại chuyển thể",
+      "production_plan_outline": "Tạo cấu trúc và lời thoại",
+      "remix_generate_production_plan_arrangement": "Sắp xếp hình ảnh và âm thanh",
+      "remix_generate_production_plan_draft": "Phác thảo kế hoạch sản xuất",
       "remix_plan_broll": "Lên kế hoạch cảnh bổ sung",
       "sketch_generation": "Tạo phác thảo",
       "batch_sketch": "Phác thảo hàng loạt",
@@ -7450,6 +7461,8 @@
       "storyboardGenNode": "Biến thể storyboard",
       "videoNode": "Video",
       "audioNode": "Âm thanh",
+      "transcriptNode": "Phiên âm",
+      "semanticTimelineNode": "Dòng thời gian ngữ nghĩa",
       "videoStoryNode": "Video có chuyện",
       "videoComposeNode": "Dựng video",
       "scriptNode": "Bộ tạo kịch bản",

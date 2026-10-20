@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Handle,
   Position,
   useUpdateNodeInternals,
   type NodeProps,
 } from "@xyflow/react";
-import { Film } from "lucide-react";
+import { Film, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useCanvasStore } from "@/stores/canvasStore";
@@ -62,9 +63,10 @@ import { boundBrollVisualMedia } from "@/features/canvas/remix/brollCanvasBindin
 import { primaryVisualEventsForScript } from "@/features/canvas/remix/remixJourney";
 import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from "@/features/canvas/remix/prepareNodeRemix";
 import { applyRemixInvalidation } from "@/features/canvas/remix/spawnRemixDownstream";
-import { flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
+import { captureFreezoneCanvasScope, flushFreezoneCanvasRuntime, applyRemoteFreezoneCanvas } from "@/features/freezone/canvasSyncRuntime";
 import { getFreezoneCanvas } from "@/api/canvas";
 import { captureCanvasBaseline, mergeConfirmedCanvasWithLocalChanges } from "@/features/canvas/remix/workbenchCanvasMerge";
+import { submitProductionComposeRender } from "@/features/canvas/compose/productionComposeRender";
 
 type VideoComposeNodeProps = NodeProps & {
   id: string;
@@ -89,6 +91,7 @@ export const VideoComposeNode = memo(
     const canvasEdges = useCanvasStore((state) => state.edges);
     const upstreamNodes = useUpstreamNodes(id);
     const [isEditorOpen, setEditorOpen] = useState(false);
+    const [isProductionComposeOpen, setProductionComposeOpen] = useState(false);
     const [isRemixWorkbenchOpen, setRemixWorkbenchOpen] = useState(false);
     const [remixKey, setRemixKey] = useState<string>(() => globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
     const [remixTask, setRemixTask] = useState<RemixTaskRef | null>(null);
@@ -123,7 +126,9 @@ export const VideoComposeNode = memo(
     const canAutoCompose =
       videoCount >= MIN_AUTO_COMPOSE_VIDEOS && seedNodeIds.length >= MIN_AUTO_COMPOSE_MEDIA;
     const hasSemanticTimeline = upstreamNodes.some((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline);
-    const showRemixStaging = hasSemanticTimeline && !data.remixWorkbenchDraft;
+    const hasProductionPlan = upstreamNodes.some((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'production_plan');
+    const productionPlanMode = Boolean(data.productionPlanNodeId && data.productionPlanV2Ref);
+    const showRemixStaging = !productionPlanMode && (hasSemanticTimeline || hasProductionPlan) && !data.remixWorkbenchDraft;
 
     const resolvedTitle = useMemo(
       () => localizeNodeDisplayName(CANVAS_NODE_TYPES.videoCompose, data, t),
@@ -180,6 +185,7 @@ export const VideoComposeNode = memo(
     useEffect(() => {
       if (!project || !data.remixManifestRef) { setManifestArtifact(null); setManifestDraft(null); setLoadedManifestRefKey(null); updateNodeData(id, { remixManifestLoadedRef: null, remixManifestLoadState: 'idle', remixManifestDirty: false }); return; }
       let cancelled = false;
+      setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
       updateNodeData(id, { remixManifestLoadedRef: null, remixManifestLoadState: 'loading' });
       void Promise.resolve(fetchRemixArtifact(project, data.remixManifestRef)).then((artifact) => {
         if (cancelled) return;
@@ -289,26 +295,79 @@ export const VideoComposeNode = memo(
     }, [autoSaveRequested, manifestReady]);
 
     useEffect(() => {
-      if (!data.autoPrepareRequested || !hasSemanticTimeline) return;
+      if (!data.autoPrepareRequested || (!hasSemanticTimeline && !hasProductionPlan)) return;
       if (data.remixManifestRef && !manifestReady) return;
       updateNodeData(id, { autoPrepareRequested: false });
       void handlePrepareRemix();
-    }, [data.autoPrepareRequested, data.remixManifestRef, hasSemanticTimeline, id, handlePrepareRemix, manifestReady, updateNodeData]);
+    }, [data.autoPrepareRequested, data.remixManifestRef, hasSemanticTimeline, hasProductionPlan, id, handlePrepareRemix, manifestReady, updateNodeData]);
 
     useEffect(() => {
       updateNodeInternals(id);
     }, [id, updateNodeInternals]);
 
+    useEffect(() => {
+      if (!productionPlanMode || !data.productionComposeOpenOnCreate) return;
+      setProductionComposeOpen(true);
+      updateNodeData(id, { productionComposeOpenOnCreate: false });
+    }, [productionPlanMode, data.productionComposeOpenOnCreate, id, updateNodeData]);
+
+    useEffect(() => {
+      if (!productionPlanMode || !data.resultVideoUrl || !data.productionPlanRenderingRef) return;
+      const rendered = data.productionPlanRenderedRef as { artifactId: string; revision: number } | undefined;
+      const requested = data.productionPlanRenderingRef as { artifactId: string; revision: number };
+      if (rendered?.artifactId === requested.artifactId && rendered.revision === requested.revision) return;
+      updateNodeData(id, { productionPlanRenderedRef: requested });
+    }, [productionPlanMode, data.resultVideoUrl, data.productionPlanRenderingRef, data.productionPlanRenderedRef, id, updateNodeData]);
+
 
     const handleOpen = useCallback(() => {
       if (!project) return false;
+      if (productionPlanMode) { setSelectedNode(id); setProductionComposeOpen(true); return true; }
       if (!canOpen) return false;
       setSelectedNode(id);
       setEditorOpen(true);
       return true;
-    }, [canOpen, id, project, setSelectedNode]);
+    }, [canOpen, id, project, productionPlanMode, setSelectedNode]);
 
     const handleAutoCompose = useCallback(async () => {
+      if (productionPlanMode) {
+        const planNodeId = typeof data.productionPlanNodeId === "string" ? data.productionPlanNodeId : null;
+        if (!project || !planNodeId) throw new Error("作品方案尚未关联视频合成节点");
+        const isCurrentScope = captureFreezoneCanvasScope(project, canvasId);
+        const assertScope = () => { if (!isCurrentScope()) throw new Error("所属画布已切换，请从原项目任务记录查看导出结果"); };
+        assertScope();
+        updateNodeData(id, { isGenerating: true, generationStartedAt: Date.now(), generationError: null });
+        try {
+          const { saved, task } = await submitProductionComposeRender({
+            project, canvasId, planNodeId, composeNodeId: id,
+          });
+          assertScope();
+          updateNodeData(id, { generationTaskKey: task.task_key, generationTaskType: task.task_type,
+            generationTaskJobId: task.job_id });
+          await awaitTaskCompletion(task.task_key, project, { taskType: task.task_type });
+          assertScope();
+          const started = Date.now();
+          let videoUrl: string | null = null;
+          while (Date.now() - started < 60_000) {
+            assertScope();
+            const current = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data;
+            const rendered = current?.productionPlanRenderedRef as { artifactId?: string; revision?: number } | undefined;
+            if (rendered?.artifactId === saved.artifactId && rendered.revision === saved.revision
+              && typeof current?.resultVideoUrl === "string" && current.resultVideoUrl) {
+              videoUrl = current.resultVideoUrl;
+              break;
+            }
+            if (current?.remixInputsCurrent === false) throw new Error("合成过程中作品方案或素材已变化，结果请从任务记录查看");
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          if (!videoUrl) throw new Error("视频任务已完成，但成片尚未回填；请从任务记录检查");
+          updateNodeData(id, { isGenerating: false, generationStartedAt: null, generationError: null });
+          return { videoUrl, output_url: videoUrl, task_key: task.task_key, task_type: task.task_type, job_id: task.job_id, operation_id: task.operation_id };
+        } catch (error) {
+          if (isCurrentScope()) updateNodeData(id, { isGenerating: false, generationStartedAt: null, generationError: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+      }
       if (!project || !canAutoCompose) {
         throw new Error("自动合成至少需要 1 个视频和共计 2 个已完成媒体节点");
       }
@@ -396,8 +455,10 @@ export const VideoComposeNode = memo(
       canAutoCompose,
       canvasId,
       data.draftTimeline,
+      data.productionPlanNodeId,
       id,
       project,
+      productionPlanMode,
       resolvedTitle,
       seedNodeIds,
       t,
@@ -424,6 +485,34 @@ export const VideoComposeNode = memo(
       }),
       [handleAutoCompose, handleOpen, id],
     );
+
+    if (productionPlanMode) {
+      const planNodeId = String(data.productionPlanNodeId);
+      const planNode = upstreamNodes.find((node) => node.id === planNodeId);
+      const plan = planNode?.data.productionPlanV2Draft as { goal?: string; beats?: unknown[] } | undefined;
+      const saved = planNode?.data.productionPlanV2Ref as { artifactId: string; revision: number } | undefined;
+      const rendered = data.productionPlanRenderedRef as { artifactId: string; revision: number } | undefined;
+      const currentVideo = Boolean(data.resultVideoUrl && saved && rendered?.artifactId === saved.artifactId
+        && rendered?.revision === saved.revision && !planNode?.data.productionPlanV2Dirty);
+      return <div className="group relative h-full w-full overflow-visible" style={{ width: NODE_WIDTH, height: NODE_HEIGHT }} onClick={() => setSelectedNode(id)}>
+        <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+        <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+        <AddNodeToChatButton nodeId={id} />
+        <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
+        <div className={`flex h-full w-full flex-col justify-center gap-2 rounded-[var(--node-radius)] border px-4 py-3 ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
+          <button type="button" onClick={(event) => { event.stopPropagation(); setProductionComposeOpen(true); }} className="nodrag h-9 rounded-[12px] border border-white/15 bg-white/[0.04] text-[13px] text-text-dark hover:bg-white/[0.08]">打开视频合成</button>
+          {Boolean(data.productionPlanLegacyComposeNodeId) && <button type="button" className="nodrag text-[11px] text-primary hover:underline" onClick={(event) => {
+            event.stopPropagation();
+            const legacyId = String(data.productionPlanLegacyComposeNodeId);
+            useCanvasStore.setState((current) => ({ nodes: current.nodes.map((node) => node.id === legacyId ? { ...node, hidden: false } : node) }));
+            setSelectedNode(legacyId); requestFocusNode(legacyId);
+          }}>查看旧版编排与成片</button>}
+          <div className="truncate text-center text-[11px] text-text-muted">{data.remixOperationId && !data.resultVideoUrl ? '正在导出' : currentVideo ? '当前版本成片' : data.resultVideoUrl || data.remixPreviousVideoUrl ? '旧版成片' : '待编排'} · {plan?.beats?.length ?? 0} 段</div>
+          {plan?.goal && <div className="truncate text-center text-[11px] text-text-muted">{plan.goal}</div>}
+        </div>
+        {isProductionComposeOpen && project && <VideoComposeModal project={project} canvasId={canvasId} seedNodeIds={[]} productionPlanNodeId={planNodeId} composeNodeId={id} onClose={() => setProductionComposeOpen(false)} onComposed={() => undefined} />}
+      </div>;
+    }
 
     if (data.remixManifestRef && (data.remixInputFingerprint || !data.remixWorkbenchDraft)) {
       const conflicts = data.remixManifestConflicts ?? [];
@@ -486,14 +575,71 @@ export const VideoComposeNode = memo(
           if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('画布尚未保存，请稍后重试');
           const task = await renderRemixManifest(project, { manifestRef: data.remixManifestRef!, idempotencyKey: remixKey, nodeRevision, canvasId, nodeId: id, inputFingerprint: data.remixInputFingerprint, regenerate });
           setRemixTask(task);
-          updateNodeData(id, { remixOperationId: task.operation_id });
+          updateNodeData(id, { remixOperationId: task.operation_id,
+            ...(data.resultVideoUrl ? { remixPreviousVideoUrl: data.resultVideoUrl, resultVideoUrl: null } : {}) });
           if (await flushFreezoneCanvasRuntime(project, canvasId) !== true) throw new Error('任务已提交，但画布尚未保存；请刷新后从任务记录恢复');
+          setRemixKey(globalThis.crypto?.randomUUID?.() ?? `remix-${Date.now()}`);
         }
         catch (error) { setRemixError(error instanceof Error ? error.message : String(error)); }
         finally { setRemixSubmitting(false); }
       };
       submitRemixRef.current = () => { void submit(false); };
       saveManifestRef.current = () => { void saveManifest(); };
+      if (data.remixRole === 'production_compose') {
+        const arrangement = upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline
+          && node.data.productionPlanNodeId);
+        const plan = upstreamNodes.find((node) => node.type === CANVAS_NODE_TYPES.script
+          && node.data.remixRole === 'production_plan');
+        const returnTarget = arrangement ?? plan;
+        const spec = manifestReady ? manifestDraft?.output_spec : null;
+        const seconds = spec?.fps && spec.duration_frames ? (spec.duration_frames / spec.fps).toFixed(1) : null;
+        const shownVideoUrl = data.resultVideoUrl ?? data.remixPreviousVideoUrl;
+        const oldPreview = Boolean(shownVideoUrl && (!data.resultVideoUrl || previewState !== 'current'));
+        const renderInProgress = Boolean(data.remixOperationId && !data.resultVideoUrl
+          && !['failed', 'cancelled', 'stale'].includes(remixOperationStatus ?? ''));
+        const status = renderInProgress ? '正在合成视频' : shownVideoUrl ? oldPreview ? '旧版预览' : '成片已生成' : '等待渲染';
+        return <div className="group relative h-full w-full overflow-visible" style={{ width: NODE_WIDTH, height: NODE_HEIGHT }} onClick={() => setSelectedNode(id)}>
+          <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+          <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
+          <AddNodeToChatButton nodeId={id} />
+          <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<Film className="h-4 w-4" />} titleText={resolvedTitle} editable onTitleChange={(next) => updateNodeData(id, { displayName: next })} />
+          <div className={`flex h-full w-full flex-col items-center justify-center gap-3 rounded-[var(--node-radius)] border px-5 py-4 text-center ${CANVAS_NODE_INPUT_SURFACE_CLASS} ${cardToneClass}`}>
+            <button type="button" onClick={(event) => { event.stopPropagation(); setProductionComposeOpen(true); }} className="nodrag flex h-10 w-full items-center justify-center rounded-[12px] border border-white/15 bg-white/[0.04] px-4 text-[13px] text-text-dark transition-colors hover:bg-white/[0.08]">打开视频合成</button>
+            <span className="text-[12px] text-text-muted/90">{status} · {seconds ? `${seconds} 秒` : '合成清单'}</span>
+            {Boolean(data.productionPlanNewComposeNodeId) && <button type="button" className="nodrag text-[11px] text-primary hover:underline" onClick={(event) => {
+              event.stopPropagation();
+              setProductionComposeOpen(false);
+              const nextId = String(data.productionPlanNewComposeNodeId);
+              useCanvasStore.setState((current) => ({ nodes: current.nodes.map((node) => node.id === id ? { ...node, hidden: true } : node) }));
+              setSelectedNode(nextId); requestFocusNode(nextId);
+            }}>返回新版视频合成</button>}
+          </div>
+          {isProductionComposeOpen && createPortal(<div role="dialog" aria-label="视频合成" aria-modal="true" className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 p-4" onClick={() => setProductionComposeOpen(false)}>
+            <div className="nodrag nowheel flex max-h-[90vh] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-[var(--ui-border-strong)] bg-[var(--ui-surface-modal)] text-text-dark shadow-2xl" onClick={(event) => event.stopPropagation()}>
+              <header className="flex items-center justify-between border-b border-[var(--ui-border-soft)] px-6 py-4"><div><h2 className="text-base font-semibold">视频合成</h2><p className="mt-1 text-xs text-text-muted">检查编排清单并渲染成片</p></div><button type="button" aria-label="关闭视频合成" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => setProductionComposeOpen(false)}><X className="h-4 w-4" /></button></header>
+              <div className="ui-scrollbar grid min-h-0 gap-6 overflow-y-auto px-6 py-5 md:grid-cols-[minmax(0,1fr)_280px]">
+                <div className="space-y-4">
+                  <div><div className="text-sm font-semibold">{status}</div><div className="mt-2 text-xs text-text-muted">{manifestReady && manifestDraft
+                    ? `${seconds ?? '—'} 秒 · 画面 ${manifestDraft.layers.length} · 声音 ${manifestDraft.audio_events.length} · 字幕 ${manifestDraft.subtitle_events.length}`
+                    : data.remixManifestLoadState === 'failed' ? '合成清单加载失败' : '正在读取编排清单…'}</div></div>
+                  {oldPreview && <p className="text-xs text-amber-300">预览已过期，重新渲染后更新</p>}
+                  {!exportable && manifestReady && <p className="text-xs text-amber-300">{!inputsCurrent ? '上游方案或素材已变化，请更新编排' : conflicts.map(conflictMessage).join('；') || blockReason}</p>}
+                  {remixError && <p role="alert" className="text-xs text-red-300">{remixError}</p>}
+                  <div className="flex flex-wrap gap-2">
+              <button type="button" disabled={!exportable || nodeRevision == null || isRemixSubmitting || renderInProgress || !project || !remixKey || remixOperationStatus === 'stale'} onClick={() => void submit(false)} className="nodrag h-8 rounded-[12px] bg-primary px-3 text-[12px] font-semibold text-primary-foreground disabled:opacity-50">{isRemixSubmitting ? '提交中…' : '渲染导出'}</button>
+              {returnTarget && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { setProductionComposeOpen(false); setSelectedNode(returnTarget.id); requestFocusNode(returnTarget.id); if (arrangement) updateNodeData(arrangement.id, { productionTimelineOpenOnCreate: true }); }}>{arrangement ? '返回成片编排' : '返回作品方案'}</button>}
+              <button type="button" disabled={isRemixPreparing || !project || (!manifestReady && data.remixManifestLoadState !== 'failed')} onClick={() => void handlePrepareRemix()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>更新编排</button>
+              {renderInProgress && <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={() => { if (project) void transitionRemixOperation(project, data.remixOperationId!, 'cancelled', 'user_cancelled').then(() => updateNodeData(id, { remixOperationId: null })); }}>取消导出</button>}
+                  </div>
+                  {shownVideoUrl && <div className="flex gap-3 text-xs text-primary underline"><a href={shownVideoUrl} target="_blank" rel="noreferrer">{oldPreview ? '查看旧版预览' : '预览成片'}</a><a href={shownVideoUrl.replace('/media/', '/files/')} download>下载 MP4</a></div>}
+                </div>
+                {shownVideoUrl && manifestReady ? <video className="nodrag max-h-[60vh] w-full rounded-[12px] bg-black" src={shownVideoUrl} controls />
+                  : <div className="flex min-h-64 items-center justify-center rounded-[12px] border border-dashed border-white/10 bg-black/10 text-xs text-text-muted">{data.remixOperationId ? '渲染完成后可在这里预览' : '尚未生成预览'}</div>}
+              </div>
+            </div>
+          </div>, document.body)}
+        </div>;
+      }
       return <div className="group relative w-[380px]" onClick={() => setSelectedNode(id)}>
         <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
         <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
@@ -601,7 +747,7 @@ export const VideoComposeNode = memo(
             >
               旧版单节点改编
             </button>}
-            {!hasSemanticTimeline && <span className="text-center text-[11px] text-text-muted">参考改编：先连接语义时间轴节点</span>}
+            {!hasSemanticTimeline && !hasProductionPlan && <span className="text-center text-[11px] text-text-muted">参考改编：先连接语义时间轴或作品方案节点</span>}
             {remixError && <span role="alert" className="text-[11px] text-red-300">{remixError}</span>}
           </div>}
         </div>

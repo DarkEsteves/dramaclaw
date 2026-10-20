@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from novelvideo.ports.registry import get_port
+from novelvideo.ports.registry import PortNotRegistered, get_port
+from novelvideo.ports.preview_capacity import LocalPreviewCapacity, PreviewUnavailable
 from novelvideo.shared import runtime_env
+
+_LOCAL_PREVIEW_CAPACITY = LocalPreviewCapacity()
 
 
 def get_auth_port():
@@ -126,6 +129,20 @@ def get_canvas_write_mutex():
         return FileLockCanvasWriteMutex()
 
 
+def get_production_index():
+    """Optional display index; EE requires its deployment-owned adapter."""
+    try:
+        return get_port("production_index")
+    except Exception as exc:
+        if exc.__class__.__name__ != "PortNotRegistered":
+            raise
+        if runtime_env.edition() != "ce":
+            return None
+        from novelvideo.ports.local.production_index import LocalProductionIndex
+
+        return LocalProductionIndex()
+
+
 def get_product_surface_access():
     return get_port("product_surface_access")
 
@@ -153,6 +170,17 @@ def get_video_result_delivery():
     return get_port("video_result_delivery")
 
 
+def get_preview_render_capacity():
+    """CE renders locally; EE must install a cluster-wide capacity port."""
+    if runtime_env.edition() == "ce":
+        return _LOCAL_PREVIEW_CAPACITY
+    try:
+        return get_port("preview_render_capacity")
+    except PortNotRegistered as exc:
+        # Old EE builds can serve the rest of CE during a rolling deployment.
+        raise PreviewUnavailable("preview capacity is not installed") from exc
+
+
 __all__ = [
     "get_audit_sink",
     "get_auth_port",
@@ -166,6 +194,7 @@ __all__ = [
     "get_lifecycle_port",
     "get_model_credentials",
     "get_product_surface_access",
+    "get_production_index",
     "get_project_access",
     "get_project_registry",
     "get_provider_instrumentation",
@@ -175,4 +204,5 @@ __all__ = [
     "get_task_projection",
     "get_usage_meter",
     "get_video_result_delivery",
+    "get_preview_render_capacity",
 ]

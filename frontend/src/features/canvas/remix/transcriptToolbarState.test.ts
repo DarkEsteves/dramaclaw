@@ -48,4 +48,8 @@ describe('transcript toolbar state', () => {
     const nodes = [transcript({ words: [], status: 'needs_review', operationId: 'operation-1' })];
     expect(transcriptToolbarState(nodes as never, [], 'transcript').busy).toBe(true);
   });
+  it('disables processing actions before the standalone task admission returns', () => {
+    const nodes = [transcript({ words: [], status: 'needs_review', transcriptSubmissionPending: 'submission-key' })];
+    expect(transcriptToolbarState(nodes as never, [], 'transcript').busy).toBe(true);
+  });
 });

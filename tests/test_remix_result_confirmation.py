@@ -87,6 +87,162 @@ def _canvas(tmp_path: Path, artifact: dict, *, node_revision: int = 3) -> Path:
     return path
 
 
+def _published_v2(tmp_path: Path) -> tuple[dict, dict, Path]:
+    from novelvideo.freezone.remix.production_plan_v2 import compile_production_plan_v2
+    from test_production_plan_v2 import _plan
+
+    plan = _plan()
+    plan["output"].update({"width": 64, "height": 64})
+    for resource in plan["resources"]:
+        media = tmp_path / resource["media_path"]
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(resource["id"].encode())
+        resource["media_hash"] = hashlib.sha256(media.read_bytes()).hexdigest()
+        resource["has_audio"] = resource["media_kind"] == "audio"
+    artifacts = RemixArtifactStore(tmp_path, "demo")
+    saved_plan = artifacts.create("production_plan.v2", plan, [])
+    ref = {"artifact_id": saved_plan["id"], "revision": 1}
+    manifest = compile_production_plan_v2(saved_plan["payload"])
+    manifest["source_versions"] = [ref]
+    saved_manifest = artifacts.create("composition_manifest.v2", manifest, [ref])
+    op_store = RemixOperationStore(tmp_path, "demo")
+    operation = op_store.start(
+        idempotency_key="v2-render", input_refs=[{"artifact_id": saved_manifest["id"], "revision": 1}],
+        producer_version="remix-render.v1",
+        normalized_parameters={"job_id": "v" * 64, "input_fingerprint": "v2-fingerprint",
+                               "manifest_media_bindings": manifest["media_bindings"]},
+        node_revision=1, canvas_id="default", node_id="compose-1",
+        input_media_hashes=sorted({item["media_hash"] for item in manifest["media_bindings"]}),
+    )
+    output = tmp_path / "freezone" / "remix_renders" / saved_manifest["id"] / "1" / "v2.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"rendered")
+    op_store.publish_result_unverified(operation["operation_id"], output_refs=[{"project_path": output.relative_to(tmp_path).as_posix()}])
+    canvas = canvas_path(tmp_path / "state", "default")
+    canvas.parent.mkdir(parents=True, exist_ok=True)
+    nodes = [{"id": "plan", "type": "scriptNode", "data": {
+        "productionPlanV2Ref": {"artifactId": saved_plan["id"], "revision": 1},
+        "productionPlanV2Dirty": False, "productionPlanV2Draft": saved_plan["payload"],
+    }}, {"id": "compose-1", "type": "videoComposeNode", "data": {
+        "productionPlanNodeId": "plan", "productionPlanV2Ref": {"artifactId": saved_plan["id"], "revision": 1},
+        "remixManifestRef": {"artifactId": saved_manifest["id"], "revision": 1},
+        "remixNodeRevision": 1, "remixInputsCurrent": True, "remixInputFingerprint": "v2-fingerprint",
+    }}]
+    edges = [{"source": "plan", "target": "compose-1"}]
+    for resource in saved_plan["payload"]["resources"]:
+        kind = resource["media_kind"]
+        url_field = {"image": "imageUrl", "video": "videoUrl", "audio": "audioUrl"}[kind]
+        nodes.append({"id": resource["node_id"], "type": "uploadNode", "data": {
+            url_field: f"/api/v1/projects/demo/media/{resource['media_path']}",
+            "remixMedia": {key: resource[key] for key in
+                           ("media_hash", "media_path", "media_kind", "duration_us", "has_audio")},
+        }})
+        edges.append({"source": resource["node_id"], "target": "plan"})
+    canvas.write_text(json.dumps({"canvas_id": "default", "project_id": "demo", "revision": 2,
+                                  "nodes": nodes, "edges": edges}))
+    return saved_plan, operation, canvas
+
+
+@pytest.mark.parametrize("mutation", ["dirty", "draft_only", "new_plan_revision", "media_hash", "media_url", "media_file", "disconnect"])
+def test_v2_confirmation_rechecks_current_plan_and_canvas_media(
+    api: TestClient, tmp_path: Path, mutation: str
+) -> None:
+    plan, operation, canvas_path_value = _published_v2(tmp_path)
+    changed = json.loads(canvas_path_value.read_text())
+    if mutation == "dirty":
+        changed["nodes"][0]["data"]["productionPlanV2Dirty"] = True
+    elif mutation == "draft_only":
+        changed["nodes"][0]["data"]["productionPlanV2Draft"]["output"]["width"] = 128
+    elif mutation == "new_plan_revision":
+        RemixArtifactStore(tmp_path, "demo").revise(plan["id"], 1, plan["payload"], [])
+    elif mutation == "media_hash":
+        changed["nodes"][2]["data"]["remixMedia"]["media_hash"] = "0" * 64
+    elif mutation == "media_url":
+        changed["nodes"][2]["data"]["imageUrl"] = "/api/v1/projects/demo/media/assets/other.png"
+    elif mutation == "media_file":
+        (tmp_path / plan["payload"]["resources"][0]["media_path"]).write_bytes(b"changed")
+    else:
+        changed["edges"] = changed["edges"][:-1]
+    canvas_path_value.write_text(json.dumps(changed))
+    response = api.post(
+        f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm",
+        json={"canvas_id": "default", "node_id": "compose-1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "stale"
+    assert "resultVideoUrl" not in json.loads(canvas_path_value.read_text())["nodes"][1]["data"]
+    assert RemixOperationStore(tmp_path, "demo").get(operation["operation_id"])["output_refs"]
+
+
+def test_v2_confirmation_accepts_unchanged_plan_and_canvas_media(api: TestClient, tmp_path: Path) -> None:
+    _plan, operation, canvas = _published_v2(tmp_path)
+    response = api.post(
+        f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}/confirm",
+        json={"canvas_id": "default", "node_id": "compose-1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "completed"
+    assert json.loads(canvas.read_text())["nodes"][1]["data"]["resultVideoUrl"].endswith(".mp4")
+    assert json.loads(canvas.read_text())["nodes"][1]["data"]["productionPlanRenderedRef"] == {
+        "artifactId": _plan["id"], "revision": 1,
+    }
+
+
+def test_graphic_only_v2_render_uses_protected_api_and_confirms_without_media(
+    api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from novelvideo.api.routes import remix as routes
+    from novelvideo.freezone.remix.production_plan_v2 import compile_production_plan_v2
+    from test_production_plan_v2 import _plan, _anchor
+
+    plan = _plan()
+    plan["resources"] = []
+    plan["placements"] = [{"id": "card", "kind": "graphic", "role": "effect", "track_id": "graphic:effect",
+                           "graphic": {"template": "question_card", "text": "为什么？"},
+                           "start": _anchor(0), "end": _anchor(60)}]
+    artifacts = RemixArtifactStore(tmp_path, "demo")
+    saved_plan = artifacts.create("production_plan.v2", plan, [])
+    plan_ref = {"artifact_id": saved_plan["id"], "revision": 1}
+    manifest = compile_production_plan_v2(saved_plan["payload"])
+    manifest["source_versions"] = [plan_ref]
+    assert manifest["media_bindings"] == []
+    saved_manifest = artifacts.create("composition_manifest.v2", manifest, [plan_ref])
+    canvas = canvas_path(tmp_path / "state", "default")
+    canvas.parent.mkdir(parents=True, exist_ok=True)
+    canvas.write_text(json.dumps({"canvas_id": "default", "project_id": "demo", "revision": 1,
+        "nodes": [{"id": "plan", "type": "scriptNode", "data": {"productionPlanV2Ref": {"artifactId": saved_plan["id"], "revision": 1},
+                   "productionPlanV2Dirty": False, "productionPlanV2Draft": saved_plan["payload"]}},
+                  {"id": "compose-1", "type": "videoComposeNode", "data": {
+                      "productionPlanNodeId": "plan", "productionPlanV2Ref": {"artifactId": saved_plan["id"], "revision": 1},
+                      "remixManifestRef": {"artifactId": saved_manifest["id"], "revision": 1},
+                      "remixNodeRevision": 1, "remixInputsCurrent": True, "remixInputFingerprint": "graphic-input"}}],
+        "edges": [{"source": "plan", "target": "compose-1"}]}))
+
+    class Backend:
+        async def enqueue_project_task(self, *_args, **_kwargs):
+            return SimpleNamespace(task_state=SimpleNamespace(task_id="graphic-task"), backend="test", queue="ffmpeg")
+
+    monkeypatch.setattr(routes, "get_task_backend", lambda: Backend())
+    submitted = api.post(f"/api/v1/projects/demo/freezone/remix/artifacts/{saved_manifest['id']}/render", json={
+        "revision": 1, "idempotency_key": "graphic-only", "node_revision": 1,
+        "canvas_id": "default", "node_id": "compose-1", "input_fingerprint": "graphic-input",
+    })
+    assert submitted.status_code == 200, submitted.text
+    operation_id = submitted.json()["data"]["operation_id"]
+    output = tmp_path / "freezone" / "remix_renders" / saved_manifest["id"] / "1" / "graphic.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"graphic-render")
+    operations = RemixOperationStore(tmp_path, "demo")
+    operations.publish_result_unverified(operation_id, output_refs=[{"project_path": output.relative_to(tmp_path).as_posix()}])
+    confirmed = api.post(f"/api/v1/projects/demo/freezone/remix/operations/{operation_id}/confirm",
+                         json={"canvas_id": "default", "node_id": "compose-1"})
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["data"]["status"] == "completed"
+    assert json.loads(canvas.read_text())["nodes"][1]["data"]["productionPlanRenderedRef"] == {
+        "artifactId": saved_plan["id"], "revision": 1,
+    }
+
+
 def test_operation_is_readable_and_listed_after_publish(api: TestClient, tmp_path: Path) -> None:
     artifact, operation = _published(tmp_path)
     path = f"/api/v1/projects/demo/freezone/remix/operations/{operation['operation_id']}"

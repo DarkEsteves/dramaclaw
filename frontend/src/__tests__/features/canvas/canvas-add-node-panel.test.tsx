@@ -63,14 +63,14 @@ describe("CanvasAddNodePanel", () => {
     }
   });
 
-  it("offers the reference remix nodes as separate canvas nodes", () => {
+  it("offers the active reference remix nodes without the legacy timeline", () => {
     render(
       <CanvasAddNodePanel skillItems={[]} onSelectNode={vi.fn()} onSelectSkill={vi.fn()} onClose={vi.fn()} />,
     );
 
     expect(screen.getByRole("button", { name: "转写/对齐" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "视频故事" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "语义时间轴" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "语义时间轴" })).not.toBeInTheDocument();
   });
 
   it("shows standalone shot context in the quick add panel", async () => {

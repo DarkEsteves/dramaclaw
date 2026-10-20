@@ -1,3 +1,4 @@
+import { captureFreezoneCanvasScope, flushFreezoneCanvasRuntime } from "@/features/freezone/canvasSyncRuntime";
 import { ImageDerivedActions } from './ImageDerivedActions';
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
@@ -109,6 +110,7 @@ import { GROUP_COLOR_PRESETS } from "@/features/canvas/domain/groupColors";
 import { StoryboardGroupToolbar } from "@/features/canvas/ui/StoryboardGroupToolbar";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import {
+  dispatchNodeAction,
   publishNodeActionAccepted,
   publishNodeActionError,
   publishNodeActionSuccess,
@@ -137,7 +139,7 @@ import { findSeedance25VideoModel } from "@/features/canvas/nodes/shared/videoMo
 import { openNodeImageViewer } from '../application/nodeMediaViewer';
 import { importStoryClips, importStoryKeyframes, isStoryClipImportRunning, storyMediaCounts } from "@/features/canvas/remix/storyMediaImport";
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
-import { analyzeReferenceVideo } from "@/features/canvas/application/analyzeReferenceVideo";
+import { analyzeReferenceVideo, waitForReferenceVideoAnalysis } from "@/features/canvas/application/analyzeReferenceVideo";
 import { attachRemixMedia } from '@/api/remix';
 import { startSourceTranscript } from "@/features/canvas/application/startSourceTranscript";
 import { remixScriptEditorLabel, scriptCanvasState } from '@/features/canvas/remix/scriptCanvasState';
@@ -180,6 +182,11 @@ import {
   NODE_TOOLBAR_POSITION,
 } from "./nodeToolbarConfig";
 import type { GridActionKey } from "@/features/canvas/application/gridTemplateAction";
+
+function readOptionalShotNumbers(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return undefined;
+  return value.map((item) => item.trim()).filter(Boolean);
+}
 
 /**
  * 「九宫格」下拉选中某一项时抛给宿主的请求。宿主据此在源节点下游建一个功能节点
@@ -1487,8 +1494,29 @@ export const NodeActionToolbar = memo(
         if (action === "run_video_analyze_story") {
           try {
             publishNodeActionAccepted(requestId, node.id, action);
+            const { project, canvas } = readUrl();
+            const isCurrentScope = project && canvas ? captureFreezoneCanvasScope(project, canvas) : () => false;
             const result = handleAnalyzeVideo();
-            publishNodeActionSuccess(requestId, node.id, action, { nodeId: result.nodeId });
+            void waitForReferenceVideoAnalysis(result, async () => {
+              if (!project || !canvas || !isCurrentScope()) throw new Error("当前画布已切换，请返回原画布查看分析结果");
+              if (await flushFreezoneCanvasRuntime(project, canvas) !== true || !isCurrentScope()) {
+                throw new Error("原片拆解结果尚未保存，请保存画布后重试");
+              }
+            })
+              .then((output) => publishNodeActionSuccess(requestId, node.id, action, output))
+              .catch((error) => publishNodeActionError(requestId, node.id, action, error));
+          } catch (error) {
+            publishNodeActionError(requestId, node.id, action, error);
+          }
+          return;
+        }
+        if (action === "import_reference_keyframes") {
+          try {
+            publishNodeActionAccepted(requestId, node.id, action);
+            const shotNumbers = readOptionalShotNumbers(parameters?.shot_numbers);
+            const output = importStoryKeyframes(node.id, { shotNumbers });
+            if (output.frames.length === 0) throw new Error("当前原片拆解没有可导入的关键帧");
+            publishNodeActionSuccess(requestId, node.id, action, { ...output });
           } catch (error) {
             publishNodeActionError(requestId, node.id, action, error);
           }
@@ -1640,9 +1668,9 @@ export const NodeActionToolbar = memo(
     const isPresetLocked = _toolbarFlags.isPresetManaged;
     const recipeCompileFellBack =
       node.data.workflowRecipeCompileMode === "timeout_fallback";
-    const remixScriptState = node.type === CANVAS_NODE_TYPES.script
+    const remixScriptState = node.type === CANVAS_NODE_TYPES.script && node.data.remixRole !== 'production_plan'
       ? scriptCanvasState(nodes, edges, node.id) : null;
-    const remixScriptLabel = node.type === CANVAS_NODE_TYPES.script
+    const remixScriptLabel = node.type === CANVAS_NODE_TYPES.script && node.data.remixRole !== 'production_plan'
       ? remixScriptEditorLabel(node.data, edges.some((edge) => edge.target === node.id
         && nodes.some((source) => source.id === edge.source && source.type === CANVAS_NODE_TYPES.videoStory && Boolean(source.data.referenceBlueprintRef))))
       : null;
@@ -1659,7 +1687,7 @@ export const NodeActionToolbar = memo(
     const storyMedia = node.type === CANVAS_NODE_TYPES.videoStory ? storyMediaCounts(node) : null;
     const transcriptActions = node.type === CANVAS_NODE_TYPES.transcript
       ? transcriptToolbarState(nodes, edges, node.id) : null;
-    const semanticTimelineAction = node.type === CANVAS_NODE_TYPES.semanticTimeline
+    const semanticTimelineAction = node.type === CANVAS_NODE_TYPES.semanticTimeline && !node.data.productionPlanNodeId
       ? semanticTimelineToolbarState({ compileOperationId: node.data.compileOperationId }) : null;
 
     if (node.type === CANVAS_NODE_TYPES.htmlArtifact && !node.data.artifactId) return null;
@@ -1708,7 +1736,7 @@ export const NodeActionToolbar = memo(
                 Recipe 已降级编译
               </span>
             )}
-            {(isVideoNode(node) || isAudioNode(node)) && (
+            {(isAudioNode(node) || isVideoNode(node)) && (
               <UiChipButton
                 key="remix-source-transcribe"
                 className={`${TOOLBAR_TEXT_BUTTON_CLASS} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:!bg-transparent`}
@@ -1832,6 +1860,10 @@ export const NodeActionToolbar = memo(
               {semanticTimelineAction.disabled ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Workflow className="h-3.5 w-3.5" />}
               {semanticTimelineAction.label}
             </UiChipButton>}
+            {node.type === CANVAS_NODE_TYPES.semanticTimeline && Boolean(node.data.productionPlanNodeId) && <UiChipButton
+              className={TOOLBAR_TEXT_BUTTON_CLASS}
+              onClick={(event) => { event.stopPropagation(); canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'open_production_timeline' }); }}
+            ><Workflow className="h-3.5 w-3.5" />查看成片编排</UiChipButton>}
             {Boolean(remixScriptLabel) && <UiChipButton
               className={TOOLBAR_TEXT_BUTTON_CLASS}
               onClick={(event) => {
@@ -1839,6 +1871,10 @@ export const NodeActionToolbar = memo(
                 requestRemixScriptEditor(node.id);
               }}
             ><PenLine className="h-3.5 w-3.5" />{remixScriptLabel}</UiChipButton>}
+            {node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'production_plan' && <UiChipButton
+              className={TOOLBAR_TEXT_BUTTON_CLASS}
+              onClick={(event) => { event.stopPropagation(); canvasEventBus.publish('remix-node/action', { nodeId: node.id, action: 'edit_production_plan' }); }}
+            ><PenLine className="h-3.5 w-3.5" />编辑作品方案</UiChipButton>}
             {remixVisualNeedsBinding && remixVisualRole && <UiChipButton
               className={TOOLBAR_TEXT_BUTTON_CLASS}
               onClick={(event) => {
@@ -1872,7 +1908,9 @@ export const NodeActionToolbar = memo(
                       : node.data.remixScriptRef ? [{ action: 'create_narration', label: '制作配音', Icon: Workflow }] : []),
                     ]),
                   ] : []
-                  : node.type === CANVAS_NODE_TYPES.semanticTimeline ? [{ action: 'create_compose', label: '生成合成清单', Icon: Film }]
+                  : node.type === CANVAS_NODE_TYPES.semanticTimeline ? node.data.productionPlanNodeId
+                    ? [{ action: 'compile', label: '生成合成清单', Icon: Workflow }, { action: 'create_compose', label: '进入视频合成', Icon: Film }]
+                    : [{ action: 'create_compose', label: '生成合成清单', Icon: Film }]
                   : [{ action: 'prepare_compose', label: '生成合成清单', Icon: Film }]
                 ).map(({ action, label, Icon }) => <UiChipButton
                   key={`remix-${action}`}

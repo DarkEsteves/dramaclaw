@@ -740,7 +740,10 @@ def _workflow_skill_description(item: dict) -> str:
     parts = [description]
     if keyword_text:
         parts.append(f"适用于：{keyword_text}。")
-    parts.append("选择后使用虾画确定性工具生成动态工作流。")
+    if item.get("id") == "reference-video-remix":
+        parts.append("选择后整理复刻方向，由作品方案节点 AI 起草。")
+    else:
+        parts.append("选择后使用虾画确定性工具生成动态工作流。")
     return " ".join(part for part in parts if part)[:1024]
 
 
@@ -759,6 +762,30 @@ def _render_workflow_skill(item: dict) -> tuple[str, dict[str, object]]:
         allow_unicode=True,
         sort_keys=False,
     ).strip()
+    native_plan_route = ""
+    if skill_id == "reference-video-remix":
+        native_plan_route = """
+## 参考视频复刻
+
+原生方案入口以当前保存的 commission_ref 和 native_plan_stage 为准，目录规划包仅供需要时查阅指导。
+源视频还没有完成原片拆解时，调用 `freezone_start_reference_analysis(source_node_id, user_goal, inputs, idempotency_key)` 后结束当前轮；后台完成后展示结果并自动开启下一轮。不要轮询节点或任务，不要用 run_video_analyze_story 长时间等待来推进复刻。
+方向阶段只用自然语言讨论用户的创作目标与保留/替换边界，不逐轮保存方向提议，不在对话中代写逐镜分镜、台词或素材清单，也不自行增加用户未指定的剧情细节。用户明确要求推进时，读取当前 commission_ref 与 native_plan_stage；unprepared 时调用 `freezone_prepare_production_nodes(commission_ref, goal, run_after_create, plan_count)`。宿主只在这个提交边界核验真实用户回合与完整目标；有歧义时自然追问。goal 写入完整但概括的已讨论目标与修改，细化内容交给作品方案节点的 AI 一次模型调用生成完整作品方案（结构、台词、素材与画面声音编排，authoring_stage=arranged），随后 Agent 读取并审核实际产物、局部修正。创建并生成传 true，仅创建传 false；恢复不改变策略，多个方案才改变 plan_count。工具复用既有 draft 和画布审批；手动批准前不落图、不生成，不新增方向或工作流卡。原生节点创建无需目录搜索、手写 Intent/分析绑定、申请 workflow_result 或单独确认 draft。
+已有节点读取真实保存状态：有方案先读取/局部修改；仅历史保存的 authoring_stage=outline 表示结构与台词已保存、画面与声音尚未安排，不做完整方案审核。需要继续时根据用户授权明确调用同节点 generate_production_plan_arrangement，parameters 仅传当前已保存 plan_ref，遵守现有动作确认；完成通知不得自动提交下一阶段或制作素材。空方案且获准生成时，用 `freezone_run_node_action` 调用当前目录注册的 generate_production_plan_draft。已受理任务后结束本轮，等真实完成/失败事件，不轮询、不重复提交。按创建/任务/plan_ref 回执报告状态；创建成功不代表方案生成。传输不明先核对既有回执；实际生成失败等待用户授权重试，不能改走通用规划或新增付费尝试。`prepare_production_nodes` 返回的 `status=confirmed` 可能只是复用已确认草稿；如果 `native_plan_stage.state=failed`，不得称为重新运行。用户明确授权重试时，使用失败槽位的原始 `plan_node_id` 调用 `freezone_run_node_action(action="generate_production_plan_draft")`；该动作会复用节点保存的 topic、requirements 和 blueprint，不要传空参数或临时改写目标，只有新的画布运行回执才能报告已提交。
+编译器负责创建原生作品方案及合成节点；首次运行只生成作品方案。素材、语音校准、编译按实际保存版本分阶段续跑。
+
+## 已有作品方案的局部编辑
+
+已有作品方案的局部编辑不是新建工作流；此时不执行下方新建流程，不重建节点，也不重新生成作品方案。
+从当前节点上下文或 `freezone_get_node_detail` 读取 `productionPlanV2Ref`，再用 `freezone_get_production_state(artifact_id=<真实 artifactId>)` 读最新保存版本。
+用 `freezone_prepare_production_edit(node_id=<真实作品方案节点ID>, command={command_id, plan_ref, kind, target_id, payload})` 提交审批卡。
+`plan_ref` 必须是刚读取的精确 `{artifact_id, revision}`；输出规格使用 `kind="set_output"`、`target_id="output"`、`payload={"output":{...当前输出规格加本次修改...}}`。
+只运行用户明确要求的动作；局部编辑不运行素材生成或渲染任务，也不把作品数据写进普通文本节点。
+
+素材选择先理解用户要求保留、替换和新增的部分。保留真实视觉元素时读取 `freezone_list_reference_media`，使用可验证的原片、已导入关键帧或已接受素材；视频证据可用于结构、动作和节奏，但不要把视频节点当成图片参考，也不要只凭文字生成后声称保留原貌。图片项没有 `existing_node_id` 时，可按 `shot_number` 调用画布动作 `import_reference_keyframes`，再重新读取 `freezone_list_reference_media`；导入只落画布，不生成媒体、不确认素材选择。没有可验证关键帧或用户明确选择风格重建时才走生成参考图路径，并说明是生成候选；导入失败时只报告原因和下一步建议，不自动生成、不自动重试。更换素材来源用 `freezone_revise_material_strategy` 保存完整替代步骤；`freezone_retry_material_step` 只重试当前策略。异步提交后结束本轮，等后台完成通知，不循环轮询。
+
+完整复刻与编排指南：`skill_view(name="workflows", file_path="references/reference-video-remix.md")`。
+Hermes 注册的指南名称是 `workflows`，不要把 portable 包名当作 Hermes Skill，也不要猜测其它参考文件。`freezone_*` 操作通过 `tool_call(name="<工具名>", arguments={...})` 调用。
+"""
     content = f"""---
 {frontmatter}
 ---
@@ -766,7 +793,10 @@ def _render_workflow_skill(item: dict) -> tuple[str, dict[str, object]]:
 # {display_name}
 
 这是虾画 Workflow Skill `{skill_id}` 的 Hermes 原生选择入口。
-
+{native_plan_route}
+"""
+    if skill_id != "reference-video-remix":
+        content += f"""
 ## 执行规则
 
 1. 本 Skill 已由用户明确选择。只调用一次 `freezone_get_workflow_skill`，固定传入 `skill_id=\"{skill_id}\"`；不要再次选择或替换 Skill。只补充 `input_contract.missing_required`，不要重复询问已经推断或有默认值的参数。

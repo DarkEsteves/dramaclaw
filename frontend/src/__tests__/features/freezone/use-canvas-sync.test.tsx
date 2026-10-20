@@ -19,6 +19,7 @@ import {
 import {
   applyRemoteFreezoneCanvas,
   refreshRemoteFreezoneCanvas,
+  getFreezoneCanvasBaseline,
   consumeQueuedLocalFreezoneProjections,
   queueLocalFreezoneProjection,
   removeLocalFreezoneProjection,
@@ -166,6 +167,29 @@ describe("useCanvasSync hydrate lifecycle", () => {
       const prompt = useCanvasStore.getState().nodes.find((node) => node.id === "video")?.data.prompt;
       expect(prompt).toContain("@图片1（主角） 是人物身份参考");
     });
+  });
+
+  it('exposes a server baseline separately from unsaved local edits', async () => {
+    const source = { id: 'baseline-node', type: 'videoNode', position: { x: 0, y: 0 }, data: { videoUrl: '/before.mp4' } };
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [source], edges: [], revision: 1 });
+    const view = renderHook(() => useCanvasSync('project-a', 'baseline-canvas'));
+    await waitFor(() => expect(view.result.current.revision).toBe(1));
+    act(() => useCanvasStore.getState().updateNodeData('baseline-node', { videoUrl: '/after.mp4' }));
+    expect(getFreezoneCanvasBaseline('project-a', 'baseline-canvas')).toMatchObject({ revision: 1, nodes: [expect.objectContaining({ data: expect.objectContaining({ videoUrl: '/before.mp4' }) })] });
+    await act(async () => { await view.result.current.flush(); });
+    expect(getFreezoneCanvasBaseline('project-a', 'baseline-canvas')).toMatchObject({ revision: 2, nodes: [expect.objectContaining({ data: expect.objectContaining({ videoUrl: '/after.mp4' }) })] });
+    view.unmount();
+  });
+
+  it('keeps the actual metadata baseline and saves metadata preserved by a remote merge', async () => {
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [], edges: [], revision: 1, metadata: { goal: 'old' } });
+    const view = renderHook(() => useCanvasSync('project-a', 'metadata-merge-canvas'));
+    await waitFor(() => expect(view.result.current.revision).toBe(1));
+    act(() => { applyRemoteFreezoneCanvas('project-a', 'metadata-merge-canvas', { nodes: [], edges: [], revision: 4, metadata: { goal: 'old' } }, () => ({ nodes: [], edges: [], metadata: { goal: 'local edit' } })); });
+    expect(getFreezoneCanvasBaseline('project-a', 'metadata-merge-canvas')).toMatchObject({ revision: 4, metadata: { goal: 'old' }, localMetadata: { goal: 'local edit' } });
+    await act(async () => { await view.result.current.flush(); });
+    expect(putFreezoneCanvas).toHaveBeenCalledWith('project-a', 'metadata-merge-canvas', expect.objectContaining({ base_revision: 4, metadata: expect.objectContaining({ goal: 'local edit' }) }));
+    view.unmount();
   });
 
   // Canvas 现在跨项目常驻（_app.tsx 不再按项目重挂 freezone），所以 hydrate 必须

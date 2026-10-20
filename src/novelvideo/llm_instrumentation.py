@@ -7,12 +7,21 @@ CE and EE processes without importing EE/control-plane modules.
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import os
+import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from typing import Any, Optional
 
 logger = logging.getLogger("novelvideo.llm_instrumentation")
+_plan_diagnostic_logger = logging.getLogger("novelvideo.production_plan_diagnostic")
+_plan_diagnostic_logger.setLevel(logging.INFO)
+_plan_diagnostic_logger.propagate = False
+if not _plan_diagnostic_logger.handlers:
+    _plan_diagnostic_logger.addHandler(logging.StreamHandler())
 
 _PROJECT_CTX: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "novelvideo_project_id", default=None
@@ -34,6 +43,28 @@ _MODEL_CALL_INSTRUMENTATION_ACTIVE: contextvars.ContextVar[bool] = contextvars.C
     "st_model_call_instrumentation_active",
     default=False,
 )
+_PRODUCTION_PLAN_DIAGNOSTIC: contextvars.ContextVar[dict[str, object]] = contextvars.ContextVar(
+    "novelvideo_production_plan_diagnostic", default={}
+)
+_PLAN_DIAGNOSTIC_SINK: contextvars.ContextVar[Callable[[dict], None] | None] = (
+    contextvars.ContextVar("novelvideo_plan_diagnostic_sink", default=None)
+)
+_PLAN_DIAGNOSTIC_IDENTIFIERS = frozenset({
+    "project_id", "canvas_id", "node_id", "workflow_run_id", "operation_id",
+    "task_id", "model_call_id", "model", "response_model", "route_profile",
+    "provider_request_id",
+})
+_PLAN_DIAGNOSTIC_NUMBERS = frozenset({
+    "attempt", "elapsed_ms", "timeout_seconds", "input_characters",
+    "available_tokens", "output_characters", "input_tokens", "output_tokens",
+    "sdk_retry_count", "context_characters", "schema_characters", "first_event_ms",
+    "first_text_ms", "streamed_characters", "reasoning_tokens",
+    "total_output_tokens", "requested_output_tokens",
+    "normalized_count", "validation_issue_count", "source_event_count",
+    "passed_event_count", "spoken_event_count", "repair_issue_count",
+})
+_PLAN_DIAGNOSTIC_TEXT = frozenset({"stage", "draft_stage", "error_code", "error_type", "finish_reason"})
+_PLAN_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 # Compatibility for EE releases that imported the old internal name. New code
 # must use the instrumentation-scope name: an empty billing reservation can
 # still own the single model-call log for a feature-included invocation.
@@ -78,6 +109,143 @@ def get_resource_kind_context() -> str:
 
 def get_billing_metadata_context() -> dict[str, Any]:
     return dict(_BILLING_METADATA_CTX.get() or {})
+
+
+@contextmanager
+def production_plan_diagnostic_context(**identifiers: object):
+    """Carry bounded correlation IDs through the plan model call and billing hook."""
+    parent = _PRODUCTION_PLAN_DIAGNOSTIC.get()
+    clean = dict(parent)
+    for key, value in identifiers.items():
+        if key in _PLAN_DIAGNOSTIC_IDENTIFIERS and isinstance(value, str):
+            stripped = value.strip()
+            if _PLAN_SAFE_IDENTIFIER.fullmatch(stripped):
+                clean[key] = stripped
+        elif key == "draft_stage" and value in {"full", "outline", "arrangement", "finalize", "repair"}:
+            clean[key] = value
+        elif key in _PLAN_DIAGNOSTIC_NUMBERS and type(value) in (int, float):
+            if 0 <= value <= 10_000_000:
+                clean[key] = value
+    token = _PRODUCTION_PLAN_DIAGNOSTIC.set(clean)
+    try:
+        yield
+    finally:
+        _PRODUCTION_PLAN_DIAGNOSTIC.reset(token)
+
+
+def current_production_plan_model_call_id() -> str:
+    return str(_PRODUCTION_PLAN_DIAGNOSTIC.get().get("model_call_id") or "")
+
+
+def has_production_plan_diagnostic_context() -> bool:
+    return bool(_PRODUCTION_PLAN_DIAGNOSTIC.get())
+
+
+@contextmanager
+def production_plan_diagnostic_sink(sink: Callable[[dict], None]) -> Iterator[None]:
+    """Deliver sanitized records to a task-local persistent log sink."""
+    token = _PLAN_DIAGNOSTIC_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _PLAN_DIAGNOSTIC_SINK.reset(token)
+
+
+def log_production_plan_diagnostic(event: str, **details: object) -> None:
+    """Emit metadata only; never serialize prompts, source text or exception messages."""
+    if not isinstance(event, str) or not re.fullmatch(r"production_plan\.[a-z_]{1,48}", event):
+        raise ValueError("invalid production plan diagnostic event")
+    record: dict[str, object] = {"event": event, **_PRODUCTION_PLAN_DIAGNOSTIC.get()}
+    for key, value in details.items():
+        if key in _PLAN_DIAGNOSTIC_IDENTIFIERS and isinstance(value, str):
+            clean = value.strip()
+            if _PLAN_SAFE_IDENTIFIER.fullmatch(clean):
+                record[key] = clean
+        elif key in _PLAN_DIAGNOSTIC_TEXT and isinstance(value, str):
+            clean = value.strip()
+            if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", clean):
+                record[key] = clean
+        elif key in _PLAN_DIAGNOSTIC_NUMBERS and type(value) in (int, float):
+            if 0 <= value <= 10_000_000:
+                record[key] = value
+        elif key in {"response_received", "partial_output_seen"} and type(value) is bool:
+            record[key] = value
+        elif key == "validation_issues" and isinstance(value, list):
+            issues = []
+            for issue in value[:20]:
+                if not isinstance(issue, dict):
+                    continue
+                clean_issue = {}
+                for field, pattern in (("path", r"/[A-Za-z0-9_/-]{0,95}"),
+                                       ("code", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("placement_id", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("selection_id", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("beat_id", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("turn_id", r"[A-Za-z0-9_.:-]{1,64}")):
+                    field_value = issue.get(field)
+                    if isinstance(field_value, str) and re.fullmatch(pattern, field_value):
+                        clean_issue[field] = field_value
+                if clean_issue:
+                    issues.append(clean_issue)
+            record[key] = issues
+    error = details.get("error")
+    if isinstance(error, BaseException):
+        chain: list[str] = []
+        current: BaseException | None = error
+        while current is not None and len(chain) < 4:
+            chain.append(type(current).__name__[:64])
+            current = current.__cause__ or current.__context__
+        record["error_type"] = chain[0]
+        record["error_chain"] = chain
+        timeout = any(isinstance(item, TimeoutError) or "timeout" in type(item).__name__.lower()
+                      for item in _exception_chain(error))
+        record.setdefault("error_code", "model_request_timeout" if timeout else "model_request_failed")
+        status = _provider_http_status(error)
+        if status is not None:
+            record["provider_http_status"] = status
+        request_id = _provider_request_id(error)
+        if request_id:
+            record["provider_request_id"] = request_id
+        record.setdefault("response_received", bool(status is not None or request_id))
+    def serialized_size() -> tuple[str, int]:
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        displayed = json.dumps(record, ensure_ascii=False)
+        return encoded, max(len(encoded.encode("utf-8")), len(displayed.encode("utf-8")))
+
+    encoded, size = serialized_size()
+    if size > 2048:
+        # Preserve the count and as many safe paths as fit, instead of dropping
+        # all locations when a draft has many validation failures.
+        issues = record.get("validation_issues")
+        if isinstance(issues, list):
+            while len(issues) > 1 and size > 2048:
+                issues.pop()
+                encoded, size = serialized_size()
+        for key in ("provider_request_id", "model", "route_profile", "canvas_id", "node_id", "validation_issues"):
+            if size <= 2048:
+                break
+            record.pop(key, None)
+            encoded, size = serialized_size()
+    logger.info("%s", encoded)
+    # Workers may have root logging at WARNING and no API file handler. Emit
+    # the same sanitized, bounded record to the worker's captured stderr.
+    _plan_diagnostic_logger.info("%s", encoded)
+    sink = _PLAN_DIAGNOSTIC_SINK.get()
+    if sink is not None:
+        try:
+            sink(dict(record))
+        except Exception:
+            # The diagnostic path must not change model or task outcomes.
+            logger.warning("production plan diagnostic sink failed", exc_info=False)
+
+
+def _exception_chain(error: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(seen) < 4:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
 def clear_llm_usage_context() -> None:
@@ -425,23 +593,36 @@ def _json_log_value(value: object, *, depth: int = 0) -> object:
 
 def _provider_http_status(exc: BaseException) -> int | None:
     """Extract only a normalized HTTP status from a provider exception."""
-    candidates = (
-        exc,
-        getattr(exc, "response", None),
-        getattr(exc, "http_response", None),
-    )
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        for attribute in ("status_code", "status"):
-            value = getattr(candidate, attribute, None)
-            try:
-                status = int(value)
-            except (TypeError, ValueError):
+    for error in _exception_chain(exc):
+        candidates = (error, getattr(error, "response", None),
+                      getattr(error, "http_response", None))
+        for candidate in candidates:
+            if candidate is None:
                 continue
-            if 100 <= status <= 599:
-                return status
+            for attribute in ("status_code", "status"):
+                value = getattr(candidate, attribute, None)
+                try:
+                    status = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 100 <= status <= 599:
+                    return status
     return None
+
+
+def _provider_request_id(exc: BaseException) -> str:
+    """Read provider IDs from a bounded exception chain without body content."""
+    for error in _exception_chain(exc):
+        request_id, _, _ = _extract_provider_ids(error)
+        if _PLAN_SAFE_IDENTIFIER.fullmatch(request_id):
+            return request_id
+        for response in (getattr(error, "response", None),
+                         getattr(error, "http_response", None)):
+            headers = getattr(response, "headers", None)
+            request_id = _header_value(headers, *_PROVIDER_REQUEST_ID_HEADER_NAMES)
+            if _PLAN_SAFE_IDENTIFIER.fullmatch(request_id):
+                return request_id
+    return ""
 
 
 def _failure_log_metadata(
@@ -611,10 +792,13 @@ def _install_agent_run_patch() -> None:
             ),
             metadata={
                 "source": "pydantic_ai_agent_run",
-                "request_payload": {
-                    "args": _json_log_value(args),
-                    "kwargs": _json_log_value(kwargs),
-                },
+                **({"model_call_id": current_production_plan_model_call_id()}
+                   if current_production_plan_model_call_id() else {}),
+                "request_payload": (
+                    {"input_characters": sum(len(value) for value in args if isinstance(value, str))}
+                    if current_production_plan_model_call_id() else
+                    {"args": _json_log_value(args), "kwargs": _json_log_value(kwargs)}
+                ),
             },
         )
         token = _MODEL_CALL_INSTRUMENTATION_ACTIVE.set(True)

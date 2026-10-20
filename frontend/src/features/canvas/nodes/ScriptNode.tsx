@@ -89,6 +89,7 @@ import { resumeBrollPlan, startBrollPlan } from '@/features/canvas/remix/brollPl
 import { resumeScriptDraftGeneration, startScriptDraftGeneration } from '@/features/canvas/remix/scriptDraftTask';
 import { resolvePendingBrollDraft } from '@/features/canvas/remix/pendingBrollSync';
 import { RemixScriptPanel } from '@/features/canvas/remix/RemixScriptPanel';
+import { convertLegacyScriptToPlan } from '@/features/canvas/remix/createProductionPlan';
 import { canRecordRemixScriptSave, latestWritableRemixScriptRef, saveRemixScriptArtifact } from '@/features/canvas/remix/remixScriptArtifact';
 import { ReferenceBlueprintPanel, type ReferenceBlueprintPanelHandle } from '@/features/canvas/remix/blueprintPanel';
 import { connectedBlueprintSources, legacySuggestBlueprintRules, suggestBlueprintRules } from '@/features/canvas/remix/blueprintModel';
@@ -103,6 +104,7 @@ import {
   subscribeRemixScriptEditorRequest,
 } from '@/features/canvas/remix/remixScriptEditorRequests';
 import type { RemixReferenceBinding, RemixScriptDraft } from '@/features/canvas/remix/remixScriptModel';
+import { ProductionPlanNode } from './ProductionPlanNode';
 import {
   BillingRuleNotConfiguredError,
   backendErrorToastMessage,
@@ -409,7 +411,7 @@ function useScriptStorySubmit(
   return { submit, isGenerating };
 }
 
-export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNodeProps) => {
+const LegacyScriptNode = memo(({ id, data, selected, width, height }: ScriptNodeProps) => {
   const { t } = useTranslation();
   const updateNodeInternals = useUpdateNodeInternals();
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
@@ -528,6 +530,15 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
         : requiredRemixBroll.length > 0
           ? `${completedRequiredRemixBroll}/${requiredRemixBroll.length} 项素材已关联`
           : '无需补充素材';
+  const hasSemanticTimeline = canvasEdges.some((edge) => edge.source === id
+    && canvasNodes.some((node) => node.id === edge.target && node.type === CANVAS_NODE_TYPES.semanticTimeline));
+  const remixNextStep = !initialRemixDraft.dialogue.trim() ? '填写或 AI 起草作品脚本'
+    : !remixRef(data.remixScriptRef) ? '保存作品脚本'
+      : remixSegmentCount > remixBoundSegmentCount ? `制作并绑定 ${remixSegmentCount - remixBoundSegmentCount} 个表演片段`
+        : currentBrollPlan && completedRequiredRemixBroll < requiredRemixBroll.length
+          ? `补齐 ${requiredRemixBroll.length - completedRequiredRemixBroll} 项 B-roll 素材`
+          : hasSemanticTimeline ? '检查语义时间轴'
+            : remixSegmentCount === 0 ? '准备语音素材并按脚本对齐' : '生成语义时间轴';
   const remixVisualNodes = upstreamNodes.filter((node) => node.data.remixRole === 'visual'
     && (isVideoNode(node) || isUploadNode(node) || isImageEditNode(node) || isImageGenNode(node) || isExportImageNode(node))).map((node) => ({
     id: node.id,
@@ -1061,6 +1072,7 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             ) : (
               <p className="flex-1">点击“{remixScriptLabel}”填写台词。</p>
             )}
+            <p className="border-t border-[var(--ui-border-soft)] pt-2 text-[11px] text-text-muted">下一步：{remixNextStep}</p>
           </div>
         ) : hasResult ? (
           <>
@@ -1224,6 +1236,14 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
             onAttachVisual={attachRemixVisual}
             onAutoSave={autoSaveRemixDraft}
             onTopicChange={(remixTopic) => updateNodeData(id, { remixTopic })}
+            onConvertToPlan={() => {
+              try {
+                convertLegacyScriptToPlan(id);
+                setRemixScriptOpen(false);
+              } catch (cause) {
+                toast.error(cause instanceof Error ? cause.message : '旧台词转换失败');
+              }
+            }}
             onDraftChange={(next, changeKind = 'content') => {
               const isMediaBinding = changeKind === 'media-binding';
               applyRemixInvalidation(id, isMediaBinding ? 'media_binding' : 'script');
@@ -1291,6 +1311,10 @@ export const ScriptNode = memo(({ id, data, selected, width, height }: ScriptNod
   );
 });
 
+LegacyScriptNode.displayName = 'LegacyScriptNode';
+
+export const ScriptNode = memo((props: ScriptNodeProps) => props.data.remixRole === 'production_plan'
+  ? <ProductionPlanNode {...props} /> : <LegacyScriptNode {...props} />);
 ScriptNode.displayName = 'ScriptNode';
 
 function promptHasContent(data: ScriptNodeData): boolean {

@@ -522,3 +522,17 @@ def test_find_clarification_bridge_message_ignores_expired_card(tmp_path) -> Non
         project_id="project-a", canvas_id="canvas-a",
         clarification_id="clarify_old", bridge_dir=bridge_dir,
     ) is None
+
+
+def test_plan_revision_sync_enriches_success_receipt_without_changing_execution(tmp_path):
+    result = canvas_command_bridge.resolve_canvas_command('edit', {
+        'ok': True, 'applied': True, 'canvas_apply_status': 'applied',
+        'command_results': [{'type': 'production_plan_command', 'status': 'success'}],
+    }, bridge_dir=tmp_path)
+    ref = {'artifact_id': 'plan', 'revision': 2, 'project_id': 'p'}
+    enriched = canvas_command_bridge.record_plan_revision_sync('edit', [
+        {'status': 'pending_canvas_save', 'plan_ref': ref}], bridge_dir=tmp_path)
+    assert enriched['plan_revision_sync'][0]['status'] == 'pending_canvas_save'
+    assert enriched['plan_ref'] == ref
+    assert enriched['command_results'] == result['command_results']
+    assert canvas_command_bridge.wait_canvas_command_result('edit', 0, bridge_dir=tmp_path) == enriched

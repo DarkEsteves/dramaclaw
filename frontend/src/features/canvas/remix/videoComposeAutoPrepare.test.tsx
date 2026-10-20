@@ -10,6 +10,9 @@ const fetchRemixArtifact = vi.hoisted(() => vi.fn());
 const reviseRemixArtifact = vi.hoisted(() => vi.fn());
 const fetchRemixOperation = vi.hoisted(() => vi.fn());
 const reconcileRemixOperation = vi.hoisted(() => vi.fn());
+const composeModal = vi.hoisted(() => vi.fn((_props: unknown) => null));
+const submitProductionComposeRender = vi.hoisted(() => vi.fn());
+const submitFreezoneVideoCompose = vi.hoisted(() => vi.fn());
 const graphState = vi.hoisted(() => ({ nodes: [] as unknown[], edges: [] as unknown[], upstreamNodes: [] as unknown[], listeners: new Set<() => void>() }));
 vi.mock('@xyflow/react', () => ({ Handle: ({ id }: { id: string }) => <div data-handle={id} />, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -24,17 +27,22 @@ vi.mock('@/features/canvas/application/useUpstreamGraph', () => ({ useUpstreamNo
 vi.mock('@/features/canvas/domain/nodeDisplay', () => ({ localizeNodeDisplayName: () => 'Compose' }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/AddNodeToChatButton', () => ({ AddNodeToChatButton: () => null }));
-vi.mock('@/features/canvas/compose/VideoComposeModal', () => ({ VideoComposeModal: () => null, buildInitialTimeline: vi.fn(), reconcileDraftWithUpstream: vi.fn() }));
+vi.mock('@/features/canvas/compose/VideoComposeModal', () => ({ VideoComposeModal: composeModal, buildInitialTimeline: vi.fn(), reconcileDraftWithUpstream: vi.fn() }));
+vi.mock('@/features/canvas/compose/productionComposeRender', () => ({ submitProductionComposeRender }));
+vi.mock('@/api/ops', async (importOriginal) => ({ ...await importOriginal<object>(), submitFreezoneVideoCompose }));
+vi.mock('@/api/tasks', async (importOriginal) => ({ ...await importOriginal<object>(), awaitTaskCompletion: vi.fn(async () => ({ status: 'succeeded' })) }));
 vi.mock('@/features/canvas/remix/prepareNodeRemix', () => ({ prepareNodeRemix, remixGraphFingerprint }));
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
 vi.mock('@/api/remix', () => ({
   listRemixOperations: vi.fn(async () => ({ items: [] })),
   fetchRemixOperation, reconcileRemixOperation, transitionRemixOperation: vi.fn(), fetchRemixArtifact, reviseRemixArtifact, confirmRemixOperation: vi.fn(), renderRemixManifest,
 }));
-vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true), applyRemoteFreezoneCanvas: vi.fn() }));
+vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true), applyRemoteFreezoneCanvas: vi.fn(), captureFreezoneCanvasScope: () => () => true }));
 vi.mock('@/api/canvas', () => ({ getFreezoneCanvas: vi.fn() }));
 
 import { VideoComposeNode } from '../nodes/VideoComposeNode';
+import { dispatchNodeAction } from '@/features/canvas/application/nodeActionResult';
+import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 describe('VideoComposeNode automatic preparation', () => {
   beforeEach(() => {
@@ -49,6 +57,32 @@ describe('VideoComposeNode automatic preparation', () => {
     reviseRemixArtifact.mockReset();
     fetchRemixOperation.mockReset();
     reconcileRemixOperation.mockReset();
+    submitProductionComposeRender.mockReset();
+    submitFreezoneVideoCompose.mockReset();
+  });
+
+  it('runs the saved layered production plan rather than the standalone clip composer', async () => {
+    const ref = { artifactId: 'plan-v2', revision: 2 };
+    const data = { displayName: '视频合成', productionPlanNodeId: 'plan', productionPlanV2Ref: ref };
+    graphState.nodes = [{ id: 'compose', type: 'videoComposeNode', data }];
+    graphState.upstreamNodes = [{ id: 'plan', type: 'scriptNode', data: { productionPlanV2Ref: ref } }];
+    canvasActions.updateNodeData.mockImplementation((nodeId, patch) => {
+      const node = graphState.nodes.find((item) => (item as { id: string }).id === nodeId) as { data: Record<string, unknown> } | undefined;
+      if (node) Object.assign(node.data, patch);
+    });
+    submitProductionComposeRender.mockImplementation(async () => {
+      Object.assign(data, { productionPlanRenderedRef: ref, resultVideoUrl: '/layered.mp4' });
+      return { saved: ref, task: { task_key: 'render-task', task_type: 'remix_render', job_id: 'render-job', operation_id: 'op' } };
+    });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={data} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    const received: Array<Record<string, unknown>> = [];
+    const unsubscribe = canvasEventBus.subscribe('freezone/node-action-result', (result) => received.push(result as unknown as Record<string, unknown>));
+    act(() => { dispatchNodeAction({ nodeId: 'compose', action: 'auto_compose_video', requestId: 'production-action' }); });
+    await waitFor(() => expect(received.some((result) => result.requestId === 'production-action' && result.status === 'success')).toBe(true));
+    expect(submitProductionComposeRender).toHaveBeenCalledWith({ project: 'demo', canvasId: 'default', planNodeId: 'plan', composeNodeId: 'compose' });
+    expect(submitFreezoneVideoCompose).not.toHaveBeenCalled();
+    expect(received.find((result) => result.requestId === 'production-action')?.output).toMatchObject({ videoUrl: '/layered.mp4', task_key: 'render-task' });
+    unsubscribe();
   });
 
   it('directs a remix user to the script when a legacy empty background node remains', async () => {
@@ -93,6 +127,63 @@ describe('VideoComposeNode automatic preparation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '生成合成清单' }));
     await waitFor(() => expect(prepareNodeRemix).toHaveBeenCalled());
+  });
+
+  it('opens production composition from the normal canvas node without exposing raw media ids', async () => {
+    graphState.upstreamNodes = [{ id: 'timeline', type: 'semanticTimelineNode', data: { productionPlanNodeId: 'plan' } }];
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 1,
+      upstream_refs: [], payload: { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 90 },
+        media_bindings: [], layers: [{ media_id: 'node:internal-secret', start_frame: 0, end_frame: 90 }],
+        audio_events: [], subtitle_events: [], manual_overrides: [], source_versions: [] } });
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: '视频合成', remixRole: 'production_compose',
+      remixManifestRef: { artifactId: 'manifest', revision: 1 }, remixInputFingerprint: 'current-fingerprint',
+      remixNodeRevision: 1, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }}
+      selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    expect(screen.getByRole('button', { name: '打开视频合成' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '渲染导出' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打开视频合成' }));
+    expect(screen.getByRole('dialog', { name: '视频合成' })).toBeInTheDocument();
+    expect(await screen.findByText(/画面 1/)).toBeInTheDocument();
+    expect(screen.queryByText('node:internal-secret')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '渲染导出' })).toBeInTheDocument();
+  });
+
+  it('routes a v2 plan straight into the shared full-screen editor with no upstream video minimum', () => {
+    graphState.upstreamNodes = [{ id: 'plan', type: 'scriptNode', data: { remixRole: 'production_plan' } }];
+    graphState.nodes = [{ id: 'plan', type: 'scriptNode', data: { productionPlanV2Ref: { artifactId: 'plan-v2', revision: 2 }, productionPlanV2Draft: { goal: '横屏作品', beats: [] } } }];
+    render(<VideoComposeNode id="compose" type="videoComposeNode" data={{ displayName: '视频合成', productionPlanNodeId: 'plan', productionPlanV2Ref: { artifactId: 'plan-v2', revision: 2 } }} selected={false} draggable={true} dragging={false} selectable={true} deletable={true} zIndex={0} isConnectable={true} positionAbsoluteX={0} positionAbsoluteY={0} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开视频合成' }));
+    expect(composeModal.mock.calls[0][0]).toMatchObject({ productionPlanNodeId: 'plan', composeNodeId: 'compose', seedNodeIds: [] });
+    expect(prepareNodeRemix).not.toHaveBeenCalled();
+  });
+
+  it('labels a retained preview as outdated when the arrangement manifest changes', async () => {
+    graphState.upstreamNodes = [{ id: 'timeline', type: 'semanticTimelineNode', data: { productionPlanNodeId: 'plan' } }];
+    fetchRemixArtifact.mockResolvedValue({ id: 'manifest', schema: 'composition_manifest.v1', revision: 2,
+      upstream_refs: [], payload: { output_spec: { width: 1080, height: 1920, fps: 30, duration_frames: 90 },
+        media_bindings: [], layers: [], audio_events: [], subtitle_events: [], manual_overrides: [], source_versions: [] } });
+    const props = { id: 'compose', type: 'videoComposeNode', selected: false, draggable: true, dragging: false,
+      selectable: true, deletable: true, zIndex: 0, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 } as const;
+    const view = render(<VideoComposeNode {...props} data={{ displayName: '视频合成', remixRole: 'production_compose',
+      remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixRenderManifestRef: { artifactId: 'manifest', revision: 1 },
+      remixInputFingerprint: 'current-fingerprint', resultVideoUrl: '/old.mp4', remixNodeRevision: 2,
+      unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} />);
+    fireEvent.click(screen.getByRole('button', { name: '打开视频合成' }));
+    expect(await screen.findByText('旧版预览')).toBeInTheDocument();
+    expect(screen.getByText('预览已过期，重新渲染后更新')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '渲染导出' })).toBeEnabled();
+    renderRemixManifest.mockResolvedValue({ operation_id: 'new-render' });
+    fireEvent.click(screen.getByRole('button', { name: '渲染导出' }));
+    await waitFor(() => expect(canvasActions.updateNodeData).toHaveBeenCalledWith('compose', expect.objectContaining({
+      remixOperationId: 'new-render', resultVideoUrl: null, remixPreviousVideoUrl: '/old.mp4',
+    })));
+    view.rerender(<VideoComposeNode {...props} data={{ displayName: '视频合成', remixRole: 'production_compose',
+      remixManifestRef: { artifactId: 'manifest', revision: 2 }, remixRenderManifestRef: { artifactId: 'manifest', revision: 1 },
+      remixInputFingerprint: 'current-fingerprint', resultVideoUrl: null, remixPreviousVideoUrl: '/old.mp4',
+      remixOperationId: 'new-render', remixNodeRevision: 2, unresolvedRequiredEvents: [], remixEvents: [], remixSelections: [] }} />);
+    expect(screen.getByText('正在合成视频')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '渲染导出' })).toBeDisabled();
+    expect(screen.getByRole('link', { name: '查看旧版预览' })).toHaveAttribute('href', '/old.mp4');
   });
 
   it('offers manifest generation when every script event already has bound B-roll', async () => {

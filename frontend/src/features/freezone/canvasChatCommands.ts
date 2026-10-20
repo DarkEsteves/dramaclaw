@@ -1,9 +1,15 @@
 import { STORY_CHOICE_EDGE_TYPE } from "@/features/canvas/story/storyTypes";
+import { assertWorkflowAnalysisSnapshot } from "./workflowAnalysisSnapshot";
+import { submitReferenceAnalysisCommand } from '@/features/canvas/application/analyzeReferenceVideo';
 import i18next from "i18next";
 import { executeWorkflowHtmlNode } from "@/features/canvas/application/workflowHtmlRuntime";
 import { extractUpstreamContent } from "@/features/canvas/application/graphContentResolver";
 import { type HtmlArtifactCommand, parseHtmlArtifactCommand, executeHtmlArtifactCommand } from '@/features/html-artifacts/commands';
 import { executeHtmlNodeWriteAction } from '@/features/html-artifacts/nodeActions';
+import { type ProductionCanvasCommand, parseProductionCanvasCommand, executeProductionCanvasCommand } from '@/features/canvas/remix/productionCanvasCommand';
+import { buildProductionWorkflowAction, hasCurrentProductionProcessingResult, isProductionProcessingAction, markProductionWorkflowSubmission, type ProductionWorkflowDescriptor } from '@/features/canvas/remix/productionWorkflowRuntime';
+import { remixGraphFingerprint } from '@/features/canvas/remix/prepareNodeRemix';
+import { captureRegisteredFreezoneCanvasSession, flushFreezoneCanvasRuntime } from '@/features/freezone/canvasSyncRuntime';
 import {
   CANVAS_NODE_TYPES,
   DEFAULT_NODE_WIDTH,
@@ -67,7 +73,9 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { placeGroupsOutsideStory } from "@/features/canvas/application/storyGroupPlacement";
 import { deterministicNodeOutputIssue } from "@/features/freezone/workflowQualityGate";
 import {
+  bindWorkflowGenerationContext,
   bindWorkflowProductOperation,
+  clearWorkflowGenerationContext,
   clearWorkflowProductOperation,
   WORKFLOW_EXECUTION_ACTIVITY_EVENT,
   WORKFLOW_RUN_UPDATED_EVENT,
@@ -107,6 +115,7 @@ const VIDEO_COMPOSE_MIN_UPSTREAM_MEDIA = 2;
 
 export type CanvasChatCommand =
   | HtmlArtifactCommand
+  | ProductionCanvasCommand
   | {
       type: "create_node";
       client_id?: string;
@@ -145,6 +154,7 @@ export type CanvasChatCommand =
       target: string;
       link_type: CanvasEdgeSemanticKind;
       expected_source_image_url?: string;
+      expected_source_analysis_snapshot?: JsonRecord;
     }
   | {
       type: "layout_nodes";
@@ -249,6 +259,7 @@ type PendingNodeAction = {
   action: string;
   executionMode?: "single" | "workflow";
   parameters?: JsonRecord;
+  processing?: ProductionWorkflowDescriptor;
   label: string;
   invalidationReason?: "explicit_regeneration" | "upstream_regeneration";
 };
@@ -272,11 +283,21 @@ type NodeActionResult = {
 type ApplyCanvasChatCommandsOptions = {
   projectId?: string | null;
   canvasId?: string | null;
+  bridgeKey?: string | null;
   actionTimeoutMs?: number;
   actionAcceptTimeoutMs?: number;
   actionResultFieldTimeoutMs?: number;
   actionRetryDelayMs?: number;
-  onWorkflowRunPersisted?: (runId: string) => void;
+  onWorkflowRunPersisted?: (runId: string, receipt?: NativeProductionWorkflowAcceptance) => void;
+  beforeWorkflowActions?: (graphResult: CanvasChatCommandApplyResult) => Promise<GraphDeliveryCheckpoint>;
+};
+
+export type GraphDeliveryCheckpoint = {
+  graph_state: "delivered" | "pending" | "conflict" | "rejected";
+  draft_id: string;
+  revision: number;
+  task_id: string;
+  canvas_revision: number | null;
 };
 
 type PendingVideoFrameCapture = {
@@ -289,6 +310,111 @@ export type CanvasChatCommandPartition = {
   immediate: CanvasChatCommandEnvelope[];
   requiresApproval: CanvasChatCommandEnvelope[];
 };
+export type NativeProductionWorkflowAcceptance = {
+  workflow_run_id: string;
+  completion_owner: "host";
+} | {
+  workflow_run_id: string;
+  operation_id: string;
+  task_id: string;
+  node_id: string;
+  action: string;
+  completion_owner: "host";
+};
+
+/** A native action is accepted only after its operation and real task exist. */
+export function nativeProductionWorkflowAcceptance(
+  run: FreezoneWorkflowRun,
+  nodeId: string,
+  action: string,
+): NativeProductionWorkflowAcceptance | null {
+  if (!isProductionProcessingAction(action) || !run.run_id || !["running", "completed"].includes(run.status)) return null;
+  const accepted = run.actions.find((item) => item.node_id === nodeId && item.action === action);
+  if (!accepted || !["running", "completed"].includes(accepted.status)) return null;
+  if (run.acceptance?.workflow_run_id === run.run_id
+      && run.acceptance.completion_owner === "host"
+      && accepted.processing_operation_id?.trim() && accepted.task_key?.trim()) {
+    return { workflow_run_id: run.run_id, completion_owner: "host" };
+  }
+  const operationId = accepted.processing_operation_id?.trim();
+  const taskId = accepted.task_id?.trim();
+  if (!operationId || !accepted.task_key?.trim() || !taskId) return null;
+  return { workflow_run_id: run.run_id, operation_id: operationId, task_id: taskId,
+    node_id: nodeId, action, completion_owner: "host" };
+}
+
+/** Mixed batches can be acknowledged only after every other command settled. */
+export function nativeProductionAcceptanceFromResult(
+  result: CanvasChatCommandApplyResult,
+): NativeProductionWorkflowAcceptance | null {
+  if (result.errors.length) return null;
+  const pending = result.commandResults.filter((step) => step.status === "pending"
+    && isRecord(step.output) && step.output.reason === "native_action_accepted");
+  if (pending.length === 0 || result.commandResults.some((step) => step.status === "error")) return null;
+  if (result.commandResults.some((step) => step.status === "pending"
+      && (!isRecord(step.output) || !["native_action_accepted", "workflow_stage_deferred"].includes(String(step.output.reason))))) return null;
+  if (pending.length > 1) {
+    const runIds = new Set<string>();
+    for (const item of pending) {
+      const output = item.output;
+      if (item.type !== "run_node_action" || !item.nodeId || !isProductionProcessingAction(item.action)
+          || !isRecord(output) || output.reason !== "native_action_accepted"
+          || output.completion_owner !== "host" || typeof output.workflow_run_id !== "string"
+          || !output.workflow_run_id.trim() || output.operation_id || output.task_id) return null;
+      runIds.add(output.workflow_run_id);
+    }
+    return runIds.size === 1
+      ? { workflow_run_id: [...runIds][0], completion_owner: "host" }
+      : null;
+  }
+  const step = pending[0];
+  const output = step.output;
+  if (step.type !== "run_node_action" || !step.nodeId || !isProductionProcessingAction(step.action)
+    || !isRecord(output) || output.reason !== "native_action_accepted"
+    || output.node_id !== step.nodeId || output.action !== step.action
+    || output.completion_owner !== "host") return null;
+  if (typeof output.workflow_run_id === "string" && output.workflow_run_id.trim()
+      && !output.operation_id && !output.task_id) {
+    return { workflow_run_id: output.workflow_run_id, completion_owner: "host" };
+  }
+  for (const field of ["workflow_run_id", "operation_id", "task_id"] as const) {
+    if (typeof output[field] !== "string" || !output[field].trim()) return null;
+  }
+  return {
+    workflow_run_id: output.workflow_run_id as string,
+    operation_id: output.operation_id as string,
+    task_id: output.task_id as string,
+    node_id: step.nodeId,
+    action: step.action,
+    completion_owner: "host",
+  };
+}
+
+/** Persist the graph separately from a later generation outcome. */
+export function canvasGraphNeedsDurableFlush(result: CanvasChatCommandApplyResult): boolean {
+  if (result.errors.length === 0) return true;
+  return result.commandResults.some((step) => step.type === "create_node" && step.status === "success")
+    && !result.commandResults.some((step) => step.status === "error" && step.type !== "run_node_action");
+}
+
+export function workflowRunIdempotencyKeyForBridge(bridgeKey: string): string {
+  const executorSeparator = bridgeKey.lastIndexOf(".executor.");
+  const canonicalKey = executorSeparator >= 0 ? bridgeKey.slice(0, executorSeparator) : bridgeKey;
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < canonicalKey.length; index += 1) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(canonicalKey.charCodeAt(index))) * 0x100000001b3n);
+  }
+  return `canvas-run:bridge:${hash.toString(16).padStart(16, "0")}`;
+}
+
+/** An old browser may have submitted a paid task before its task handle was saved. */
+export function ordinaryMediaActionNeedsReconciliation(
+  run: FreezoneWorkflowRun, nodeId: string, action: string,
+): boolean {
+  if (!GENERATION_NODE_ACTIONS.has(action)) return false;
+  const recorded = run.actions.find((item) => item.node_id === nodeId && item.action === action);
+  return recorded?.status === "running" && !recorded.product_operation_id;
+}
 
 type CanvasCommandApprovalSubscriber = (detail: CanvasCommandApprovalEventDetail) => boolean | void;
 
@@ -347,6 +473,10 @@ const RUN_NODE_ACTIONS = new Set([
   "upload",
   "generate_text_video",
   "generate_story_script",
+  "generate_production_plan_draft",
+  "generate_production_plan_arrangement",
+  "align_production_speech",
+  "compile_production_plan",
   "open_upload_picker",
   "generate_image",
   "generate_audio",
@@ -399,6 +529,7 @@ const RUN_NODE_ACTIONS = new Set([
   "download_video",
   "open_video_clip_tool",
   "open_video_upscale_tool",
+  "import_reference_keyframes",
   "run_video_analyze_story",
   "run_audio_separate",
   "download_audio",
@@ -438,7 +569,8 @@ export function canvasCommandEnvelopesRunInBackground(
 ): boolean {
   return envelopes.some((envelope) => envelope.commands.some((command) =>
     command.type === "run_workflow" ||
-    (command.type === "run_node_action" && GENERATION_NODE_ACTIONS.has(command.action))
+    (command.type === "run_node_action" && (GENERATION_NODE_ACTIONS.has(command.action)
+      || isProductionProcessingAction(command.action)))
   ));
 }
 
@@ -446,7 +578,8 @@ export function canvasCommandEnvelopesRequireDurableAcceptance(
   envelopes: CanvasChatCommandEnvelope[],
 ): boolean {
   return envelopes.some((envelope) =>
-    envelope.commands.some((command) => command.type === "run_workflow"));
+    envelope.commands.some((command) => command.type === "run_workflow"
+      || command.type === "run_node_action" && isProductionProcessingAction(command.action)));
 }
 
 export async function waitForImmediateCanvasCommandResult(
@@ -525,6 +658,10 @@ const CURRENT_MEDIA_NODE_ACTIONS = new Set([
   "open_video_crop_tool",
   "open_video_extend_tool",
   "run_video_depth_capture",
+]);
+
+const NODE_ACTIONS_RETURNING_RESULT = new Set([
+  "import_reference_keyframes",
 ]);
 
 const RESULT_SPAWNING_NODE_ACTIONS = new Set([
@@ -957,6 +1094,7 @@ function parseCommand(value: unknown): CanvasChatCommand | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   switch (value.type) {
     case "html_artifact": return parseHtmlArtifactCommand(value);
+    case "production_plan_command": return parseProductionCanvasCommand(value);
     case "create_node": {
       const rawNodeType =
         value.node_type ??
@@ -1031,6 +1169,8 @@ function parseCommand(value: unknown): CanvasChatCommand | null {
           source: value.source,
           target: value.target,
           link_type: linkType,
+          expected_source_analysis_snapshot: value.expected_source_analysis_snapshot && typeof value.expected_source_analysis_snapshot === "object" && !Array.isArray(value.expected_source_analysis_snapshot)
+            ? value.expected_source_analysis_snapshot as JsonRecord : undefined,
           expected_source_image_url: typeof value.expected_source_image_url === "string"
             ? value.expected_source_image_url : undefined,
         };
@@ -1397,7 +1537,7 @@ function chooseNextNodeType(sourceNode: CanvasNode, requestedType?: CanvasNodeTy
 function connectNodes(
   source: string,
   target: string,
-  options: { link_type?: CanvasEdgeSemanticKind; external_input_image_url?: string } = {},
+  options: { link_type?: CanvasEdgeSemanticKind; external_input_image_url?: string; external_input_analysis_snapshot?: JsonRecord } = {},
 ): string | null {
   if (source === target) throw new Error("connection requires two different nodes");
   const store = useCanvasStore.getState();
@@ -1407,6 +1547,9 @@ function connectNodes(
   }
   if (options.external_input_image_url) {
     data.workflowExternalInputImageUrl = options.external_input_image_url;
+  }
+  if (options.external_input_analysis_snapshot) {
+    data.workflowExternalInputAnalysisSnapshot = options.external_input_analysis_snapshot;
   }
   if (Object.keys(data).length > 0) {
     return store.addEdgeWithData(source, target, {
@@ -1809,6 +1952,64 @@ function runNodeAction(nodeId: string, action: string, parameters?: JsonRecord):
   });
 }
 
+async function dispatchNodeActionAndWait(
+  nodeId: string,
+  action: string,
+  parameters: JsonRecord | undefined,
+  timeoutMs: number,
+): Promise<NodeActionResult> {
+  const requestId = `node-action:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const waiting = waitForNodeActionResult(requestId, timeoutMs);
+  const accepted = waitForNodeActionAccepted(requestId);
+  const handlerCount = dispatchNodeAction({
+    nodeId,
+    action,
+    executionMode: "single",
+    ...(parameters ? { parameters } : {}),
+    requestId,
+  });
+  const acceptanceOrResult = () => Promise.race([
+    accepted.then((ok) => ok ? "accepted" as const : "rejected" as const),
+    waiting.then(() => "result" as const),
+  ]);
+  if (handlerCount === 0) {
+    await mountNodeForPendingAction(nodeId);
+    const postMountSignal = await acceptanceOrResult();
+    if (postMountSignal === "rejected") {
+      clearPendingNodeAction(requestId);
+      return {
+        requestId,
+        nodeId,
+        action,
+        status: "error",
+        error: `节点动作未被目标节点接手：${action} (${nodeId})。`,
+      };
+    }
+  } else {
+    const preMountSignal = await Promise.race([
+      accepted.then((ok) => ok ? "accepted" as const : "rejected" as const),
+      waiting.then(() => "result" as const),
+      new Promise<"pending">((resolve) => {
+        setTimeout(() => resolve("pending"), NODE_ACTION_ACCEPTANCE_GRACE_MS);
+      }),
+    ]);
+    if (preMountSignal === "pending") await mountNodeForPendingAction(nodeId);
+    if (preMountSignal === "rejected") {
+      clearPendingNodeAction(requestId);
+      return {
+        requestId,
+        nodeId,
+        action,
+        status: "error",
+        error: `节点动作未被目标节点接手：${action} (${nodeId})。`,
+      };
+    }
+  }
+  const result = await waiting;
+  clearPendingNodeAction(requestId);
+  return result;
+}
+
 function selectedWorkflowNodeIds(): string[] {
   const state = useCanvasStore.getState();
   const selected = state.nodes
@@ -1829,7 +2030,7 @@ function expandWorkflowNodeIds(
   for (const edge of state.edges) {
     // A Recipe consumes the existing image at this edge. Traversing back into
     // its source would also reach unrelated branches that share that image.
-    if (!edge.data?.workflowExternalInputImageUrl) {
+    if (!edge.data?.workflowExternalInputImageUrl && !edge.data?.workflowExternalInputAnalysisSnapshot) {
       const upstream = upstreamByNodeId.get(edge.target) ?? [];
       upstream.push(edge.source);
       upstreamByNodeId.set(edge.target, upstream);
@@ -1925,6 +2126,12 @@ function workflowExternalImageSourceIds(
   const externalSources = new Set<string>();
   const ordinarySources = new Set<string>();
   for (const edge of scopedEdges) {
+    const expectedAnalysis = edge.data?.workflowExternalInputAnalysisSnapshot;
+    if (expectedAnalysis && typeof expectedAnalysis === "object" && !Array.isArray(expectedAnalysis)) {
+      assertWorkflowAnalysisSnapshot(nodeById.get(edge.source), expectedAnalysis as JsonRecord, edge.source);
+      externalSources.add(edge.source);
+      continue;
+    }
     const expectedUrl = edge.data?.workflowExternalInputImageUrl;
     if (typeof expectedUrl !== "string" || !expectedUrl.trim()) {
       ordinarySources.add(edge.source);
@@ -2087,10 +2294,17 @@ function workflowNodeActions(
   return [
     ...expandedNodeIds,
     ...composeNodeIdsToOpen,
-  ].flatMap((nodeId) => {
+  ].flatMap((nodeId): PendingNodeAction[] => {
     const node = nodeByIdMap.get(nodeId);
     if (!node || node.type === CANVAS_NODE_TYPES.group) return [];
     if (externalImageSourceIds.has(nodeId)) return [];
+    const processing = buildProductionWorkflowAction(node, state.nodes, state.edges);
+    if (processing) {
+      if (options.skipCompleted !== false && !processing.blocked && hasGeneratedResult(nodeId, processing.action)) return [];
+      return [{ commandIndex, nodeId, action: processing.action, executionMode: 'workflow' as const,
+        parameters: processing.payload, processing, label: processing.action === 'generate_production_plan_draft'
+          ? '生成可编辑作品方案' : processing.action === 'generate_production_plan_arrangement' ? '安排画面与声音' : processing.action === 'align_production_speech' ? '校准发声素材' : '编译作品方案' }];
+    }
     if (isRedundantLegacyComposeGenerator(node, state.nodes, state.edges)) return [];
     if (node.type === CANVAS_NODE_TYPES.videoCompose) {
       return [{
@@ -2129,6 +2343,15 @@ function directNodeActionQueue(
 ): PendingNodeAction[] {
   const state = useCanvasStore.getState();
   const nodeByIdMap = new Map(state.nodes.map((node) => [node.id, node] as const));
+  const targetNode = nodeByIdMap.get(nodeId);
+  if (targetNode && isProductionProcessingAction(action)) {
+    const processing = buildProductionWorkflowAction(targetNode, state.nodes, state.edges,
+      { action, parameters });
+    if (!processing) return [];
+    return [{ commandIndex, nodeId, action, executionMode: 'workflow', processing,
+      parameters: processing.payload, label: action === 'generate_production_plan_draft'
+        ? '生成可编辑作品方案' : action === 'generate_production_plan_arrangement' ? '安排画面与声音' : action === 'align_production_speech' ? '校准发声素材' : '编译作品方案' }];
+  }
   const includeUpstream = (
     GENERATION_NODE_ACTIONS.has(action)
     || (
@@ -2309,6 +2532,11 @@ export function hasGeneratedResult(
 ): boolean {
   const data = nodeById(nodeId)?.data as Record<string, unknown> | undefined;
   if (!data) return false;
+  if (isProductionProcessingAction(action)) {
+    const state = useCanvasStore.getState();
+    const node = state.nodes.find((item) => item.id === nodeId);
+    return Boolean(node && hasCurrentProductionProcessingResult(node, action, state.nodes, state.edges));
+  }
   if (
     !includeInvalidatedResult &&
     GENERATION_NODE_ACTIONS.has(action) &&
@@ -2333,6 +2561,21 @@ export function hasGeneratedResult(
     return Boolean(nonEmptyString(data.videoUrl) ?? nonEmptyString(data.video_url));
   }
   if (action === "auto_compose_video") {
+    if (typeof data.productionPlanNodeId === 'string' && data.productionPlanNodeId) {
+      const state = useCanvasStore.getState();
+      const plan = state.nodes.find((item) => item.id === data.productionPlanNodeId);
+      const saved = plan?.data.productionPlanV2Ref as { artifactId?: unknown; revision?: unknown } | undefined;
+      const rendered = data.productionPlanRenderedRef as { artifactId?: unknown; revision?: unknown } | undefined;
+      const linked = data.productionPlanV2Ref as { artifactId?: unknown; revision?: unknown } | undefined;
+      return Boolean(nonEmptyString(data.resultVideoUrl) && saved && rendered && linked
+        && typeof saved.artifactId === 'string' && Number.isInteger(saved.revision)
+        && saved.artifactId === rendered.artifactId && saved.revision === rendered.revision
+        && saved.artifactId === linked.artifactId && saved.revision === linked.revision
+        && !plan?.data.productionPlanV2Dirty && !plan?.data.productionPlanV2Conflict
+        && data.remixInputsCurrent !== false
+        && typeof data.remixInputFingerprint === 'string'
+        && data.remixInputFingerprint === remixGraphFingerprint(state.nodes, state.edges, nodeId));
+    }
     return Boolean(nonEmptyString(data.resultVideoUrl));
   }
   if (action === "generate_audio") {
@@ -2511,6 +2754,25 @@ function workflowTaskReference(
     ...(taskType ? { task_type: taskType } : {}),
     ...(jobId ? { job_id: jobId } : {}),
   };
+}
+
+function freshCompleteWorkflowTaskReference(output: Record<string, unknown> | null | undefined, initial: ReturnType<typeof workflowTaskReference>): ReturnType<typeof workflowTaskReference> {
+  const reference = workflowTaskReference(output);
+  if (!reference.task_key || !reference.task_type || !reference.job_id
+    || Object.values(reference).some((value) => value.length > 256)
+    || reference.task_key === initial.task_key) return {};
+  return reference;
+}
+
+async function waitForFreshWorkflowTaskReference(nodeId: string, initial: ReturnType<typeof workflowTaskReference>, timeoutMs: number, shouldStop: () => boolean): Promise<ReturnType<typeof workflowTaskReference>> {
+  const started = Date.now();
+  while (!shouldStop()) {
+    const reference = freshCompleteWorkflowTaskReference(submittedGenerationOutputFromNode(nodeId), initial);
+    if (reference.task_key) return reference;
+    if (Date.now() - started >= timeoutMs) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return {};
 }
 
 async function waitForSubmittedGenerationOutputFromNode(
@@ -2926,7 +3188,14 @@ async function executeQueuedNodeActions(
     const completedWhileQueued = pendingActions.filter((action) =>
       action.executionMode === "workflow"
       && !action.invalidationReason
-      && hasGeneratedResult(action.nodeId, action.action));
+      && (action.processing
+        ? (() => {
+          const state = useCanvasStore.getState();
+          const node = state.nodes.find((candidate) => candidate.id === action.nodeId);
+          return Boolean(node && hasCurrentProductionProcessingResult(node, action.processing!.action,
+            state.nodes, state.edges, action.processing!.requestPayload));
+        })()
+        : hasGeneratedResult(action.nodeId, action.action)));
     const completedImageNodeIds = new Set(
       completedWhileQueued.filter((action) => action.action === "generate_image")
         .map((action) => action.nodeId),
@@ -2953,13 +3222,38 @@ async function executeQueuedNodeActions(
         });
       }
     }
+    // The plan revision is produced by a previous run. Admit only the earliest
+    // available native stage; never submit a placeholder plan_ref to the API.
+    const stage = pendingActions.some((action) => action.processing?.action === 'generate_production_plan_draft')
+      ? 'generate_production_plan_draft'
+      : pendingActions.some((action) => action.processing?.action === 'generate_production_plan_arrangement')
+        ? 'generate_production_plan_arrangement'
+      : pendingActions.some((action) => action.processing?.action === 'align_production_speech')
+        ? 'align_production_speech' : 'compile_production_plan';
+    const deferred = pendingActions.filter((action) => action.processing
+      && (action.processing.blocked || action.processing.action !== stage));
+    if (deferred.length > 0) {
+      pendingActions = pendingActions.filter((action) => !deferred.includes(action));
+      for (const action of deferred) result.commandResults.push({
+        commandIndex: action.commandIndex, type: 'run_node_action', status: 'pending',
+        label: `${action.label}（待续跑）`, nodeId: action.nodeId, action: action.action,
+        output: { pending: true, reason: 'workflow_stage_deferred',
+          detail: action.processing?.blocked ?? '请等待上一阶段产出后再续跑' },
+      });
+    }
     if (pendingActions.length === 0) {
       syncCompletedStoryFrames(completedImageNodeIds, result);
       return;
     }
     const projectId = options.projectId?.trim();
     const canvasId = options.canvasId?.trim();
+    const generationSession = captureRegisteredFreezoneCanvasSession(projectId ?? '');
     let workflowRunId: string | null = null;
+    let admittedRun: FreezoneWorkflowRun | null = null;
+    let nativeReceiptEmitted = false;
+    let nativeActionsAccepted = 0;
+    let nativeActionsAwaitingReceipt = 0;
+    let ordinaryActionsAwaitingReconciliation = 0;
     const workflowCancelKeyForRun = workflowCancelKey(canvasId);
     const workflowCancelToken = workflowCancelTokensByCanvas.get(workflowCancelKeyForRun) ?? 0;
     const workflowCancelled = () =>
@@ -2983,6 +3277,15 @@ async function executeQueuedNodeActions(
         "pending" as WorkflowRunActionStatus,
       ]),
     );
+    const markWorkflowResultsPending = () => {
+      for (const step of result.commandResults) {
+        if (step.type !== 'run_node_action' || step.status !== 'success') continue;
+        if (!pendingActions.some((action) => action.nodeId === step.nodeId && action.action === step.action)) continue;
+        step.status = 'pending';
+        step.output = { pending: true, reason: 'workflow_server_reconciliation_pending' };
+        result.openedUiActions = Math.max(0, result.openedUiActions - 1);
+      }
+    };
     const enqueueWorkflowHeartbeat = (operation: () => Promise<void>): Promise<void> => {
       const queued = workflowHeartbeatQueue
         .catch(() => undefined)
@@ -3015,10 +3318,18 @@ async function executeQueuedNodeActions(
     };
     if (projectId && canvasId) {
       try {
-        const workflowRunIdempotencyKey =
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        if (pendingActions.some((action) => action.processing)) {
+          for (const action of pendingActions) if (action.processing) markProductionWorkflowSubmission(action.processing);
+          if (await flushFreezoneCanvasRuntime(projectId, canvasId) !== true) {
+            throw new Error('画布处理输入尚未保存，请保存画布后重试');
+          }
+        }
+        const workflowRunIdempotencyKey = options.bridgeKey?.trim()
+          ? workflowRunIdempotencyKeyForBridge(options.bridgeKey.trim())
+          : typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
             ? `canvas-run:${crypto.randomUUID()}`
             : `canvas-run:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+        const bridgeArgument: [string] | [] = options.bridgeKey ? [options.bridgeKey] : [];
         const createdRun = await createFreezoneWorkflowRun(
           projectId,
           canvasId,
@@ -3034,6 +3345,13 @@ async function executeQueuedNodeActions(
             return {
               node_id: action.nodeId,
               action: action.action,
+              ...(action.processing ? {
+                node_revision: action.processing.nodeRevision,
+                payload: action.processing.payload,
+                depends_on: useCanvasStore.getState().edges
+                  .filter((edge) => edge.target === action.nodeId && pendingActions.some((pending) => pending.nodeId === edge.source))
+                  .map((edge) => edge.source),
+              } : {}),
               ...(recipeId ? { recipe_id: recipeId } : {}),
               ...(recipeVersion ? { recipe_version: recipeVersion } : {}),
               ...(GENERATION_NODE_ACTIONS.has(action.action)
@@ -3046,10 +3364,37 @@ async function executeQueuedNodeActions(
           }),
           workflowRunIdempotencyKey,
           workflowRunnerId,
+          ...bridgeArgument,
         );
         workflowRunId = createdRun.run_id;
-        options.onWorkflowRunPersisted?.(workflowRunId);
+        admittedRun = createdRun;
+        if (["failed", "interrupted", "cancelled"].includes(createdRun.status)) {
+          const message = "原工作流已结束，需查看结果后再明确重试。";
+          result.errors.push(message);
+          for (const action of pendingActions) result.commandResults.push({
+            commandIndex: action.commandIndex, type: "run_node_action", status: "error",
+            label: action.label, nodeId: action.nodeId, action: action.action, error: message,
+          });
+          return;
+        }
+        const nativeActions = pendingActions.filter((item) => item.processing);
+        if (nativeActions.length === 0) options.onWorkflowRunPersisted?.(workflowRunId);
+        else if (nativeActions.length === 1 && pendingActions.length === 1 && result.commandResults.length === 0) {
+          const nativeAction = nativeActions[0];
+          const receipt = nativeProductionWorkflowAcceptance(createdRun, nativeAction.nodeId, nativeAction.action);
+          if (receipt) {
+            options.onWorkflowRunPersisted?.(workflowRunId, receipt);
+            nativeReceiptEmitted = true;
+          }
+        }
         for (const action of createdRun.actions) {
+          if (GENERATION_NODE_ACTIONS.has(action.action) && action.generation_attempt_id) {
+            bindWorkflowGenerationContext(action.node_id, {
+              projectId,
+              workflowRunId,
+              generationAttemptId: action.generation_attempt_id,
+            });
+          }
           if (action.product_operation_id) {
             bindWorkflowProductOperation(action.node_id, {
               projectId,
@@ -3096,7 +3441,13 @@ async function executeQueuedNodeActions(
         }
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
-          const message = "当前画布已有工作流正在执行，请等待其完成后再试。";
+          const body = isRecord(error.body) ? error.body : null;
+          const detail = body && isRecord(body.detail) ? body.detail : null;
+          const boundNodeId = detail?.code === "bound_plan_node_required"
+            && typeof detail.node_id === "string" ? detail.node_id : null;
+          const message = boundNodeId
+            ? `当前作品方案已绑定节点 ${boundNodeId}，请在该节点继续。`
+            : "当前画布已有工作流正在执行，请等待其完成后再试。";
           result.errors.push(message);
           for (const action of pendingActions) {
             result.commandResults.push({
@@ -3189,6 +3540,9 @@ async function executeQueuedNodeActions(
     ): Promise<void> => {
       if (!projectId || !canvasId || !workflowRunId) return;
       const acceptedUpdates = updates.filter((update) => {
+        // Registered remix processing actions are reconciled by the server
+        // from their durable task and artifact proof, never by a browser PATCH.
+        if (isProductionProcessingAction(update.action)) return false;
         const key = `${update.node_id}:${update.action}`;
         const current = workflowActionStatuses.get(key);
         if (
@@ -3427,6 +3781,17 @@ async function executeQueuedNodeActions(
                 retryCount,
               };
             }
+            const savedAction = admittedRun?.actions.find(
+              (item) => item.node_id === action.nodeId && item.action === action.action,
+            );
+            if (savedAction?.status === "completed") {
+              return completedServerActionOutcome(action, retryCount);
+            }
+            if (admittedRun && ordinaryMediaActionNeedsReconciliation(admittedRun, action.nodeId, action.action)) {
+              ordinaryActionsAwaitingReconciliation += 1;
+              return { action, failed: null, pending: true, retryCount,
+                output: { reason: "workflow_server_reconciliation_pending" } };
+            }
             const mustHoldCapacityUntilCompleted = GENERATION_NODE_ACTIONS.has(action.action) && (
               generationActions.length > WORKFLOW_ACTION_CONCURRENCY ||
               generationCountByLane[lane] > workflowLaneLimits[lane]
@@ -3471,13 +3836,54 @@ async function executeQueuedNodeActions(
                 retryCount,
               };
             }
-            await persistRunUpdate([{
+            if (!action.processing) await persistRunUpdate([{
               node_id: action.nodeId,
               action: action.action,
               status: "running",
               phase: "preparing",
               retry_count: retryCount,
             }]);
+
+            if (action.processing) {
+              if (!projectId || !canvasId || !workflowRunId) return { action, failed: '处理动作需要已保存的项目和画布', retryCount };
+              if (workflowCancelled()) return { action, failed: WORKFLOW_STOPPED_MESSAGE, retryCount };
+              if (workflowLeaseLost || workflowPersistenceError) return { action, failed: workflowPersistenceError ?? WORKFLOW_LEASE_LOST_MESSAGE, retryCount };
+              // The POST dispatches a durable task. A single GET recovers an
+              // admission response that raced the task writer; final artifacts
+              // are published by the host and never awaited in this browser.
+              let observed: FreezoneWorkflowRun = admittedRun ?? await getFreezoneWorkflowRun(projectId, canvasId, workflowRunId, 10);
+              let receipt = nativeProductionWorkflowAcceptance(observed, action.nodeId, action.action);
+              let current = observed.actions.find((item) => item.node_id === action.nodeId && item.action === action.action);
+              if (current && (current.status === 'failed' || current.status === 'blocked' || current.status === 'skipped')) {
+                return { action, failed: current.error || current.user_error || '处理任务失败', retryCount };
+              }
+              if (!receipt) {
+                observed = await getFreezoneWorkflowRun(projectId, canvasId, workflowRunId, 10);
+                receipt = nativeProductionWorkflowAcceptance(observed, action.nodeId, action.action);
+              }
+              current = observed.actions.find((item) => item.node_id === action.nodeId && item.action === action.action);
+              if (!current) return { action, failed: '服务端未找到对应的处理动作', retryCount };
+              if (current.status === 'failed' || current.status === 'blocked' || current.status === 'skipped') {
+                return { action, failed: current.error || current.user_error || '处理任务失败', retryCount };
+              }
+              if (!receipt) {
+                // A persisted run may have reached the task writer before its
+                // task identity becomes visible. Keep this attempt pending and
+                // reconcile the same run; never turn an unknown into a failed
+                // generation or submit another paid task.
+                nativeActionsAwaitingReceipt += 1;
+                return { action, failed: null, pending: true, output: {
+                  workflow_run_id: workflowRunId,
+                  reason: 'workflow_server_reconciliation_pending',
+                }, retryCount };
+              }
+              nativeActionsAccepted += 1;
+              if (!nativeReceiptEmitted && pendingActions.length === 1 && result.commandResults.length === 0) {
+                options.onWorkflowRunPersisted?.(workflowRunId, receipt);
+                nativeReceiptEmitted = true;
+              }
+              return { action, failed: null, pending: true, output: { ...receipt }, retryCount };
+            }
 
             if (workflowServerCompleted) {
               return completedServerActionOutcome(action, retryCount);
@@ -3568,6 +3974,7 @@ async function executeQueuedNodeActions(
               action.nodeId,
               action.action,
             );
+            const initialTaskReference = workflowTaskReference(submittedGenerationOutputFromNode(action.nodeId));
             markNodeActionRunning(action.nodeId, action.action);
             let handlerCount = 0;
             const accepted = requiresAcceptedSignal
@@ -3623,13 +4030,13 @@ async function executeQueuedNodeActions(
             let actionSettled = false;
             const taskReferencePersistence =
               firstSignal.kind === "accepted" && GENERATION_NODE_ACTIONS.has(action.action)
-                ? waitForSubmittedGenerationOutputFromNode(
+                ? waitForFreshWorkflowTaskReference(
                   action.nodeId,
+                  initialTaskReference,
                   Math.min(options.actionTimeoutMs ?? DEFAULT_NODE_ACTION_TIMEOUT_MS, 5_000),
-                  () => actionSettled,
-                ).then(async (submittedOutput) => {
-                  const taskReference = workflowTaskReference(submittedOutput);
-                  if (Object.keys(taskReference).length === 0) return;
+                  () => actionSettled || workflowLeaseLost || workflowCancelled() || !generationSession.isCurrent(),
+                ).then(async (taskReference) => {
+                  if (Object.keys(taskReference).length === 0 || !generationSession.isCurrent()) return;
                   await persistRunUpdate([{
                     node_id: action.nodeId,
                     action: action.action,
@@ -3709,7 +4116,24 @@ async function executeQueuedNodeActions(
                   };
             }
             actionSettled = true;
-            void taskReferencePersistence;
+            await taskReferencePersistence;
+            const taskBackedMedia = GENERATION_NODE_ACTIONS.has(action.action)
+              && !['generate_text', 'generate_story_script', 'generate_html'].includes(action.action);
+            if (taskBackedMedia && projectId && canvasId) {
+              let reference = generationSession.isCurrent()
+                ? freshCompleteWorkflowTaskReference(actionResult.output, initialTaskReference) : {};
+              if (!reference.task_key && actionResult.status !== 'error') {
+                reference = await waitForFreshWorkflowTaskReference(action.nodeId, initialTaskReference,
+                  Math.min(options.actionTimeoutMs ?? DEFAULT_NODE_ACTION_TIMEOUT_MS, options.actionResultFieldTimeoutMs ?? DEFAULT_NODE_ACTION_RESULT_FIELD_TIMEOUT_MS),
+                  () => workflowLeaseLost || workflowCancelled() || workflowServerCompleted || !generationSession.isCurrent());
+              }
+              // Task metadata never participates in output-change detection.
+              // Only a complete fresh tuple may accompany this result hint.
+              const cleanOutput = { ...actionResult.output };
+              for (const key of ['task_key', 'taskKey', 'generationTaskKey', 'task_type', 'taskType', 'generationTaskType', 'job_id', 'jobId', 'generationTaskJobId', 'generationJobId']) delete cleanOutput[key];
+              actionResult = { ...actionResult, output: { ...cleanOutput, ...reference } };
+              if (!generationSession.isCurrent()) return { action, failed: WORKFLOW_STOPPED_MESSAGE, retryCount };
+            }
             clearPendingNodeAction(requestId);
             await persistRunUpdate([{
               node_id: action.nodeId,
@@ -3792,7 +4216,7 @@ async function executeQueuedNodeActions(
               ? settled.failed === WORKFLOW_STOPPED_MESSAGE
                 ? "skipped"
                 : settled.failed.startsWith("跳过 ") ? "blocked" : "failed"
-              : isRecord(settled.output) && settled.output.skipped === true
+              : isRecord(settled.output) && "skipped" in settled.output && settled.output.skipped === true
                 ? "skipped"
                 : "completed",
             ...(settled.failed ? { error: settled.failed } : {}),
@@ -3810,12 +4234,19 @@ async function executeQueuedNodeActions(
             commandIndex: action.commandIndex,
             type: "run_node_action",
             status: "pending",
-            label: `${action.label}（${i18next.t("freezone.chat.workflowOutputSyncPendingLabel", {
-              defaultValue: "产物待同步",
-            })}）`,
+            label: isProductionProcessingAction(action.action)
+              && (!isRecord(output) || output.reason !== 'workflow_server_reconciliation_pending')
+              ? action.label
+              : `${action.label}（${i18next.t("freezone.chat.workflowOutputSyncPendingLabel", {
+                  defaultValue: "产物待同步",
+                })}）`,
             nodeId: action.nodeId,
             action: action.action,
-            output: { pending: true, reason: "workflow_result_sync_pending" },
+            output: isProductionProcessingAction(action.action)
+              ? { pending: true, reason: isRecord(output) && output.reason === 'workflow_server_reconciliation_pending'
+                ? output.reason : "native_action_accepted", ...output,
+                node_id: action.nodeId, action: action.action }
+              : { pending: true, reason: "workflow_result_sync_pending" },
           });
           continue;
         }
@@ -3864,18 +4295,54 @@ async function executeQueuedNodeActions(
       syncCompletedStoryFrames(completedImageNodeIds, result);
       stopWorkflowHeartbeat();
       await workflowHeartbeatQueue;
-      await persistRunUpdate(
-        [],
-        runCancelled ? "cancelled" : runFailed || blockedNodeIds.size > 0 ? "failed" : "completed",
-      );
+      if ((nativeActionsAccepted === 0 && nativeActionsAwaitingReceipt === 0
+          && ordinaryActionsAwaitingReconciliation === 0)
+        || runCancelled || runFailed || blockedNodeIds.size > 0) {
+        await persistRunUpdate(
+          [],
+          runCancelled ? "cancelled" : runFailed || blockedNodeIds.size > 0 ? "failed" : "completed",
+        );
+      }
       if (workflowServerReconciliationPending) {
-        for (const step of result.commandResults) {
-          if (step.type !== "run_node_action" || step.status !== "success") continue;
-          if (!pendingActions.some((action) => action.nodeId === step.nodeId && action.action === step.action)) continue;
-          step.status = "pending";
-          step.output = { pending: true, reason: "workflow_server_reconciliation_pending" };
-          result.openedUiActions = Math.max(0, result.openedUiActions - 1);
+        const started = Date.now();
+        let settlementReadFailed = false;
+        const timeout = Math.min(options.actionTimeoutMs ?? DEFAULT_NODE_ACTION_TIMEOUT_MS,
+          options.actionResultFieldTimeoutMs ?? DEFAULT_NODE_ACTION_RESULT_FIELD_TIMEOUT_MS);
+        while (workflowServerReconciliationPending && !workflowLeaseLost && !workflowCancelled()
+          && generationSession.isCurrent() && Date.now() - started < timeout) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (workflowCancelled() || !generationSession.isCurrent()) break;
+          try {
+            await enqueueWorkflowHeartbeat(async () => {
+              const current = await getFreezoneWorkflowRun(projectId!, canvasId!, workflowRunId!, 10);
+              observeWorkflowRunStatus(current);
+              workflowServerReconciliationPending = current.status === 'running';
+            });
+          } catch (error) {
+            settlementReadFailed = true;
+            markWorkflowResultsPending();
+            workflowPersistenceError = error instanceof ApiError && error.status === 409
+              ? WORKFLOW_LEASE_LOST_MESSAGE : workflowPersistenceFailureMessage(error);
+            result.errors.push(workflowPersistenceError);
+            // Known ownership/scope loss must never issue a terminal mutation.
+            // Other read failures still try the original runner-fenced ending.
+            if (error instanceof ApiError && [401, 403, 404, 409].includes(error.status)) workflowLeaseLost = true;
+            break;
+          }
+          if (workflowPersistenceError) {
+            markWorkflowResultsPending();
+            throw new Error(workflowPersistenceError);
+          }
         }
+        if (workflowServerReconciliationPending && !workflowLeaseLost) {
+          markWorkflowResultsPending();
+          if (!settlementReadFailed && !workflowCancelled() && generationSession.isCurrent()) result.errors.push('生成产物已到达，但服务端执行证明尚未同步；请核对当前任务记录后继续，勿重复生成。');
+          await persistRunUpdate([], workflowCancelled() || !generationSession.isCurrent() ? 'cancelled' : 'failed');
+        }
+      }
+      stopWorkflowHeartbeat();
+      if (workflowServerReconciliationPending) {
+        markWorkflowResultsPending();
       }
     } catch (error) {
       if (!workflowPersistenceError) throw error;
@@ -3901,6 +4368,7 @@ async function executeQueuedNodeActions(
         window.removeEventListener(WORKFLOW_EXECUTION_ACTIVITY_EVENT, handleWorkflowActivity);
       }
       for (const action of pendingActions) clearWorkflowProductOperation(action.nodeId);
+      for (const action of pendingActions) clearWorkflowGenerationContext(action.nodeId);
       stopWorkflowHeartbeat();
     }
   };
@@ -4012,6 +4480,7 @@ async function executePendingMainlineProjections(
 function commandLabel(command: CanvasChatCommand): string {
   switch (command.type) {
     case "html_artifact": return i18next.t("htmlArtifact.saveCommand");
+    case "production_plan_command": return "修改作品方案";
     case "create_node":
       return "创建节点";
     case "add_next_node":
@@ -4068,6 +4537,7 @@ function commandLabel(command: CanvasChatCommand): string {
       if (command.action === "download_video") return "下载视频";
       if (command.action === "open_video_clip_tool") return "打开视频剪辑";
       if (command.action === "open_video_upscale_tool") return "打开视频高清";
+      if (command.action === "import_reference_keyframes") return "导入原片关键帧";
       if (command.action === "run_video_analyze_story") return "解析视频";
       if (command.action === "run_audio_separate") return "分离音视频";
       if (command.action === "download_audio") return "下载音频";
@@ -4104,6 +4574,7 @@ function commandLabel(command: CanvasChatCommand): string {
 
 function commandPrimaryNodeId(command: CanvasChatCommand): string | undefined {
   switch (command.type) {
+    case "production_plan_command":
     case "update_node_data":
     case "run_node_action":
       return command.node_id;
@@ -4146,6 +4617,7 @@ function selectAndFocusNode(nodeId: string): void {
 
 function commandNodeRefs(command: CanvasChatCommand): string[] {
   switch (command.type) {
+    case "production_plan_command":
     case "update_node_data":
     case "run_node_action":
       return [command.node_id];
@@ -4286,10 +4758,22 @@ function workflowEnvelopeAlreadyApplied(envelope: CanvasChatCommandEnvelope): bo
     (command): command is Extract<CanvasChatCommand, { type: "create_node" }> =>
       command.type === "create_node" && workflowNodeIdentity(command.data) !== null,
   );
+  const existingNodeIds = new Map(createCommands.map((command) => [
+    command.client_id,
+    existingWorkflowNodeForCommand(command)?.id,
+  ]));
   return (
     createCommands.length > 0 &&
-    createCommands.every((command) => existingWorkflowNodeForCommand(command) !== null) &&
+    createCommands.every((command) => existingNodeIds.get(command.client_id) !== undefined) &&
     envelope.commands.every((command) => {
+      if (command.type === "create_edge") {
+        const source = existingNodeIds.get(command.source) ?? command.source;
+        const target = existingNodeIds.get(command.target) ?? command.target;
+        return useCanvasStore.getState().edges.some((edge) =>
+          edge.source === source && edge.target === target &&
+          edge.data?.link_type === command.link_type
+        );
+      }
       if (command.type !== "html_artifact" || command.action !== "prepare") return true;
       const identity = workflowNodeIdentity(command.workflow_data);
       return identity !== null && useCanvasStore.getState().nodes.some((node) => (
@@ -4407,6 +4891,18 @@ function* applyCanvasChatCommandsInternal(
       commandIndex += 1;
       try {
         switch (command.type) {
+          case "production_plan_command": {
+            if (!options.queueNodeActions) throw new Error("作品方案修改需要授权的异步画布执行器");
+            const projectId = options.projectId;
+            if (!projectId || (envelope.project_id && envelope.project_id !== projectId) || !options.canvasId || (envelope.canvas_id && envelope.canvas_id !== options.canvasId)) throw new Error("作品方案项目或画布范围不匹配");
+            yield executeProductionCanvasCommand({ ...command, node_id: resolveNodeId(command.node_id, clientIdMap) }, projectId, options.canvasId).then((saved) => {
+              result.applied += 1;
+              const { output, ...savedStep } = saved;
+              result.commandResults.push({ commandIndex: currentCommandIndex, type: command.type, status: 'success', label: commandLabel(command), ...savedStep,
+                ...(output ? { output: { ...output } } : {}) });
+            });
+            break;
+          }
           case "html_artifact": {
             if (!options.queueNodeActions) throw new Error("HTML artifacts require the authenticated async executor");
             const projectId = options.projectId;
@@ -4613,6 +5109,9 @@ function* applyCanvasChatCommandsInternal(
                 throw new Error(`workflow source image changed: ${source}`);
               }
             }
+            if (command.expected_source_analysis_snapshot) {
+              assertWorkflowAnalysisSnapshot(nodeById(source) ?? undefined, command.expected_source_analysis_snapshot, source);
+            }
             const invalidReason = invalidConnectionReason(source, target);
             if (invalidReason) {
               if (isMissingOrFatalConnectionReason(invalidReason)) throw new Error(invalidReason);
@@ -4629,6 +5128,7 @@ function* applyCanvasChatCommandsInternal(
             const edgeId = connectNodes(source, target, {
               link_type: command.link_type,
               external_input_image_url: command.expected_source_image_url,
+              external_input_analysis_snapshot: command.expected_source_analysis_snapshot,
             });
             if (!edgeId) throw new Error(`edge rejected: ${command.source} -> ${command.target}`);
             syncStoryVideoReferencePrompt(target);
@@ -4716,9 +5216,21 @@ function* applyCanvasChatCommandsInternal(
           case "run_node_action": {
             const targetId = resolveNodeId(command.node_id, clientIdMap);
             assertNodeActionAvailable(targetId, command.action);
+            if (!options.queueNodeActions && NODE_ACTIONS_RETURNING_RESULT.has(command.action)) {
+              throw new Error("原片关键帧导入需要异步画布执行入口。");
+            }
             if (command.action === "capture_video_last_frame" || command.action === "capture_video_first_frame") {
               if (!options.queueNodeActions) throw new Error("截取视频帧需要异步执行入口。");
               pendingVideoFrameCaptures.push({ nodeId: targetId, commandIndex: currentCommandIndex, action: command.action });
+              break;
+            }
+            if (command.action === 'run_video_analyze_story' && command.parameters?.reference_analysis !== undefined) {
+              if (!options.queueNodeActions || !options.projectId || !options.canvasId) throw new Error('原片分析需要已确认的浏览器执行');
+              yield submitReferenceAnalysisCommand(options.projectId, options.canvasId, targetId, command.parameters.reference_analysis).then(run => {
+                result.applied += 1;
+                result.commandResults.push({ commandIndex: currentCommandIndex, type: command.type, status: 'success',
+                  label: commandLabel(command), nodeId: targetId, action: command.action, output: { reference_analysis_run: run } });
+              });
               break;
             }
             const targetNode = nodeById(targetId);
@@ -4753,6 +5265,30 @@ function* applyCanvasChatCommandsInternal(
             if (!RESULT_SPAWNING_NODE_ACTIONS.has(command.action)) {
               selectAndFocusNode(targetId);
             }
+            if (options.queueNodeActions && NODE_ACTIONS_RETURNING_RESULT.has(command.action)) {
+              yield dispatchNodeActionAndWait(
+                targetId,
+                command.action,
+                command.parameters,
+                options.actionTimeoutMs ?? DEFAULT_NODE_ACTION_TIMEOUT_MS,
+              ).then((actionResult) => {
+                result.applied += actionResult.status === "success" ? 1 : 0;
+                result.commandResults.push({
+                  commandIndex: currentCommandIndex,
+                  type: command.type,
+                  status: actionResult.status,
+                  label: commandLabel(command),
+                  nodeId: targetId,
+                  action: command.action,
+                  ...(actionResult.output ? { output: actionResult.output } : {}),
+                  ...(actionResult.error ? { error: actionResult.error } : {}),
+                });
+                if (actionResult.status === "error" && actionResult.error) {
+                  result.errors.push(actionResult.error);
+                }
+              });
+              break;
+            }
             if (options.queueNodeActions && CURRENT_MEDIA_NODE_ACTIONS.has(command.action)) {
               setTimeout(() => {
                 try {
@@ -4784,6 +5320,7 @@ function* applyCanvasChatCommandsInternal(
               options.queueNodeActions
               && (
                 GENERATION_NODE_ACTIONS.has(command.action)
+                || isProductionProcessingAction(command.action)
                 || queuedActions.length > 1
               )
             );
@@ -4868,7 +5405,12 @@ function* applyCanvasChatCommandsInternal(
               for (const action of actions) {
                 const actionKey = `${action.nodeId}:${action.action}`;
                 if (queuedNodeActionKeys.has(actionKey)) continue;
-                assertNodeActionAvailable(action.nodeId, action.action);
+                if (action.processing) {
+                  const state = useCanvasStore.getState();
+                  const current = state.nodes.find((node) => node.id === action.nodeId);
+                  const resolved = current && buildProductionWorkflowAction(current, state.nodes, state.edges);
+                  if (!resolved || resolved.action !== action.action) throw new Error('作品方案处理动作已变化，请重新读取画布');
+                } else assertNodeActionAvailable(action.nodeId, action.action);
                 queuedNodeActionKeys.add(actionKey);
                 pendingNodeActions.push({
                   ...action,
@@ -4992,6 +5534,36 @@ function* applyCanvasChatCommandsInternal(
     yield (async () => {
       if (!(await executePendingVideoFrameCaptures(pendingVideoFrameCaptures, result, options))) return;
       await executePendingMainlineProjections(pendingMainlineProjections, result);
+      const hasWorkflowDraft = envelopes.some((envelope) => envelope.commands.some((command) =>
+        command.type === "create_node" && typeof command.data?.workflowInstanceId === "string"
+        && command.data.workflowInstanceId.startsWith("workflow_draft_")));
+      if (hasWorkflowDraft) {
+        if (result.errors.length > 0) return;
+        const projectId = options.projectId?.trim();
+        const canvasId = options.canvasId?.trim();
+        let checkpoint: GraphDeliveryCheckpoint | undefined;
+        try {
+          if (!projectId || !canvasId || !options.beforeWorkflowActions
+              || await flushFreezoneCanvasRuntime(projectId, canvasId) !== true) {
+            throw new Error("工作流画布尚未确认保存，动作未提交");
+          }
+          checkpoint = await options.beforeWorkflowActions(result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result.errors.push(message);
+          result.commandResults.push({ commandIndex: -1, type: "validate", status: "error",
+            label: "确认工作流画布", error: message });
+          return;
+        }
+        if (checkpoint.graph_state !== "delivered") {
+          const message = "工作流画布尚未确认保存，动作未提交";
+          result.errors.push(message);
+          result.commandResults.push({ commandIndex: -1, type: "validate", status: "error",
+            label: "确认工作流画布", error: message,
+            output: { graph_state: checkpoint.graph_state, draft_id: checkpoint.draft_id } });
+          return;
+        }
+      }
       await executeQueuedNodeActions(pendingNodeActions, result, options);
     })();
   }

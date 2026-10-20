@@ -10,6 +10,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterator, TypeVar
 
+import httpx
+
 from novelvideo.model_gateway_settings import (
     get_effective_llm_config,
     get_effective_newapi_config,
@@ -26,7 +28,7 @@ from novelvideo.ports.egress_operations import (
     OperationSpec,
     canonical_request_digest,
 )
-from novelvideo.ports.model_credentials import RequestCredential
+from novelvideo.ports.model_credentials import ModelCredentialError, RequestCredential
 from novelvideo.shared.runtime_env import is_ce_effective
 
 _T = TypeVar("_T")
@@ -89,6 +91,10 @@ class ModelGatewayEgressError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(_EGRESS_ERROR_MESSAGES.get(code, "model egress failed"))
         self.code = code
+
+
+class ModelGatewayPreDispatchError(RuntimeError):
+    """A local failure that proves the provider request was never attempted."""
 
 
 def current_model_gateway_context() -> TrustedEgressContext | None:
@@ -395,6 +401,21 @@ def _organization_admission(context: TrustedEgressContext) -> AdmissionContext:
     )
 
 
+def _validate_organization_credential(
+    credential: RequestCredential, context: TrustedEgressContext
+) -> None:
+    """Reject unusable or borrowed credentials before any provider submit."""
+    if type(credential) is not RequestCredential or credential.reference != context.credential:
+        raise ModelCredentialError("ORG_CREDENTIAL_VERSION_MISMATCH")
+    try:
+        endpoint = httpx.URL(credential.base_url.strip())
+    except httpx.InvalidURL as exc:
+        raise ModelCredentialError("ORG_CREDENTIAL_MISSING") from exc
+    if (not credential.api_key.strip() or endpoint.scheme not in {"http", "https"}
+            or not endpoint.host):
+        raise ModelCredentialError("ORG_CREDENTIAL_MISSING")
+
+
 async def execute_organization_gateway_request(
     *,
     capability: str,
@@ -439,6 +460,7 @@ async def execute_organization_gateway_request(
         credential = await get_model_credentials().resolve(
             _organization_admission(context)
         )
+        _validate_organization_credential(credential, context)
     except BaseException:
         await operation_port.mark_rejected_before_submit(
             operation_id=operation.operation_id,
@@ -449,6 +471,13 @@ async def execute_organization_gateway_request(
 
     try:
         result = await submit(credential)
+    except ModelGatewayPreDispatchError:
+        await operation_port.mark_rejected_before_submit(
+            operation_id=operation.operation_id,
+            transition_token=transition_token,
+            expected_version=operation.version,
+        )
+        raise
     except BaseException:
         await operation_port.mark_unknown(
             operation_id=operation.operation_id,
@@ -520,6 +549,7 @@ async def execute_organization_gateway_stream(
         credential = await get_model_credentials().resolve(
             _organization_admission(context)
         )
+        _validate_organization_credential(credential, context)
     except BaseException:
         await operation_port.mark_rejected_before_submit(
             operation_id=operation.operation_id,

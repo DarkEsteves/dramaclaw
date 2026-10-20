@@ -1,67 +1,29 @@
-# Freezone Codex final response contract
+# Freezone chat text and operation outcomes
 
-Issue #575 removes user-text classification from canvas receipt enforcement.
-The legacy `_freezone_canvas_write_requested` helper is not an execution or
-authorization boundary and is no longer used by the Codex streaming adapter.
+Freezone assistant prose uses the ordinary accumulated `assistant.delta` stream. The
+Codex canvas turn has no final `message/mode/canvas_receipts` JSON envelope and
+no format repair turn. The complete text is persisted once in the assistant
+message; reconnecting does not append the streamed prefix twice.
 
-## Evidence and declarations
+Every canvas or artifact write is evaluated from host observed tool events.
+`runtime_event_evidence.py` checks the exact actor, project, canvas, revision
+and persisted receipt. A successful transport response alone is `unverified`.
+A draft awaiting the existing browser approval is `awaiting_approval`; an
+accepted background task is `accepted` or `running`, never completed media.
+Failures, timeouts and cancellation retain their own call IDs and errors. A
+separate successful operation cannot hide one of these results.
 
-Each observed canvas write tool call has its own lifecycle state. A completed
-tool transport is not sufficient: a successful browser apply must carry a bridge
-receipt, and a direct apply must carry a saved revision. Both must match the
-current project and canvas. Catalog-only Skill saves are not canvas writes.
+The assistant message stores `metadata.operation_outcome` with the per call
+state, `blocking_call_ids` and turn disposition. The existing tool progress and
+canvas execution UI show these states. No extra confirmation card is created.
+A complete prose reply, a successful write, and presentation of a reviewed
+plan are separate events. `plan_confirmation` is recorded only after the full
+plan reply is delivered and no blocking operation remains.
 
-The App Server receives `outputSchema` on every Freezone turn, including resumed
-threads. The final response contains:
-
-```json
-{
-  "message": "节点已创建。",
-  "mode": "mutation",
-  "canvas_receipts": [{"bridge_key": "actual-bridge-key", "revision": null}]
-}
-```
-
-- `read_only`: explanations, checks, proposals, clarification answers, and
-  catalog-only changes; no canvas success declarations or receipt references.
-- `blocked`: no canvas write was performed because of a limitation; no receipts.
-- `mutation`: success declarations refer to the complete set of verified
-  same-turn receipts. A direct receipt uses `bridge_key: null` and its integer
-  `revision`. Historical or wrong-scope receipts cannot satisfy the declaration.
-
-The adapter validates structured declarations, not natural-language keywords.
-The model must not put canvas success claims in a `read_only` message; this is a
-response-protocol obligation, not a second prose classifier. Missing/invalid
-structured responses fail closed and never fall back to unverified raw prose.
-
-## Non-success states and compatibility
-
-Failed, timed-out, cancelled, and pending-approval operations are distinct from
-success. One successful write cannot hide a different unsuccessful tool call.
-This conservative rule also reports an incomplete turn if an earlier write
-attempt failed even when a later attempt succeeded; recovery within a single
-turn requires a future explicit operation/supersession contract, not guessing
-from similar arguments or user text.
-
-A ready Workflow draft remains pending user confirmation; it is not evidence
-that nodes already exist. An answered clarification by itself is not a failed
-canvas write. Runtime timeout retains the existing runtime reason. On runtime
-cancellation, Freezone discards all unvalidated structured output (including
-partial JSON) and emits and persists only an explicit cancellation notice.
-Cancellation does not roll back tool operations that already completed.
-
-Freezone assistant prose is buffered until the response is validated. Tool
-progress and approval/clarification cards continue to stream. JSON transport
-fields are not shown as the user-facing answer. Mainline Codex, Claude, Hermes,
-write authorization, and the #571 Inbox/Outbox transport are unchanged.
-
-The Freezone thread protocol version is bumped so existing threads are recreated
-with the new developer instructions. No database migration is needed.
-
-Compatibility gateways may not expose the transport `outputSchema` to the
-model. The Freezone developer instructions therefore also embed the complete
-schema and a valid read-only greeting example. Greetings must produce the same
-structured envelope; plain prose is not exempt from receipt validation.
-After updating the backend, restart the API so it loads the new instructions
-and thread protocol version. Prompt/schema unit tests do not replace a live
-gateway smoke test.
+Natural language cannot be validated by a final JSON receipt. Agent guidance
+therefore requires accurate wording: intent before submission, submitted after
+a verified acceptance, and generated only after a terminal artifact exists.
+The UI and workflow advance from host receipts, never from the assistant's
+words. Existing canvas write and node action approval policies still decide
+when commands actually apply. The Freezone thread protocol version changes
+when these developer instructions change; existing saved chats remain readable.

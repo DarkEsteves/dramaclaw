@@ -1,5 +1,7 @@
 import { canvasCreationActions } from "@/features/canvas/application/nodeCatalog";
 import { uuidGenerator } from "@/features/canvas/infrastructure/idGenerator";
+import { browserRecoveryId, createBackgroundBridgeRecovery, startIndependentBridgeRecovery, deliverClosedCanvasRecovery, claimContextRecoveryAlias, rememberContextRecoveryResult, contextRecoveryResult, type BridgeRecoveryPage } from "@/features/superchat/backgroundBridgeRecovery";
+import { useAuthStore } from "@/stores/auth-store";
 import { htmlArtifactNodePatches } from '@/features/html-artifacts/nodeMetadata';
 import { HtmlArtifactEditor } from '@/features/html-artifacts/HtmlArtifactEditor';
 import { HTML_ARTIFACT_OPEN_EVENT, HTML_ARTIFACT_REFERENCE_EVENT, HTML_ARTIFACT_UPDATED_EVENT, type HtmlArtifactTarget } from '@/features/html-artifacts/api';
@@ -98,7 +100,6 @@ import { prefetchFreezoneStyleTemplates } from "@/features/canvas/hooks/useFreez
 import { prefetchFreezoneVideoCameraTemplates } from "@/features/canvas/hooks/useFreezoneVideoCameraTemplates";
 import {
   claimExternalCanvasCommand,
-  confirmedExternalCanvasCommandKeys,
 } from "./externalCanvasCommandDedupe";
 import {
   normalizePresetProjectionRequest,
@@ -149,7 +150,7 @@ import {
   type FreezoneCanvasAgent,
   type FreezoneCanvasAgentState,
 } from "@/features/freezone/canvasAgents";
-import { validateCanvasChatCommandEnvelopes } from "@/features/freezone/context/canvasCommandValidator";
+import { preflightCanvasChatCommandEnvelopes } from "@/features/freezone/context/canvasCommandValidator";
 import {
   replayCanvasCommandToolResult,
   reportCanvasCommandToolResult,
@@ -157,6 +158,7 @@ import {
 import {
   emitCanvasContextActivity,
   reportCanvasContextToolResult,
+  FREEZONE_CANVAS_CONTEXT_TOOL_RESULT_EVENT,
 } from "@/features/freezone/canvasContextToolResult";
 import {
   buildCanvasNodeReferenceAttachment,
@@ -241,7 +243,6 @@ const FREEZONE_CHAT_FLOAT_MARGIN = 12;
 const FREEZONE_CHAT_FLOAT_MIN_TOP = APP_HEADER_HEIGHT + 8;
 const FREEZONE_CHAT_FLOAT_BOTTOM_RESERVE = TASK_STATUS_BAR_HEIGHT + 8;
 const FREEZONE_CHAT_FLOAT_DEFAULT_POS = { right: 24, top: FREEZONE_CHAT_FLOAT_MIN_TOP + 8 };
-const EXTERNAL_CANVAS_COMMAND_POLL_MS = 800;
 const EXTERNAL_CANVAS_REVISION_POLL_MS = 2_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -328,31 +329,6 @@ async function listServerFreezoneCanvasAgents(
     data?: { agents?: FreezoneCanvasAgent[] };
   }>();
   return Array.isArray(response.data?.agents) ? response.data.agents : [];
-}
-
-async function listPendingCanvasCommandFrames({
-  projectId,
-  canvasId,
-  agentIds,
-  seenKeys,
-}: {
-  projectId: string;
-  canvasId: string;
-  agentIds: string[];
-  seenKeys: string[];
-}): Promise<ServerFrame[]> {
-  const response = await api.post("api/v1/chat/pending-canvas-commands", {
-    json: {
-      project_id: projectId,
-      canvas_id: canvasId,
-      agent_ids: agentIds,
-      seen_keys: seenKeys,
-    },
-  }).json<{
-    ok?: boolean;
-    data?: { frames?: ServerFrame[] };
-  }>();
-  return Array.isArray(response.data?.frames) ? response.data.frames : [];
 }
 
 function pushJsonTextCanvasCommandCandidate(candidates: unknown[], text: unknown): void {
@@ -945,6 +921,7 @@ export function FreezoneShell({
   const [assetLibraryReloadToken, setAssetLibraryReloadToken] = useState(0);
   const [assetPanelCollapsed, setAssetPanelCollapsed] = useState(true);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const recoveryActor = useAuthStore(state => state.username);
   const [viewMode, setViewMode] = useFreezoneViewMode();
   const [chatOpen, setChatOpen] = useFreezoneChatVisibility(viewMode, active);
   const [pendingChatAttachments, setPendingChatAttachments] = useState<ChatAttachment[]>([]);
@@ -1709,7 +1686,7 @@ export function FreezoneShell({
   }, []);
 
   useEffect(() => {
-    const handleCanvasCommand = (event: Event) => {
+    const handleCanvasCommand = async (event: Event) => {
       const detail = (event as CustomEvent<{
         frame?: ServerFrame;
         anchorTextPrefix?: string | null;
@@ -1854,10 +1831,12 @@ export function FreezoneShell({
         envelopes,
         currentState.nodes.map((node) => node.id),
       );
-      const validation = validateCanvasChatCommandEnvelopes(
+      const validation = await preflightCanvasChatCommandEnvelopes(
         normalizedEnvelopes,
         currentState.nodes,
         currentState.edges,
+        projectId,
+        canvasId,
       );
       if (!validation.ok) {
         const errors = [
@@ -1994,71 +1973,43 @@ export function FreezoneShell({
 
   useEffect(() => {
     emittedExternalCanvasCommandKeysRef.current.clear();
-  }, [canvasId, projectId]);
+  }, [canvasId, projectId, recoveryActor]);
 
+
+  // The dock unmounts when closed and idle; canvas tools still have a browser.
   useEffect(() => {
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const seenKeys = confirmedExternalCanvasCommandKeys(
-          emittedExternalCanvasCommandKeysRef.current,
-        ).slice(-200);
-        const agentIds = loadFreezoneCanvasAgentsWithSource(projectId, canvasId).state.agents
-          .map((agent) => agent.id);
-        const frames = await listPendingCanvasCommandFrames({
-          projectId,
-          canvasId,
-          agentIds,
-          seenKeys,
-        });
-        if (frames.length > 0) {
-          console.info("[freezone-canvas-command] pending frames polled", {
-            count: frames.length,
-            bridgeKeys: frames
-              .map((frame) => {
-                const record = frame as Record<string, unknown>;
-                return typeof record.bridge_key === "string" ? record.bridge_key : null;
-              })
-              .filter((key): key is string => Boolean(key)),
-          });
-        }
-        const now = Date.now();
-        frames.forEach((frame, index) => {
-          const frameRecord = frame as Record<string, unknown>;
-          const bridgeKey =
-            typeof frameRecord.bridge_key === "string"
-              ? frameRecord.bridge_key
-              : typeof frameRecord.bridgeKey === "string"
-                ? frameRecord.bridgeKey
-                : null;
-          if (!bridgeKey) return;
-          window.dispatchEvent(new CustomEvent(SUPERCHAT_CANVAS_COMMAND_EVENT, {
-            detail: {
-              frame,
-              anchorTextPrefix: "外部 Agent",
-              receivedAt: now + index,
-              externalMcpCommand: true,
-            },
-          }));
-        });
-      } catch {
-        // The page can be open before auth/API is ready. Retry quietly.
-      } finally {
-        if (!cancelled) {
-          timer = window.setTimeout(tick, EXTERNAL_CANVAS_COMMAND_POLL_MS);
-        }
-      }
-    };
-
-    timer = window.setTimeout(tick, EXTERNAL_CANVAS_COMMAND_POLL_MS);
+    if (chatOpen || !active || !recoveryActor) return;
+    let scheduler: ReturnType<typeof startIndependentBridgeRecovery> | undefined;
+    scheduler = startIndependentBridgeRecovery({
+      scopeIds: () => loadFreezoneCanvasAgentsWithSource(projectId, canvasId).state.agents.map(agent => agent.id),
+      createRecovery: agentId => createBackgroundBridgeRecovery({
+        pull: (cursor, eventCursor, signal) => api.post("api/v1/chat/pending-interactions", {
+          json: { project_id: projectId, canvas_id: canvasId, agent_id: agentId,
+            browser_id: browserRecoveryId(), cursor, event_cursor: eventCursor }, signal, timeout: 12_000, retry: 0,
+        }).json<{ data: BridgeRecoveryPage }>().then(response => response.data),
+        receive: page => deliverClosedCanvasRecovery(page, {
+          command: frame => window.dispatchEvent(new CustomEvent(SUPERCHAT_CANVAS_COMMAND_EVENT, { detail: { frame } })),
+          context: frame => window.dispatchEvent(new CustomEvent(SUPERCHAT_CANVAS_CONTEXT_REQUEST_EVENT, { detail: frame })),
+          openChat: () => setChatOpen(true),
+        }),
+        denied: () => scheduler?.stop(),
+      }),
+    });
+    const wake = () => scheduler?.wake();
+    const visible = () => { if (document.visibilityState === "visible") wake(); };
+    const expire = () => scheduler?.stop();
+    window.addEventListener("focus", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    document.addEventListener("visibilitychange", visible);
     return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      expire();
+      window.removeEventListener("focus", wake);
+      window.removeEventListener("online", wake);
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+      document.removeEventListener("visibilitychange", visible);
     };
-  }, [canvasId, projectId]);
+  }, [chatOpen, active, recoveryActor, projectId, canvasId]);
 
   useEffect(() => {
     const handleCanvasContextRequest = (event: Event) => {
@@ -2071,6 +2022,16 @@ export function FreezoneShell({
             ? detail.canvasId
             : null;
       if (requestedCanvasId && requestedCanvasId !== canvasId) return;
+      if (detail.project_id && detail.project_id !== projectId) return;
+      if (typeof detail.bridge_key === "string" && detail.bridge_key.includes(".executor.")
+        && !claimContextRecoveryAlias(detail.bridge_key)) {
+        const receipt = contextRecoveryResult(detail.bridge_key, useAuthStore.getState().username);
+        if (receipt) {
+          const { type: _type, ...body } = receipt;
+          void api.post("api/v1/chat/canvas-context-tool-result", { json: body, timeout: 12_000 }).catch(() => undefined);
+        }
+        return;
+      }
 
       const bridgeKey = typeof detail.bridge_key === "string" ? detail.bridge_key : null;
       const agentId =
@@ -2164,8 +2125,14 @@ export function FreezoneShell({
       })();
     };
 
+    const rememberResult = (event: Event) => {
+      const result = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (result?.project_id === projectId && result?.canvas_id === canvasId) rememberContextRecoveryResult(result, useAuthStore.getState().username);
+    };
+    window.addEventListener(FREEZONE_CANVAS_CONTEXT_TOOL_RESULT_EVENT, rememberResult);
     window.addEventListener(SUPERCHAT_CANVAS_CONTEXT_REQUEST_EVENT, handleCanvasContextRequest);
     return () => {
+      window.removeEventListener(FREEZONE_CANVAS_CONTEXT_TOOL_RESULT_EVENT, rememberResult);
       window.removeEventListener(SUPERCHAT_CANVAS_CONTEXT_REQUEST_EVENT, handleCanvasContextRequest);
     };
   }, [canvasId, projectId, sync.metadata]);

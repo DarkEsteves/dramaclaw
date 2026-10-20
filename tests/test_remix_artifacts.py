@@ -450,6 +450,9 @@ def test_interrupted_publish_never_exposes_an_envelope(
             schema="reference_evidence.v1", payload=evidence_payload(), upstream_refs=[]
         )
 
-    artifact_directories = list((tmp_path / "freezone" / "_remix_artifacts").iterdir())
+    artifact_directories = [
+        path for path in (tmp_path / "freezone" / "_remix_artifacts").iterdir()
+        if path.is_dir()
+    ]
     assert len(artifact_directories) == 1
     assert not (artifact_directories[0] / "1.json").exists()

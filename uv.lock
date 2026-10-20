@@ -757,34 +757,34 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime" },
+    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufft = [
-    { name = "nvidia-cufft" },
+    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufile = [
-    { name = "nvidia-cufile" },
+    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti" },
+    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 curand = [
-    { name = "nvidia-curand" },
+    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver" },
+    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse" },
+    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink" },
+    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc" },
+    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx" },
+    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -2338,6 +2338,24 @@ wheels = [
 ]
 
 [[package]]
+name = "opencc"
+version = "1.4.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/12/09e62f051af1de7ca84be1d69154bd0514416ef72237e2081584cc268bc9/opencc-1.4.2.tar.gz", hash = "sha256:47977905f131d7d9cfcec29fba5d841154907e1da73103105a4a68744e0f4f1a", size = 11637673, upload-time = "2026-08-22T19:09:31.761Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/74/673131660e3c4cf9cb8540bde081227a28ea686b22f7a0b64fa4150456a6/opencc-1.4.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:5c5a76365426fb1c346c00a1729000dfc92ee621669c0b12ba33c008a6f2c300", size = 2150650, upload-time = "2026-08-22T19:13:46.78Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/b7/d78cff32ed0820985aa7148a43bf96f1e1927a8ca3e7988f465065a052fe/opencc-1.4.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a3bb8d817b8d5500fda9a81e245825d176b087e4d31702dafc2ef83d6ef21b4a", size = 2052303, upload-time = "2026-08-22T19:09:35.036Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/a0/3b9eed66849db84d98502522e427718ac4c97368047055a84b911f17204c/opencc-1.4.2-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:689eea00ddfdaa3ba0b78426da34759dcb07db52b2fc1c660fa62b3d94ee4f04", size = 2409668, upload-time = "2026-08-22T19:10:59.358Z" },
+    { url = "https://files.pythonhosted.org/packages/70/eb/637c7cb0e79f8109709563d4435192641f95393ee423166a324b306f971b/opencc-1.4.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:794afd1f5254b22fb7e8655d3e60f0467e4a1ad5ebbd62f9efdd2dd421dd43db", size = 2447735, upload-time = "2026-08-22T19:09:26.344Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/38/f3d6db1ba92e1d042f89babce2ef554bb9728db5a42120c4f37e7d590fcb/opencc-1.4.2-cp311-cp311-win_amd64.whl", hash = "sha256:0c0a14242f9b0a9932eccf4dd50fc5e26133940246a00862f60971fff3e78b02", size = 2890126, upload-time = "2026-08-22T19:13:43.308Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/ad/9926e816dd654239905c4bc45997752dbe2d3d113a75cf77ba8ed866271c/opencc-1.4.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:052177a890ac2fdd960402d5a482163c965ec68ba7511271c19db327a5606616", size = 2149929, upload-time = "2026-08-22T19:13:48.687Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/44/03bf0db03120e10f18fa1f3453593d5540b6c4250e5dc15b9551f8ffe976/opencc-1.4.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:2992898ccfb14aaa9feef5a38e08c4c20a79f41482626fc5a6e8ee87b23016e2", size = 2051557, upload-time = "2026-08-22T19:09:36.12Z" },
+    { url = "https://files.pythonhosted.org/packages/58/c2/6d6de602d5800b897a92eb6aad9c901eed562912dac3a0d099a06572710d/opencc-1.4.2-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:eb5df4bd9bd766aaa533d961123b519b51d6b678437b89650e8ffe9564c682c7", size = 2408615, upload-time = "2026-08-22T19:11:00.559Z" },
+    { url = "https://files.pythonhosted.org/packages/75/8f/e8b80f225440a045c08dfc9bf251c8cb1019e0935d104c56715afff468ad/opencc-1.4.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d90a8b76ea5d1f425a4f2eb16114cb33abd29a73c6a4ec367361c61b1c059a10", size = 2446507, upload-time = "2026-08-22T19:09:27.558Z" },
+    { url = "https://files.pythonhosted.org/packages/43/83/ed548fd759ee4dfdd88a1f57f6877b5fd421f582e66bdf01979771d6cbba/opencc-1.4.2-cp312-cp312-win_amd64.whl", hash = "sha256:7025dc276b2a60b30ed3aefb99f1ceb8616076fd3eb3310c0f8f2046e79e76b1", size = 2890587, upload-time = "2026-08-22T19:13:44.385Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.42.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3476,6 +3494,7 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "openai-codex" },
+    { name = "opencc" },
     { name = "oss2" },
     { name = "packaging" },
     { name = "pillow" },
@@ -3555,6 +3574,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24.0,<2.0.0" },
     { name = "openai", specifier = ">=2.29.0" },
     { name = "openai-codex", git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&rev=25b5957f0e263fbf48e0b8844ba764a9841162c4" },
+    { name = "opencc", specifier = "==1.4.2" },
     { name = "oss2", specifier = ">=2.19.1" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "pillow", specifier = ">=10.0.0" },

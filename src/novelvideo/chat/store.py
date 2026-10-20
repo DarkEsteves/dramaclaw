@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,7 +132,46 @@ class ChatScope:
         return data
 
 
+# One latest revision per event: no token/event payload history is duplicated.
+# SQLite serializes writers; trigger revisions commit atomically with the row.
+_UI_EVENT_REVISION_SQL = (
+    "CREATE TABLE IF NOT EXISTS chat_ui_event_revisions (revision INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL UNIQUE)",
+    """CREATE TRIGGER IF NOT EXISTS chat_ui_event_revision_insert AFTER INSERT ON chat_ui_events
+       BEGIN INSERT INTO chat_ui_event_revisions(event_id) VALUES (NEW.id)
+       ON CONFLICT(event_id) DO UPDATE SET revision=excluded.revision; END""",
+    """CREATE TRIGGER IF NOT EXISTS chat_ui_event_revision_update AFTER UPDATE ON chat_ui_events
+       BEGIN INSERT INTO chat_ui_event_revisions(event_id) VALUES (NEW.id)
+       ON CONFLICT(event_id) DO UPDATE SET revision=excluded.revision; END""",
+    """CREATE TRIGGER IF NOT EXISTS chat_ui_event_revision_delete AFTER DELETE ON chat_ui_events
+       BEGIN DELETE FROM chat_ui_event_revisions WHERE event_id=OLD.id; END""",
+    """INSERT INTO chat_ui_event_revisions(event_id) SELECT id FROM chat_ui_events
+       WHERE NOT EXISTS (SELECT 1 FROM chat_ui_event_revisions WHERE event_id=chat_ui_events.id) ORDER BY id""",
+)
+
+
 class ChatStore:
+    def pull_recovery(self, username: str, scope: ChatScope, *, cursor: int = 0,
+                      event_cursor: str = "", limit: int = 100) -> dict[str, Any]:
+        """Pull persisted messages and updated UI snapshots without storing deltas."""
+        limit = max(1, min(limit, 200))
+        if event_cursor and (not event_cursor.startswith("r") or not event_cursor[1:].isdigit()):
+            raise ValueError("invalid event cursor")
+        conn = self.connect(username, scope, db_path=self.read_db_for(username, scope))
+        try:
+            rows = conn.execute("SELECT * FROM chat_messages WHERE id>? AND role NOT IN ('trace','agent_notification') ORDER BY id LIMIT ?", (cursor,limit)).fetchall()
+            events = conn.execute("SELECT event.*, revision.revision FROM chat_ui_events AS event JOIN chat_ui_event_revisions AS revision ON revision.event_id=event.id WHERE revision.revision>? ORDER BY revision.revision LIMIT ?", (int(event_cursor[1:] or 0) if event_cursor else 0,limit)).fetchall()
+            messages = [self._message_from_row(row) for row in rows]
+            if messages:
+                turn_ids = list({str(message["turn_id"]) for message in messages if message.get("turn_id")})
+                self._attach_ui_events_to_messages(messages, self._load_ui_events(conn, turn_ids=turn_ids))
+        finally:
+            conn.close()
+        return {"messages": messages,
+                "events": [{"id":int(row["id"]),"turn_id":row["turn_id"],"type":row["event_type"],"payload":json.loads(row["payload_json"]),"created_at":row["created_at"]} for row in events],
+                "cursor": int(rows[-1]["id"]) if rows else cursor,
+                "event_cursor": f"r{events[-1]['revision']}" if events else event_cursor,
+                "has_more": len(rows)==limit or len(events)==limit}
+
     @staticmethod
     def _project_root(username: str, scope: ChatScope) -> Path:
         if scope.state_dir:
@@ -534,6 +574,14 @@ class ChatStore:
             )
             """
         )
+        conn.execute("CREATE TABLE IF NOT EXISTS chat_store_migrations (name TEXT PRIMARY KEY)")
+        if not conn.execute("SELECT 1 FROM chat_store_migrations WHERE name='ui_event_revisions_v1'").fetchone():
+            # The unique marker acquires the writer lock before triggers/backfill;
+            # competing initializers wait and only the winning transaction migrates.
+            marker = conn.execute("INSERT OR IGNORE INTO chat_store_migrations(name) VALUES ('ui_event_revisions_v1')")
+            if marker.rowcount:
+                for statement in _UI_EVENT_REVISION_SQL:
+                    conn.execute(statement)
         conn.commit()
         return conn
 
@@ -627,6 +675,13 @@ class ChatStore:
             )
             """
         )
+        await db.execute("CREATE TABLE IF NOT EXISTS chat_store_migrations (name TEXT PRIMARY KEY)")
+        cursor = await db.execute("SELECT 1 FROM chat_store_migrations WHERE name='ui_event_revisions_v1'")
+        if not await cursor.fetchone():
+            marker = await db.execute("INSERT OR IGNORE INTO chat_store_migrations(name) VALUES ('ui_event_revisions_v1')")
+            if marker.rowcount:
+                for statement in _UI_EVENT_REVISION_SQL:
+                    await db.execute(statement)
         await db.commit()
 
     @staticmethod
@@ -818,16 +873,31 @@ class ChatStore:
         created_at = datetime.now(timezone.utc).isoformat()
         conn = self.connect(username, scope)
         try:
-            cursor = conn.execute(
-                """
-                INSERT INTO chat_ui_events(turn_id, event_type, payload_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (turn_id, event_type, json.dumps(event, ensure_ascii=False), created_at),
-            )
+            existing = None
+            if event_type == "assistant.message_parts" and isinstance(event.get("parts"), list):
+                # A streamed snapshot is mutable state, not a new interaction.
+                # Serialize writers so two tabs cannot lose each other's cards.
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT id,payload_json FROM chat_ui_events WHERE turn_id=? AND event_type=? ORDER BY id DESC LIMIT 1",
+                    (turn_id, event_type),
+                ).fetchone()
+            if existing is not None:
+                event = self._merge_snapshot_event(existing["payload_json"], event)
+                event_id = int(existing["id"])
+                conn.execute(
+                    "UPDATE chat_ui_events SET payload_json=?,created_at=? WHERE id=?",
+                    (json.dumps(event, ensure_ascii=False), created_at, event_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO chat_ui_events(turn_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
+                    (turn_id, event_type, json.dumps(event, ensure_ascii=False), created_at),
+                )
+                event_id = int(cursor.lastrowid)
             conn.commit()
             return {
-                "id": int(cursor.lastrowid),
+                "id": event_id,
                 "turn_id": turn_id,
                 "type": event_type,
                 "payload": event,
@@ -850,16 +920,31 @@ class ChatStore:
         created_at = datetime.now(timezone.utc).isoformat()
         db = await self.connect_async(username, scope)
         try:
-            cursor = await db.execute(
-                """
-                INSERT INTO chat_ui_events(turn_id, event_type, payload_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (turn_id, event_type, json.dumps(event, ensure_ascii=False), created_at),
-            )
+            existing = None
+            if event_type == "assistant.message_parts" and isinstance(event.get("parts"), list):
+                await db.execute("BEGIN IMMEDIATE")
+                cursor = await db.execute(
+                    "SELECT id,payload_json FROM chat_ui_events WHERE turn_id=? AND event_type=? ORDER BY id DESC LIMIT 1",
+                    (turn_id, event_type),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+            if existing is not None:
+                event = self._merge_snapshot_event(existing["payload_json"], event)
+                event_id = int(existing["id"])
+                await db.execute(
+                    "UPDATE chat_ui_events SET payload_json=?,created_at=? WHERE id=?",
+                    (json.dumps(event, ensure_ascii=False), created_at, event_id),
+                )
+            else:
+                cursor = await db.execute(
+                    "INSERT INTO chat_ui_events(turn_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
+                    (turn_id, event_type, json.dumps(event, ensure_ascii=False), created_at),
+                )
+                event_id = int(cursor.lastrowid)
             await db.commit()
             return {
-                "id": int(cursor.lastrowid),
+                "id": event_id,
                 "turn_id": turn_id,
                 "type": event_type,
                 "payload": event,
@@ -867,6 +952,18 @@ class ChatStore:
             }
         finally:
             await db.close()
+
+    @classmethod
+    def _merge_snapshot_event(cls, previous_json: str, event: dict[str, Any]) -> dict[str, Any]:
+        try:
+            previous = json.loads(previous_json)
+        except (ValueError, TypeError):
+            previous = {}
+        old_parts = previous.get("parts", []) if isinstance(previous, dict) else []
+        return {
+            **event,
+            "parts": cls._merge_message_parts_snapshots([old_parts, event["parts"]]),
+        }
 
     async def _load_ui_events_async(
         self,
@@ -901,13 +998,13 @@ class ChatStore:
             events_by_turn.setdefault(turn_id, []).append(payload)
         return events_by_turn
 
-    def _load_ui_events(self, conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    def _load_ui_events(self, conn: sqlite3.Connection, *, turn_ids: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+        if turn_ids == []:
+            return {}
+        where = "" if turn_ids is None else " WHERE turn_id IN (" + ",".join("?" for _ in turn_ids) + ")"
         rows = conn.execute(
-            """
-            SELECT id, turn_id, event_type, payload_json, created_at
-              FROM chat_ui_events
-             ORDER BY id ASC
-            """
+            "SELECT id, turn_id, event_type, payload_json, created_at FROM chat_ui_events"
+            + where + " ORDER BY id ASC", turn_ids or [],
         ).fetchall()
         events_by_turn: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
@@ -1201,6 +1298,75 @@ class ChatStore:
             },
         )
         return messages
+
+    def recent_user_messages(
+        self,
+        username: str,
+        scope: ChatScope,
+        *,
+        created_after: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Read bounded visible role=user input from one already authorized scope.
+
+        A shared canvas chat can contain several participants. These rows are
+        creative input, not per-message actor proof or a new approval receipt.
+        Read canonical columns only; rendered metadata/UI events cannot change
+        who the database says authored a message or replace its visible text.
+        """
+        def utc(value: str) -> datetime | None:
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+            except (AttributeError, TypeError, ValueError):
+                return None
+        cutoff = utc(created_after)
+        if cutoff is None:
+            return []
+        db_path = self.read_db_for(username, scope)
+        if not db_path.is_file():
+            return []
+        bounded_limit = max(1, min(int(limit), 8))
+        # A read must not create/migrate a missing chat or load media/UI history.
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(chat_messages)')}
+            if not {'id', 'role', 'content', 'turn_id', 'created_at'} <= columns:
+                return []
+            rows = conn.execute("""SELECT id, substr(content,1,2049) AS content, turn_id, created_at
+                FROM chat_messages WHERE role='user' AND julianday(created_at)>=julianday(?)
+                  AND (turn_id IS NULL OR length(turn_id)<=256) AND length(created_at)<=64
+                ORDER BY id DESC LIMIT ?""", (cutoff.isoformat(), bounded_limit)).fetchall()
+        messages = []
+        remaining = 8192 - 2  # Include the JSON array's brackets and separators.
+        def wire_size(row: dict[str, Any]) -> int:
+            return len(json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+        for row in rows:
+            timestamp = utc(row['created_at'])
+            raw = str(row['content'] or '')
+            if timestamp is None or timestamp < cutoff or not raw.strip():
+                continue
+            text = raw.encode('utf-8')[:2048].decode('utf-8', errors='ignore')
+            message = {'message_id': int(row['id']), 'turn_id': row['turn_id'],
+                       'created_at': row['created_at'], 'content': text,
+                       'content_truncated': text != raw}
+            available = remaining - bool(messages)
+            if wire_size(message) > available:
+                message['content_truncated'] = True
+                low, high = 0, len(text)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    message['content'] = text[:middle]
+                    if wire_size(message) <= available:
+                        low = middle
+                    else:
+                        high = middle - 1
+                message['content'] = text[:low]
+                if not message['content'] or wire_size(message) > available:
+                    break
+            remaining -= wire_size(message) + bool(messages)
+            messages.append(message)
+        return list(reversed(messages))
 
     async def history_contents_async(
         self,

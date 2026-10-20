@@ -81,9 +81,16 @@ _VOICE_REF_REQUIRED_FIELDS = {
 }
 
 
+RECOVERY_FIELDS = (
+    "field_path", "allowed_fields", "compact_example", "errors",
+    "agent_instruction", "next_action", "operation_status", "requires_new_operation",
+)
+
+
 class WorkflowOperationError(ValueError):
     def __init__(
-        self, message: str, *, code: str = "invalid_workflow_change", errors=None
+        self, message: str, *, code: str = "invalid_workflow_change", errors=None,
+        detail: dict | None = None,
     ):
         super().__init__(message)
         self.result = {
@@ -95,6 +102,10 @@ class WorkflowOperationError(ValueError):
             "next_action": "correct_reported_fields",
             "errors": errors or [],
         }
+        if detail:
+            self.result.update({
+                key: deepcopy(detail[key]) for key in RECOVERY_FIELDS if key in detail
+            })
 
 
 def _require_result(result: dict) -> dict:
@@ -102,7 +113,7 @@ def _require_result(result: dict) -> dict:
         raise WorkflowOperationError(
             str(result.get("error") or "workflow validation failed"),
             code=str(result.get("status") or "workflow_validation_failed"),
-            errors=result.get("errors"),
+            detail=result,
         )
     return result
 

@@ -36,6 +36,51 @@ def _bind_remix_task(operations, operation_id: str, task_id: str) -> dict:
     )
 
 
+def test_approved_bridge_redelivery_takes_over_same_running_workflow(tmp_path: Path) -> None:
+    request = dict(project_dir=tmp_path, project_id="project", canvas_id="default",
+                   actions=[{"node_id": "image", "action": "generate_image"}], actor_id="alice",
+                   idempotency_key="canvas-run:bridge", metadata={"canvas_bridge_key": "bridge"})
+    first = create_workflow_run(**request, runner_id="canvas-runner:first")
+    with pytest.raises(WorkflowRunLeaseConflict):
+        create_workflow_run(**request, runner_id="canvas-runner:second", recover_runner=True)
+    with sqlite3.connect(workflow_runs_db_path(tmp_path)) as conn:
+        conn.execute("UPDATE workflow_runs SET lease_expires_at=? WHERE run_id=?",
+                     ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), first["run_id"]))
+    recovered = create_workflow_run(**request, runner_id="canvas-runner:second", recover_runner=True)
+    assert recovered["run_id"] == first["run_id"]
+    assert recovered["runner_id"] == "canvas-runner:second"
+    with pytest.raises(WorkflowRunLeaseConflict):
+        update_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=first["run_id"],
+                            status="running", runner_id="canvas-runner:first")
+    assert update_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=first["run_id"],
+                               status="running", runner_id="canvas-runner:second")
+    with pytest.raises(WorkflowRunIdempotencyConflict):
+        create_workflow_run(**{**request, "metadata": {"canvas_bridge_key": "other"}},
+                            runner_id="canvas-runner:third", recover_runner=True)
+    update_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=first["run_id"],
+                        status="failed", runner_id="canvas-runner:second")
+    terminal = create_workflow_run(**request, runner_id="canvas-runner:fourth", recover_runner=True)
+    assert terminal["status"] == "failed"
+    assert terminal["runner_id"] == "canvas-runner:second"
+
+
+def test_bridge_replay_accepts_only_a_subset_with_completed_omissions(tmp_path: Path) -> None:
+    actions = [{"node_id": "first", "action": "generate_html"},
+               {"node_id": "second", "action": "generate_video", "depends_on": ["first"]}]
+    request = dict(project_dir=tmp_path, project_id="project", canvas_id="default",
+                   actor_id="alice", idempotency_key="canvas-run:partial-bridge",
+                   metadata={"canvas_bridge_key": "bridge"})
+    first = create_workflow_run(**request, actions=actions)
+    with pytest.raises(WorkflowRunIdempotencyConflict):
+        create_workflow_run(**request, actions=[{"node_id": "second", "action": "generate_video"}])
+    update_workflow_run(project_dir=tmp_path, canvas_id="default", run_id=first["run_id"],
+        action_updates=[{"node_id": "first", "action": "generate_html", "status": "completed"}])
+    replay = create_workflow_run(**request, actions=[{"node_id": "second", "action": "generate_video"}])
+    assert replay["run_id"] == first["run_id"]
+    with pytest.raises(WorkflowRunIdempotencyConflict):
+        create_workflow_run(**request, actions=[{"node_id": "second", "action": "generate_image"}])
+
+
 def _set_run_timestamps(
     project_dir: Path,
     run_id: str,

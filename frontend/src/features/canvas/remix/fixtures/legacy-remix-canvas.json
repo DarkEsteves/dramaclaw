@@ -1,0 +1,31 @@
+{
+  "nodes": [
+    { "id": "reference", "type": "videoNode", "position": { "x": 0, "y": 0 }, "data": { "displayName": "Reference", "videoUrl": "/media/reference.mp4", "remixRole": "reference" } },
+    { "id": "story", "type": "videoStoryNode", "position": { "x": 400, "y": 0 }, "data": { "displayName": "Story", "referenceBlueprintRef": { "artifactId": "blueprint", "revision": 1 } } },
+    { "id": "legacy-script", "type": "scriptNode", "position": { "x": 800, "y": 0 }, "data": { "displayName": "Legacy script", "remixRole": "remix_script", "remixScriptRef": { "artifactId": "script", "revision": 2 } } },
+    { "id": "narration", "type": "audioNode", "position": { "x": 1200, "y": 0 }, "data": { "displayName": "Narration", "audioUrl": "/media/narration.wav", "remixRole": "narration" } },
+    { "id": "words", "type": "transcriptNode", "position": { "x": 1600, "y": 0 }, "data": { "displayName": "Transcript", "artifactRef": { "artifactId": "word-timeline", "revision": 1 }, "alignedScriptRef": { "artifactId": "script", "revision": 2 }, "status": "completed", "words": [{ "text": "你好", "startUs": 0, "endUs": 600000 }] } },
+    { "id": "timeline", "type": "semanticTimelineNode", "position": { "x": 2000, "y": 0 }, "data": { "displayName": "Semantic timeline", "artifactRef": { "artifactId": "timing", "revision": 3 }, "events": [{ "selectionId": "opening", "label": "开场", "startFrame": 0, "endFrame": 30 }] } },
+    { "id": "legacy-compose", "type": "videoComposeNode", "position": { "x": 2400, "y": 0 }, "data": { "displayName": "Legacy compose", "remixManifestRef": { "artifactId": "legacy-manifest", "revision": 1 } } },
+    { "id": "plan", "type": "scriptNode", "position": { "x": 800, "y": 600 }, "data": { "displayName": "Production plan", "remixRole": "production_plan", "productionPlanV2Ref": { "artifactId": "plan", "revision": 4 } } },
+    { "id": "plan-compose", "type": "videoComposeNode", "position": { "x": 1200, "y": 600 }, "data": { "displayName": "Plan compose", "productionPlanNodeId": "plan", "productionPlanV2Ref": { "artifactId": "plan", "revision": 4 } } },
+    { "id": "legacy-plan", "type": "scriptNode", "position": { "x": 800, "y": 1200 }, "data": { "displayName": "Legacy production plan", "remixRole": "production_plan", "productionPlanRef": { "artifactId": "legacy-plan", "revision": 2 } } },
+    { "id": "legacy-arrangement", "type": "semanticTimelineNode", "position": { "x": 1200, "y": 1200 }, "data": { "displayName": "Legacy arrangement", "productionPlanNodeId": "legacy-plan", "artifactRef": { "artifactId": "legacy-arrangement", "revision": 1 }, "events": [] } },
+    { "id": "legacy-plan-compose", "type": "videoComposeNode", "position": { "x": 1600, "y": 1200 }, "data": { "displayName": "Legacy plan compose", "productionPlanNodeId": "legacy-plan", "remixManifestRef": { "artifactId": "legacy-arrangement", "revision": 1 } } }
+  ],
+  "edges": [
+    { "id": "reference-story", "source": "reference", "target": "story" },
+    { "id": "story-legacy-script", "source": "story", "target": "legacy-script" },
+    { "id": "script-narration", "source": "legacy-script", "target": "narration" },
+    { "id": "script-words", "source": "legacy-script", "target": "words" },
+    { "id": "narration-words", "source": "narration", "target": "words" },
+    { "id": "script-timeline", "source": "legacy-script", "target": "timeline" },
+    { "id": "words-timeline", "source": "words", "target": "timeline" },
+    { "id": "timeline-legacy-compose", "source": "timeline", "target": "legacy-compose" },
+    { "id": "story-plan", "source": "story", "target": "plan" },
+    { "id": "plan-compose", "source": "plan", "target": "plan-compose" },
+    { "id": "story-legacy-plan", "source": "story", "target": "legacy-plan" },
+    { "id": "legacy-plan-arrangement", "source": "legacy-plan", "target": "legacy-arrangement" },
+    { "id": "arrangement-legacy-plan-compose", "source": "legacy-arrangement", "target": "legacy-plan-compose" }
+  ]
+}

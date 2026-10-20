@@ -11,7 +11,19 @@ from novelvideo.chat.runtime_event_evidence import (
     _codex_freezone_is_generation_preflight_rejection,
     _codex_freezone_write_receipt,
     _codex_freezone_write_result_error,
+    _codex_freezone_write_result_state,
+    _codex_freezone_non_canvas_receipt,
 )
+from novelvideo.freezone.remix.reference_analysis_identity import analysis_admission_key
+
+
+def test_write_state_distinguishes_native_submission_from_running_and_completion():
+    event = SimpleNamespace(name='freezone_prepare_production_edit', structured={
+        'ok': True, 'canvas_apply_status': 'accepted', 'tool_call_status': 'completed'},
+        output=None, status='completed')
+    assert _codex_freezone_write_result_state(event) == 'accepted'
+    event.structured['canvas_apply_status'] = 'running'
+    assert _codex_freezone_write_result_state(event) == 'running'
 
 
 def test_runtime_event_evidence_has_no_application_or_persistence_imports() -> None:
@@ -38,6 +50,38 @@ def test_runtime_event_evidence_has_no_application_or_persistence_imports() -> N
             else [alias.name for alias in node.names]
         )
     )
+
+
+def test_analysis_receipt_needs_injected_actual_admission_identity() -> None:
+    arguments = {"source_node_id": "source-a", "user_goal": "换产品", "inputs": {"tone": "warm"},
+                 "idempotency_key": "分析原片-第一轮"}
+    key = analysis_admission_key(
+        project_id="project-a", canvas_id="canvas-a", source_node_id="source-a",
+        user_goal="换产品", inputs={"tone": "warm"}, operation_id="分析原片-第一轮",
+    )
+    run = {"project_id": "project-a", "canvas_id": "canvas-a", "source_node_id": "source-a",
+           "run_id": "run-a", "analysis_node_id": "analysis-a", "status": "analyzing",
+           "task_id": "task-a", "task_key": "task-key-a"}
+    payload = {"ok": True, "project_id": "project-a", "canvas_id": "canvas-a",
+               "status": "reference_analysis_submitted", "submitted": True, "run": run,
+               "run_id": "run-a", "analysis_node_id": "analysis-a", "task_id": "task-a",
+               "task_key": "task-key-a", "idempotency_key": key}
+    event = SimpleNamespace(name="freezone_start_reference_analysis", status="completed",
+                            error=None, input=arguments, structured=payload, output=None)
+    scope = {"expected_project": "project-a", "expected_canvas": "canvas-a"}
+    assert _codex_freezone_non_canvas_receipt(event, **scope) is None
+    assert _codex_freezone_non_canvas_receipt(
+        event, admission_key_for_request=analysis_admission_key, **scope,
+    ) is payload
+    event.input = {key: value for key, value in arguments.items() if key != "idempotency_key"}
+    assert _codex_freezone_non_canvas_receipt(
+        event, admission_key_for_request=analysis_admission_key, **scope,
+    ) is None
+    event.input = arguments
+    payload["idempotency_key"] = "cached-other-request"
+    assert _codex_freezone_non_canvas_receipt(
+        event, admission_key_for_request=analysis_admission_key, **scope,
+    ) is None
 
 
 def test_runtime_event_evidence_requires_saved_canvas_identity() -> None:

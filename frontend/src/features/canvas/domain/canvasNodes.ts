@@ -390,6 +390,8 @@ export interface VideoComposeNodeData extends NodeDisplayData {
   remixRenderManifestRef?: { artifactId: string; revision: number } | null;
   /** 最近一次合成导出的视频 url。 */
   resultVideoUrl?: string | null;
+  /** 重新渲染期间保留的旧版预览。 */
+  remixPreviousVideoUrl?: string | null;
   /** 结果视频的封面（暂未生成时为空）。 */
   previewImageUrl?: string | null;
   /** 上次使用的导出分辨率。 */
@@ -836,7 +838,7 @@ export interface TranscriptNodeData extends NodeDisplayData {
   artifactRef?: { artifactId: string; revision: number } | null;
   words: TranscriptWord[];
   transcriptText?: string | null;
-  status: 'completed' | 'needs_review' | 'failed';
+  status: 'completed' | 'needs_review' | 'no_speech' | 'failed';
   unresolved?: string[];
   [key: string]: unknown;
 }

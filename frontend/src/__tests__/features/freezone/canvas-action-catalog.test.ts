@@ -628,6 +628,47 @@ describe("canvas action catalog", () => {
     expect(names).not.toContain("run_video_depth_capture");
   });
 
+  it("exposes analyzed keyframe import on story nodes only", () => {
+    const story = node({
+      id: "story-keyframes-a",
+      type: CANVAS_NODE_TYPES.videoStory,
+      data: {
+        rows: [{ shotNumber: 1, keyframeUrl: "/static/projects/demo/shot-1.png" }],
+      },
+    });
+    const video = node({
+      id: "video-keyframes-a",
+      type: CANVAS_NODE_TYPES.video,
+      data: { videoUrl: "/static/projects/demo/source.mp4" },
+    });
+
+    const action = buildCanvasNodeActionCatalog(story).actions.find(
+      (item) => item.action === "import_reference_keyframes",
+    );
+    expect(action).toEqual(expect.objectContaining({
+      execution: "frontend_node",
+      command_type: "run_node_action",
+      parameters: expect.objectContaining({
+        node_id: story.id,
+        shot_numbers: expect.objectContaining({ type: "array" }),
+      }),
+      result_effect: expect.objectContaining({
+        next_step: expect.stringContaining("freezone_list_reference_media"),
+      }),
+    }));
+    expect(action?.description).toContain("不生成媒体");
+    expect(buildCanvasNodeActionCatalog(video).actions.map((item) => item.action))
+      .not.toContain("import_reference_keyframes");
+
+    const emptyStory = node({
+      id: "story-keyframes-empty",
+      type: CANVAS_NODE_TYPES.videoStory,
+      data: { rows: [], referenceEvents: [] },
+    });
+    expect(buildCanvasNodeActionCatalog(emptyStory).actions.map((item) => item.action))
+      .toContain("import_reference_keyframes");
+  });
+
   it("exposes start_video_breakdown on a breakdown node and gates it on a source video", () => {
     const video = node({
       id: "video-source-a",
@@ -673,6 +714,7 @@ describe("canvas action catalog", () => {
 
   it("registers the new video actions as executable chat node actions", () => {
     for (const action of [
+      "import_reference_keyframes",
       "run_video_breakdown",
       "start_video_breakdown",
       "open_video_crop_tool",

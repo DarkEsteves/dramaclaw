@@ -1,6 +1,8 @@
+import { canonicalBridgeRequestId } from "@/features/superchat/backgroundBridgeRecovery";
 import type { ServerFrame } from "@/features/superchat/types";
 import {
   readCanvasCommandReceipt,
+  bindCanvasCommandCallbackAlias,
   type CanvasCommandToolResultPayload,
 } from "@/features/freezone/canvasCommandToolResult";
 
@@ -43,18 +45,23 @@ export function claimExternalCanvasCommand(
         ? frameRecord.bridgeKey
         : null;
 
-  if (!externalMcpCommand || !bridgeKey) {
+  const requestId = typeof frameRecord?.request_id === "string" ? frameRecord.request_id : bridgeKey ? canonicalBridgeRequestId(bridgeKey) : null;
+  const owned = Boolean(requestId && bridgeKey && bridgeKey.includes(".executor."));
+  if ((!externalMcpCommand && !owned) || !bridgeKey || !requestId) {
     return { externalMcpCommand, bridgeKey, accepted: true };
   }
+  bindCanvasCommandCallbackAlias(bridgeKey);
   const terminalReceipt = readCanvasCommandReceipt(bridgeKey);
-  if (terminalReceipt) {
-    seenBridgeKeys.add(bridgeKey);
+  const scopeMatches = !terminalReceipt || ["project_id", "canvas_id", "agent_id"].every((key) =>
+    frameRecord?.[key] == null || (terminalReceipt as unknown as Record<string, unknown>)[key] === frameRecord[key]);
+  if (terminalReceipt && scopeMatches) {
+    seenBridgeKeys.add(requestId);
     return { externalMcpCommand, bridgeKey, accepted: false, terminalReceipt };
   }
-  if (seenBridgeKeys.has(bridgeKey)) {
+  if (seenBridgeKeys.has(requestId)) {
     return { externalMcpCommand, bridgeKey, accepted: false };
   }
-  seenBridgeKeys.add(bridgeKey);
+  seenBridgeKeys.add(requestId);
   return { externalMcpCommand, bridgeKey, accepted: true };
 }
 

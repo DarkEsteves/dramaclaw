@@ -43,12 +43,13 @@ interface Props {
   onAttachVisual?: (nodeId: string) => Promise<string | BrollVisualAttachment>;
   onAutoSave?: (draft: RemixScriptDraft) => Promise<void>;
   onTopicChange?: (topic: string) => void;
+  onConvertToPlan?: () => void;
   onDraftChange: (draft: RemixScriptDraft, changeKind?: 'content' | 'media-binding') => void;
   onSave: (ref: RemixArtifactRef, blueprintRef?: RemixArtifactRef) => void;
   onClose: () => void;
 }
 
-export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], onCreateReference, onConnectReference, onResolveTakeReferences, onSetTakeReferences, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onDraftChange, onClose }: Props) {
+export function RemixScriptPanel({ project, initialDraft, initialTopic = '', existingRef, blueprintRef, blueprintSettings, onEnsureBlueprint, onGenerateDraft, generationRunning = false, generationPersistsDraft = false, visualNodes, performanceNodes = [], referenceNodes = [], onCreateReference, onConnectReference, onResolveTakeReferences, onSetTakeReferences, onCreateTake, onAttachTake, missingPrimaryVisualCount = 0, onCreatePrimaryVisuals, sfxNodes, brollRequirements = [], brollDecisions = {}, brollPlanStatus, brollPlanError, brollPlanCurrent = false, onPlanBroll, onBrollDecisionChange, onCreateVisual, onAttachVisual, onAutoSave, onTopicChange, onConvertToPlan, onDraftChange, onClose }: Props) {
   const [draft, setDraft] = useState(initialDraft);
   const [autoSaving, setAutoSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -324,6 +325,10 @@ export function RemixScriptPanel({ project, initialDraft, initialTopic = '', exi
         <p className="mt-1.5 text-text-muted">填写新主题后，点击右侧按钮生成台词</p>
       </div>}
       <label className="block">改编台词<textarea aria-label="改编台词" value={draft.dialogue} onChange={(event) => changeDraft(editRemixDialogue(draft, event.target.value))} className={`${fieldClass} min-h-28 text-sm`} /></label>
+      {onConvertToPlan && draft.dialogue.trim() && <div className="flex flex-wrap items-center justify-between gap-2 rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
+        <p className="text-text-muted">想先看整片规划？旧台词会原样保留。</p>
+        <button type="button" className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS} onClick={onConvertToPlan}>转为作品方案</button>
+      </div>}
       <section aria-label="A-roll 主画面与声音" className="rounded-[12px] border border-white/10 bg-white/[0.03] p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div><div className="flex items-center gap-2"><span aria-hidden="true" className="rounded-md bg-[rgb(var(--accent-rgb)/0.14)] px-1.5 py-0.5 font-mono text-[11px] text-[rgb(var(--accent-rgb))]">01</span><h3 className="font-medium">主画面与声音</h3><span className="text-base font-semibold text-text-dark">A-roll</span></div><p className="mt-1 text-text-muted">先决定台词由谁说、成片使用哪段基础画面和声音。素材在对应的画布节点制作。</p><p className="mt-1 text-[11px] text-text-muted">{arollStatus}</p></div>

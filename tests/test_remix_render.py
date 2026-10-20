@@ -13,18 +13,46 @@ from pathlib import Path
 
 import pytest
 
+from novelvideo.freezone.remix.contracts import validate_payload
 from novelvideo.freezone.remix.render import (
     _ass_document,
+    _preview_snapshot_v4,
     build_manifest,
     manifest_renderer,
     render_manifest,
     render_preview_frame,
     validate_manifest,
 )
-from novelvideo.freezone.remix.contracts import validate_payload
 from novelvideo.freezone.remix.timing import compile_timing
 
 
+def test_graphic_card_ass_escapes_text_and_previews_its_actual_animation_frame() -> None:
+    effect = {"placement_id": "g", "row_id": "g", "start_frame": 10, "end_frame": 40,
+              "template": "question_card", "text": "{为什么}少一杯？", "emphasis": "少一杯",
+              "foreground": "#FFFFFF", "background": "#111827", "accent": "#00BDCF",
+              "enter": "pop", "enter_frames": 6, "exit_frames": 4}
+    ass = _ass_document([], width=640, height=360, fps=30, graphic_events=[effect])
+    assert "question_card" not in ass  # Template is compiled to ASS rather than treated as text.
+    assert r"\{为什么\}" in ass
+    assert r"\fscx" in ass and r"\fad" in ass
+    manifest = {"manifest_version": 4,
+                "output_spec": {"width": 640, "height": 360, "fps_num": 30, "fps_den": 1,
+                                "duration_frames": 50, "background": "#000000"},
+                "media_bindings": [], "layers": [], "audio_events": [], "subtitle_events": [],
+                "graphic_events": [effect]}
+    sampled = _preview_snapshot_v4(manifest, 12)
+    assert sampled["graphic_events"][0]["sample_frame"] == 2
+    assert sampled["graphic_events"][0]["start_frame"] == 0
+    assert _preview_snapshot_v4(manifest, 9)["graphic_events"] == []
+
+
+def test_graphic_ass_keeps_dialogue_subtitles_above_effects() -> None:
+    card = {"start_frame": 0, "end_frame": 30, "template": "question_card", "text": "提问",
+            "foreground": "#FFFFFF", "background": "#111827", "accent": "#00BDCF",
+            "enter": "none", "enter_frames": 0, "exit_frames": 0}
+    ass = _ass_document([{"text": "说话字幕", "start_frame": 0, "end_frame": 30}],
+                        width=640, height=360, fps=30, graphic_events=[card])
+    assert "Dialogue: 2," in ass and "Dialogue: 1," in ass
 def _ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
 
@@ -208,6 +236,29 @@ def test_v3_accepts_sequential_speaking_videos_and_rejects_silent_speech() -> No
     drift["audio_events"][1]["start_frame"] = 31
     with pytest.raises(ValueError, match="speech and visual spans"):
         validate_manifest(drift)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required")
+def test_v3_renders_silent_video_with_an_explicit_silent_audio_track(tmp_path: Path) -> None:
+    background = tmp_path / "background.png"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=180x320", "-frames:v", "1", str(background))
+    manifest = {
+        "manifest_version": 3,
+        "output_spec": {"width": 1080, "height": 1920, "fps": 30, "duration_frames": 30,
+                        "subtitle_safe_area": {"left": 90, "right": 90, "top": 120, "bottom": 180}},
+        "media_bindings": [{"media_id": "background", "kind": "image", "purpose": "a-roll",
+                            "media_hash": "sha256:" + hashlib.sha256(background.read_bytes()).hexdigest()}],
+        "layers": [{"media_id": "background", "start_frame": 0, "end_frame": 30,
+                    "z_order": 0, "fit": "cover"}],
+        "audio_events": [], "subtitle_events": [], "manual_overrides": [], "source_versions": [],
+    }
+    output = render_manifest(manifest, media_paths={"background": background}, output_path=tmp_path / "silent.mp4")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", str(output)],
+        check=True, capture_output=True, text=True,
+    )
+    assert {stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]} == {"video", "audio"}
+    assert _audio_rms(output) == 0
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required")

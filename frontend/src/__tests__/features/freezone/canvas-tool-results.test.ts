@@ -73,6 +73,34 @@ describe("Freezone canvas tool result reporting", () => {
     });
   });
 
+  it("reports native acceptance with the exact durable action identity", () => {
+    reportCanvasCommandToolResult({
+      bridgeKey: "bridge-native", projectId: "project-a", canvasId: "canvas-a", accepted: true,
+      nativeReceipt: { workflow_run_id: "run-a", operation_id: "operation-a", task_id: "task-a",
+        node_id: "plan-a", action: "generate_production_plan_draft", completion_owner: "host" },
+    });
+    expect(api.post).toHaveBeenCalledWith("api/v1/chat/canvas-command-tool-result", {
+      json: expect.objectContaining({ canvas_apply_status: "accepted", workflow_run_id: "run-a",
+        operation_id: "operation-a", task_id: "task-a", node_id: "plan-a",
+        action: "generate_production_plan_draft", completion_owner: "host" }),
+      timeout: 30_000,
+    });
+  });
+
+  it("keeps mixed immediate success and native pending as pending", () => {
+    reportCanvasCommandToolResult({ bridgeKey: "bridge-mixed", result: {
+      applied: 1, openedUiActions: 0, createdNodeIds: ["plan-a"], errors: [], commandResults: [
+        { commandIndex: 0, type: "create_node", status: "success", label: "创建节点" },
+        { commandIndex: 1, type: "run_node_action", status: "pending", label: "起草作品方案",
+          nodeId: "plan-a", action: "generate_production_plan_draft",
+          output: { pending: true, reason: "native_action_accepted" } },
+      ],
+    } });
+    expect(api.post).toHaveBeenCalledWith("api/v1/chat/canvas-command-tool-result", {
+      json: expect.objectContaining({ canvas_apply_status: "pending", applied: false }), timeout: 30_000,
+    });
+  });
+
   it("reports a completed run with an unsynced canvas artifact as pending", () => {
     reportCanvasCommandToolResult({
       bridgeKey: "bridge-unsynced",

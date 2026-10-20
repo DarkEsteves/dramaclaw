@@ -12,7 +12,7 @@ from pathlib import Path
 import asyncpg
 import anyio
 from anyio.lowlevel import RunVar
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from novelvideo.api.auth import get_api_user, require_scope
@@ -821,7 +821,15 @@ async def get_project(project: str, user: dict = Depends(get_api_user)):
 
 
 @router.get("/projects/{project}/static-auth", include_in_schema=False)
-async def authorize_project_static_media(project: str, user: dict = Depends(get_api_user)):
+async def authorize_project_static_media(project: str, user: dict = Depends(get_api_user), request: Request = None):
+    if request is not None:
+        from urllib.parse import unquote, urlsplit
+        from novelvideo.utils.project_file_policy import is_internal_project_path
+        original = request.headers.get('x-supertale-original-uri') or request.headers.get('x-original-uri') or ''
+        original_path = unquote(urlsplit(original).path)
+        prefix = f'/static/projects/{project}/'
+        if original_path.startswith(prefix) and is_internal_project_path(original_path[len(prefix):]):
+            raise HTTPException(403, 'Internal project files require a scoped API')
     requester_user_id = await user_id_from_api_user(user)
     access = get_project_access()
     principals = await access.resolve_requester_principals(requester_user_id)

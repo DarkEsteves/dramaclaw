@@ -447,7 +447,7 @@ async def test_gate3_world_lane_saturation_does_not_starve_default_lane(
 
 
 @pytest.mark.asyncio
-async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_cancels_queue(
+async def test_speech_operations_share_default_capacity_and_cancel_queue(
     monkeypatch,
     _task_ports,
     signed_inline_backend,
@@ -466,9 +466,9 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
         "_PROJECT_TASK_PLACEMENTS",
         dict(task_registry._PROJECT_TASK_PLACEMENTS),
     )
-    monkeypatch.setenv("ST_CE_GLOBAL_MAX_ACTIVE_SPEECH_TASKS", "1")
-    monkeypatch.setenv("ST_PROJECT_MAX_ACTIVE_SPEECH_TASKS", "1")
-    monkeypatch.setenv("ST_PROJECT_USER_MAX_ACTIVE_SPEECH_TASKS", "1")
+    monkeypatch.setenv("ST_CE_GLOBAL_MAX_ACTIVE_DEFAULT_TASKS", "1")
+    monkeypatch.setenv("ST_PROJECT_MAX_ACTIVE_DEFAULT_TASKS", "3")
+    monkeypatch.setenv("ST_PROJECT_USER_MAX_ACTIVE_DEFAULT_TASKS", "3")
     backend = signed_inline_backend()
     ctx_a = _ctx(tmp_path, "speech_a", requester="speaker_a")
     ctx_b = _ctx(tmp_path, "speech_b", requester="speaker_b")
@@ -496,8 +496,8 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
         default_done.set()
         return {"ok": True}
 
-    register_project_task_runner("l014_speech_running", speech_runner, lane="speech")
-    register_project_task_runner("l014_speech_queued", speech_runner, lane="speech")
+    register_project_task_runner("l014_speech_running", speech_runner, lane="default")
+    register_project_task_runner("l014_speech_queued", speech_runner, lane="default")
     register_project_task_runner("l014_speech_unrelated", default_runner)
 
     await backend.enqueue_project_task(
@@ -505,7 +505,7 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
         task_type="l014_speech_running",
         product_surface="freezone",
         episode=1,
-        queue_kind="speech",
+        queue_kind="default",
     )
     await _wait_for_status(_task_ports, ctx_a, "l014_speech_running", "running")
     queued = await backend.enqueue_project_task(
@@ -513,7 +513,7 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
         task_type="l014_speech_queued",
         product_surface="freezone",
         episode=1,
-        queue_kind="speech",
+        queue_kind="default",
     )
     await backend.enqueue_project_task(
         ctx_a,
@@ -523,10 +523,10 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
         queue_kind="default",
     )
 
-    assert await asyncio.to_thread(default_done.wait, 1) is True
-    assert backend.lane_snapshot()["speech"] == {
+    assert not default_done.is_set()
+    assert backend.lane_snapshot()["default"] == {
         "active": 1,
-        "queued": 1,
+        "queued": 2,
         "concurrency": 1,
     }
     assert max_active == 1
@@ -534,12 +534,13 @@ async def test_speech_lane_runs_one_job_globally_without_blocking_default_and_ca
 
     await backend.cancel_project_task(ctx_b, queued.task_state)
     await _wait_for_status(_task_ports, ctx_b, "l014_speech_queued", "cancelled")
-    assert backend.lane_snapshot()["speech"]["queued"] == 0
+    assert backend.lane_snapshot()["default"]["queued"] == 1
     release.set()
-    await _wait_lane_idle(backend, "speech")
+    await _wait_lane_idle(backend, "default")
     assert max_active == 1
     assert started == [ctx_a.project_id]
 
+    assert default_done.is_set()
 
 @pytest.mark.asyncio
 async def test_gate3_same_lane_overflow_is_explicitly_queued_and_cancelable(

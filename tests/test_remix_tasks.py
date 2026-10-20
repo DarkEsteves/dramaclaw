@@ -41,12 +41,16 @@ def render_parameters(job_id: str) -> dict:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from novelvideo.api.auth import get_api_user
+    from novelvideo.api import egress_binding
     from novelvideo.api.routes import remix as routes
 
     async def resolve(*, user, project_id, required_role):
         if project_id != "demo":
             raise HTTPException(403, "Access denied")
-        return SimpleNamespace(output_dir=str(tmp_path), project_id="demo", is_home_node=True)
+        return SimpleNamespace(
+            output_dir=str(tmp_path), project_id="demo", requester_user_id="alice",
+            is_home_node=True,
+        )
 
     queued = []
 
@@ -56,9 +60,15 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path):
             return SimpleNamespace(task_state=SimpleNamespace(task_id="task-1"), backend="local", queue="ffmpeg")
 
     monkeypatch.setattr(routes, "resolve_project_context", resolve)
+    async def platform_egress_context(**kwargs):
+        assert kwargs["requester_user_id"] == "alice"
+        assert kwargs["project_id"] == "demo"
+        return None
+
+    monkeypatch.setattr(egress_binding, "build_request_egress_context", platform_egress_context)
     monkeypatch.setattr(routes, "require_project_home_node", lambda ctx, **kwargs: None)
     monkeypatch.setattr(routes, "get_task_backend", lambda: Backend())
-    monkeypatch.setattr(routes, "_speech_engine_ready", lambda: True, raising=False)
+    monkeypatch.setattr(routes, "_transcription_engine_ready", lambda: True, raising=False)
     app = FastAPI()
     app.include_router(routes.router, prefix="/api/v1")
     app.dependency_overrides[get_api_user] = lambda: {"username": "alice"}
@@ -248,6 +258,41 @@ def test_render_retries_only_after_proven_pre_accept_rejection(client, monkeypat
     assert retried.status_code == 200
     assert retried.json()["data"]["task_id"] == "task-1"
     assert len(queued) == 1
+
+
+def test_direct_plan_envelope_rejection_is_structured_and_not_resubmitted(
+    client, tmp_path, monkeypatch: pytest.MonkeyPatch,
+):
+    from novelvideo.api.routes import remix as routes
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+    api, queued = client
+    attempts = []
+
+    class RejectingBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            attempts.append(kwargs)
+            raise InvalidTaskEnvelope()
+
+    monkeypatch.setattr(routes, "get_task_backend", lambda: RejectingBackend())
+    body = {"action": "generate_production_plan_draft", "node_revision": 1,
+            "idempotency_key": "direct-plan-envelope-rejection",
+            "payload": {"topic": "黑咖啡"}}
+    url = "/api/v1/projects/demo/freezone/remix/actions"
+    first = api.post(url, json=body)
+    assert first.status_code == 500
+    assert first.json()["detail"]["code"] == "TASK_ENVELOPE_INVALID"
+
+    operation = RemixOperationStore(tmp_path, "demo").get(
+        first.json()["detail"]["operation_id"]
+    )
+    assert operation["status"] == "failed"
+    repeated = api.post(url, json=body)
+    assert repeated.status_code == 200
+    assert repeated.json()["data"]["operation_status"] == "failed"
+    assert len(attempts) == 1
+    assert queued == []
 
 
 def test_render_timeout_keeps_submission_for_reconciliation_without_requeue(client, tmp_path, monkeypatch: pytest.MonkeyPatch):
@@ -474,12 +519,12 @@ def test_processing_action_queues_once_with_project_local_media(client, tmp_path
     assert first.json()["data"]["task_type"] == "remix_transcribe_media"
     assert second.json()["data"]["task_id"] == first.json()["data"]["task_id"]
     assert len(queued) == 1
-    assert queued[0]["queue_kind"] == "speech"
+    assert queued[0]["queue_kind"] == 'default'
     assert queued[0]["payload"]["media_path"] == "media/voice.wav"
     assert queued[0]["payload"]["media_sha256"] == hashlib.sha256(b"voice").hexdigest()
 
 
-def test_alignment_action_uses_the_same_bounded_speech_lane(client, tmp_path):
+def test_alignment_action_uses_newapi(client, tmp_path, monkeypatch):
     api, queued = client
     media = tmp_path / "media" / "voice.wav"
     media.parent.mkdir()
@@ -518,10 +563,40 @@ def test_alignment_action_uses_the_same_bounded_speech_lane(client, tmp_path):
 
     assert response.status_code == 200
     assert queued[0]["task_type"] == "remix_align_script"
-    assert queued[0]["queue_kind"] == "speech"
+    assert queued[0]["queue_kind"] == 'default'
 
 
-def test_take_timeline_action_hashes_all_project_media_and_uses_speech_lane(client, tmp_path):
+def test_production_speech_action_checks_saved_binding_and_uses_speech_lane(client, tmp_path):
+    api, queued = client
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    digest = hashlib.sha256(b"voice").hexdigest()
+    plan = api.post(BASE, json={"schema": "production_plan.v2", "payload": {
+        "schema_version": 2, "goal": "问答", "output": {"width": 1280, "height": 720, "fps_num": 25, "fps_den": 1},
+        "beats": [{"id": "b", "purpose": "提问", "duration_frames": 25,
+                   "turns": [{"id": "t", "speaker": "甲", "text": "你好", "speech_placement_id": "p"}]}],
+        "resources": [{"id": "r", "node_id": "n", "media_kind": "audio", "media_path": "media/voice.wav",
+                       "media_hash": digest, "duration_us": 1_000_000, "has_audio": True}],
+        "placements": [{"id": "p", "kind": "audio", "role": "speech", "track_id": "speech",
+                        "resource_id": "r", "start": {"kind": "program_frame", "frame": 0},
+                        "end": {"kind": "program_frame", "frame": 25}}], "provenance": {},
+    }, "upstream_refs": []}).json()["data"]
+    body = {"action": "align_production_speech", "payload": {
+        "media_path": "media/voice.wav", "plan_ref": {"artifact_id": plan["id"], "revision": plan["revision"]},
+        "turn_id": "t", "placement_id": "p",
+    }, "idempotency_key": "plan-speech", "node_revision": 1}
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json=body)
+    assert response.status_code == 200
+    assert queued[-1]["task_type"] == "remix_align_production_speech"
+    assert queued[-1]["queue_kind"] == 'default'
+    assert queued[-1]["payload"]["media_sha256"] == digest
+    body["payload"]["placement_id"] = "missing"
+    body["idempotency_key"] = "plan-speech-invalid"
+    assert api.post("/api/v1/projects/demo/freezone/remix/actions", json=body).status_code == 422
+
+
+def test_take_timeline_action_hashes_all_project_media_and_uses_speech_lane(client, tmp_path, monkeypatch):
     api, queued = client
     media = tmp_path / "media" / "speaker.mp4"
     media.parent.mkdir()
@@ -539,18 +614,16 @@ def test_take_timeline_action_hashes_all_project_media_and_uses_speech_lane(clie
     })
     assert response.status_code == 200
     assert queued[0]["task_type"] == "remix_compile_take_timeline"
-    assert queued[0]["queue_kind"] == "speech"
+    assert queued[0]["queue_kind"] == 'default'
     assert queued[0]["payload"]["take_bindings"][0]["media_sha256"] == hashlib.sha256(b"speaker video").hexdigest()
 
 
-def test_reference_analysis_action_queues_project_media_without_speech_engine(client, tmp_path, monkeypatch):
+def test_reference_analysis_action_queues_project_media(client, tmp_path, monkeypatch):
     api, queued = client
-    from novelvideo.api.routes import remix as routes
 
     media = tmp_path / "media" / "reference.mp4"
     media.parent.mkdir()
     media.write_bytes(b"video")
-    monkeypatch.setattr(routes, "_speech_engine_ready", lambda: False)
     response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
         "action": "analyze_reference_video", "payload": {"media_path": "media/reference.mp4"},
         "idempotency_key": "reference-once", "node_revision": 1,
@@ -655,6 +728,68 @@ def test_script_draft_generation_action_rejects_blank_topic(client):
     assert queued == []
 
 
+def test_production_plan_draft_action_queues_visible_project_task(client, tmp_path):
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    api, queued = client
+    context = {"summary": "先制造疑问，再给出解决办法"}
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "generate_production_plan_draft",
+        "payload": {"topic": "把产品换成黑咖啡", "analysis_context": context},
+        "idempotency_key": "production-plan-draft-1",
+        "node_revision": 3,
+    })
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["task_type"] == "remix_generate_production_plan_draft"
+    assert data["task_key"]
+    assert queued[0]["queue_kind"] == "default"
+    assert queued[0]["payload"]["topic"] == "把产品换成黑咖啡"
+    assert queued[0]["payload"]["analysis_context"] == context
+    operation = RemixOperationStore(tmp_path, "demo").get(data["operation_id"])
+    assert operation["normalized_parameters"]["payload"]["analysis_context"] == context
+
+
+def test_compile_production_plan_action_requires_saved_v2_and_queues_task(client, tmp_path):
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from test_production_plan_v2 import _anchor, _plan
+
+    api, queued = client
+    store = RemixArtifactStore(tmp_path, "demo")
+    plan = _plan()
+    plan["resources"] = []
+    plan["placements"] = [{"id": "card", "kind": "graphic", "role": "effect", "track_id": "graphic",
+                           "graphic": {"template": "question_card", "text": "为什么？"},
+                           "start": _anchor(0), "end": _anchor(48)}]
+    saved = store.create("production_plan.v2", plan, [])
+    ref = {"artifact_id": saved["id"], "revision": 1}
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "compile_production_plan", "payload": {"plan_ref": ref},
+        "idempotency_key": "compile-production-1", "node_revision": 1,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["task_type"] == "remix_compile_production_plan"
+    assert queued[-1]["payload"]["plan_ref"] == ref
+    assert api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "compile_production_plan", "payload": {"plan_ref": {"artifact_id": "missing", "revision": 1}},
+        "idempotency_key": "compile-production-missing", "node_revision": 1,
+    }).status_code == 404
+
+
+def test_production_plan_draft_action_rejects_conflicting_sources(client):
+    api, queued = client
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "generate_production_plan_draft",
+        "payload": {"topic": "黑咖啡", "blueprint_ref": {"artifact_id": "missing", "revision": 1},
+                    "analysis_context": {"summary": "旧原片"}},
+        "idempotency_key": "production-plan-conflict",
+        "node_revision": 1,
+    })
+    assert response.status_code == 422
+    assert queued == []
+
+
 def test_processing_action_transport_error_is_reconciled_without_resubmission(client, tmp_path, monkeypatch):
     from novelvideo.api.routes import remix as routes
     from novelvideo.freezone.remix.operations import RemixOperationStore
@@ -749,7 +884,7 @@ def test_speech_action_reports_unavailable_engine_before_queueing(client, monkey
     api, queued = client
     from novelvideo.api.routes import remix as routes
 
-    monkeypatch.setattr(routes, "_speech_engine_ready", lambda: False)
+    monkeypatch.setattr(routes, "_transcription_engine_ready", lambda: False)
     response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
         "action": "transcribe_media", "payload": {"media_path": "media/voice.wav", "language": "en"},
         "idempotency_key": "missing-engine", "node_revision": 1,
@@ -757,6 +892,24 @@ def test_speech_action_reports_unavailable_engine_before_queueing(client, monkey
 
     assert response.status_code == 503
     assert queued == []
+
+
+def test_transcription_queues_with_newapi(client, tmp_path, monkeypatch):
+    api, queued = client
+    from novelvideo.api.routes import remix as routes
+
+    media = tmp_path / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    monkeypatch.setattr(routes, "_transcription_engine_ready", lambda: True, raising=False)
+
+    response = api.post("/api/v1/projects/demo/freezone/remix/actions", json={
+        "action": "transcribe_media", "payload": {"media_path": "media/voice.wav", "language": "auto"},
+        "idempotency_key": "newapi-only", "node_revision": 1,
+    })
+
+    assert response.status_code == 200, response.text
+    assert queued[0]["task_type"] == "remix_transcribe_media"
 
 
 def test_speech_action_runs_readiness_probe_off_the_async_event_loop(
@@ -778,7 +931,7 @@ def test_speech_action_runs_readiness_probe_off_the_async_event_loop(
             return True
         raise AssertionError("readiness probe blocked the async API event loop")
 
-    monkeypatch.setattr(routes, "_speech_engine_ready", readiness)
+    monkeypatch.setattr(routes, "_transcription_engine_ready", readiness)
 
     response = api.post(
         "/api/v1/projects/demo/freezone/remix/actions",

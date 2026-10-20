@@ -154,10 +154,14 @@ async def test_workflow_run_creation_offloads_storage_from_event_loop(
         del project, user, kwargs
         return ctx, "alice", "demo", tmp_path, str(tmp_path)
 
+    actual_create_workflow_run = freezone.create_workflow_run
+    created_runs = []
+
     def fake_create_workflow_run(**kwargs):
-        del kwargs
         storage_thread_ids.append(get_ident())
-        return {"run_id": "run-1"}
+        run = actual_create_workflow_run(**kwargs)
+        created_runs.append(run)
+        return run
 
     monkeypatch.setattr(freezone, "_resolve_freezone_project", fake_resolve)
     monkeypatch.setattr(freezone, "create_workflow_run", fake_create_workflow_run)
@@ -169,6 +173,6 @@ async def test_workflow_run_creation_offloads_storage_from_event_loop(
         user={"id": "u-alice", "username": "alice"},
     )
 
-    assert response["data"]["run_id"] == "run-1"
+    assert response["data"]["run_id"] == created_runs[0]["run_id"]
     assert storage_thread_ids
     assert storage_thread_ids[0] != event_loop_thread_id

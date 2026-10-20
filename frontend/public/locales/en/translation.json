@@ -772,6 +772,7 @@
     }
   },
   "aiAssistant": {
+    "systemNotice": "System",
     "clearChat": {
       "title": "Clear this chat?",
       "description": "This chat history will be deleted. Your next message will start a new Agent context. The canvas, project, and other chats will stay unchanged. Running generation tasks will continue.",
@@ -3508,6 +3509,13 @@
     "beatThumbnails": "Beat Thumbnails"
   },
   "tasks": {
+    "planValidation": {
+      "start": "start",
+      "end": "end",
+      "range": "start or end",
+      "speechSourceCycle": "Plan validation failed: speech source {{placement}} depends on its own untimed dialogue {{turn}} for its {{edge}} time, creating a timing cycle. Set the source interval first. This draft was not saved.",
+      "otherIssue": "Plan validation failed at {{path}} ({{code}}). This draft was not saved."
+    },
     "taskCount": "{{count}} tasks",
     "noTasks": "No tasks",
     "cancelled": "Task cancelled",
@@ -3545,6 +3553,9 @@
       "episode_prop_planner": "Plan props",
       "content_rewriter": "AI rewrite",
       "remix_generate_script_draft": "Generate adapted dialogue",
+      "production_plan_outline": "Generate structure and dialogue",
+      "remix_generate_production_plan_arrangement": "Arrange visuals and sound",
+      "remix_generate_production_plan_draft": "Draft production plan",
       "remix_plan_broll": "Plan supplemental visuals",
       "sketch_generation": "Sketch generation",
       "batch_sketch": "Batch sketch",
@@ -7573,6 +7584,8 @@
       "storyboardGenNode": "Storyboard variants",
       "videoNode": "Video",
       "audioNode": "Audio",
+      "transcriptNode": "Transcript",
+      "semanticTimelineNode": "Semantic timeline",
       "videoStoryNode": "Video story",
       "videoComposeNode": "Video compose",
       "scriptNode": "Script generator",

@@ -1,5 +1,7 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { canonicalBridgeRequestId } from "@/features/superchat/backgroundBridgeRecovery";
 import i18next from "i18next";
-import type { CanvasChatCommandApplyResult } from "@/features/freezone/canvasChatCommands";
+import type { CanvasChatCommandApplyResult, NativeProductionWorkflowAcceptance } from "@/features/freezone/canvasChatCommands";
 import {
   canvasCommandAgentHintFromResult,
   canvasCommandUserMessageFromResult,
@@ -52,9 +54,17 @@ export type CanvasCommandToolResultPayload = {
   message: string;
   user_message?: string;
   agent_hint?: string;
-};
+} & Partial<NativeProductionWorkflowAcceptance>;
+
+const callbackAliases = new Map<string, string>();
+const callbackActors = new Map<string, string | null>();
+export function bindCanvasCommandCallbackAlias(alias: string) {
+  callbackAliases.set(canonicalBridgeRequestId(alias), alias);
+  callbackActors.set(canonicalBridgeRequestId(alias), useAuthStore.getState().username);
+}
 
 type StoredCanvasCommandReceipt = {
+  actor?: string | null;
   storedAt: number;
   payload: CanvasCommandToolResultPayload;
 };
@@ -79,7 +89,7 @@ function storeCanvasCommandReceipt(payload: CanvasCommandToolResultPayload) {
     .sort(([, left], [, right]) => left.storedAt - right.storedAt)
     .slice(-(CANVAS_COMMAND_RECEIPT_LIMIT - 1));
   const next = Object.fromEntries(receipts);
-  next[receiptStorageKey(payload)] = { storedAt: now, payload };
+  next[receiptStorageKey(payload)] = { actor: useAuthStore.getState().username, storedAt: now, payload };
   try {
     window.localStorage.setItem(CANVAS_COMMAND_RECEIPTS_STORAGE_KEY, JSON.stringify(next));
   } catch {
@@ -88,7 +98,8 @@ function storeCanvasCommandReceipt(payload: CanvasCommandToolResultPayload) {
 }
 
 function receiptStorageKey(payload: CanvasCommandToolResultPayload): string {
-  return payload.followup ? `${payload.bridge_key}:followup` : payload.bridge_key;
+  const key = canonicalBridgeRequestId(payload.bridge_key);
+  return payload.followup ? `${key}:followup` : key;
 }
 
 function removeCanvasCommandReceipt(payload: CanvasCommandToolResultPayload) {
@@ -107,19 +118,27 @@ function removeCanvasCommandReceipt(payload: CanvasCommandToolResultPayload) {
 export function readCanvasCommandReceipt(
   bridgeKey: string,
 ): CanvasCommandToolResultPayload | null {
-  const receipt = loadCanvasCommandReceipts()[bridgeKey];
-  if (!receipt || receipt.storedAt < Date.now() - CANVAS_COMMAND_RECEIPT_TTL_MS) return null;
-  return receipt.payload?.bridge_key === bridgeKey ? receipt.payload : null;
+  const identity = canonicalBridgeRequestId(bridgeKey);
+  const receipt = Object.values(loadCanvasCommandReceipts()).find((entry) =>
+    entry?.payload?.bridge_key && canonicalBridgeRequestId(entry.payload.bridge_key) === identity
+    && (entry.actor ?? null) === useAuthStore.getState().username
+    && !entry.payload.followup
+    && entry.storedAt >= Date.now() - CANVAS_COMMAND_RECEIPT_TTL_MS
+    && !["accepted", "pending"].includes(entry.payload.canvas_apply_status));
+  return receipt ? { ...receipt.payload, bridge_key: bridgeKey } : null;
 }
 
 function emitCanvasCommandToolResult(payload: CanvasCommandToolResultPayload) {
+  const owner = callbackActors.get(canonicalBridgeRequestId(payload.bridge_key));
+  if (owner !== undefined && owner !== useAuthStore.getState().username) return;
+  payload = { ...payload, bridge_key: callbackAliases.get(canonicalBridgeRequestId(payload.bridge_key)) ?? payload.bridge_key };
   window.dispatchEvent(new CustomEvent(FREEZONE_CANVAS_COMMAND_TOOL_RESULT_EVENT, { detail: payload }));
   const { type: _type, ...body } = payload;
   void api.post("api/v1/chat/canvas-command-tool-result", {
     json: body,
     timeout: 30_000,
   }).then(() => {
-    removeCanvasCommandReceipt(payload);
+    if (payload.followup || ["accepted", "pending"].includes(payload.canvas_apply_status)) removeCanvasCommandReceipt(payload);
   }).catch((error) => {
     console.warn("[freezone-canvas-command] failed to report canvas command result", error);
   });
@@ -132,7 +151,8 @@ export function replayCanvasCommandToolResult(payload: CanvasCommandToolResultPa
 export function replayPendingCanvasCommandFollowups() {
   const now = Date.now();
   for (const receipt of Object.values(loadCanvasCommandReceipts())) {
-    if (receipt?.payload?.followup && receipt.storedAt >= now - CANVAS_COMMAND_RECEIPT_TTL_MS) {
+    if (receipt?.payload?.followup && (receipt.actor ?? null) === useAuthStore.getState().username
+      && receipt.storedAt >= now - CANVAS_COMMAND_RECEIPT_TTL_MS) {
       emitCanvasCommandToolResult(receipt.payload);
     }
   }
@@ -168,6 +188,7 @@ export function reportCanvasCommandToolResult({
   result,
   cancelled = false,
   accepted = false,
+  nativeReceipt,
   followup = false,
 }: {
   bridgeKey?: string | null;
@@ -179,6 +200,7 @@ export function reportCanvasCommandToolResult({
   result?: CanvasChatCommandApplyResult;
   cancelled?: boolean;
   accepted?: boolean;
+  nativeReceipt?: NativeProductionWorkflowAcceptance;
   followup?: boolean;
 }) {
   if (!bridgeKey) return;
@@ -192,6 +214,7 @@ export function reportCanvasCommandToolResult({
     result,
     cancelled,
     accepted,
+    nativeReceipt,
     followup,
   });
   storeCanvasCommandReceipt(payload);
@@ -208,6 +231,7 @@ function buildCanvasCommandToolResultPayload({
   result,
   cancelled = false,
   accepted = false,
+  nativeReceipt,
   followup = false,
 }: {
   bridgeKey?: string | null;
@@ -219,6 +243,7 @@ function buildCanvasCommandToolResultPayload({
   result?: CanvasChatCommandApplyResult;
   cancelled?: boolean;
   accepted?: boolean;
+  nativeReceipt?: NativeProductionWorkflowAcceptance;
   followup?: boolean;
 }): CanvasCommandToolResultPayload {
   const workflowFailed = result ? workflowExecutionFailed(result) : false;
@@ -259,6 +284,7 @@ function buildCanvasCommandToolResultPayload({
     project_id: projectId ?? null,
     canvas_id: canvasId ?? null,
     agent_id: agentId ?? null,
+    ...(accepted && nativeReceipt ? nativeReceipt : {}),
     tool_call_status: cancelled ? "cancelled" : canvasApplyStatus === "failed" ? "failed" : "completed",
     canvas_apply_status: canvasApplyStatus,
     background_execution_status: accepted || canvasApplyStatus === "pending"

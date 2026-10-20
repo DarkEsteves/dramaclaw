@@ -12,11 +12,16 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from novelvideo.freezone.agent_workflows.reference_production import (
+    NATIVE_PRODUCTION_CONTRACT, compile_reference_production_plan, supports_native_production,
+)
+
 from novelvideo.freezone.workflow_schema import (
     PORTABLE_VIDEO_GENERATION_MODES,
     WORKFLOW_INTENT_SCHEMA_VERSION,
     WORKFLOW_PLAN_SCHEMA_VERSION,
 )
+from novelvideo.freezone.workflow_preflight import is_production_material_node
 
 try:
     from novelvideo.freezone.agent_config_store import list_user_agent_config_items
@@ -109,6 +114,13 @@ _OUTPUT_KIND_BY_CAPABILITY = {
     "videoGeneration": "video",
     "audioGeneration": "audio",
 }
+
+_REFERENCE_PRODUCTION_PROCESSING_ACTIONS = frozenset({
+    "generate_production_plan_draft",
+    "generate_production_plan_arrangement",
+    "align_production_speech",
+    "compile_production_plan",
+})
 
 # These built-in prompt Recipes consume the user goal or upstream structured text.
 # Older catalog copies marked them as requiring binary media, which makes valid
@@ -1683,7 +1695,9 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
             "available_skill_ids": sorted(
                 _text(item.get("id"))
                 for item in _load_skills()
-                if _text(item.get("id")) and item.get("_disabled") is not True
+                if _text(item.get("id"))
+                and item.get("_disabled") is not True
+                and item.get("enabled") is not False
             ),
         }
 
@@ -1716,6 +1730,26 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
         recipes_by_output_kind.setdefault(output_kind, []).append(recipe_id)
         if not recipe.get("requires_source_media"):
             source_anchor_recipe_ids.setdefault(output_kind, []).append(recipe_id)
+    native_production = supports_native_production(skill)
+    native_production_contract = None
+    if native_production:
+        native_production_contract = deepcopy(NATIVE_PRODUCTION_CONTRACT)
+        native_production_contract.pop("intent_example")
+        native_production_contract["guide_reference"] = {
+            "tool": "workflow_skill_reference_get",
+            "arguments": {
+                "skill_id": "reference-video-remix",
+                "reference": "reference-video-remix.md",
+            },
+            "resource_uri": (
+                "dramaclaw-workflow://skills/reference-video-remix/"
+                "references/reference-video-remix.md"
+            ),
+        }
+        for recipe in recipe_summaries:
+            if recipe["id"] == "reference-production-plan":
+                recipe.update(node_type="scriptNode", processing_action="generate_production_plan_draft",
+                              remix_role="production_plan", execution="native_production_planner")
     input_contract = _skill_input_contract(skill, args)
     compact = bool(args.get("compact"))
     from novelvideo.freezone.workflow_planning import WORKFLOW_PLANNING_INSTRUCTIONS
@@ -1730,10 +1764,27 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
     # Keep the planning package aligned with plan validation for video Skills.
     if "videoNode" in allowed_node_types:
         allowed_node_types.add("videoComposeNode")
+    if _text(skill.get("id")) == "reference-video-remix":
+        allowed_node_types.add("videoStoryNode")
     return {
         "ok": True,
         "schema_version": "freezone_workflow_skill_package.v1",
-        "agent_instruction": WORKFLOW_PLANNING_INSTRUCTIONS,
+        "agent_instruction": (
+            "For reference-video-remix, first reuse a completed videoStoryNode for the selected source, "
+            "or call freezone_start_reference_analysis(source_node_id, user_goal, inputs, idempotency_key) and end this turn. "
+            "The host will notify the user and resume with the saved analysis; do not poll nodes or tasks. "
+            "Read freezone_get_reference_director_state, summarize actual analysis and confirm preserve/replace direction with the user first. "
+            "After the saved direction receipt, read freezone_get_production_progress and its current native_plan_stage. "
+            "When unprepared, pass the current commission_ref.artifact_id as intent.reference_commission_id and call freezone_prepare_workflow_draft with the compact intent in planning_contract.native_production. When ready_for_canvas_approval, call freezone_confirm_workflow_draft with that exact draft_id and revision; in manual mode its existing canvas approval card must be approved before nodes exist. Do not ask for a separate workflow confirmation. "
+            "Respect the workflow draft's saved run_after_create policy. When true, the approved creation batch already includes drafting; after verified workflow acceptance, end the turn at await_completion_event and do not submit it again. "
+            "When false and native_plan_stage is ready_to_submit, call freezone_run_node_action(generate_production_plan_draft) on its exact bound plan_node_id; in manual mode await that action card too. If native_plan_stage is failed, prepare_production_nodes only reuses the existing draft; after explicit user retry authorization, call freezone_run_node_action on the failed slot's exact plan_node_id and require a fresh run receipt before saying it was resubmitted. Never retry automatically. "
+            "A durable accepted run or action means submitted, not generated. On outline completion, read/edit the saved structure and dialogue; visual/audio arrangement is still pending. Never auto-submit the next stage from its notification. When authorized to continue, explicitly call the same node generate_production_plan_arrangement with only current saved plan_ref, using existing action confirmation. After actual arrangement use normal full plan review. "
+            "The host compiles native plan and composition nodes through the same canvas path. Do not create a textAnnotationNode plan, "
+            "request a generic videoStoryNode create schema, or put reference-production-plan in items. "
+            "Read the full guide using planning_contract.native_production.guide_reference before preparing material dependencies. "
+            "Review the real saved plan and confirm its content, then plan material dependencies before generation; media, speech correction and compilation follow with real saved revisions."
+            if native_production else WORKFLOW_PLANNING_INSTRUCTIONS
+        ),
         "skill_id": _text(skill.get("id")),
         "user_goal": _workflow_goal_text(args),
         "source": _catalog_source(skill),
@@ -1768,15 +1819,17 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
             "workflow_type_prefix": "dynamic.",
             "mode": "dynamic_only",
             "requires_agent_authored_topology": (
-                _text(skill.get("id")) not in _DETERMINISTIC_SKILL_PLANNERS
+                _text(skill.get("id")) not in _DETERMINISTIC_SKILL_PLANNERS and not native_production
             ),
             "custom_items_require_agent_authored_topology": True,
             "requires_explicit_skill_id": True,
             "requires_explicit_recipe_id": (
-                _text(skill.get("id")) not in _DETERMINISTIC_SKILL_PLANNERS
+                _text(skill.get("id")) not in _DETERMINISTIC_SKILL_PLANNERS and not native_production
             ),
             "custom_items_require_explicit_recipe_id": True,
+            "native_production": native_production_contract,
             "topology_modes": (
+                ["native_production", "custom_items"] if native_production else
                 ["standard_planner", "custom_items"]
                 if _text(skill.get("id")) in _DETERMINISTIC_SKILL_PLANNERS
                 else ["custom_items"]
@@ -1790,13 +1843,18 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
             "max_nodes": 200,
             "max_edges": 400,
             "missing_source_media": {
-                "strategy": "generate_anchor_then_continue",
+                "strategy": "analyze_selected_reference_then_continue" if native_production else "generate_anchor_then_continue",
                 "anchor_recipe_requires_source_media": False,
                 "dependency_link_type": "media_input_for",
                 "source_anchor_recipe_ids": source_anchor_recipe_ids,
             },
             "recipe_ids_by_output_kind": recipes_by_output_kind,
             "recipe_selection_rule": (
+                "Use native_production.request_example with native_production.prepare_tool only when the current native_plan_stage is unprepared and the user requests proceeding. Copy the actual current commission_ref and choose run_after_create from the conversation. "
+                "For an existing bound scriptNode, run native_production.draft_action on its exact plan_node_id; "
+                "reference-production-plan is not a generic text Recipe item. "
+                "Other media Recipes remain available for later missing-asset stages."
+                if native_production else
                 "Use each Recipe's node_type. output_kind=text with output_format=html produces "
                 "a saved HTML webpage through htmlArtifactNode, while ordinary text produces textAnnotationNode. "
                 "HTML steps require a non-empty generation prompt in node.prompt or node.data.prompt; "
@@ -1808,6 +1866,8 @@ def get_workflow_skill(args: dict[str, Any]) -> dict[str, Any]:
             ),
         },
         "message": (
+            "已加载原生作品方案规划器，请先完成原片拆解并通过自然对话明确方向，再按 native_production.request_example 向 prepare_tool 提交当前引用和目标，沿用现有画布确认。"
+            if native_production and input_contract["ready_for_planning"] else
             "已加载完整 Workflow Skill 包，可直接规划 freezone_workflow_plan.v1。"
             if input_contract["ready_for_planning"]
             else "已加载 Workflow Skill，但必须先补全或修正 input_contract。"
@@ -1837,6 +1897,11 @@ def compile_workflow_intent(
     user_goal = _workflow_goal_text(intent)
     if not user_goal:
         return _intent_error("user_goal is required", path="user_goal")
+    native_production = supports_native_production(skill)
+    if native_production and not _intent_items(intent):
+        contract_error = _native_compact_intent_error(intent, skill)
+        if contract_error is not None:
+            return contract_error
     input_contract = _skill_input_contract(skill, intent)
     if input_contract["errors"] or input_contract["missing_required"]:
         errors = list(input_contract["errors"])
@@ -1852,13 +1917,36 @@ def compile_workflow_intent(
             }
             for parameter_id in input_contract["missing_required"]
         )
-        return {
+        response = {
             "ok": False,
             "status": "invalid_workflow_intent",
             "error": errors[0]["message"],
             "errors": errors,
             "agent_instruction": _INTENT_FIX_INSTRUCTION,
         }
+        return (_with_native_compact_contract(response, path=errors[0]["path"], skill=skill)
+                if native_production and not _intent_items(intent) else response)
+
+    if native_production:
+        items = _intent_items(intent)
+        if any(_text(item.get("recipe_id") or item.get("recipeId")) == "reference-production-plan" for item in items):
+            return {"ok": False, "status": "native_production_planner_required",
+                    "error": "Use compact intent without items, with external_inputs reference_analysis; the host creates native production plan nodes."}
+        if not items:
+            compiled = compile_reference_production_plan(intent, skill, input_contract["resolved"], user_goal)
+            if not compiled.get("ok"):
+                path = ("external_inputs" if compiled.get("status") in {"reference_analysis_required", "reference_analysis_binding_required"}
+                        else "inputs.plan_count" if "plan_count" in str(compiled.get("error"))
+                        else "planner")
+                return _with_native_compact_contract(compiled, path=path, skill=skill)
+            validated = validate_agent_workflow_plan(compiled["plan"], allow_template_reroute=False)
+            if not validated.get("ok"):
+                return validated
+            return {"ok": True, "status": "workflow_intent_compiled", "schema_version": WORKFLOW_INTENT_SCHEMA_VERSION,
+                    "skill_id": skill_id, "plan": compiled["plan"],
+                    "node_count": len(compiled["plan"]["nodes"]), "edge_count": len(compiled["plan"]["edges"]),
+                    "preflight": validated.get("preflight") or {},
+                    "planner": {"mode": "native_production", "stage": "production_plans", "skill_id": skill_id}}
 
     compiled_intent = deepcopy(intent)
     planner_metadata: dict[str, Any] | None = None
@@ -3360,6 +3448,73 @@ def _intent_error(
     }
 
 
+def _native_compact_intent_error(
+    intent: dict[str, Any], skill: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reject fields the native compiler cannot honor instead of dropping them."""
+    allowed_top = {
+        "schema_version", "skill_id", "user_goal", "inputs", "external_inputs",
+        "reference_commission_id", "title", "include_compose", "planner",
+    }
+    allowed_inputs = {
+        _text(item.get("id")) for item in skill.get("input_parameters") or []
+        if isinstance(item, dict) and _text(item.get("id"))
+    } | _UNIVERSAL_GENERATION_INPUT_KEYS
+    invalid: list[tuple[str, list[str]]] = [
+        (key, sorted(allowed_top)) for key in intent if key not in allowed_top
+    ]
+    inputs = intent.get('inputs', {})
+    if not isinstance(inputs, dict):
+        invalid.append(('inputs', sorted(allowed_inputs)))
+    else:
+        invalid.extend((f'inputs.{key}', sorted(allowed_inputs))
+                       for key in inputs if key not in allowed_inputs)
+    planner = intent.get('planner')
+    if planner not in (None, {}, {'mode': 'standard'}):
+        if isinstance(planner, dict):
+            invalid.extend((f'planner.{key}', ['mode']) for key in planner if key != 'mode')
+            if not any(key != 'mode' for key in planner):
+                invalid.append(('planner.mode', ['mode']))
+        else:
+            invalid.append(('planner', ['mode']))
+    if not invalid:
+        return None
+    error_path, allowed_fields = invalid[0]
+    message = f"{error_path} is not a supported native production intent field"
+    return {
+        "ok": False, "status": "invalid_workflow_intent", "error": message,
+        "field_path": error_path, "allowed_fields": allowed_fields,
+        "compact_example": deepcopy(NATIVE_PRODUCTION_CONTRACT["intent_example"]),
+        "errors": [{"path": path,
+                    "message": f"{path} is not a supported native production intent field",
+                    "hint": "Use the compact_example fields and current saved references."}
+                   for path, _ in invalid],
+        "agent_instruction": _INTENT_FIX_INSTRUCTION,
+    }
+
+
+def _with_native_compact_contract(
+    result: dict[str, Any], *, path: str, skill: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep native validation errors actionable without changing their status."""
+    response = dict(result)
+    response["field_path"] = path
+    if path.startswith("inputs."):
+        response["allowed_fields"] = sorted({
+            _text(item.get("id")) for item in skill.get("input_parameters") or []
+            if isinstance(item, dict) and _text(item.get("id"))
+        } | _UNIVERSAL_GENERATION_INPUT_KEYS)
+    else:
+        response["allowed_fields"] = sorted({
+            "schema_version", "skill_id", "user_goal", "inputs", "external_inputs",
+            "reference_commission_id", "title", "include_compose", "planner",
+        })
+    response["compact_example"] = deepcopy(NATIVE_PRODUCTION_CONTRACT["intent_example"])
+    response.setdefault("errors", [{"path": path, "message": str(response.get("error") or "invalid native production intent")}])
+    response.setdefault("agent_instruction", _INTENT_FIX_INSTRUCTION)
+    return response
+
+
 def _intent_bool(intent: dict[str, Any], key: str, default: bool) -> bool:
     value = intent.get(key)
     if value is None:
@@ -3430,7 +3585,9 @@ def _intent_items(intent: dict[str, Any]) -> list[dict[str, Any]]:
                 or raw_item.get("durationSeconds")
                 or raw_item.get("duration")
             )
-            if duration_seconds is None:
+            # A remix prompt describes the finished piece; a number in its
+            # prose is not an individual source clip generation duration.
+            if duration_seconds is None and not step_id and intent.get("skill_id") != "reference-video-remix":
                 duration_seconds = _positive_duration_seconds(prompt)
             if title or prompt or narration:
                 items.append(
@@ -3791,7 +3948,7 @@ def _intent_item_node(
             data["count"] = image_variants
     if node_type == "videoNode":
         duration_seconds = _positive_duration_seconds(item.get("duration_seconds"))
-        if duration_seconds is None:
+        if duration_seconds is None and _text(skill.get("id")) != "reference-video-remix":
             duration_seconds = _positive_duration_seconds(
                 resolved_inputs.get("video_duration_seconds")
             )
@@ -4009,6 +4166,8 @@ def _backfill_plan_runtime_fields(
             node["data"] = data
         for input_key, field in fields:
             if data.get(field) is not None:
+                continue
+            if field == "durationSec" and is_production_material_node(node):
                 continue
             if field == "durationSec" and any(
                 alias in data for alias in _IGNORED_VIDEO_DURATION_KEYS
@@ -4330,6 +4489,8 @@ def validate_agent_workflow_plan(
     allowed_node_types.add("textAnnotationNode")
     if "videoNode" in allowed_node_types:
         allowed_node_types.add("videoComposeNode")
+    if skill_id == "reference-video-remix":
+        allowed_node_types.add("videoStoryNode")
     allowed_recipe_ids = {
         _text(recipe.get("id"))
         for recipe in _workflow_skill_recipe_candidates(
@@ -4382,6 +4543,34 @@ def validate_agent_workflow_plan(
                 }
             )
         data = node.get("data") if isinstance(node, dict) else None
+        processing_action = (
+            _text(data.get("processingAction")) if isinstance(data, dict) else ""
+        )
+        if (
+            processing_action in _REFERENCE_PRODUCTION_PROCESSING_ACTIONS
+            and skill_id != "reference-video-remix"
+        ):
+            errors.append({
+                "path": f"nodes[{index}].data.processingAction",
+                "message": f"processing action {processing_action} is not allowed by skill {skill_id}",
+            })
+        if skill_id == "reference-video-remix" and processing_action in _REFERENCE_PRODUCTION_PROCESSING_ACTIONS:
+            expected_node_type = (
+                "videoComposeNode" if processing_action == "compile_production_plan"
+                else "scriptNode"
+            )
+            if node_type != expected_node_type or (
+                expected_node_type == "scriptNode"
+                and _text(data.get("remixRole")) != "production_plan"
+            ):
+                errors.append({
+                    "path": f"nodes[{index}].data.processingAction",
+                    "message": (
+                        f"processing action {processing_action} requires "
+                        f"{expected_node_type}"
+                        + (" with remixRole=production_plan" if expected_node_type == "scriptNode" else "")
+                    ),
+                })
         catalog = data.get("workflowCatalog") if isinstance(data, dict) else None
         recipe_id = _text(catalog.get("recipeId")) if isinstance(catalog, dict) else ""
         if skill_id == "short-drama-quick" and node_type == "videoNode" and recipe_id == "general-video":
@@ -4411,13 +4600,22 @@ def validate_agent_workflow_plan(
             node_type == "textAnnotationNode"
             and stage not in {"input", "resource", "asset"}
         )
-        if requires_recipe and not recipe_id:
+        if (
+            requires_recipe
+            and not recipe_id
+            and processing_action not in _REFERENCE_PRODUCTION_PROCESSING_ACTIONS
+        ):
             errors.append(
                 {
                     "path": f"nodes[{index}].data.workflowCatalog.recipeId",
                     "message": f"executable node {node.get('id')} requires an explicit recipeId",
                 }
             )
+        if supports_native_production(skills[skill_id]) and recipe_id == "reference-production-plan":
+            errors.append({
+                "path": f"nodes[{index}].data.workflowCatalog.recipeId",
+                "message": "reference-production-plan must run through the native production planner; use compact intent with a completed reference_analysis input",
+            })
         if recipe_id and recipe_id not in allowed_recipe_ids:
             errors.append(
                 {
@@ -4583,7 +4781,12 @@ def validate_agent_workflow_plan(
 def _load_skill(skill_id: str) -> dict[str, Any] | None:
     wanted = _alias_key(skill_id)
     for skill in _load_skills():
-        if _alias_key(_text(skill.get("id"))) == wanted:
+        if (
+            _alias_key(_text(skill.get("id"))) == wanted
+            and skill.get("enabled") is not False
+            and skill.get("hidden") is not True
+            and skill.get("_disabled") is not True
+        ):
             return skill
     return None
 

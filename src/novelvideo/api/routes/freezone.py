@@ -192,6 +192,7 @@ from novelvideo.freezone.workflow_drafts import (
     patch_workflow_draft,
     prune_expired_workflow_drafts,
     read_workflow_draft,
+    read_native_plan_claim,
 )
 from novelvideo.freezone.agent_product_operations import (
     PRODUCT_TASK_TYPES,
@@ -215,6 +216,7 @@ from novelvideo.freezone.workflow_runs import (
     WorkflowRunIdempotencyConflict,
     WorkflowRunLeaseConflict,
     bind_workflow_action_product_operation,
+    bind_workflow_generation_task,
     bind_workflow_media_task,
     claim_workflow_media_action,
     bind_workflow_action_processing_operation,
@@ -225,6 +227,7 @@ from novelvideo.freezone.workflow_runs import (
     prune_workflow_runs,
     read_workflow_run,
     reclaim_failed_workflow_media_action,
+    recover_completed_generation_task,
     renew_workflow_media_claim,
     reconcile_workflow_runs_with_canvas_nodes,
     reconcile_workflow_runs_with_canvas_results,
@@ -522,10 +525,33 @@ def _verified_workflow_media_link(
     node_id: str | None,
     operation_id: str,
     attempt_id: str,
+    workflow_run_id: str = "",
 ) -> dict[str, str]:
-    """Bind a media submission to its admitted Recipe attempt before enqueue."""
-    if not operation_id and not attempt_id:
+    """Bind media to a Recipe attempt or a saved ordinary canvas workflow."""
+    if not operation_id and not attempt_id and not workflow_run_id:
         return {}
+    if workflow_run_id and not operation_id:
+        if not all((workflow_run_id, attempt_id, canvas_id, node_id)):
+            raise HTTPException(400, "incomplete workflow media link")
+        run = read_workflow_run(
+            project_dir=_canvas_state_project_dir(ctx, project_dir),
+            canvas_id=str(canvas_id),
+            run_id=workflow_run_id,
+        )
+        action = next(
+            (
+                item for item in (run or {}).get("actions", [])
+                if item.get("node_id") == node_id
+                and item.get("action") in {"generate_image", "generate_video", "generate_text_video", "generate_audio"}
+                and item.get("generation_attempt_id") == attempt_id
+            ),
+            None,
+        )
+        if (run is None or run.get("project_id") != ctx.project_id
+                or run.get("canvas_id") != canvas_id
+                or run.get("status") != "running" or action is None):
+            raise HTTPException(409, "workflow media link does not match active canvas workflow")
+        return {"workflow_run_id": workflow_run_id, "generation_attempt_id": attempt_id}
     if not all((operation_id, attempt_id, canvas_id, node_id)):
         raise HTTPException(400, "incomplete workflow media link")
     operation = read_agent_product_operation(
@@ -564,6 +590,8 @@ async def _enqueue_claimed_workflow_media(
 ) -> dict:
     """Use the durable workflow claim and task scope for one media submission."""
     operation_id = str(payload.get("product_operation_id") or "")
+    workflow_run_id = str(payload.get("workflow_run_id") or "")
+    task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=job_id)
     if operation_id:
         identity = {
             key: value
@@ -720,6 +748,18 @@ async def _enqueue_claimed_workflow_media(
             run_id=claim["run_id"],
             task=queued.task_state,
         )
+    elif workflow_run_id:
+        await asyncio.to_thread(
+            bind_workflow_generation_task,
+            project_dir=_canvas_state_project_dir(ctx, project_dir),
+            canvas_id=str(payload.get("canvas_id") or ""),
+            run_id=workflow_run_id,
+            node_id=str(payload.get("node_id") or ""),
+            generation_attempt_id=str(payload.get("generation_attempt_id") or ""),
+            task_key=task_key,
+            task_type=task_type,
+            job_id=job_id,
+        )
     return _project_job_response(
         task_type=task_type,
         ctx=ctx,
@@ -778,6 +818,7 @@ async def _start_or_enqueue_freezone_video_gen(
     node_id: str | None = None,
     product_operation_id: str = "",
     generation_attempt_id: str = "",
+    workflow_run_id: str = "",
     model_id: str | None = None,
     catalog_id: str | None = None,
     gen_mode: str | None = None,
@@ -805,6 +846,7 @@ async def _start_or_enqueue_freezone_video_gen(
             node_id=node_id,
             operation_id=product_operation_id,
             attempt_id=generation_attempt_id,
+            workflow_run_id=workflow_run_id,
         )
 
     from novelvideo.freezone.reference_validation import validate_reference_media
@@ -1023,6 +1065,7 @@ async def _start_or_enqueue_freezone_gen_job(
     node_id: str | None = None,
     product_operation_id: str = "",
     generation_attempt_id: str = "",
+    workflow_run_id: str = "",
     model_id: str | None = None,
     catalog_id: str | None = None,
     gen_mode: str | None = None,
@@ -1043,6 +1086,7 @@ async def _start_or_enqueue_freezone_gen_job(
             node_id=node_id,
             operation_id=product_operation_id,
             attempt_id=generation_attempt_id,
+            workflow_run_id=workflow_run_id,
         )
     reference_paths = _resolve_url_list(project_dir, reference_urls)
     for path_text in reference_paths:
@@ -5090,6 +5134,44 @@ async def freezone_skills(user: dict = Depends(get_api_user)):
 async def _dispatch_ready_remix_workflow_actions(
     *, ctx: Any, state_dir: Path, output_dir: Path, run: dict[str, Any]
 ) -> dict[str, Any]:
+    """Advance an approved native run only while its recorded runner is live."""
+    from datetime import datetime, timezone
+    from novelvideo.ports.project import role_allows
+
+    current = await asyncio.to_thread(
+        read_workflow_run, project_dir=state_dir, canvas_id=run["canvas_id"], run_id=run["run_id"],
+    )
+    if not current or current.get("project_id") != ctx.project_id:
+        raise ValueError("workflow run does not belong to this project")
+    # GET is also used by observers. Reading an approved run must never create
+    # a new paid task in an observer's identity, or after the actor loses edit.
+    if (current.get("status") != "running"
+            or not role_allows(str(getattr(ctx, "effective_role", "")), "editor")
+            or (current.get("actor_id") and current["actor_id"] != ctx.requester_user_id)):
+        return current
+    runner_id = str(current.get("runner_id") or "")
+    if runner_id:
+        try:
+            expiry = datetime.fromisoformat(str(current.get("lease_expires_at") or "").replace("Z", "+00:00"))
+            if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+                return current
+        except ValueError:
+            return current
+    try:
+        return await _dispatch_ready_remix_workflow_actions_owned(
+            ctx=ctx, state_dir=state_dir, output_dir=output_dir, run=current, runner_id=runner_id,
+        )
+    except WorkflowRunLeaseConflict:
+        # A cancelled/replaced/expired runner is an ordinary observation race.
+        # An operation already submitted remains bound for task reconciliation.
+        return await asyncio.to_thread(
+            read_workflow_run, project_dir=state_dir, canvas_id=current["canvas_id"], run_id=current["run_id"],
+        ) or current
+
+
+async def _dispatch_ready_remix_workflow_actions_owned(
+    *, ctx: Any, state_dir: Path, output_dir: Path, run: dict[str, Any], runner_id: str,
+) -> dict[str, Any]:
     """Dispatch dependency-ready deterministic remix steps from one approved run."""
     from novelvideo.api.routes.remix import prepare_registered_action, record_enqueue_exception
     from novelvideo.freezone.remix.operations import RemixOperationStore
@@ -5109,7 +5191,7 @@ async def _dispatch_ready_remix_workflow_actions(
         for node_id, statuses in action_statuses_by_node.items()
         if statuses and all(status in {"completed", "skipped"} for status in statuses)
     }
-    store = RemixArtifactStore(output_dir, ctx.project_id)
+    store = RemixArtifactStore(output_dir, ctx.project_id, created_by=ctx.requester_user_id)
     operations = RemixOperationStore(output_dir, ctx.project_id)
     for item in actions:
         if (
@@ -5123,13 +5205,20 @@ async def _dispatch_ready_remix_workflow_actions(
             continue
         action_name = str(item["action"])
         node_id = str(item["node_id"])
+        owned = await asyncio.to_thread(
+            update_workflow_run, project_dir=state_dir, canvas_id=run["canvas_id"],
+            run_id=run["run_id"], runner_id=runner_id,
+        )
+        if not owned or owned.get("status") != "running":
+            return owned or run
         node_revision = int(item.get("node_revision") or 0)
         idempotency_key = f"workflow:{run['run_id']}:{node_id}:{action_name}"
+        action_payload = dict(item.get("payload") or {})
         prepared = await asyncio.to_thread(
             prepare_registered_action,
             store,
             action_name,
-            item.get("payload") or {},
+            action_payload,
             idempotency_key=idempotency_key,
             node_revision=node_revision,
         )
@@ -5144,6 +5233,44 @@ async def _dispatch_ready_remix_workflow_actions(
             node_id=node_id,
             input_media_hashes=prepared["input_media_hashes"],
         )
+        if operation.get("status") == "failed":
+            run = await asyncio.to_thread(
+                update_workflow_run,
+                project_dir=state_dir, canvas_id=run["canvas_id"], run_id=run["run_id"],
+                runner_id=runner_id, action_updates=[{
+                    "node_id": node_id, "action": action_name, "status": "failed",
+                    "error": str(operation.get("failure_reason") or "processing_operation_failed"),
+                }],
+            )
+            continue
+        if (action_name in {"generate_production_plan_draft", "generate_production_plan_arrangement", "compile_production_plan",
+                            "align_production_speech"}
+                and not operation.get("task_id")
+                and operation.get("status") in {"pending", "pending_reconciliation"}):
+            from novelvideo.freezone.remix.production_processing_settlement import native_action_automation_control
+            from novelvideo.freezone.remix.production_automation import bind_automation_operation
+
+            try:
+                current_canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, run["canvas_id"])
+                if not isinstance(current_canvas, dict):
+                    raise ValueError("native action canvas is unavailable")
+                control = await asyncio.to_thread(native_action_automation_control, ctx,
+                    canvas_id=run["canvas_id"], canvas=current_canvas, action=item)
+                from novelvideo.freezone.remix.native_execution_context import is_manual_native_run
+                if control is not None and not is_manual_native_run(run):
+                    await asyncio.to_thread(bind_automation_operation, ctx,
+                        canvas_id=run["canvas_id"],
+                        commission_id=control["scope"]["commission_id"],
+                        generation=control["generation"], operation_id=operation["operation_id"],
+                        agent_id=control["scope"]["agent_id"])
+            except (ValueError, PermissionError, FileNotFoundError) as exc:
+                await asyncio.to_thread(operations.fail, operation["operation_id"], reason=str(exc))
+                run = await asyncio.to_thread(update_workflow_run,
+                    project_dir=state_dir, canvas_id=run["canvas_id"], run_id=run["run_id"],
+                    runner_id=runner_id, action_updates=[{
+                        "node_id": node_id, "action": action_name, "status": "failed", "error": str(exc),
+                    }])
+                continue
         scope = prepared["scope"] or operation["operation_id"]
         task_key = project_task_state_key(
             prepared["task_type"], ctx.project_id, 0, scope=scope
@@ -5216,6 +5343,17 @@ async def _dispatch_ready_remix_workflow_actions(
                     continue
             else:
                 try:
+                    owned = await asyncio.to_thread(
+                        update_workflow_run, project_dir=state_dir, canvas_id=run["canvas_id"],
+                        run_id=run["run_id"], runner_id=runner_id,
+                    )
+                except WorkflowRunLeaseConflict:
+                    await asyncio.to_thread(operations.release_submission, operation["operation_id"], owner=owner, fencing_token=fencing_token)
+                    raise
+                if not owned or owned.get("status") != "running":
+                    await asyncio.to_thread(operations.release_submission, operation["operation_id"], owner=owner, fencing_token=fencing_token)
+                    return owned or run
+                try:
                     queued = await get_task_backend().enqueue_project_task(
                         ctx,
                         product_surface="freezone",
@@ -5238,6 +5376,23 @@ async def _dispatch_ready_remix_workflow_actions(
                         fencing_token=fencing_token,
                         error=exc,
                     )
+                    from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+                    if isinstance(exc, InvalidTaskEnvelope):
+                        settled = await asyncio.to_thread(
+                            operations.get, operation["operation_id"],
+                        )
+                        if settled.get("cancel_reason"):
+                            continue
+                        run = await asyncio.to_thread(
+                            update_workflow_run, project_dir=state_dir,
+                            canvas_id=run["canvas_id"], run_id=run["run_id"],
+                            runner_id=runner_id, action_updates=[{
+                                "node_id": node_id, "action": action_name,
+                                "status": "failed", "error": "TASK_ENVELOPE_INVALID",
+                            }],
+                        )
+                        continue
                     raise
                 operation = await asyncio.to_thread(
                     operations.bind_task,
@@ -5251,6 +5406,7 @@ async def _dispatch_ready_remix_workflow_actions(
             project_dir=state_dir,
             canvas_id=run["canvas_id"],
             run_id=run["run_id"],
+            runner_id=runner_id,
             action_updates=[{
                 "node_id": node_id,
                 "action": action_name,
@@ -5264,6 +5420,96 @@ async def _dispatch_ready_remix_workflow_actions(
         # Dispatch only the currently-ready frontier. Later polling/reconciliation
         # advances dependent steps using durable task and artifact proof.
     return run
+
+
+async def resume_host_owned_native_workflows(ctx: Any, *, canvas_id: str) -> int:
+    """Advance saved Agent native runs after the submitting browser has left."""
+    runs = await asyncio.to_thread(
+        list_workflow_runs, project_dir=ctx.state_dir, canvas_id=canvas_id, limit=100,
+    )
+    advanced = 0
+    for run in runs:
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        if (run.get("status") != "running"
+                or run.get("project_id") != ctx.project_id
+                or run.get("actor_id") != ctx.requester_user_id
+                or metadata.get("native_completion_owner") != "host"
+                or not metadata.get("canvas_bridge_key")):
+            continue
+        try:
+            await _dispatch_ready_remix_workflow_actions(
+                ctx=ctx, state_dir=Path(ctx.state_dir), output_dir=Path(ctx.output_dir), run=run,
+            )
+            advanced += 1
+        except Exception:
+            logger.exception("host-owned workflow dispatch deferred run_id=%s", run.get("run_id"))
+    return advanced
+
+
+def _with_native_processing_task_ids(
+    run: dict[str, Any], *, output_dir: Path, project_id: str,
+) -> dict[str, Any]:
+    """Expose a verified task id for a durable native action acceptance."""
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+
+    if run.get("project_id") != project_id:
+        return run
+    operation_store = RemixOperationStore(output_dir, project_id)
+    actions = []
+    for action in run.get("actions") or []:
+        item = dict(action)
+        operation_id = str(item.get("processing_operation_id") or "")
+        if operation_id and item.get("task_key"):
+            try:
+                operation = operation_store.get(operation_id)
+            except (ValueError, FileNotFoundError):
+                operation = None
+            if (operation and operation.get("canvas_id") == run.get("canvas_id")
+                    and operation.get("node_id") == item.get("node_id")
+                    and operation.get("status") not in {"failed", "cancelled"}
+                    and operation.get("task_id")):
+                item["task_id"] = operation["task_id"]
+        actions.append(item)
+    response = {**run, "actions": actions}
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if (metadata.get("native_completion_owner") == "host"
+            and isinstance(metadata.get("canvas_bridge_key"), str)
+            and metadata["canvas_bridge_key"]
+            and run.get("status") in {"running", "completed"}
+            and actions
+            and {(item.get("node_id"), item.get("action")) for item in actions}
+            == {(item.get("node_id"), item.get("action"))
+                for item in metadata.get("native_approved_actions", [])
+                if isinstance(item, dict)}
+            and all(item.get("processing_operation_id") and item.get("task_key")
+                    and item.get("status") in {"running", "completed"}
+                    for item in actions)):
+        response["acceptance"] = {
+            "workflow_run_id": run["run_id"], "completion_owner": "host",
+        }
+    return response
+
+
+def _workflow_admission_response(
+    run: dict[str, Any], *, output_dir: Path, project_id: str,
+) -> dict[str, Any]:
+    response = _with_native_processing_task_ids(
+        run, output_dir=output_dir, project_id=project_id,
+    )
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if metadata.get("native_completion_owner") == "host":
+        bridge_digest = hashlib.sha256(
+            str(metadata.get("canvas_bridge_key") or "").encode()
+        ).hexdigest()[:12]
+        logger.info(
+            "native workflow admitted project_id=%s canvas_id=%s run_id=%s bridge=%s "
+            "actions=%d task_bound=%d accepted=%s",
+            project_id, run.get("canvas_id"), run.get("run_id"), bridge_digest,
+            len(response.get("actions") or []),
+            sum(bool(item.get("task_id")) for item in response.get("actions") or []),
+            bool(response.get("acceptance")),
+        )
+    return response
 
 
 @router.post(
@@ -6462,6 +6708,7 @@ async def freezone_gen(
         node_id=body.node_id or None,
         product_operation_id=body.product_operation_id,
         generation_attempt_id=body.generation_attempt_id,
+        workflow_run_id=body.workflow_run_id,
         model_id=_catalog_entry_id(catalog_entry) or body.model_id or None,
         catalog_id=_catalog_entry_id(catalog_entry) or None,
         gen_mode=body.gen_mode or None,
@@ -10899,6 +11146,7 @@ async def freezone_video_gen(
             node_id=body.node_id or None,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=body.model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             gen_mode="text_to_video",
@@ -10988,6 +11236,7 @@ async def freezone_image_animate(
             node_id=body.node_id,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             # 当前模型目录的关键帧能力统一为 first_last_frame；仅提供首帧
@@ -11154,6 +11403,7 @@ async def freezone_video_i2v(
             node_id=body.node_id or None,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=body.model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             gen_mode=execution_mode,
@@ -11291,6 +11541,7 @@ async def freezone_video_keyframes(
             node_id=body.node_id or None,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=body.model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             gen_mode=execution_mode,
@@ -11490,6 +11741,7 @@ async def freezone_video_omni_gen(
             node_id=body.node_id or None,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=body.model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             # 智能续写按视频延长任务执行（任务类型发 extend）；计费、目录校验和节点
@@ -11638,6 +11890,7 @@ async def freezone_video_edit(
             node_id=body.node_id or None,
             product_operation_id=body.product_operation_id,
             generation_attempt_id=body.generation_attempt_id,
+            workflow_run_id=body.workflow_run_id,
             model_id=body.model,
             catalog_id=_catalog_entry_id(capabilities) or None,
             gen_mode="video_edit",
@@ -12107,6 +12360,7 @@ async def freezone_audio_speech(
         node_id=body.node_id,
         operation_id=body.product_operation_id,
         attempt_id=body.generation_attempt_id,
+        workflow_run_id=body.workflow_run_id,
     )
     account_voice_username = (
         ctx.requester_username
@@ -12269,6 +12523,7 @@ async def freezone_audio_eleven_music(
         node_id=body.node_id,
         operation_id=body.product_operation_id,
         attempt_id=body.generation_attempt_id,
+        workflow_run_id=body.workflow_run_id,
     )
 
     prompt = body.input.strip()
@@ -15455,6 +15710,69 @@ async def _validate_workflow_draft_story_targets(
     return bool(context.get("targets") or context.get("asset_targets"))
 
 
+async def _enforce_reference_workflow_stage(
+    ctx, canvas_id: str, plan: dict, *, commission_id: str | None = None,
+) -> dict | None:
+    """Apply the same native commission stage gate to every workflow caller."""
+    from novelvideo.freezone.remix.reference_workflow_gate import reference_workflow_stage_decision
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    artifact_store = RemixArtifactStore(Path(ctx.output_dir), ctx.project_id,
+                                         created_by=ctx.requester_user_id)
+    problem, binding = await asyncio.to_thread(
+        reference_workflow_stage_decision, artifact_store, canvas_id=canvas_id,
+        requester_user_id=ctx.requester_user_id, plan=plan, commission_id=commission_id,
+    )
+    if problem:
+        raise HTTPException(409, {"code": problem, "message":
+                            "当前原片复刻任务需要先完成对应阶段；请继续该任务，不要另建通用工作流。"})
+    return binding
+
+
+def persist_validated_workflow_draft(*, ctx, canvas_id: str, state_dir: Path,
+                                           prepared: dict, run_after_create: bool,
+                                           operation_id: str = "") -> dict:
+    """Persist the validated graph in the existing native claim transaction."""
+    prune_expired_workflow_drafts(project_dir=state_dir, canvas_id=canvas_id)
+    return create_workflow_draft(
+        project_dir=state_dir, project_id=ctx.project_id,
+        canvas_id=canvas_id, intent=prepared["intent"], compiled=prepared["compiled"],
+        run_after_create=run_after_create, operation_id=operation_id,
+    )
+
+
+async def prepare_validated_workflow_draft(*, ctx, canvas_id: str, body: dict,
+                                         state_dir: Path, project: str, user: dict) -> dict:
+    """Shared compiler, reference gate, bindings and runtime preflight."""
+    prepared = await _prepare_workflow_source(body, user)
+    validated = prepared["compiled"]
+    has_story_targets = await _validate_workflow_draft_story_targets(
+        validated, state_dir=state_dir, canvas_id=canvas_id,
+    )
+    if has_story_targets and "run_after_create" not in body:
+        raise HTTPException(400, {
+            "ok": False,
+            "code": "story_execution_policy_required",
+            "error": "Story-bound workflows require an explicit run_after_create boolean.",
+            "retryable": True,
+            "next_action": "prepare_with_explicit_execution_policy",
+        })
+    reference_binding = await _enforce_reference_workflow_stage(
+        ctx, canvas_id, validated.get("plan") or {},
+        commission_id=str(prepared["intent"].get("reference_commission_id") or "") or None,
+    )
+    if reference_binding is not None:
+        validated["reference_binding"] = reference_binding
+    # Keep a stable snapshot while async runtime preflight releases control.
+    validated["external_inputs_verified"] = deepcopy(await _resolve_workflow_draft_external_inputs(
+        validated, state_dir=state_dir, canvas_id=canvas_id, project_id=ctx.project_id,
+    ))
+    validated["preflight"] = await _check_workflow_runtime(
+        validated, project=project, user=user
+    )
+    return prepared
+
+
 @router.post(
     "/projects/{project}/freezone/canvases/{canvas_id}/workflow-drafts",
     tags=[TAG_FREEZONE_CANVAS],
@@ -15567,14 +15885,40 @@ async def create_canvas_workflow_draft(
                     existing, summary=body.get("response_view") == "summary"
                 ),
             }
-        raise HTTPException(409, error or "delivered workflow result is missing")
+        raise HTTPException(409, {
+            "ok": False,
+            "status": "delivered_workflow_result_missing",
+            "code": "delivered_workflow_result_missing",
+            "error": error or "delivered workflow result is missing",
+            "retryable": False,
+            "operation_status": "delivered",
+            "requires_new_operation": True,
+            "next_action": "begin_new_workflow_result_operation",
+            "agent_instruction": (
+                "The delivered operation is immutable and its referenced draft is missing. "
+                "Report the missing result; a new attempt requires a new operation and "
+                "explicit authorization. Do not retry or revive this operation."
+            ),
+        })
     if operation and operation.get("status") not in {
         "reserved",
         "running",
         "accepted",
         "submitted",
     }:
-        raise HTTPException(409, "workflow result operation is not admitted")
+        operation_status = str(operation.get("status") or "")
+        raise HTTPException(409, {
+            "ok": False,
+            "status": "workflow_result_operation_not_admitted",
+            "code": "workflow_result_operation_not_admitted",
+            "error": "workflow result operation is not admitted",
+            "retryable": False,
+            "operation_status": operation_status,
+            "requires_new_operation": operation_status == "failed",
+            "next_action": ("stop" if operation_status == "cancelled"
+                            else "begin_new_workflow_result_operation" if operation_status == "failed"
+                            else "read_current_operation_receipt"),
+        })
     if operation and not (operation.get("model_evidence") or {}).get("model_call_id"):
         evidence_metrics.observe("agent_product_evidence_rejected")
         logger.warning(
@@ -15589,71 +15933,160 @@ async def create_canvas_workflow_draft(
             409,
             "workflow result has no server-observed model execution evidence",
         )
-    prepared = await _prepare_workflow_source(body, user)
-    validated = prepared["compiled"]
-    has_story_targets = await _validate_workflow_draft_story_targets(
-        validated, state_dir=state_dir, canvas_id=canvas_id,
-    )
-    if has_story_targets and "run_after_create" not in body:
-        raise HTTPException(400, {
-            "ok": False,
-            "code": "story_execution_policy_required",
-            "error": "Story-bound workflows require an explicit run_after_create boolean.",
-            "retryable": True,
-            "next_action": "prepare_with_explicit_execution_policy",
-        })
-    validated["external_inputs_verified"] = await _resolve_workflow_draft_external_inputs(
-        validated, state_dir=state_dir, canvas_id=canvas_id, project_id=ctx.project_id,
-    )
-    validated["preflight"] = await _check_workflow_runtime(
-        validated, project=project, user=user
-    )
-    plan = validated.get("plan") if isinstance(validated.get("plan"), dict) else {}
-    logger.info(
-        "workflow_draft.create.validated project_id=%s canvas_id=%s operation_id=%s "
-        "skill_id=%s node_count=%d edge_count=%d",
-        ctx.project_id,
-        canvas_id,
-        operation_id or "unmetered",
-        str(validated.get("skill_id") or ""),
-        len(plan.get("nodes") or []),
-        len(plan.get("edges") or []),
-    )
-    if isinstance(prepared["intent"].get("plan"), dict):
-        prepared["intent"]["plan"] = deepcopy(validated["plan"])
-    if operation is not None:
-        validated_skill = (
-            validated.get("plan", {}).get("skill")
-            if isinstance(validated.get("plan"), dict)
-            and isinstance(validated.get("plan", {}).get("skill"), dict)
-            else {}
-        )
-        validated_skill_version = str(validated_skill.get("version") or "").strip()
-        if (
-            validated.get("skill_id") != compiled_skill_id
-            or (
-                validated_skill_version
-                and validated_skill_version != operation_skill_version
+    # A native direction occupies one workflow draft. Resolve that authenticated
+    # claim before running another compiler/preflight for a transport retry.
+    requested_intent = body.get("intent") if isinstance(body.get("intent"), dict) else {}
+    requested_commission_id = str(requested_intent.get("reference_commission_id") or "").strip()
+    if requested_commission_id:
+        from novelvideo.freezone.remix.store import RemixArtifactStore
+
+        artifact_store = RemixArtifactStore(Path(ctx.output_dir), ctx.project_id,
+                                            created_by=ctx.requester_user_id)
+        try:
+            saved_commission = await asyncio.to_thread(artifact_store.read_latest, requested_commission_id)
+        except (ValueError, FileNotFoundError):
+            saved_commission = None
+        commission = saved_commission.get("payload") if saved_commission and saved_commission.get("schema") == "reference_commission.v1" else None
+        if (commission and commission.get("project_id") == ctx.project_id
+                and commission.get("canvas_id") == canvas_id
+                and commission.get("requester_user_id") == ctx.requester_user_id
+                and commission.get("phase") == "drafting_plan"):
+            existing = await asyncio.to_thread(
+                read_native_plan_claim, project_dir=state_dir, project_id=ctx.project_id,
+                canvas_id=canvas_id, requester_user_id=ctx.requester_user_id,
+                commission_id=requested_commission_id,
+                direction_revision=commission["direction_revision"],
             )
-        ):
-            raise HTTPException(
-                400, "workflow result operation does not match compiled Skill identity"
-            )
+            expected_binding = {
+                "project_id": ctx.project_id, "canvas_id": canvas_id,
+                "requester_user_id": ctx.requester_user_id,
+                "commission_id": requested_commission_id,
+                "analysis_node_id": commission["analysis_node_id"],
+                "direction_revision": commission["direction_revision"],
+                "direction_fingerprint": commission["direction_fingerprint"],
+                "stage": "production_plans",
+            }
+            if existing and (existing.get("compiled") or {}).get("reference_binding") != expected_binding:
+                raise HTTPException(409, {"code": "binding_conflict", "message": "当前作品方案绑定与确认方向不一致"})
+            if existing and (existing["status"] != "ready" or existing["expires_at"] >= time.time()):
+                if operation is not None:
+                    operation = await asyncio.to_thread(
+                        finish_agent_product_operation, project_dir=state_dir,
+                        operation_id=operation_id, outcome="delivered",
+                        expected_task_id=str(operation.get("task_id") or ""),
+                        result_ref={"kind": "workflow_draft", "id": existing["draft_id"],
+                                    "revision": existing["revision"], "digest": existing["plan_digest"]},
+                    )
+                    await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+                from novelvideo.freezone.remix.native_plan_stage import read_native_plan_stage
+
+                canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, canvas_id)
+                stage = await asyncio.to_thread(
+                    read_native_plan_stage, ctx=ctx, canvas=canvas or {"nodes": []},
+                    commission={**commission, "commission_ref": {"artifact_id": requested_commission_id}},
+                )
+                data = _workflow_draft_api_data(existing, summary=body.get("response_view") == "summary")
+                data["native_plan_stage"] = stage
+                data["next_action"] = stage["next_action"]
+                return {"ok": True, "data": data}
+    phase = "prepare_source"
     try:
-        await asyncio.to_thread(
-            prune_expired_workflow_drafts,
-            project_dir=state_dir,
-            canvas_id=canvas_id,
+        prepared = await prepare_validated_workflow_draft(
+            ctx=ctx, canvas_id=canvas_id, body=body, state_dir=state_dir,
+            project=project, user=user,
         )
+        validated = prepared["compiled"]
+        plan = validated.get("plan") if isinstance(validated.get("plan"), dict) else {}
+        logger.info(
+            "workflow_draft.create.validated project_id=%s canvas_id=%s operation_id=%s "
+            "skill_id=%s node_count=%d edge_count=%d",
+            ctx.project_id,
+            canvas_id,
+            operation_id or "unmetered",
+            str(validated.get("skill_id") or ""),
+            len(plan.get("nodes") or []),
+            len(plan.get("edges") or []),
+        )
+        if isinstance(prepared["intent"].get("plan"), dict):
+            prepared["intent"]["plan"] = deepcopy(validated["plan"])
+        if operation is not None:
+            phase = "skill_identity"
+            validated_skill = (
+                validated.get("plan", {}).get("skill")
+                if isinstance(validated.get("plan"), dict)
+                and isinstance(validated.get("plan", {}).get("skill"), dict)
+                else {}
+            )
+            validated_skill_version = str(validated_skill.get("version") or "").strip()
+            if (
+                validated.get("skill_id") != compiled_skill_id
+                or (
+                    validated_skill_version
+                    and validated_skill_version != operation_skill_version
+                )
+            ):
+                raise HTTPException(
+                    400, "workflow result operation does not match compiled Skill identity"
+                )
+    except HTTPException as exc:
+        detail = exc.detail
+        code_candidates = (
+            (detail.get("code"), detail.get("error"), detail.get("status"))
+            if isinstance(detail, dict) else (detail,)
+        )
+        code = next(
+            (candidate for candidate in code_candidates
+             if isinstance(candidate, str)
+             and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", candidate)),
+            "unspecified",
+        )
+        logger.warning(
+            "workflow_draft.create.rejected project_id=%s canvas_id=%s "
+            "operation_id=%s phase=%s status_code=%d code=%s",
+            ctx.project_id, canvas_id, operation_id or "unmetered",
+            phase, exc.status_code, code,
+        )
+        # A definitive validation failure cannot produce a draft. Close the
+        # admitted waiter so a later corrected request starts a new attempt.
+        if operation is not None and exc.status_code in {400, 409, 422}:
+            try:
+                operation = await asyncio.to_thread(
+                    finish_agent_product_operation,
+                    project_dir=state_dir,
+                    operation_id=operation_id,
+                    outcome="failed",
+                    expected_task_id=str(operation.get("task_id") or ""),
+                )
+            except ValueError:
+                # A concurrent successful delivery has an immutable receipt.
+                operation = await asyncio.to_thread(
+                    read_agent_product_operation,
+                    project_dir=state_dir,
+                    operation_id=operation_id,
+                )
+                if operation is None or operation.get("status") != "delivered":
+                    raise
+                existing_id = str((operation.get("result_ref") or {}).get("id") or "")
+                existing, _error = await asyncio.to_thread(
+                    read_workflow_draft,
+                    project_dir=state_dir,
+                    canvas_id=canvas_id,
+                    draft_id=existing_id,
+                )
+                if existing is None:
+                    raise
+                await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+                return {"ok": True, "data": _workflow_draft_api_data(
+                    existing, summary=body.get("response_view") == "summary",
+                )}
+            await _settle_failed_agent_product_task(
+                ctx=ctx, operation=operation, error=str(exc.detail),
+            )
+        raise
+    try:
         draft = await asyncio.to_thread(
-            create_workflow_draft,
-            project_dir=state_dir,
-            project_id=ctx.project_id,
-            canvas_id=canvas_id,
-            intent=prepared["intent"],
-            compiled=validated,
-            run_after_create=bool(body.get("run_after_create")),
-            operation_id=operation_id,
+            persist_validated_workflow_draft, ctx=ctx, canvas_id=canvas_id, state_dir=state_dir, prepared=prepared,
+            run_after_create=bool(body.get("run_after_create")), operation_id=operation_id,
         )
     except ValueError as exc:
         logger.warning(
@@ -15850,6 +16283,12 @@ async def patch_canvas_workflow_draft(
     await _validate_workflow_draft_story_targets(
         validated, state_dir=state_dir, canvas_id=canvas_id,
     )
+    reference_binding = await _enforce_reference_workflow_stage(
+        ctx, canvas_id, validated.get("plan") or {},
+        commission_id=str(prepared["intent"].get("reference_commission_id") or "") or None,
+    )
+    if reference_binding is not None:
+        validated["reference_binding"] = reference_binding
     validated["external_inputs_verified"] = await _resolve_workflow_draft_external_inputs(
         validated, state_dir=state_dir, canvas_id=canvas_id, project_id=ctx.project_id,
     )
@@ -16400,11 +16839,28 @@ async def claim_canvas_workflow_draft(
             "status": "workflow_draft_revision_conflict",
             "current_revision": current_draft["revision"],
         }
+    native_binding = (current_draft.get("compiled") or {}).get("reference_binding")
+    if native_binding and current_draft["status"] in {"confirming", "submitted", "confirmed"}:
+        if any(native_binding.get(key) != value for key, value in {
+            "project_id": ctx.project_id, "canvas_id": canvas_id,
+            "requester_user_id": ctx.requester_user_id,
+        }.items()):
+            raise HTTPException(403, "native plan draft belongs to another scope")
+        return {"ok": True, "data": _workflow_draft_api_data(current_draft)}
     # Revalidate old drafts and catalog revocations before admitting a task.
     validated = await _validate_workflow_draft_submission(current_draft, user)
     await _validate_workflow_draft_story_targets(
         validated, state_dir=state_dir, canvas_id=canvas_id,
     )
+    reference_binding = await _enforce_reference_workflow_stage(
+        ctx, canvas_id, validated.get("plan") or {},
+        commission_id=str(current_draft["intent"].get("reference_commission_id") or "") or None,
+    )
+    if reference_binding != current_draft["compiled"].get("reference_binding"):
+        raise HTTPException(409, {
+            "code": "reference_direction_changed",
+            "message": "作品方案草稿所依据的方向已经变化，请按当前方向重新准备。",
+        })
     await _resolve_workflow_draft_external_inputs(
         current_draft["compiled"], state_dir=state_dir, canvas_id=canvas_id,
         project_id=ctx.project_id,
@@ -16535,18 +16991,192 @@ async def create_canvas_workflow_run(
     )
     state_dir = _canvas_state_project_dir(ctx, project_dir)
     actions = body.get("actions") if isinstance(body.get("actions"), list) else []
+    # Browser canvas commands execute with a human session. Resolve their
+    # opaque receipt against the saved Agent command before admitting a run.
+    # A caller-supplied commission id or metadata is not proof of Agent origin.
+    bridge_key = body.get("bridge_key")
+    bridge_command = None
+    if bridge_key is not None:
+        from novelvideo.api.routes.chat import _canvas_bridge_dir
+        from novelvideo.freezone.canvas_command_bridge import (
+            canonical_bridge_key, read_bridge_message,
+        )
+
+        if not isinstance(bridge_key, str) or not bridge_key.strip():
+            raise HTTPException(400, {"code": "invalid_canvas_bridge_key"})
+        bridge_key = bridge_key.strip()
+        username = str(user.get("username") or "")
+        if not username:
+            raise HTTPException(409, {"code": "canvas_bridge_actor_mismatch"})
+        bridge_root = _canvas_bridge_dir(
+            username, profile="freezone", project_state_dir=state_dir,
+        )
+        bridge_dirs = [bridge_root, *(
+            directory for directory in bridge_root.glob("freezone_*")
+            if directory.is_dir() and not directory.is_symlink()
+        )]
+        messages = [
+            message for directory in bridge_dirs
+            if (message := await asyncio.to_thread(
+                read_bridge_message, bridge_key, bridge_dir=directory,
+            )) is not None
+        ]
+        if len(messages) != 1:
+            raise HTTPException(409, {"code": "canvas_bridge_unavailable"})
+        bridge_command = messages[0]
+        producer = bridge_command.get("producer_binding")
+        if (
+            bridge_command.get("kind") != "canvas_command"
+            or bridge_command.get("transport_status") != "delivered"
+            or not isinstance(producer, dict)
+            or not producer.get("turn_id")
+            or bridge_command.get("delivery_binding") != producer
+            or producer.get("username") != username
+            or producer.get("project_id") != ctx.project_id
+            or producer.get("canvas_id") != canvas_id
+            or bridge_command.get("project_id") != ctx.project_id
+            or bridge_command.get("canvas_id") != canvas_id
+        ):
+            raise HTTPException(409, {"code": "canvas_bridge_scope_mismatch"})
+        canonical_key = canonical_bridge_key(bridge_key)
+        owner_token = bridge_command.get("execution_token")
+        expected_key = (
+            f"{canonical_key}.executor.{owner_token}" if owner_token else canonical_key
+        )
+        if bridge_key != expected_key:
+            raise HTTPException(409, {"code": "canvas_bridge_owner_mismatch"})
+        from novelvideo.api.routes.chat import (
+            _NATIVE_PROCESSING_ACTIONS, _bridge_approves_native_action,
+        )
+
+        approved_commands = bridge_command.get("commands")
+        approved_commands = approved_commands if isinstance(approved_commands, list) else []
+        saved_canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, canvas_id)
+        for item in actions:
+            if not isinstance(item, dict) or item.get("action") not in _NATIVE_PROCESSING_ACTIONS:
+                continue
+            if not _bridge_approves_native_action(
+                approved_commands, saved_canvas or {"nodes": []},
+                node_id=str(item.get("node_id") or ""), action=str(item["action"]),
+            ):
+                raise HTTPException(409, {"code": "canvas_bridge_action_mismatch"})
+    if (
+        user.get("credential_kind") in {"agent_session", "local_trusted_agent"}
+        or bridge_command is not None
+    ) and any(
+        isinstance(item, dict) and item.get("action") in {"generate_production_plan_draft", "generate_production_plan_arrangement"}
+        for item in actions
+    ):
+        # The common bridge validation above already resolved graph aliases
+        # to the saved node identity for every native action in this run.
+        from novelvideo.freezone.remix.native_plan_stage import (
+            read_native_plan_stage,
+            validate_bound_plan_action,
+        )
+        from novelvideo.freezone.remix.reference_director import list_director_artifacts
+        from novelvideo.freezone.remix.store import RemixArtifactStore
+
+        artifact_store = RemixArtifactStore(
+            Path(output_dir), ctx.project_id, created_by=ctx.requester_user_id
+        )
+        director = await asyncio.to_thread(
+            list_director_artifacts, artifact_store, canvas_id, ctx.requester_user_id,
+            limit=None,
+        )
+        commissions = [
+            commission for commission in director["commissions"]
+            if commission.get("phase") == "drafting_plan"
+        ]
+        if commissions:
+            canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, canvas_id)
+            stages = [
+                await asyncio.to_thread(
+                    read_native_plan_stage, ctx=ctx, canvas=canvas or {"nodes": []},
+                    commission=commission,
+                )
+                for commission in commissions
+            ]
+            if len(commissions) > 1:
+                candidates = sorted({
+                    str(slot["plan_node_id"])
+                    for stage in stages for slot in stage.get("slots", [])
+                    if slot.get("plan_node_id")
+                })
+                if bridge_command is None:
+                    raise HTTPException(409, {
+                        "code": "binding_conflict", "candidate_node_ids": candidates,
+                    })
+                from novelvideo.chat.reference_remix_continuation import ReferenceRemixStore
+
+                producer = bridge_command["producer_binding"]
+                continuations = await asyncio.to_thread(
+                    ReferenceRemixStore().interaction_runs,
+                    username=producer["username"], project_id=producer["project_id"],
+                    canvas_id=producer["canvas_id"], agent_id=producer["agent_id"],
+                    turn_id=producer["turn_id"],
+                )
+                commission_ids = {
+                    (run.get("commission_ref") or {}).get("artifact_id")
+                    for run in continuations
+                    if run.get("requester_user_id") == ctx.requester_user_id
+                    and isinstance(run.get("commission_ref"), dict)
+                }
+                if len(commission_ids) != 1:
+                    raise HTTPException(409, {
+                        "code": "binding_conflict", "candidate_node_ids": candidates,
+                    })
+                selected = [
+                    stage for commission, stage in zip(commissions, stages)
+                    if (commission.get("commission_ref") or {}).get("artifact_id")
+                    in commission_ids
+                ]
+                if len(selected) != 1:
+                    raise HTTPException(409, {
+                        "code": "binding_conflict", "candidate_node_ids": candidates,
+                    })
+                stages = selected
+            for item in actions:
+                if not isinstance(item, dict) or item.get("action") not in {"generate_production_plan_draft", "generate_production_plan_arrangement"}:
+                    continue
+                node_id = str(item.get("node_id") or "")
+                matching = [
+                    stage for stage in stages
+                    if any(slot.get("plan_node_id") == node_id for slot in stage.get("slots", []))
+                ]
+                if matching:
+                    problem = validate_bound_plan_action(
+                        stage=matching[0], node_id=node_id,
+                        action=str(item["action"]),
+                    )
+                elif len(stages) == 1:
+                    problem = validate_bound_plan_action(
+                        stage=stages[0], node_id=node_id,
+                        action=str(item["action"]),
+                    )
+                else:
+                    candidates = sorted({
+                        str(slot["plan_node_id"])
+                        for stage in stages for slot in stage.get("slots", [])
+                        if slot.get("plan_node_id")
+                    })
+                    problem = {"code": "binding_conflict", "candidate_node_ids": candidates}
+                if problem:
+                    raise HTTPException(409, problem)
     from novelvideo.api.routes.remix import (
-        _speech_engine_ready,
+        _transcription_engine_ready,
         prepare_registered_action,
     )
     from novelvideo.freezone.remix.store import RemixArtifactStore
     from novelvideo.freezone.workflow_contract_generated import PROCESSING_ACTION_TYPES
 
     processing_actions = set(PROCESSING_ACTION_TYPES)
-    remix_store = RemixArtifactStore(Path(output_dir), ctx.project_id)
+    remix_store = RemixArtifactStore(Path(output_dir), ctx.project_id, created_by=ctx.requester_user_id)
     # Preflight the entire approved run before persisting or dispatching any task.
     # This prevents a malformed later step from leaving a half-admitted workflow.
     try:
+        plan_stages = {item.get("action") for item in actions if isinstance(item, dict)}
+        if {"generate_production_plan_draft", "generate_production_plan_arrangement"} <= plan_stages:
+            raise ValueError("submit arrangement separately after reviewing the saved structure")
         for item in actions:
             if not isinstance(item, dict) or item.get("action") not in processing_actions:
                 continue
@@ -16556,10 +17186,21 @@ async def create_canvas_workflow_run(
                 raise ValueError(f"processing workflow action {action_name} requires node_revision")
             if not isinstance(item.get("payload"), dict):
                 raise ValueError(f"processing workflow action {action_name} requires payload")
-            if action_name in {"transcribe_media", "align_script"} and not await asyncio.to_thread(
-                _speech_engine_ready
+            if action_name in {"transcribe_media", "align_script", "align_production_speech", "compile_take_timeline"} and not await asyncio.to_thread(
+                _transcription_engine_ready
             ):
-                raise ValueError("Speech alignment engine is not configured")
+                raise ValueError("NewAPI audio-transcribe is not configured")
+            if action_name == "generate_production_plan_arrangement":
+                from novelvideo.freezone.remix.production_task_inputs import validate_arrangement_node
+                current_canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, canvas_id)
+                await asyncio.to_thread(validate_arrangement_node, remix_store, current_canvas,
+                                        str(item.get("node_id") or ""), item["payload"])
+            if action_name == 'generate_production_plan_draft':
+                from novelvideo.freezone.remix.production_requirements import hydrate_native_requirements
+                current_canvas = await asyncio.to_thread(canvas_store.read_canvas, state_dir, canvas_id)
+                await asyncio.to_thread(hydrate_native_requirements, remix_store, item['payload'],
+                    canvas={**current_canvas, 'canvas_id': canvas_id, 'project_id': ctx.project_id},
+                    node_id=str(item.get('node_id') or ''), requester_user_id=ctx.requester_user_id)
             await asyncio.to_thread(
                 prepare_registered_action,
                 remix_store,
@@ -16600,6 +17241,39 @@ async def create_canvas_workflow_run(
                     400,
                     "model workflow actions require recipe_id and generation_attempt_id",
                 )
+    from novelvideo.api.routes.chat import _NATIVE_PROCESSING_ACTIONS
+    native_host_owned = bool(
+        actions
+        and all(isinstance(item, dict) and item.get("action") in _NATIVE_PROCESSING_ACTIONS
+                for item in actions)
+    )
+    run_metadata = dict(body.get("metadata") if isinstance(body.get("metadata"), dict) else {})
+    # These fields are server-owned. A caller's metadata is never evidence of
+    # bridge approval or a host handoff.
+    run_metadata.pop("canvas_bridge_key", None)
+    run_metadata.pop("native_completion_owner", None)
+    run_metadata.pop("native_approved_actions", None)
+    run_metadata.pop("native_execution_source", None)
+    run_metadata.pop("native_execution_context", None)
+    from novelvideo.freezone.remix.native_execution_context import resolve_native_execution_source
+    run_metadata["native_execution_source"] = resolve_native_execution_source(
+        credential_kind=str(user.get("credential_kind") or ""),
+        has_verified_bridge=bridge_command is not None,
+    )
+    run_metadata["native_execution_context"] = {
+        "source": run_metadata["native_execution_source"],
+        "requester_user_id": _canvas_actor_id(user),
+        "project_id": ctx.project_id,
+        "canvas_id": canvas_id,
+    }
+    if bridge_command is not None:
+        run_metadata["canvas_bridge_key"] = canonical_key
+    if native_host_owned:
+        run_metadata["native_completion_owner"] = "host"
+        run_metadata["native_approved_actions"] = [
+            {"node_id": item["node_id"], "action": item["action"]}
+            for item in actions
+        ]
     try:
         run = await asyncio.to_thread(
             create_workflow_run,
@@ -16608,17 +17282,19 @@ async def create_canvas_workflow_run(
             canvas_id=canvas_id,
             actions=actions,
             actor_id=_canvas_actor_id(user),
-            metadata=(
-                body.get("metadata") if isinstance(body.get("metadata"), dict) else None
-            ),
+            metadata=run_metadata,
             idempotency_key=(
                 body.get("idempotency_key")
                 if isinstance(body.get("idempotency_key"), str)
                 else ""
             ),
             runner_id=(
+                "" if native_host_owned else
                 body.get("runner_id") if isinstance(body.get("runner_id"), str) else ""
             ),
+            recover_runner=(bridge_command is not None and not native_host_owned
+                            and isinstance(body.get("runner_id"), str)
+                            and bool(body["runner_id"].strip())),
         )
     except (WorkflowRunLeaseConflict, WorkflowRunIdempotencyConflict) as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -16633,7 +17309,8 @@ async def create_canvas_workflow_run(
             output_dir=Path(output_dir),
             run=run,
         )
-        return {"ok": True, "data": run}
+        return {"ok": True, "data": _workflow_admission_response(
+            run, output_dir=Path(output_dir), project_id=ctx.project_id)}
     admitted_operations: list[dict[str, Any]] = []
     try:
         for action in run.get("actions") or []:
@@ -16736,7 +17413,8 @@ async def create_canvas_workflow_run(
         output_dir=Path(output_dir),
         run=run,
     )
-    return {"ok": True, "data": run}
+    return {"ok": True, "data": _workflow_admission_response(
+        run, output_dir=Path(output_dir), project_id=ctx.project_id)}
 
 
 @router.get(
@@ -16863,6 +17541,21 @@ async def get_canvas_workflow_runs(
         canvas_id=canvas_id,
         limit=limit,
     )
+    from novelvideo.freezone.remix.production_processing_settlement import (
+        has_settleable_native_action, settle_production_processing,
+    )
+    for workflow_run in runs:
+        if workflow_run.get("project_id") != ctx.project_id or workflow_run.get("actor_id") != ctx.requester_user_id:
+            continue
+        if not has_settleable_native_action(workflow_run):
+            continue
+        try:
+            await asyncio.to_thread(
+                settle_production_processing, ctx, canvas_id=canvas_id, run_id=workflow_run["run_id"],
+            )
+        except (CanvasLockBusy, ValueError, FileNotFoundError) as exc:
+            logger.warning("workflow native result publication deferred: %s", exc)
+    recovered_generation = False
     advanced_runs: list[dict[str, Any]] = []
     for workflow_run in runs:
         if workflow_run.get("status") != "running":
@@ -16899,6 +17592,93 @@ async def get_canvas_workflow_runs(
             operation_id = str(action.get("product_operation_id") or "")
             task_key = str(action.get("task_key") or "")
             recovered_history: dict[str, Any] | None = None
+            if not operation_id and not task_key:
+                # Ordinary canvas media actions do not have a Recipe operation
+                # in the local/no-meter path.  Their browser PATCH can be lost
+                # when the workflow lease expires, even though the provider
+                # task and node history are complete.  Recover only a unique
+                # completed task for this exact node/action; never enqueue or
+                # reopen the workflow here.
+                expected_task_types = {
+                    "generate_image": {"freezone_gen"},
+                    "generate_video": {"freezone_video_gen"},
+                    "generate_text_video": {"freezone_video_gen"},
+                    "generate_audio": {"freezone_audio_speech", "freezone_audio_eleven_music"},
+                }.get(str(action.get("action") or ""), set())
+                node_id = str(action.get("node_id") or "").strip()
+                attempt_id = str(action.get("generation_attempt_id") or "").strip()
+                candidates = []
+                for record in generation_history:
+                    if (not isinstance(record, dict)
+                            or str(record.get("node_id") or "").strip() != node_id
+                            or record.get("task_type") not in expected_task_types
+                            or record.get("status") != "completed"):
+                        continue
+                    record_attempt = str(record.get("generation_attempt_id") or "").strip()
+                    if record_attempt and attempt_id and record_attempt != attempt_id:
+                        continue
+                    record_task_key = str(record.get("task_key") or "").strip()
+                    task = tasks_by_key.get(record_task_key)
+                    # Task state is retained separately from node generation
+                    # history and may be expired after a successful run.  A
+                    # completed history record is still durable proof of the
+                    # exact provider result, so use it when the task row is
+                    # gone instead of making the user regenerate paid media.
+                    task_result = (
+                        task.get("result")
+                        if isinstance(task, dict) and isinstance(task.get("result"), dict)
+                        else record.get("result")
+                        if isinstance(record.get("result"), dict)
+                        else None
+                    )
+                    if not record_task_key or (
+                        isinstance(task, dict) and task.get("status") != "completed"
+                    ):
+                        continue
+                    artifact_status, _artifact_error, result_ref = await asyncio.to_thread(
+                        _validate_action_artifact,
+                        action=str(action.get("action") or ""),
+                        task_result=task_result,
+                        history_record=record,
+                        project_dir=canvas_project_dir,
+                        project_id=ctx.project_id,
+                    )
+                    if artifact_status == "valid" and result_ref:
+                        candidates.append((record, task, result_ref))
+                candidate_keys = {str(row[0].get("task_key") or "") for row in candidates}
+                if len(candidate_keys) == 1:
+                    recovered_history, recovered_task, recovered_ref = candidates[0]
+                    try:
+                        recovered_run = await asyncio.to_thread(
+                            recover_completed_generation_task,
+                            project_dir=canvas_project_dir,
+                            canvas_id=canvas_id,
+                            run_id=str(run.get("run_id") or ""),
+                            node_id=node_id,
+                            task_key=str(recovered_history["task_key"]),
+                            task_type=str(recovered_history["task_type"]),
+                            job_id=str(
+                                recovered_history.get("job_id")
+                                or (recovered_task or {}).get("scope")
+                                or ""
+                            ),
+                            result_ref=recovered_ref,
+                        )
+                    except (ValueError, KeyError) as exc:
+                        logger.info(
+                            "workflow generation recovery deferred run_id=%s node_id=%s reason=%s",
+                            run.get("run_id"), node_id, exc,
+                        )
+                    else:
+                        run.clear()
+                        run.update(recovered_run)
+                        recovered_generation = True
+                        action = next(
+                            item for item in run.get("actions", [])
+                            if item.get("node_id") == node_id
+                            and item.get("action") == str(action.get("action") or "")
+                        )
+                        task_key = str(action.get("task_key") or "")
             if operation_id and not task_key:
                 # The media endpoint validated this Recipe attempt before enqueue;
                 # the worker persisted that link with its completed result.
@@ -16929,6 +17709,46 @@ async def get_canvas_workflow_runs(
                     task_key = str(recovered_history["task_key"])
             task = tasks_by_key.get(task_key)
             if not operation_id or task is None:
+                if (not operation_id and isinstance(task, dict)
+                        and task.get("status") == "completed"
+                        and str(action.get("status") or "") != "completed"):
+                    artifact_status, _artifact_error, result_ref = await asyncio.to_thread(
+                        _validate_action_artifact,
+                        action=str(action.get("action") or ""),
+                        task_result=task.get("result") if isinstance(task.get("result"), dict) else None,
+                        history_record=history_by_task_node.get(
+                            (task_key, str(action.get("node_id") or ""))
+                        ),
+                        project_dir=canvas_project_dir,
+                        project_id=ctx.project_id,
+                    )
+                    if artifact_status == "valid" and result_ref:
+                        try:
+                            recovered_run = await asyncio.to_thread(
+                                recover_completed_generation_task,
+                                project_dir=canvas_project_dir,
+                                canvas_id=canvas_id,
+                                run_id=str(run.get("run_id") or ""),
+                                node_id=str(action.get("node_id") or ""),
+                                task_key=task_key,
+                                task_type=str(action.get("task_type") or ""),
+                                job_id=str(action.get("job_id") or task.get("scope") or ""),
+                                result_ref=result_ref,
+                            )
+                        except (ValueError, KeyError) as exc:
+                            logger.info(
+                                "workflow bound generation recovery deferred run_id=%s node_id=%s reason=%s",
+                                run.get("run_id"), action.get("node_id"), exc,
+                            )
+                        else:
+                            run.clear()
+                            run.update(recovered_run)
+                            recovered_generation = True
+                            action = next(
+                                item for item in run.get("actions", [])
+                                if item.get("node_id") == action.get("node_id")
+                                and item.get("action") == action.get("action")
+                            )
                 continue
             task_status = str(task.get("status") or "")
             artifact_status = str(action.get("artifact_status") or "")
@@ -17017,6 +17837,19 @@ async def get_canvas_workflow_runs(
                 server_recipe_direct_audio=direct_voice and outcome == "delivered",
             )
             await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+    if recovered_generation:
+        # Recovery is a read-side repair. Wake the existing observer so it can
+        # bind the material work package and send the normal Agent update; do
+        # not start another generation or advance the user's confirmation state.
+        try:
+            from novelvideo.chat.reference_production_observer import wake_local_observers
+
+            wake_local_observers()
+        except Exception:
+            logger.debug(
+                "workflow generation recovery observer wake unavailable",
+                exc_info=True,
+            )
     return {"ok": True, "data": {"runs": runs}}
 
 
@@ -17064,7 +17897,8 @@ async def get_canvas_workflow_run(
         if not wait_seconds or summary["terminal"] or changed or remaining <= 0:
             if view == "summary":
                 return {"ok": True, "data": {**summary, "changed": changed}}
-            return {"ok": True, "data": run}
+            return {"ok": True, "data": _with_native_processing_task_ids(
+                run, output_dir=Path(ctx.output_dir), project_id=ctx.project_id)}
         token = summary["observation_token"]
         await asyncio.sleep(min(2, remaining))
 
@@ -19172,3 +20006,15 @@ async def init_freezone(project: str, user: dict = Depends(get_api_user)):
             },
         },
     }
+
+# Reference remix submission is isolated from the existing manual media routes.
+from novelvideo.api.routes.reference_analysis import router as reference_analysis_router  # noqa: E402
+router.include_router(reference_analysis_router)
+from novelvideo.api.routes.reference_director import router as reference_director_router  # noqa: E402
+router.include_router(reference_director_router)
+from novelvideo.api.routes.reference_material import router as reference_material_router  # noqa: E402
+router.include_router(reference_material_router)
+from novelvideo.api.routes.reference_output import router as reference_output_router  # noqa: E402
+router.include_router(reference_output_router)
+from novelvideo.api.routes.reference_branches import router as reference_branches_router  # noqa: E402
+router.include_router(reference_branches_router)

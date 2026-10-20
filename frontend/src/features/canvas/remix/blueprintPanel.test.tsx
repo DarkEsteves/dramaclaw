@@ -181,7 +181,6 @@ describe('ReferenceBlueprintPanel', () => {
 
   it.each([
     ['legacy', { narrative_role: '旧蓝图', events: [{ shot: 1 }], preserve_replace_rules: [], observations: [], inferences: [], user_choices: [] }],
-    ['unreviewed', reviewedPayload('needs_review')],
     ['broken reference', { ...reviewedPayload(), evidence_ref: { artifact_id: 'other-evidence', revision: 1 }, events: [{ ...reviewedPayload().events[0], observed_frame: { ...reviewedPayload().events[0].observed_frame, evidence_ref: { artifact_id: 'other-evidence', revision: 1 } } }] }],
   ])('rejects a clean saved %s blueprint before reuse', async (_label, payload) => {
     vi.mocked(fetchRemixArtifact).mockResolvedValue({
@@ -192,6 +191,17 @@ describe('ReferenceBlueprintPanel', () => {
     render(<ReferenceBlueprintPanel ref={panel} nodeId="story" source={source} rows={rows} draft={{ referenceBlueprintRef: { artifactId: 'already-saved', revision: 3 }, referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={() => {}} onReanalyze={() => {}} />);
 
     await expect(panel.current?.ensureSaved()).rejects.toThrow();
+    expect(createRemixArtifact).not.toHaveBeenCalled();
+    expect(reviseRemixArtifact).not.toHaveBeenCalled();
+  });
+
+  it('reuses a real saved blueprint with unreviewed events without rewriting its acknowledgement fields', async () => {
+    const payload = reviewedPayload('needs_review');
+    vi.mocked(fetchRemixArtifact).mockResolvedValue({ id: 'already-saved', revision: 3, schema: 'reference_blueprint.v1', payload, upstream_refs: [{ artifact_id: 'evidence-1', revision: 1 }, { artifact_id: 'transcript-1', revision: 2 }] });
+    const panel = createRef<ReferenceBlueprintPanelHandle>();
+    render(<ReferenceBlueprintPanel ref={panel} nodeId="story" source={source} rows={rows} draft={{ referenceBlueprintRef: { artifactId: 'already-saved', revision: 3 }, referenceEvidenceRef: { artifactId: 'evidence-1', revision: 1 } }} onPatch={() => {}} onReanalyze={() => {}} />);
+    expect(await panel.current?.ensureSaved()).toEqual({ artifactId: 'already-saved', revision: 3 });
+    expect(payload.events[0].user_override.review_state).toBe('needs_review');
     expect(createRemixArtifact).not.toHaveBeenCalled();
     expect(reviseRemixArtifact).not.toHaveBeenCalled();
   });

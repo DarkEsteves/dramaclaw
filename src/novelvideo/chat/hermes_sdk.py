@@ -487,6 +487,48 @@ def _stable_tool_failure_payload(value: object) -> object:
     return value
 
 
+_REFERENCE_ROUTED_TOOLS = frozenset({"freezone_start_reference_analysis", "freezone_prepare_workflow_draft", "freezone_get_reference_evidence", "freezone_get_reference_director_state", "freezone_prepare_reference_decision", "freezone_review_production_plan", "freezone_prepare_material_work", "freezone_prepare_material_stage", "freezone_get_material_work", "freezone_review_material_candidate", "freezone_accept_material_candidate", "freezone_retry_material_step", "freezone_get_speech_review", "freezone_prepare_speech_correction", "freezone_review_production_output", "freezone_prepare_reference_branches", "freezone_associate_material_upload"})
+_REFERENCE_ROUTED_TOOLS |= frozenset({"freezone_get_production_progress", "freezone_advance_production",
+                                    "freezone_select_material_work", "freezone_get_material_speech_review"})
+
+
+def _reference_routed_tool(name: str | None, value: object) -> tuple[str | None, object]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return name, value
+    else:
+        decoded = value
+    if not isinstance(decoded, dict) or decoded.get("name") not in _REFERENCE_ROUTED_TOOLS:
+        return name, value
+    if _canonical_tool_name(name) not in {"tool_call", decoded["name"]}:
+        return name, value
+    arguments = decoded.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return name, value
+    return decoded["name"], arguments
+
+
+def _reference_analysis_submission(event: ChatBackendEvent) -> dict | None:
+    if event.type != "tool_updated" or event.status != "completed" or _canonical_tool_name(event.name) != "freezone_start_reference_analysis":
+        return None
+    result = event.structured
+    if isinstance(event.input, dict) and isinstance(result, dict):
+        if event.input.get("idempotency_key") and event.input["idempotency_key"] != result.get("idempotency_key"):
+            return None
+        if event.input.get("source_node_id") and event.input["source_node_id"] != (result.get("run") or {}).get("source_node_id"):
+            return None
+    if (isinstance(result, dict) and result.get("ok") is True and result.get("submitted") is True
+            and isinstance(result.get("run_id"), str) and result["run_id"]
+            and isinstance(result.get("analysis_node_id"), str) and result["analysis_node_id"]):
+        return result
+    return None
+
+
 def _should_stop_after_write_tool(first_write_tool: str | None, next_tool_name: object) -> bool:
     first_name = _canonical_tool_name(first_write_tool)
     next_name = _canonical_tool_name(next_tool_name)
@@ -1303,7 +1345,13 @@ class HermesSdkThread:
         if self._closed:
             return
         try:
-            await self._prepare()
+            # A warm-up scheduled while idle can run after a prompt starts.
+            # Its session/load also reads stdout, so it must share the same
+            # reader lock as real turns, beyond the setup-only lock.
+            async with self._turn_lock:
+                if self._closed:
+                    return
+                await self._prepare()
             _log.info("hermes worker warmed for user=%s session=%s", self._username, self.id)
         except Exception as e:  # noqa: BLE001 - best-effort prewarm
             _log.warning("hermes warm() failed for user=%s: %s", self._username, e)
@@ -1625,6 +1673,13 @@ class HermesSdkThread:
                         first_write_failed = True
                     story_write_continuation.observe(ev)
                     yield ev
+                    if _reference_analysis_submission(ev):
+                        # This task has durable server ownership. Stop before another
+                        # model request can poll it; completion starts a fresh turn.
+                        await self.close()
+                        yield ChatBackendEvent(type="complete", thread_id=self.id, turn_id=turn_id,
+                                               text="原片分析已提交，完成后会显示结果并继续准备作品方案。")
+                        return
         finally:
             # Don't kill subprocess here — caller may want to send more prompts.
             # HermesPool handles cleanup on idle / shutdown.
@@ -1713,6 +1768,7 @@ class HermesSdkThread:
             title = update.get("title") or update.get("kind") or "tool"
             tool_name, _body = _split_tool_title(title)
             tool_input = _first_present(update, "rawInput", "raw_input")
+            tool_name, tool_input = _reference_routed_tool(tool_name, tool_input)
             call_id = str(
                 update.get("toolCallId")
                 or update.get("tool_call_id")
@@ -1751,6 +1807,11 @@ class HermesSdkThread:
             tool_input = self._tool_inputs_by_call_id.get(call_id or "")
             tool_started_at = self._tool_started_at_by_call_id.get(call_id or "")
             update_input = _first_present(update, "rawInput", "raw_input")
+            tool_name, resolved_input = _reference_routed_tool(tool_name, update_input if update_input is not None else tool_input)
+            if update_input is not None:
+                update_input = resolved_input
+            else:
+                tool_input = resolved_input
             tool_output = _first_present(
                 update, "rawOutput", "raw_output", "result", "content"
             )
@@ -1782,8 +1843,9 @@ class HermesSdkThread:
                 structured=structured_result,
                 native_kind=kind,
                 lifecycle_only=(
-                    hermes_events.is_anonymous_tool_call_update(tool_name, update)
-                    or hermes_events.is_lifecycle_only_tool_update(text, update)
+                    not (tool_name in _REFERENCE_ROUTED_TOOLS and status == "completed" and isinstance(structured_result, dict))
+                    and (hermes_events.is_anonymous_tool_call_update(tool_name, update)
+                         or hermes_events.is_lifecycle_only_tool_update(text, update))
                 ),
                 transient_failure=hermes_events.is_transient_tool_failure(update),
                 raw=update,

@@ -1,0 +1,256 @@
+{
+  "schema_version": 2,
+  "goal": "shared source dialogue",
+  "output": {
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 30,
+    "fps_den": 1
+  },
+  "beats": [
+    {
+      "id": "first",
+      "purpose": "dialogue",
+      "duration_frames": 180,
+      "turns": [
+        {
+          "id": "guest",
+          "speaker": "guest",
+          "text": "Guest answer",
+          "speech_placement_id": "talk",
+          "speech_timing": {
+            "placement_id": "talk",
+            "media_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "text": "Guest answer",
+            "text_hash": "6cadff48168a13b95d20ab5f8242982e72c69be07eae03bb75d23624b5b08754",
+            "evidence_ref": {
+              "artifact_id": "asr-guest",
+              "revision": 1
+            },
+            "words": [
+              {
+                "id": "word:guest",
+                "text": "Guest answer",
+                "start_us": 500000,
+                "end_us": 4100000
+              }
+            ]
+          }
+        },
+        {
+          "id": "host",
+          "speaker": "host",
+          "text": "Next question",
+          "speech_placement_id": "talk",
+          "speech_timing": {
+            "placement_id": "talk",
+            "media_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "text": "Next question",
+            "text_hash": "f7a9d7437e96463835a47a3a8332a40fa38870f56ff117c1cc0a041958c95beb",
+            "evidence_ref": {
+              "artifact_id": "asr-host",
+              "revision": 1
+            },
+            "words": [
+              {
+                "id": "word:host",
+                "text": "Next question",
+                "start_us": 4600000,
+                "end_us": 5800000
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "silent",
+      "purpose": "product",
+      "duration_frames": 90,
+      "turns": []
+    },
+    {
+      "id": "third",
+      "purpose": "closing",
+      "duration_frames": 90,
+      "turns": [
+        {
+          "id": "close",
+          "speaker": "guest",
+          "text": "Close",
+          "speech_placement_id": "closing",
+          "speech_timing": {
+            "placement_id": "closing",
+            "media_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "text": "Close",
+            "text_hash": "7d9eb7acb13e24625c404401d8e88b2350e32162455885f18276cf802f7701ed",
+            "evidence_ref": {
+              "artifact_id": "asr-close",
+              "revision": 1
+            },
+            "words": [
+              {
+                "id": "word:close",
+                "text": "Close",
+                "start_us": 0,
+                "end_us": 3500000
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "id": "video",
+      "node_id": "video-node",
+      "media_kind": "video",
+      "media_path": "media/video.mp4",
+      "media_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "duration_us": 6400000,
+      "has_audio": true
+    },
+    {
+      "id": "closing-video",
+      "node_id": "closing-node",
+      "media_kind": "video",
+      "media_path": "media/closing.mp4",
+      "media_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "duration_us": 4000000,
+      "has_audio": true
+    }
+  ],
+  "placements": [
+    {
+      "id": "talk",
+      "kind": "visual",
+      "role": "primary",
+      "track_id": "primary",
+      "resource_id": "video",
+      "start": {
+        "kind": "beat",
+        "ref_id": "first",
+        "edge": "start"
+      },
+      "end": {
+        "kind": "beat",
+        "ref_id": "first",
+        "edge": "end"
+      }
+    },
+    {
+      "id": "closing",
+      "kind": "visual",
+      "role": "primary",
+      "track_id": "primary",
+      "resource_id": "closing-video",
+      "start": {
+        "kind": "beat",
+        "ref_id": "third",
+        "edge": "start"
+      },
+      "end": {
+        "kind": "beat",
+        "ref_id": "third",
+        "edge": "end"
+      }
+    },
+    {
+      "id": "caption-host",
+      "kind": "subtitle",
+      "role": "dialogue",
+      "track_id": "subtitles",
+      "turn_id": "host",
+      "start": {
+        "kind": "cue",
+        "ref_id": "cue:host",
+        "edge": "start"
+      },
+      "end": {
+        "kind": "cue",
+        "ref_id": "cue:host",
+        "edge": "end"
+      }
+    }
+  ],
+  "speech_takes": [
+    {
+      "id": "take:first",
+      "beat_id": "first",
+      "resource_id": "video",
+      "turn_ids": [
+        "guest",
+        "host"
+      ],
+      "origin_placement_id": "talk",
+      "source_in_us": 0,
+      "source_out_us": null,
+      "speed_num": 1,
+      "speed_den": 1,
+      "lead_in_frames": 0
+    },
+    {
+      "id": "take:third",
+      "beat_id": "third",
+      "resource_id": "closing-video",
+      "turn_ids": [
+        "close"
+      ],
+      "origin_placement_id": "closing",
+      "source_in_us": 0,
+      "source_out_us": null,
+      "speed_num": 1,
+      "speed_den": 1,
+      "lead_in_frames": 0
+    }
+  ],
+  "speech_cues": [
+    {
+      "id": "cue:guest",
+      "turn_id": "guest",
+      "take_id": "take:first",
+      "text": "Guest answer",
+      "source_start_us": 500000,
+      "source_end_us": 4100000,
+      "timing_source": "manual",
+      "timing_status": "ready",
+      "word_ids": [],
+      "evidence_ref": {
+        "artifact_id": "timing-guest",
+        "revision": 1
+      }
+    },
+    {
+      "id": "cue:host",
+      "turn_id": "host",
+      "take_id": "take:first",
+      "text": "Next question",
+      "source_start_us": 4600000,
+      "source_end_us": 5800000,
+      "timing_source": "manual",
+      "timing_status": "ready",
+      "word_ids": [],
+      "evidence_ref": {
+        "artifact_id": "timing-host",
+        "revision": 1
+      }
+    },
+    {
+      "id": "cue:close",
+      "turn_id": "close",
+      "take_id": "take:third",
+      "text": "Close",
+      "source_start_us": 0,
+      "source_end_us": 3500000,
+      "timing_source": "manual",
+      "timing_status": "ready",
+      "word_ids": [],
+      "evidence_ref": {
+        "artifact_id": "timing-close",
+        "revision": 1
+      }
+    }
+  ],
+  "provenance": {}
+}

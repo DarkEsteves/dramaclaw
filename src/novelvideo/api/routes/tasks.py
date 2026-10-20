@@ -94,6 +94,8 @@ _TASK_TYPE_LABELS = {
     "freezone_image_to_3gs": "图片转世界",
     "freezone_image_reverse_prompt": "图片反推提示词",
     "freezone_image_to_blockout": "参考图转白模",
+    "remix_generate_production_plan_draft": "AI 起草作品方案",
+    "remix_generate_production_plan_arrangement": "AI 安排画面与声音",
 }
 _STAGE_ASSET_STEP_LABELS = {
     "pano_from_master": "Master 生成全景",

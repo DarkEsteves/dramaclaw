@@ -72,17 +72,17 @@ export const CANVAS_LINK_TYPE_CATALOG: CanvasLinkTypeCatalogItem[] = [
     link_type: "derived_from",
     category: "derivation",
     source_object_types: ["ImageNode", "VideoNode", "AudioNode"],
-    target_object_types: ["ImageNode", "VideoNode", "AudioNode"],
+    target_object_types: ["ImageNode", "VideoNode", "AudioNode", "ScriptNode"],
     description: "目标媒体是从上游媒体编辑、裁剪、高清、变体、导出或修复得到的结果。",
-    instruction: "Use for produced derivative artifacts, not for a generator merely using a reference.",
+    instruction: "Use for produced derivative artifacts. A videoStoryNode may derive a scriptNode with remixRole=production_plan; ordinary script nodes are not media derivatives.",
   },
   {
     link_type: "composition_input_for",
     category: "composition",
-    source_object_types: ["VideoNode", "AudioNode"],
+    source_object_types: ["VideoNode", "AudioNode", "ScriptNode"],
     target_object_types: ["VideoNode"],
     description: "上游文本、图片、视频或音频片段进入目标合成/时间线节点，作为最终成片素材。",
-    instruction: "Use primarily for inputs into videoComposeNode or other composition/timeline nodes.",
+    instruction: "Use for inputs into videoComposeNode. A ScriptNode source must be a native production plan with remixRole=production_plan; ordinary scripts are not composition media.",
   },
 ];
 
@@ -165,6 +165,15 @@ export function allowedCanvasLinkTypesForNodes(
   if (!sourceType || !targetType) return CANVAS_LINK_TYPE_CATALOG.map((item) => item.link_type);
   return CANVAS_LINK_TYPE_CATALOG
     .filter((item) => item.source_object_types.includes(sourceType) && item.target_object_types.includes(targetType))
+    .filter((item) => {
+      if (item.link_type === 'composition_input_for' && sourceType === 'ScriptNode') {
+        return sourceNode?.data.remixRole === 'production_plan' && targetNode?.type === CANVAS_NODE_TYPES.videoCompose;
+      }
+      if (item.link_type === 'derived_from' && targetType === 'ScriptNode') {
+        return sourceNode?.type === CANVAS_NODE_TYPES.videoStory && targetNode?.data.remixRole === 'production_plan';
+      }
+      return true;
+    })
     .map((item) => item.link_type);
 }
 

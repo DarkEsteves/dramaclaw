@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
-import os
-import subprocess
 import threading
-import json
 import re
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
@@ -18,28 +14,55 @@ from typing import Any, Protocol
 _SPEECH_ENGINE_SLOT = threading.BoundedSemaphore(value=1)
 
 
-class SpeechAligner(Protocol):
-    """A local or service-backed engine whose raw result is normalized here."""
-
+class SpeechTranscriber(Protocol):
     def transcribe(self, media_path: Path, language: str) -> dict[str, Any]: ...
+
+
+class SpeechAligner(SpeechTranscriber, Protocol):
+    """A local or service-backed engine whose raw result is normalized here."""
 
     def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]: ...
 
 
-def transcribe_media(
-    media_path: Path, language: str, *, aligner: SpeechAligner | None = None
-) -> dict[str, Any]:
-    """Transcribe local media into a normalized ``word_timeline.v1`` payload.
+def configured_newapi_transcriber(*, allow_segments: bool = False) -> SpeechAligner:
+    """Use the effective NewAPI gateway for canvas speech recognition."""
+    from novelvideo.config import get_newapi_runtime_credentials
+    from novelvideo.egress_context import ambient_organization_egress_context
+    from novelvideo.freezone.remix.newapi_transcription import NewApiSpeechTranscriber
 
-    ``aligner`` is deliberately injected. This module does not import WhisperX,
-    download model weights, or select a hosted provider while handling a request.
-    The adapter returns ``status`` (``completed`` or ``no_speech``) and raw
-    ``words`` containing ``text`` plus either microsecond times or seconds.
+    if ambient_organization_egress_context() is not None:
+        return NewApiSpeechTranscriber(organization=True, allow_segments=allow_segments)
+    api_key, base_url = get_newapi_runtime_credentials()
+    return NewApiSpeechTranscriber(api_key=api_key, base_url=base_url, allow_segments=allow_segments)
+
+
+def transcribe_media(
+    media_path: Path, language: str, *, aligner: SpeechTranscriber | None = None, allow_segments: bool = False
+) -> dict[str, Any]:
+    """Transcribe media through NewAPI into a normalized word timeline.
+
+    An injected adapter remains available for tests and dedicated callers.
     Unicode code-point spans are derived in stream order.
     """
     _validate_media_and_language(media_path, language)
-    with _SPEECH_ENGINE_SLOT:
-        raw = _require_aligner(aligner).transcribe(media_path, language)
+    if aligner is None:
+        raw = (configured_newapi_transcriber(allow_segments=True) if allow_segments else configured_newapi_transcriber()).transcribe(media_path, language)
+    else:
+        with _SPEECH_ENGINE_SLOT:
+            raw = aligner.transcribe(media_path, language)
+    if allow_segments and raw.get("status") == "completed" and not raw.get("words"):
+        segments = []
+        for segment in raw.get("segments", []):
+            if not isinstance(segment, dict) or not isinstance(segment.get("text"), str) or not segment["text"]:
+                raise ValueError("recognized segment text is required")
+            start, end = _word_times(segment)
+            segments.append({"text": segment["text"], "start_us": start, "end_us": end})
+        transcript = raw.get("transcript", "")
+        if not isinstance(transcript, str):
+            raise ValueError("recognized transcript must be text")
+        return {"media_hash": _sha256(media_path), "language": raw.get("language", language),
+                "status": "completed" if transcript or segments else "no_speech",
+                "transcript": transcript, "words": [], "segments": segments}
     return _normalize_result(
         raw,
         media_path=media_path,
@@ -55,7 +78,7 @@ def align_script(
     *,
     aligner: SpeechAligner | None = None,
 ) -> dict[str, Any]:
-    """Force-align a versioned script and return its normalized word timeline.
+    """Align a versioned script against timed recognition words.
 
     ``script`` requires ``revision`` and either ``dialogue`` or ``text``; its
     optional ``language`` is inferred from the script when absent. Set
@@ -177,82 +200,8 @@ def _spoken_script_positions(text: str) -> tuple[str, list[int] | None]:
 
 def _require_aligner(aligner: SpeechAligner | None) -> SpeechAligner:
     if aligner is None:
-        return configured_speech_aligner()
+        return configured_newapi_transcriber()
     return aligner
-
-
-def speech_engine_ready() -> bool:
-    """Report whether an explicitly enabled local engine can accept jobs."""
-    if os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE") != "whisperx":
-        return False
-    cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
-    python = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON")
-    available = Path(python).is_file() and os.access(python, os.X_OK) if python else importlib.util.find_spec("whisperx")
-    return bool(cache and Path(cache).is_dir() and available)
-
-
-def configured_speech_aligner() -> SpeechAligner:
-    """Build the opt-in adapter without downloading models during API startup."""
-    if os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE") != "whisperx":
-        raise RuntimeError("no speech aligner is configured")
-    cache = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE")
-    if not cache or not Path(cache).is_dir():
-        raise RuntimeError("WhisperX model cache must be an existing local directory")
-    python = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON")
-    if python:
-        if not Path(python).is_file() or not os.access(python, os.X_OK):
-            raise RuntimeError("WhisperX Python executable is unavailable")
-        return _ExternalWhisperXAligner(Path(python), Path(cache))
-    from novelvideo.freezone.remix.whisperx_adapter import WhisperXSpeechAligner
-
-    return WhisperXSpeechAligner(
-        model_cache=Path(cache),
-        model_name=os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small"),
-        device=os.getenv("DRAMACLAW_REMIX_DEVICE", "cpu"),
-        compute_type=os.getenv("DRAMACLAW_REMIX_COMPUTE_TYPE", "int8"),
-        batch_size=int(os.getenv("DRAMACLAW_REMIX_BATCH_SIZE", "4")),
-    )
-
-
-class _ExternalWhisperXAligner:
-    """Run WhisperX in its own Python environment to preserve project dependencies."""
-
-    def __init__(self, python: Path, model_cache: Path) -> None:
-        self.python = python
-        self.model_cache = model_cache
-
-    def transcribe(self, media_path: Path, language: str) -> dict[str, Any]:
-        return self._run("transcribe", media_path, language)
-
-    def align(self, media_path: Path, script: str, language: str) -> dict[str, Any]:
-        return self._run("align", media_path, language, script)
-
-    def _run(self, action: str, media_path: Path, language: str, script: str | None = None) -> dict[str, Any]:
-        request = {
-            "action": action,
-            "media_path": str(media_path),
-            "language": language,
-            "script": script,
-            "model_cache": str(self.model_cache),
-            "model_name": os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small"),
-            "device": os.getenv("DRAMACLAW_REMIX_DEVICE", "cpu"),
-            "compute_type": os.getenv("DRAMACLAW_REMIX_COMPUTE_TYPE", "int8"),
-            "batch_size": int(os.getenv("DRAMACLAW_REMIX_BATCH_SIZE", "4")),
-        }
-        worker = Path(__file__).with_name("whisperx_worker.py")
-        completed = subprocess.run(
-            [str(self.python), str(worker)], input=json.dumps(request),
-            text=True, capture_output=True, timeout=1800, check=False,
-        )
-        if completed.returncode:
-            raise RuntimeError(f"WhisperX worker failed: {completed.stderr[-2000:]}")
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("WhisperX worker returned invalid JSON") from error
-        if not isinstance(result, dict):
-            raise RuntimeError("WhisperX worker returned invalid result")
-        return result
 
 
 def _validate_media_and_language(media_path: Path, language: object) -> None:
@@ -286,7 +235,7 @@ def _normalize_result(
     if status == "no_speech":
         return {**common, "status": "no_speech", "transcript": "", "words": [], "confidence_available": False}
     if status == "script_mismatch":
-        return {
+        mismatch = {
             **common,
             "status": "script_mismatch",
             "transcript": "",
@@ -294,6 +243,11 @@ def _normalize_result(
             "confidence_available": False,
             "mismatch": raw.get("mismatch", {"reason": "speech aligner reported a script mismatch"}),
         }
+        recognized_transcript = raw.get("recognized_transcript")
+        if isinstance(recognized_transcript, str) and isinstance(raw.get("recognized_words"), list):
+            mismatch["recognized_transcript"] = recognized_transcript
+            mismatch["recognized_words"] = _normalize_words(raw["recognized_words"], recognized_transcript)
+        return mismatch
     if status != "completed":
         raise ValueError("speech aligner status must be completed, no_speech, or script_mismatch")
 

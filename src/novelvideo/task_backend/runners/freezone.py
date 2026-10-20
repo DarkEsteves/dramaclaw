@@ -350,6 +350,20 @@ async def _run_freezone_workflow_confirm_async(
                 raise RuntimeError("workflow canvas operation was not delivered")
             if status not in {"confirming", "submitted"}:
                 raise RuntimeError(f"invalid workflow confirmation status: {status}")
+            if attempt_started_at is not None:
+                from novelvideo.freezone.workflow_delivery import reconcile_workflow_draft_delivery
+
+                if await asyncio.to_thread(
+                    reconcile_workflow_draft_delivery,
+                    project_dir=Path(ctx.state_dir), canvas_id=canvas_id,
+                    draft_id=draft_id, task_id=run_task_id,
+                    attempt=attempt_started_at,
+                ):
+                    return {
+                        "ok": True, "draft_id": draft_id, "canvas_id": canvas_id,
+                        "revision": revision, "plan_digest": plan_digest,
+                        "delivery_status": "canvas_applied",
+                    }
             await asyncio.sleep(0.2)
     except BaseException:
         from novelvideo.freezone.workflow_drafts import (
@@ -362,7 +376,10 @@ async def _run_freezone_workflow_confirm_async(
                 project_dir=Path(ctx.state_dir),
                 canvas_id=canvas_id,
                 draft_id=draft_id,
-                outcome="ready",
+                # A worker exception proves no delivery result, not that the
+                # browser made no canvas changes. Retain this exact attempt
+                # for a late receipt or saved-graph reconciliation.
+                outcome="submitted",
                 expected_task_id=run_task_id,
                 expected_confirmation_started_at=attempt_started_at,
             )

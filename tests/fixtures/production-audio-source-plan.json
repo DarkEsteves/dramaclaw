@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "goal": "两人演示一件物品",
+  "output": {"width": 64, "height": 64, "fps_num": 25, "fps_den": 1},
+  "beats": [
+    {
+      "id": "demo",
+      "purpose": "两人连续问答",
+      "duration_frames": 50,
+      "turns": [
+        {"id": "ask", "speaker": "甲", "text": "怎么开始？", "speech_placement_id": "demo-video", "timing_basis": "estimated"},
+        {"id": "answer", "speaker": "乙", "text": "按这里。", "speech_placement_id": "demo-video", "timing_basis": "estimated"}
+      ]
+    }
+  ],
+  "resources": [],
+  "placements": [
+    {
+      "id": "demo-video", "kind": "visual", "role": "primary", "track_id": "picture",
+      "description": "两人完成问答演示", "source_audio": true,
+      "start": {"kind": "beat", "ref_id": "demo", "edge": "start"},
+      "end": {"kind": "beat", "ref_id": "demo", "edge": "end"}
+    }
+  ],
+  "provenance": {}
+}

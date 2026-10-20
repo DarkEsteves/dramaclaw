@@ -7,6 +7,7 @@ reservations and settlement remain owned by the external usage meter (EE).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -44,6 +45,7 @@ AGENT_PRODUCT_PRICE_REFERENCE = tuple(
 PENDING_STATUSES = {"admitting", "reserved", "running", "accepted", "submitted"}
 TERMINAL_STATUSES = {"delivered", "failed", "cancelled"}
 OPERATION_ID_RE = re.compile(r"^agent_product_[a-zA-Z0-9_-]{1,96}$")
+logger = logging.getLogger(__name__)
 
 
 RECIPE_COMPILE_MESSAGES = {
@@ -123,6 +125,17 @@ CREATE TABLE IF NOT EXISTS freezone_agent_product_operations (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_product_session
 ON freezone_agent_product_operations(generation_session_id, product_kind);
+CREATE TABLE IF NOT EXISTS freezone_agent_product_turn_bindings (
+    operation_id TEXT PRIMARY KEY,
+    turn_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    waiting_reason TEXT NOT NULL DEFAULT '',
+    waiting_receipt_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_product_turn_binding
+ON freezone_agent_product_turn_bindings(turn_id);
 CREATE TABLE IF NOT EXISTS freezone_recipe_model_prompts (
     operation_id          TEXT PRIMARY KEY,
     model_call_id         TEXT NOT NULL,
@@ -291,7 +304,22 @@ def read_agent_product_operation(
             "SELECT * FROM freezone_agent_product_operations WHERE operation_id = ?",
             (clean_id,),
         ).fetchone()
-    return _payload(row) if row is not None else None
+        if row is None:
+            return None
+        waiting = conn.execute(
+            """SELECT waiting_reason, waiting_receipt_json
+                 FROM freezone_agent_product_turn_bindings WHERE operation_id = ?""",
+            (clean_id,),
+        ).fetchone()
+    payload = _payload(row)
+    if (
+        payload["status"] in PENDING_STATUSES
+        and waiting is not None
+        and waiting["waiting_reason"]
+    ):
+        payload["waiting_reason"] = str(waiting["waiting_reason"])
+        payload["waiting_receipt"] = _json_object(waiting["waiting_receipt_json"])
+    return payload
 
 
 def list_agent_product_operations_for_session(
@@ -347,6 +375,327 @@ def bind_agent_product_task(
     return _payload(row)
 
 
+def bind_agent_product_turn_admission(
+    *, project_dir: Path, operation_id: str, expected_task_id: str,
+    turn_id: str, tool_call_id: str,
+    expected_project_id: str = "", expected_canvas_id: str = "",
+) -> dict[str, Any]:
+    """Bind a verified admission tool receipt to the running server turn.
+
+    The caller must extract both IDs from the successful server tool response,
+    never from a model-authored tool input. This does not create model evidence.
+    """
+    clean_turn = str(turn_id or "").strip()
+    clean_call = str(tool_call_id or "").strip()
+    clean_task = str(expected_task_id or "").strip()
+    if not clean_turn or not clean_call or not clean_task:
+        raise ValueError("trusted admission turn and task identity are required")
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM freezone_agent_product_operations WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("agent product operation not found")
+        operation = _payload(row)
+        if operation["task_id"] != clean_task:
+            raise ValueError("agent product operation task identity mismatch")
+        if expected_project_id and operation["project_id"] != expected_project_id:
+            raise ValueError("agent product operation project identity mismatch")
+        if expected_canvas_id and operation["canvas_id"] != expected_canvas_id:
+            raise ValueError("agent product operation canvas identity mismatch")
+        existing = conn.execute(
+            "SELECT * FROM freezone_agent_product_turn_bindings WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["turn_id"] != clean_turn
+                or existing["task_id"] != clean_task
+                or (existing["tool_call_id"] != clean_call
+                    and not str(existing["tool_call_id"]).startswith('resume:'))
+            ):
+                raise ValueError("agent product operation is bound to another turn")
+            if existing['tool_call_id'] != clean_call:
+                conn.execute(
+                    """UPDATE freezone_agent_product_turn_bindings
+                       SET tool_call_id=?, updated_at=? WHERE operation_id=?""",
+                    (clean_call, time.time(), operation_id),
+                )
+        else:
+            conn.execute(
+                """INSERT INTO freezone_agent_product_turn_bindings(
+                    operation_id, turn_id, task_id, tool_call_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)""",
+                (operation_id, clean_turn, clean_task, clean_call, time.time()),
+            )
+    return operation
+
+
+def record_agent_product_turn_wait(
+    *, project_dir: Path, operation_id: str, expected_task_id: str,
+    turn_id: str, waiting_reason: str, receipt_ref: dict[str, Any],
+) -> None:
+    """Record a durable, server-verified reason to retain a pending admission."""
+    reason = str(waiting_reason or "").strip()
+    receipt = receipt_ref if isinstance(receipt_ref, dict) else {}
+    if reason not in {"user_confirmation", "async_dependency", "native_task"}:
+        raise ValueError("invalid agent product waiting reason")
+    if not str(receipt.get("kind") or "").strip() or not str(receipt.get("id") or "").strip():
+        raise ValueError("waiting requires a durable receipt reference")
+    if receipt.get('kind') == 'clarification_bridge':
+        if (reason != 'user_confirmation' or not str(receipt.get('clarification_id') or '').strip()
+                or not str(receipt.get('event_fingerprint') or '').strip()
+                or type(receipt.get('expires_at')) not in {int, float}
+                or receipt['expires_at'] <= time.time()):
+            raise ValueError('clarification wait requires a live verified bridge receipt')
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT b.task_id, b.turn_id, o.status, o.project_id
+               FROM freezone_agent_product_turn_bindings AS b
+               JOIN freezone_agent_product_operations AS o USING(operation_id)
+              WHERE b.operation_id = ?""",
+            (operation_id,),
+        ).fetchone()
+        if row is None or row["turn_id"] != str(turn_id or "").strip():
+            raise ValueError("agent product operation is not bound to this turn")
+        if row["task_id"] != str(expected_task_id or "").strip():
+            raise ValueError("agent product operation task identity mismatch")
+        if row["status"] in TERMINAL_STATUSES:
+            raise ValueError("agent product operation is already terminal")
+        if reason == "native_task":
+            native_task_id = str(receipt.get("id") or "").strip()
+            native_task_type = str(receipt.get("task_type") or "").strip()
+            if (
+                receipt.get("kind") != "project_task"
+                or not native_task_type
+                or native_task_id == row["task_id"]
+            ):
+                raise ValueError("waiting requires an active native task")
+            native = conn.execute(
+                """SELECT status FROM task_states
+                    WHERE task_id = ? AND task_type = ? AND project_id = ?""",
+                (native_task_id, native_task_type, row["project_id"]),
+            ).fetchone()
+            if native is None or native["status"] not in {"submitting", "queued", "running"}:
+                raise ValueError("waiting requires an active native task")
+        conn.execute(
+            """UPDATE freezone_agent_product_turn_bindings
+                  SET waiting_reason = ?, waiting_receipt_json = ?, updated_at = ?
+                WHERE operation_id = ?""",
+            (reason, json.dumps(receipt, ensure_ascii=False), time.time(), operation_id),
+        )
+
+
+def _native_wait_is_active(
+    *, project_dir: Path, project_id: str, receipt: dict[str, Any],
+) -> bool:
+    if receipt.get("kind") != "project_task":
+        return False
+    with _connect(project_dir) as conn:
+        task = conn.execute(
+            """SELECT status FROM task_states
+                WHERE task_id = ? AND task_type = ? AND project_id = ?""",
+            (str(receipt.get("id") or ""),
+             str(receipt.get("task_type") or ""), project_id),
+        ).fetchone()
+    return bool(task and task["status"] in {"submitting", "queued", "running"})
+
+
+def _clarification_wait_is_live(receipt: dict[str, Any]) -> bool:
+    expires = receipt.get('expires_at')
+    return type(expires) in {int, float} and expires > time.time()
+
+
+def pending_agent_product_operations_for_turn(
+    *, project_dir: Path, turn_id: str, project_id: str, canvas_id: str,
+) -> list[dict[str, Any]]:
+    """Return scoped admissions; a caller must not guess when several exist."""
+    with _connect(project_dir) as conn:
+        rows = conn.execute(
+            """SELECT o.* FROM freezone_agent_product_operations AS o
+               JOIN freezone_agent_product_turn_bindings AS b USING(operation_id)
+              WHERE b.turn_id=? AND o.project_id=? AND o.canvas_id=?
+                AND o.status IN ('admitting','reserved','running','accepted','submitted')
+              ORDER BY o.created_at, o.operation_id""",
+            (turn_id, project_id, canvas_id),
+        ).fetchall()
+    return [_payload(row) for row in rows]
+
+
+def transfer_agent_product_clarification_wait(
+    *, project_dir: Path, old_turn_id: str, new_turn_id: str,
+    bridge_key: str, clarification_id: str, project_id: str, canvas_id: str,
+) -> list[str]:
+    """Move a verified answered wait to its host-created continuation turn."""
+    if not old_turn_id or not new_turn_id or old_turn_id == new_turn_id:
+        raise ValueError('distinct continuation turns are required')
+    moved: list[str] = []
+    with _connect(project_dir) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        rows = conn.execute(
+            """SELECT b.operation_id,b.waiting_reason,b.waiting_receipt_json
+               FROM freezone_agent_product_turn_bindings AS b
+               JOIN freezone_agent_product_operations AS o USING(operation_id)
+              WHERE b.turn_id=? AND o.project_id=? AND o.canvas_id=?
+                AND o.status IN ('admitting','reserved','running','accepted','submitted')""",
+            (old_turn_id, project_id, canvas_id),
+        ).fetchall()
+        for row in rows:
+            receipt = _json_object(row['waiting_receipt_json'])
+            if (row['waiting_reason'] != 'user_confirmation'
+                    or receipt.get('kind') != 'clarification_bridge'
+                    or receipt.get('id') != bridge_key
+                    or receipt.get('clarification_id') != clarification_id
+                    or receipt.get('project_id') != project_id
+                    or receipt.get('canvas_id') != canvas_id
+                    or not _clarification_wait_is_live(receipt)):
+                continue
+            conn.execute(
+                """UPDATE freezone_agent_product_turn_bindings
+                   SET turn_id=?, tool_call_id=?, waiting_reason='',
+                       waiting_receipt_json='{}', updated_at=? WHERE operation_id=?""",
+                (new_turn_id, 'resume:' + bridge_key, time.time(), row['operation_id']),
+            )
+            moved.append(row['operation_id'])
+    return moved
+
+
+def settle_agent_product_turn(
+    *, project_dir: Path, turn_id: str, outcome: str,
+) -> list[dict[str, Any]]:
+    """Settle admissions only after the server turn exits or its lease is lost.
+
+    Tool failures inside a live turn never call this function, leaving the same
+    admission available for a corrected tool invocation. Task projection is
+    repeated on every call so interruption between stores is repairable.
+    """
+    clean_turn = str(turn_id or "").strip()
+    clean_outcome = str(outcome or "").strip()
+    if not clean_turn or clean_outcome not in {"completed", "failed", "cancelled", "interrupted"}:
+        raise ValueError("valid turn identity and terminal outcome are required")
+    with _connect(project_dir) as conn:
+        rows = conn.execute(
+            """SELECT o.*, b.waiting_reason, b.waiting_receipt_json
+               FROM freezone_agent_product_operations AS o
+               JOIN freezone_agent_product_turn_bindings AS b
+                 ON b.operation_id = o.operation_id AND b.task_id = o.task_id
+              WHERE b.turn_id = ? ORDER BY o.created_at, o.operation_id""",
+            (clean_turn,),
+        ).fetchall()
+    settled: list[dict[str, Any]] = []
+    from novelvideo.task_state import reconcile_agent_product_task_for_operation
+
+    for row in rows:
+        operation = _payload(row)
+        if operation["status"] not in TERMINAL_STATUSES:
+            waiting = str(row["waiting_reason"] or "").strip()
+            receipt = _json_object(row["waiting_receipt_json"])
+            valid_wait = bool(waiting and receipt.get("kind") and receipt.get("id"))
+            if valid_wait and waiting == "native_task":
+                valid_wait = _native_wait_is_active(
+                    project_dir=project_dir, project_id=operation["project_id"],
+                    receipt=receipt,
+                )
+            if valid_wait and receipt.get('kind') == 'clarification_bridge':
+                valid_wait = (waiting == 'user_confirmation'
+                              and _clarification_wait_is_live(receipt)
+                              and receipt.get('project_id') == operation['project_id']
+                              and receipt.get('canvas_id') == operation['canvas_id'])
+            if valid_wait and clean_outcome != "cancelled":
+                settled.append({**operation, "waiting_reason": waiting, "waiting_receipt": receipt})
+                continue
+            target = "cancelled" if clean_outcome == "cancelled" else "failed"
+            try:
+                operation = finish_agent_product_operation(
+                    project_dir=project_dir, operation_id=operation["operation_id"],
+                    outcome=target, expected_task_id=operation["task_id"],
+                    result_ref={},
+                )
+            except ValueError as exc:
+                if "another terminal outcome" not in str(exc):
+                    raise
+                # A delivery can commit between the snapshot above and our
+                # finalization. The persisted terminal result wins.
+                current = read_agent_product_operation(
+                    project_dir=project_dir, operation_id=operation["operation_id"]
+                )
+                if current is None or current["status"] not in TERMINAL_STATUSES:
+                    raise
+                operation = current
+        reconcile_agent_product_task_for_operation(project_dir=project_dir, operation=operation)
+        settled.append(operation)
+    return settled
+
+
+def reconcile_expired_agent_product_turns(
+    *, project_dir: Path, expired_turn_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Recover turns whose owner lease was verified lost by the caller.
+
+    Elapsed operation age is not evidence of a lost turn: an explicit user wait
+    can last indefinitely. The lease owner supplies only expired turn IDs.
+    """
+    settled: list[dict[str, Any]] = []
+    for turn_id in sorted({str(value or "").strip() for value in expired_turn_ids} - {""}):
+        settled.extend(
+            settle_agent_product_turn(
+                project_dir=project_dir, turn_id=turn_id, outcome="interrupted"
+            )
+        )
+    return settled
+
+
+def reconcile_agent_product_task_projections(*, project_dir: Path) -> list[dict[str, str]]:
+    """Replay terminal operation outcomes left between operation/task writes."""
+    # An unanswered parameter card has a bounded transport lifetime. Once it
+    # expires, the next ordinary task reconciliation closes its reservation
+    # instead of leaving a running placeholder indefinitely.
+    with _connect(project_dir) as conn:
+        waiting_rows = conn.execute(
+            """SELECT b.turn_id,b.waiting_receipt_json
+               FROM freezone_agent_product_turn_bindings AS b
+               JOIN freezone_agent_product_operations AS o USING(operation_id)
+              WHERE b.waiting_reason='user_confirmation'
+                AND o.status IN ('admitting','reserved','running','accepted','submitted')"""
+        ).fetchall()
+    expired_turns = {
+        row['turn_id'] for row in waiting_rows
+        if (receipt := _json_object(row['waiting_receipt_json'])).get('kind') == 'clarification_bridge'
+        and not _clarification_wait_is_live(receipt)
+    }
+    for turn_id in sorted(expired_turns):
+        settle_agent_product_turn(project_dir=project_dir, turn_id=turn_id, outcome='interrupted')
+    with _connect(project_dir) as conn:
+        rows = conn.execute(
+            """SELECT * FROM freezone_agent_product_operations
+                WHERE status IN ('delivered', 'failed', 'cancelled')
+                  AND task_id != '' ORDER BY updated_at, operation_id"""
+        ).fetchall()
+    from novelvideo.task_state import reconcile_agent_product_task_for_operation
+
+    projections: list[dict[str, str]] = []
+    for row in rows:
+        operation = _payload(row)
+        try:
+            task_status = reconcile_agent_product_task_for_operation(
+                project_dir=project_dir, operation=operation
+            )
+        except ValueError:
+            logger.warning(
+                "agent product task projection identity conflict: operation_id=%s",
+                operation["operation_id"], exc_info=True,
+            )
+            continue
+        if task_status is not None:
+            projections.append(
+                {"operation_id": operation["operation_id"], "task_status": task_status}
+            )
+    return projections
+
+
 def bind_agent_product_model_execution(
     *,
     project_dir: Path,
@@ -399,12 +748,35 @@ def bind_agent_product_model_execution(
             raise ValueError("agent product operation is already terminal")
         existing = payload["model_evidence"]
         if existing:
-            if existing != evidence:
+            if existing == evidence:
+                return payload
+            if not (
+                existing.get("source") == clean_source == "server_observed_agent_turn"
+                and existing.get("turn_id") == evidence.get("turn_id")
+                and evidence.get("turn_id")
+            ):
                 raise ValueError(
                     "agent product operation is bound to another model execution"
                 )
-            return payload
         now = time.time()
+        if evidence.get("turn_id"):
+            turn_binding = conn.execute(
+                "SELECT turn_id, task_id FROM freezone_agent_product_turn_bindings WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if turn_binding is not None and (
+                turn_binding["turn_id"] != evidence["turn_id"]
+                or turn_binding["task_id"] != payload["task_id"]
+            ):
+                raise ValueError("agent product operation is bound to another turn")
+            if turn_binding is None and payload["task_id"]:
+                conn.execute(
+                    """INSERT INTO freezone_agent_product_turn_bindings(
+                        operation_id, turn_id, task_id, tool_call_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)""",
+                    (operation_id, evidence["turn_id"], payload["task_id"],
+                     evidence.get("tool_call_id", ""), now),
+                )
         conn.execute(
             """
             UPDATE freezone_agent_product_operations

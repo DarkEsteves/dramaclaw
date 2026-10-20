@@ -53,6 +53,7 @@ import {
 import {
   consumeQueuedLocalFreezoneProjections,
   registerFreezoneCanvasRuntime,
+  type FreezoneCanvasBaseline,
 } from "./canvasSyncRuntime";
 import {
   mergeProjectedCanvasWithLocalCanvas,
@@ -757,6 +758,7 @@ export function useCanvasSync(
   // is how we ignore pure view-state churn. Seeded on hydrate so the initial
   // measure/select pass after load doesn't fire a redundant save.
   const lastSignatureRef = useRef<string | null>(null);
+  const remoteBaselineRef = useRef<FreezoneCanvasBaseline | null>(null);
   // All save scheduling for the currently-loaded canvas. Replaced (and the old
   // one disposed) on every hydrate and every remote refresh, so queued work can
   // never survive into a canvas it was not written for. See
@@ -917,6 +919,7 @@ export function useCanvasSync(
       hydratedRef,
       switchingRef,
       lastRemoteNodeCountRef,
+      remoteBaselineRef,
       setStatus: setSyncStatus,
       setError,
       snapshotConflict,
@@ -1063,9 +1066,11 @@ export function useCanvasSync(
         : { nodes: remoteNodes, edges: remoteEdges };
       const remoteSignature = canvasContentSignature(remoteNodes, remoteEdges);
       const nextSignature = canvasContentSignature(next.nodes, next.edges);
-      const mergedLocalWork = Boolean(merge) && nextSignature !== remoteSignature;
+      const mergedMetadata = Object.prototype.hasOwnProperty.call(next, 'metadata');
+      const mergedLocalWork = Boolean(merge) && (nextSignature !== remoteSignature || (mergedMetadata && JSON.stringify(next.metadata) !== JSON.stringify(remote.metadata)));
       const remoteRevision =
         typeof remote.revision === "number" ? remote.revision : null;
+      remoteBaselineRef.current = { nodes: remoteNodes, edges: remoteEdges, revision: remoteRevision, metadata: remote.metadata ?? null };
       revisionRef.current = remoteRevision;
       setRevision(remoteRevision);
       canvasEnvelopeRef.current = canvasEnvelopeFromRemote(remote);
@@ -1077,7 +1082,7 @@ export function useCanvasSync(
       pendingClientSaveIdRef.current = null;
       pendingClientSaveIdSignatureRef.current = null;
       clearCanvasDraft(project, canvasId);
-      const meta = (remote.metadata ?? null) as
+      const meta = ((mergedMetadata ? next.metadata : remote.metadata) ?? null) as
         | (Record<string, unknown> & { shotMetadata?: ShotMetadata })
         | null;
       metadataRef.current = meta;
@@ -1155,7 +1160,10 @@ export function useCanvasSync(
       applyCanvasDataEdit(next.nodes, next.edges);
       saveProjectionEditNow();
       return true;
-    }, () => revisionRef.current);
+    }, () => revisionRef.current,
+    () => hydratedRef.current && !switchingRef.current && remoteBaselineRef.current
+      ? { ...remoteBaselineRef.current, localMetadata: buildPersistMetadata(useShotMetadataStore.getState().shot) }
+      : null);
   }, [applyCanvasDataEdit, project, canvasId, setCanvasData]);
 
   // ---- 1. Hydrate ---- //
@@ -1174,6 +1182,7 @@ export function useCanvasSync(
     setSyncStatus("loading");
     setError(null);
     lastSignatureRef.current = null;
+    remoteBaselineRef.current = null;
     revisionRef.current = null;
     metadataRef.current = null;
     setRevision(null);
@@ -1226,6 +1235,7 @@ export function useCanvasSync(
         publishForeignMediaRefs(project, canvasId, remote.foreign_media ?? []);
         const nodes = (remote.nodes ?? []) as Parameters<typeof setCanvasData>[0];
         const edges = (remote.edges ?? []) as Parameters<typeof setCanvasData>[1];
+        remoteBaselineRef.current = { nodes, edges, revision: remoteRevision, metadata: remote.metadata ?? null };
         const meta = (remote.metadata ?? null) as
           | (Record<string, unknown> & { shotMetadata?: ShotMetadata })
           | null;
@@ -1850,6 +1860,7 @@ interface SaveArgs {
   hydratedRef: { current: boolean };
   switchingRef: { current: boolean };
   lastRemoteNodeCountRef: { current: number };
+  remoteBaselineRef?: { current: FreezoneCanvasBaseline | null };
   setStatus: (s: CanvasSyncStatus) => void;
   setError: (e: string | null) => void;
   /**
@@ -2058,6 +2069,9 @@ function consumeSaveResponse(
   // Record what the server now sees so the next dangerous-empty check has
   // an up-to-date baseline.
   args.lastRemoteNodeCountRef.current = args.nodes.length;
+  if (args.remoteBaselineRef) {
+    args.remoteBaselineRef.current = { nodes: args.nodes as CanvasNode[], edges: args.edges as CanvasEdge[], revision: args.revisionRef.current, metadata: args.metadata ?? null };
+  }
   args.markDraftPersisted?.(
     canvasDraftSignature(
       args.nodes as CanvasNode[],

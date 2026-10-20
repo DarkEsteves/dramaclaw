@@ -19,6 +19,14 @@ function loadLocale(language: string): unknown {
 }
 
 describe("locale translation files", () => {
+  it.each(["en", "zh", "vi"])("defines %s display names for reference-remix node types", (language) => {
+    const translations = loadLocale(language) as { node: { displayName: Record<string, string> } };
+    for (const type of ["transcriptNode", "semanticTimelineNode"]) {
+      expect(translations.node.displayName[type]).toEqual(expect.any(String));
+      expect(translations.node.displayName[type].length).toBeGreaterThan(0);
+    }
+  });
+
   it.each(["en", "zh", "vi"])("%s translation JSON is valid", (language) => {
     const content = readFileSync(`public/locales/${language}/translation.json`, "utf8");
 

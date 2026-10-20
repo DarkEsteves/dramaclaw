@@ -100,8 +100,13 @@ def test_only_audited_self_contained_builtin_runners_are_placement_free():
         "freezone_image_vectorize",
         "freezone_image_animate_gif",
         "remix_render",
+        "remix_rebuild_production_index",
         "remix_transcribe_media",
+        "remix_adopt_source_speech",
+        "remix_analyze_material_speech",
         "remix_align_script",
+        "remix_align_production_speech",
+        "remix_compile_take_timeline",
     }
     assert {
         task: project_task_lane(task) for task in laned
@@ -109,8 +114,13 @@ def test_only_audited_self_contained_builtin_runners_are_placement_free():
         "freezone_image_vectorize": "ffmpeg",
         "freezone_image_animate_gif": "ffmpeg",
         "remix_render": "ffmpeg",
-        "remix_transcribe_media": "speech",
-        "remix_align_script": "speech",
+        "remix_rebuild_production_index": "default",
+        "remix_adopt_source_speech": "default",
+        "remix_analyze_material_speech": "default",
+        "remix_transcribe_media": "default",
+        "remix_align_script": "default",
+        "remix_align_production_speech": "default",
+        "remix_compile_take_timeline": "default",
     }
 
 
@@ -287,6 +297,9 @@ def test_gif_runner_converts_shared_output_without_project_state(
 
     from PIL import Image
     from novelvideo.task_backend.runners import freezone  # noqa: F401
+    # Import-time gateway settings use a global SQLite database. Prewarm the
+    # API dependency before the guard below checks project-state isolation.
+    from novelvideo.api import deps  # noqa: F401
 
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg unavailable")
@@ -498,3 +511,17 @@ def test_entry_check_resolves_placement_after_builtin_runners_are_imported(
         )
 
     assert calls == ["imported"]
+
+
+def test_queue_and_limit_configuration_only_contains_four_existing_lanes():
+    from novelvideo.task_backend import limits
+    from novelvideo.task_backend.queues import normalize_queue_kind
+
+    expected = {"default", "video", "world", "ffmpeg"}
+    assert QUEUE_KINDS == expected
+    for defaults in (limits.PROJECT_LANE_LIMIT_DEFAULTS, limits.PROJECT_LANE_MIN_DEFAULTS,
+                     limits.PROJECT_USER_LANE_LIMIT_DEFAULTS, limits.GLOBAL_LANE_CONCURRENCY_DEFAULTS,
+                     limits.GLOBAL_LANE_QUEUE_LIMIT_DEFAULTS):
+        assert set(defaults) == expected
+    with pytest.raises(ValueError, match="unknown queue kind"):
+        normalize_queue_kind("speech")

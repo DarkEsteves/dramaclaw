@@ -1,7 +1,9 @@
 import { attachCompletedStoryAsset, attachCompletedStoryFrame, ensureVideoContinuity, syncStoryVideoReferencePrompt } from "@/features/canvas/application/videoContinuity";
 import { getOrCaptureVideoFrame } from "@/features/canvas/application/videoCaptureFrame";
 import * as videoReferenceEnvelope from "@/features/canvas/application/videoReferenceEnvelope";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as nativeReferenceCanvasApi from '@/api/canvas';
+import * as referenceApiClient from '@/api/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createFreezoneWorkflowRun,
@@ -14,14 +16,24 @@ import { ApiError } from "@/api/client";
 import { CANVAS_NODE_TYPES } from "@/features/canvas/domain/canvasNodes";
 import { canvasEventBus } from "@/features/canvas/application/canvasServices";
 import { subscribeNodeAction } from "@/features/canvas/application/nodeActionResult";
+import { registerFreezoneCanvasRuntime } from "@/features/freezone/canvasSyncRuntime";
 import { buildCanvasOntologyContext } from "@/features/canvas/ontology/canvasOntology";
 import {
   applyCanvasChatCommands,
   applyCanvasChatCommandsAsync,
   workflowGenerationTargetsForPreflight,
+  type CanvasChatCommandApplyResult,
   cancelCanvasWorkflowExecution,
   type CanvasCommandApprovalEventDetail,
   canvasCommandEnvelopeMatchesCanvas,
+  canvasCommandEnvelopesRunInBackground,
+  canvasCommandEnvelopesRequireDurableAcceptance,
+  nativeProductionWorkflowAcceptance,
+  nativeProductionAcceptanceFromResult,
+  canvasGraphNeedsDurableFlush,
+  workflowRunIdempotencyKeyForBridge,
+  ordinaryMediaActionNeedsReconciliation,
+  isCanvasChatRunNodeAction,
   CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
   type CanvasChatCommandEnvelope,
   emitCanvasCommandApproval,
@@ -45,6 +57,7 @@ import {
   shouldIncludeCanvasSummary,
 } from "@/features/freezone/chatNodeReferences";
 import { buildCanvasNodeActionCatalog } from "@/features/freezone/canvasNodeActionCatalog";
+import { importStoryKeyframes } from "@/features/canvas/remix/storyMediaImport";
 import { validateCanvasChatCommandEnvelopes } from "@/features/freezone/context/canvasCommandValidator";
 import { openPresetProjectionInMyCanvas } from "@/features/freezone/openPresetProjection";
 import { personalCanvasIdForUsername } from "@/features/freezone/projections";
@@ -119,9 +132,84 @@ vi.mock("@/features/freezone/openPresetProjection", () => ({
 }));
 
 describe("canvas chat commands", () => {
+  it("confirms a create-only workflow graph without starting generation", async () => {
+    const checkpoints: string[] = [];
+    const unregister = registerFreezoneCanvasRuntime("project-a", "canvas-a", () => true,
+      async () => true);
+    try {
+      const result = await applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{
+        schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "create_node", client_id: "image", node_type: CANVAS_NODE_TYPES.imageGen,
+          data: { prompt: "Product", workflowInstanceId: "workflow_draft_create_only",
+            workflowPlanNodeId: "image", workflowDraftRevision: 1,
+            workflowConfirmationTaskId: "task-create-only" } }],
+      }]), {
+        projectId: "project-a", canvasId: "canvas-a", bridgeKey: "bridge-create-only",
+        beforeWorkflowActions: async () => {
+          checkpoints.push("graph-delivered");
+          return { graph_state: "delivered", draft_id: "workflow_draft_create_only",
+            revision: 1, task_id: "task-create-only", canvas_revision: 2 };
+        },
+      });
+      expect(checkpoints).toEqual(["graph-delivered"]);
+      expect(result.errors).toEqual([]);
+      expect(createFreezoneWorkflowRun).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+  it("does not admit workflow actions when the saved graph checkpoint is not delivered", async () => {
+    const checkpoints: string[] = [];
+    const unregister = registerFreezoneCanvasRuntime("project-a", "canvas-a", () => true,
+      async () => true);
+    try {
+    const result = await applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{
+      schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+      commands: [
+        { type: "create_node", client_id: "image", node_type: CANVAS_NODE_TYPES.imageGen,
+          data: { prompt: "An ordinary product", workflowInstanceId: "workflow_draft_test",
+            workflowPlanNodeId: "image", workflowDraftRevision: 1,
+            workflowConfirmationTaskId: "task-test" } },
+        { type: "run_workflow", node_ids: ["image"] },
+      ],
+    }]), {
+      projectId: "project-a", canvasId: "canvas-a", bridgeKey: "bridge-test",
+      beforeWorkflowActions: async (graph) => {
+        checkpoints.push("graph");
+        expect(graph.createdNodeIds.length).toBeGreaterThan(0);
+        expect(createFreezoneWorkflowRun).not.toHaveBeenCalled();
+        return { graph_state: "pending", draft_id: "workflow_draft_test",
+          revision: 1, task_id: "task-test", canvas_revision: null };
+      },
+    });
+    expect(checkpoints).toEqual(["graph"]);
+    expect(createFreezoneWorkflowRun).not.toHaveBeenCalled();
+    expect(result.errors).toContain("工作流画布尚未确认保存，动作未提交");
+    } finally {
+      unregister();
+    }
+  });
+  let releaseNativeCompletionFixture: (() => void) | undefined;
+  afterEach(() => releaseNativeCompletionFixture?.());
   beforeEach(() => {
     useCanvasStore.getState().setCanvasData([], []);
     useAuthStore.setState({ username: null, role: null });
+    // Positive callback fixtures represent a genuine completed native task.
+    // Bare-URL race tests deliberately omit this callback and supply their own
+    // late/invalid task descriptor, so the fixture cannot repair those cases.
+    releaseNativeCompletionFixture = canvasEventBus.subscribe('freezone/node-action-result', (payload) => {
+      if (payload.status !== 'success') return;
+      const field = payload.action === 'generate_image' ? 'imageUrl'
+        : payload.action === 'generate_audio' ? 'audioUrl'
+        : ['generate_video', 'generate_text_video'].includes(payload.action) ? 'videoUrl' : null;
+      const node = useCanvasStore.getState().nodes.find((item) => item.id === payload.nodeId);
+      if (!field || typeof node?.data[field] !== 'string' || !node.data[field]) return;
+      useCanvasStore.getState().updateNodeData(payload.nodeId, {
+        generationTaskKey: `task:native-fixture:${payload.requestId}`,
+        generationTaskType: `native-fixture:${payload.action}`,
+        generationTaskJobId: `job:native-fixture:${payload.requestId}`,
+      });
+    });
     vi.mocked(openPresetProjectionInMyCanvas).mockClear();
     uploadFreezoneImage.mockReset();
     uploadFreezoneImage.mockResolvedValue({ url: "/static/project/tail-frame.png" });
@@ -190,6 +278,163 @@ describe("canvas chat commands", () => {
 
     resolvePersistence();
     await expect(boundary).resolves.toBeNull();
+  });
+
+  it("submits native production actions in the background after durable admission", () => {
+    const planAction = { commands: [{ type: "run_node_action", node_id: "plan",
+      action: "generate_production_plan_draft" }] } as unknown as CanvasChatCommandEnvelope;
+    expect(canvasCommandEnvelopesRunInBackground([planAction])).toBe(true);
+    expect(canvasCommandEnvelopesRequireDurableAcceptance([planAction])).toBe(true);
+  });
+
+  it("keeps keyframe import executable without classifying it as generation", () => {
+    const keyframeImport = { commands: [{ type: "run_node_action", node_id: "story",
+      action: "import_reference_keyframes", parameters: { shot_numbers: ["2"] } }] } as unknown as CanvasChatCommandEnvelope;
+    expect(isCanvasChatRunNodeAction("import_reference_keyframes")).toBe(true);
+    expect(canvasCommandEnvelopesRunInBackground([keyframeImport])).toBe(false);
+    expect(canvasCommandEnvelopesRequireDurableAcceptance([keyframeImport])).toBe(false);
+    expect(extractCanvasChatCommandEnvelopes([{
+      schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+      commands: keyframeImport.commands,
+    }])).toEqual([expect.objectContaining({
+      commands: [expect.objectContaining({ action: "import_reference_keyframes" })],
+    })]);
+  });
+
+  it("returns the existing node-action result for keyframe import", async () => {
+    const storyId = useCanvasStore.getState().addNode(CANVAS_NODE_TYPES.videoStory, { x: 0, y: 0 }, {
+      rows: [{ shotNumber: 2, keyframeUrl: "/static/projects/demo/shot-2.png" }],
+      referenceEvents: [],
+    });
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      if (payload.action !== "import_reference_keyframes" || !payload.requestId) return;
+      const rawShotNumbers = payload.parameters?.shot_numbers;
+      const output = importStoryKeyframes(payload.nodeId, {
+        shotNumbers: Array.isArray(rawShotNumbers)
+          ? rawShotNumbers.filter((value): value is string => typeof value === "string")
+          : undefined,
+      });
+      canvasEventBus.publish("freezone/node-action-result", {
+        requestId: payload.requestId,
+        nodeId: payload.nodeId,
+        action: payload.action,
+        status: "success",
+        output,
+      });
+    });
+    try {
+      const result = await applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{
+        schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_node_action", node_id: storyId,
+          action: "import_reference_keyframes", parameters: { shot_numbers: ["2"] } }],
+      }]), { actionTimeoutMs: 500 });
+      expect(result.errors).toEqual([]);
+      expect(result.applied).toBe(1);
+      expect(result.commandResults).toContainEqual(expect.objectContaining({
+        status: "success",
+        action: "import_reference_keyframes",
+        output: expect.objectContaining({ imported: 1, createdNodeIds: expect.any(Array) }),
+      }));
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("accepts native production only with a matching persisted operation and task", () => {
+    const run = { run_id: "run-1", status: "running", actions: [{ node_id: "plan", action: "generate_production_plan_draft",
+      status: "running", processing_operation_id: "operation-1", task_key: "native-task", task_id: "task-1" }] } as unknown as FreezoneWorkflowRun;
+    expect(nativeProductionWorkflowAcceptance(run, "plan", "generate_production_plan_draft")).toEqual({
+      workflow_run_id: "run-1", operation_id: "operation-1", task_id: "task-1",
+      node_id: "plan", action: "generate_production_plan_draft", completion_owner: "host",
+    });
+    expect(nativeProductionWorkflowAcceptance({ ...run, actions: [{ ...run.actions[0], task_id: null }] }, "plan", "generate_production_plan_draft")).toBeNull();
+    expect(nativeProductionWorkflowAcceptance(run, "other-plan", "generate_production_plan_draft")).toBeNull();
+    expect(nativeProductionWorkflowAcceptance(run, "plan", "compile_production_plan")).toBeNull();
+  });
+
+  it("accepts a mixed command only after every immediate command finished", () => {
+    const receipt = { workflow_run_id: "run-1", operation_id: "operation-1", task_id: "task-1",
+      node_id: "plan", action: "generate_production_plan_draft", completion_owner: "host" };
+    const result = { applied: 1, openedUiActions: 0, createdNodeIds: ["plan"], errors: [], commandResults: [
+      { commandIndex: 0, type: "create_node", status: "success", label: "创建节点" },
+      { commandIndex: 1, type: "run_node_action", status: "pending", label: "起草作品方案",
+        nodeId: "plan", action: "generate_production_plan_draft", output: { pending: true, reason: "native_action_accepted", ...receipt } },
+    ] } as CanvasChatCommandApplyResult;
+    expect(nativeProductionAcceptanceFromResult(result)).toEqual(receipt);
+    expect(nativeProductionAcceptanceFromResult({ ...result, commandResults: [
+      { ...result.commandResults[0], status: "error" }, result.commandResults[1],
+    ] })).toBeNull();
+    expect(nativeProductionAcceptanceFromResult({ ...result, commandResults: [
+      { ...result.commandResults[0], status: "pending" }, result.commandResults[1],
+    ] })).toBeNull();
+  });
+
+  it("accepts a server-owned workflow with two native actions before task ids are returned", () => {
+    const result = { applied: 2, openedUiActions: 0, createdNodeIds: ["plan-a", "plan-b"], errors: [], commandResults: [
+      { commandIndex: 0, type: "create_node", status: "success", label: "创建节点" },
+      { commandIndex: 1, type: "run_node_action", status: "pending", label: "起草方案 A",
+        nodeId: "plan-a", action: "generate_production_plan_draft", output: {
+          pending: true, reason: "native_action_accepted", workflow_run_id: "run-1", completion_owner: "host",
+          node_id: "plan-a", action: "generate_production_plan_draft",
+        } },
+      { commandIndex: 1, type: "run_node_action", status: "pending", label: "起草方案 B",
+        nodeId: "plan-b", action: "generate_production_plan_draft", output: {
+          pending: true, reason: "native_action_accepted", workflow_run_id: "run-1", completion_owner: "host",
+          node_id: "plan-b", action: "generate_production_plan_draft",
+        } },
+    ] } as CanvasChatCommandApplyResult;
+    expect(nativeProductionAcceptanceFromResult(result)).toEqual({ workflow_run_id: "run-1", completion_owner: "host" });
+    expect(nativeProductionAcceptanceFromResult({ ...result, commandResults: [
+      result.commandResults[0], result.commandResults[1], { ...result.commandResults[2], output: {
+        ...result.commandResults[2].output, workflow_run_id: "other-run",
+      } },
+    ] })).toBeNull();
+  });
+
+  it("saves successful graph commands even when their later action fails", () => {
+    const result = { applied: 1, openedUiActions: 0, createdNodeIds: ["plan"],
+      errors: ["generation failed"], commandResults: [
+        { commandIndex: 0, type: "create_node", status: "success", label: "创建", createdNodeId: "plan" },
+        { commandIndex: 1, type: "run_node_action", status: "error", label: "起草", error: "generation failed" },
+      ] } as CanvasChatCommandApplyResult;
+    expect(canvasGraphNeedsDurableFlush(result)).toBe(true);
+    expect(canvasGraphNeedsDurableFlush({ ...result, commandResults: [
+      result.commandResults[0], { ...result.commandResults[1], type: "create_edge" },
+    ] })).toBe(false);
+  });
+
+  it("reuses one workflow run identity for the same approved bridge", () => {
+    expect(workflowRunIdempotencyKeyForBridge("bridge-1")).toBe(workflowRunIdempotencyKeyForBridge("bridge-1"));
+    expect(workflowRunIdempotencyKeyForBridge("bridge-1.executor.first"))
+      .toBe(workflowRunIdempotencyKeyForBridge("bridge-1.executor.second"));
+    expect(workflowRunIdempotencyKeyForBridge("bridge-1")).not.toBe(workflowRunIdempotencyKeyForBridge("bridge-2"));
+  });
+
+  it("does not resubmit ordinary media when a recovered run already started it", () => {
+    const run = { run_id: "run-1", status: "running", actions: [{
+      node_id: "image", action: "generate_image", status: "running",
+    }] } as unknown as FreezoneWorkflowRun;
+    expect(ordinaryMediaActionNeedsReconciliation(run, "image", "generate_image")).toBe(true);
+    expect(ordinaryMediaActionNeedsReconciliation({ ...run, actions: [{ ...run.actions[0], status: "pending" }] },
+      "image", "generate_image")).toBe(false);
+    expect(ordinaryMediaActionNeedsReconciliation(run, "image", "save")).toBe(false);
+  });
+
+  it("accepts the admitted native stage while later workflow stages are deferred", () => {
+    const result = { applied: 1, openedUiActions: 0, createdNodeIds: [], errors: [], commandResults: [
+      { commandIndex: 0, type: "run_node_action", status: "pending", label: "起草方案",
+        nodeId: "plan", action: "generate_production_plan_draft", output: {
+          pending: true, reason: "native_action_accepted", workflow_run_id: "run-1",
+          completion_owner: "host", node_id: "plan", action: "generate_production_plan_draft",
+        } },
+      { commandIndex: 1, type: "run_node_action", status: "pending", label: "后续阶段",
+        nodeId: "compose", action: "compile_production_plan", output: {
+          pending: true, reason: "workflow_stage_deferred",
+        } },
+    ] } as CanvasChatCommandApplyResult;
+    expect(nativeProductionAcceptanceFromResult(result)).toEqual({
+      workflow_run_id: "run-1", completion_owner: "host",
+    });
   });
 
   it("returns a workflow creation failure instead of waiting for durable acceptance", async () => {
@@ -497,6 +742,7 @@ describe("canvas chat commands", () => {
     expect(second.commandResults).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          type: "create_node",
           status: "success",
           output: {
             skipped: true,
@@ -505,6 +751,14 @@ describe("canvas chat commands", () => {
         }),
       ]),
     );
+    useCanvasStore.setState({ edges: [] });
+    const resumed = applyCanvasChatCommands(envelopes);
+    expect(resumed.errors).toEqual([]);
+    expect(resumed.createdNodeIds).toEqual([]);
+    expect(useCanvasStore.getState().edges).toHaveLength(1);
+    expect(resumed.commandResults).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "create_edge", status: "success" }),
+    ]));
   });
 
   it("does not create internal or derived node types from assistant create commands", () => {
@@ -709,6 +963,49 @@ describe("canvas chat commands", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("preserves and checks an external analysis snapshot without rerunning the reference workflow", async () => {
+    const store = useCanvasStore.getState();
+    const analysis = { sourceVideoUrl: "/static/project/ref.mp4", rawResult: { video_story: { summary: "结构" } }, referenceBlueprintRef: null, blueprintDirty: false };
+    const sourceId = store.addNode(CANVAS_NODE_TYPES.videoStory, { x: 0, y: 0 }, analysis);
+    const targetId = store.addNode(CANVAS_NODE_TYPES.imageGen, { x: 360, y: 0 }, { prompt: "作品画面" });
+    const unrelatedId = store.addNode(CANVAS_NODE_TYPES.imageGen, { x: 360, y: 300 }, { prompt: "别的分支" });
+    store.addEdge(sourceId, unrelatedId);
+    const created = applyCanvasChatCommands(extractCanvasChatCommandEnvelopes([{
+      schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+      commands: [{ type: "create_edge", source: sourceId, target: targetId, link_type: "media_input_for", expected_source_analysis_snapshot: analysis }],
+    }]));
+    expect(created.errors).toEqual([]);
+    expect(useCanvasStore.getState().edges.find((edge) => edge.target === targetId)?.data).toMatchObject({ workflowExternalInputAnalysisSnapshot: analysis });
+    const events: string[] = [];
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      events.push(payload.nodeId);
+      if (!payload.requestId) return;
+      store.updateNodeData(payload.nodeId, { imageUrl: "/static/project/result.png" });
+      canvasEventBus.publish("freezone/node-action-result", { requestId: payload.requestId, nodeId: payload.nodeId, action: payload.action, status: "success" });
+    });
+    try {
+      const envelope = extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION, commands: [{ type: "run_workflow", node_ids: [targetId] }] }]);
+      const result = await applyCanvasChatCommandsAsync(envelope, { canvasId: "canvas-a", actionTimeoutMs: 100 });
+      expect(result.errors).toEqual([]);
+      expect(events).toEqual([targetId]);
+      store.updateNodeData(sourceId, { rawResult: { video_story: { summary: "已修改" } } });
+      events.length = 0;
+      const guarded = extractCanvasChatCommandEnvelopes([{
+        schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [
+          { type: "create_node", client_id: "new-plan", node_type: CANVAS_NODE_TYPES.script, data: { displayName: "不可创建" } },
+          { type: "create_edge", source: sourceId, target: "new-plan", link_type: "media_input_for", expected_source_analysis_snapshot: analysis },
+        ],
+      }]);
+      const validation = validateCanvasChatCommandEnvelopes(guarded, useCanvasStore.getState().nodes, useCanvasStore.getState().edges);
+      expect(validation.ok).toBe(false);
+      expect(validation.issues.some((issue) => issue.message.includes("workflow source analysis changed"))).toBe(true);
+      const stale = await applyCanvasChatCommandsAsync(envelope, { canvasId: "canvas-a", actionTimeoutMs: 100 });
+      expect(stale.errors.some((error) => error.includes("workflow source analysis changed"))).toBe(true);
+      expect(events).toEqual([]);
+    } finally { unsubscribe(); }
   });
 
   it("rejects invented image model ids before creating image nodes", () => {
@@ -8939,6 +9236,33 @@ describe("canvas chat commands", () => {
     }
   });
 
+  it("keeps a recovered paid media action pending without dispatching it twice", async () => {
+    const imageNodeId = useCanvasStore.getState().addNode(
+      CANVAS_NODE_TYPES.imageGen, { x: 0, y: 0 }, { prompt: "原任务仍待核对" },
+    );
+    vi.mocked(createFreezoneWorkflowRun).mockResolvedValueOnce({
+      run_id: "recovered-run", status: "running", actions: [{
+        node_id: imageNodeId, action: "generate_image", status: "running",
+      }],
+    } as FreezoneWorkflowRun);
+    const events: unknown[] = [];
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (event) => events.push(event));
+    try {
+      const result = await applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{
+        schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_workflow", node_ids: [imageNodeId] }],
+      }]), { projectId: "project-a", canvasId: "canvas-recovered-media", bridgeKey: "bridge.executor.new" });
+      expect(events).toHaveLength(0);
+      expect(result.commandResults).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "run_node_action", status: "pending" }),
+      ]));
+      expect(vi.mocked(updateFreezoneWorkflowRun).mock.calls.some(([, , , body]) => body.status === "completed"))
+        .toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("serializes distinct workflow runs on the same canvas instead of discarding them", async () => {
     const firstNodeId = useCanvasStore.getState().addNode(
       CANVAS_NODE_TYPES.imageGen,
@@ -9228,6 +9552,7 @@ describe("canvas chat commands", () => {
         {
           projectId: "project-a",
           canvasId: "canvas-a",
+          bridgeKey: "agent-command.executor.owner-token",
           actionTimeoutMs: 100,
         },
       );
@@ -9245,6 +9570,7 @@ describe("canvas chat commands", () => {
         ],
         expect.stringMatching(/^canvas-run:/),
         expect.stringMatching(/^canvas-runner:/),
+        "agent-command.executor.owner-token",
       );
       expect(updateFreezoneWorkflowRun).toHaveBeenLastCalledWith(
         "project-a",
@@ -9289,6 +9615,27 @@ describe("canvas chat commands", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("reports the bound plan node when bridged admission rejects another plan", async () => {
+    const store = useCanvasStore.getState();
+    const planNodeId = store.addNode(CANVAS_NODE_TYPES.imageGen, { x: 0, y: 0 }, {
+      prompt: "image",
+    });
+    vi.mocked(createFreezoneWorkflowRun).mockRejectedValueOnce(new ApiError(
+      "Conflict", 409, { detail: { code: "bound_plan_node_required", node_id: "plan-a" } },
+    ));
+
+    const result = await applyCanvasChatCommandsAsync(
+      extractCanvasChatCommandEnvelopes([{
+        schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_node_action", node_id: planNodeId,
+          action: "generate_image" }],
+      }]),
+      { projectId: "project-a", canvasId: "canvas-a", bridgeKey: "bridge.executor.token" },
+    );
+
+    expect(result.errors.join(" ")).toContain("plan-a");
   });
 
   it("does not start node actions when the workflow run cannot be persisted", async () => {
@@ -9553,6 +9900,193 @@ describe("canvas chat commands", () => {
   });
 
   it.each([
+    [CANVAS_NODE_TYPES.video, "generate_video", "videoUrl"],
+    [CANVAS_NODE_TYPES.imageGen, "generate_image", "imageUrl"],
+    [CANVAS_NODE_TYPES.audio, "generate_audio", "audioUrl"],
+  ])("persists late real task identity when a %s URL wins the native callback race", async (kind, action, field) => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(kind, { x: 0, y: 0 }, { prompt: "Media", text: "Literal narration" });
+    const task = { task_key: "task:real-current", task_type: "real-generation-type", job_id: "real-job" };
+    let bound = false;
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async (_p, _c, _r, body) => {
+      if (body.action_updates?.some((item) => item.task_key === task.task_key && item.task_type === task.task_type && item.job_id === task.job_id)) bound = true;
+      return { run_id: "run-test", status: body.status === "completed" && bound ? "completed" : "running", actions: [] } as unknown as FreezoneWorkflowRun;
+    });
+    vi.mocked(getFreezoneWorkflowRun).mockImplementation(async () => ({ run_id: "run-test", status: bound ? "completed" : "running", actions: [] }) as unknown as FreezoneWorkflowRun);
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      if (!payload.requestId) return;
+      canvasEventBus.publish("freezone/node-action-accepted", { requestId: payload.requestId, nodeId, action: payload.action });
+      // Task admission is later than the old 5s probe. The URL arrives first,
+      // and no explicit node-action-result is sent: this is the real fallback.
+      window.setTimeout(() => store.updateNodeData(nodeId, { [field]: "/static/project/new-media" }), 6_000);
+      window.setTimeout(() => store.updateNodeData(nodeId, { generationTaskKey: task.task_key, generationTaskType: task.task_type, generationTaskJobId: task.job_id }), 6_100);
+    });
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_workflow", node_ids: [nodeId] }] }]),
+      { projectId: "project-a", canvasId: "canvas-a", actionTimeoutMs: 10_000, actionResultFieldTimeoutMs: 500 });
+      await vi.advanceTimersByTimeAsync(13_000);
+      const result = await pending;
+      expect(result.errors).toEqual([]);
+      expect(result.commandResults).toContainEqual(expect.objectContaining({ nodeId, action, status: "success" }));
+      expect(updateFreezoneWorkflowRun).toHaveBeenCalledWith("project-a", "canvas-a", "run-test", expect.objectContaining({ action_updates: expect.arrayContaining([expect.objectContaining({ node_id: nodeId, ...task })]) }));
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it("keeps native 200-running pending and its heartbeat until genuine settlement", async () => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: "Video" });
+    const started = Date.now();
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async (_p, _c, _r, body) => ({ run_id: "run-test", status: body.status === "failed" ? "failed" : "running", actions: [] }) as unknown as FreezoneWorkflowRun);
+    vi.mocked(getFreezoneWorkflowRun).mockImplementation(async () => ({ run_id: "run-test", status: Date.now() - started >= 17_000 ? "completed" : "running", actions: [] }) as unknown as FreezoneWorkflowRun);
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      if (!payload.requestId) return;
+      canvasEventBus.publish("freezone/node-action-accepted", { requestId: payload.requestId, nodeId, action: payload.action });
+      store.updateNodeData(nodeId, { generationTaskKey: "task:current", generationTaskType: "freezone_video_gen", generationTaskJobId: "job-current" });
+      window.setTimeout(() => store.updateNodeData(nodeId, { videoUrl: "/static/project/video.mp4" }), 10);
+    });
+    let finished = false;
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_workflow", node_ids: [nodeId] }] }]), { projectId: "project-a", canvasId: "canvas-a", actionTimeoutMs: 30_000, actionResultFieldTimeoutMs: 20_000 });
+      void pending.then(() => { finished = true; });
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(finished).toBe(false);
+      expect(vi.mocked(updateFreezoneWorkflowRun).mock.calls.filter(([, , , body]) => body.status === "running" && !body.action_updates).length).toBeGreaterThanOrEqual(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect((await pending).errors).toEqual([]);
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it.each(["old", "incomplete", "wrong-type"])("does not persist a %s descriptor as new media proof", async (descriptor) => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: "Video",
+      ...(descriptor === "old" ? { generationTaskKey: "task:old", generationTaskType: "freezone_video_gen", generationTaskJobId: "old-job" } : {}) });
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async (_p, _c, _r, body) => ({ run_id: "run-test", status: body.status === "failed" ? "failed" : "running", actions: [] }) as unknown as FreezoneWorkflowRun);
+    vi.mocked(getFreezoneWorkflowRun).mockResolvedValue({ run_id: "run-test", status: "running", actions: [] } as unknown as FreezoneWorkflowRun);
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      if (!payload.requestId) return;
+      canvasEventBus.publish("freezone/node-action-accepted", { requestId: payload.requestId, nodeId, action: payload.action });
+      window.setTimeout(() => store.updateNodeData(nodeId, { videoUrl: "/static/project/new.mp4",
+        ...(descriptor === "incomplete" ? { generationTaskKey: "task:partial" } : {}),
+        ...(descriptor === "wrong-type" ? { generationTaskKey: 42, generationTaskType: "freezone_video_gen", generationTaskJobId: "new-job" } : {}) }), 10);
+    });
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: "run_workflow", node_ids: [nodeId] }] }]), { projectId: "project-a", canvasId: "canvas-a", actionTimeoutMs: 200, actionResultFieldTimeoutMs: 100 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.commandResults.filter((row) => row.type === "run_node_action" && row.nodeId === nodeId && row.status === "success")).toEqual([]);
+      expect(vi.mocked(updateFreezoneWorkflowRun).mock.calls.flatMap(([, , , body]) => body.action_updates ?? []).every((row) => !row.task_key && !row.task_type && !row.job_id)).toBe(true);
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it.each(['cancel', 'scope'])('stops task-reference synchronization on %s without adopting later metadata', async (ending) => {
+    vi.useFakeTimers();
+    const unregister = registerFreezoneCanvasRuntime('project-a', 'canvas-a', () => true);
+    let unregisterOther: (() => void) | undefined;
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: 'Video' });
+    let calls = 0;
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async (_p, _c, _r, body) => ({ run_id: 'run-test', status: body.status === 'cancelled' ? 'cancelled' : 'running', actions: [] }) as unknown as FreezoneWorkflowRun);
+    vi.mocked(getFreezoneWorkflowRun).mockResolvedValue({ run_id: 'run-test', status: 'running', actions: [] } as unknown as FreezoneWorkflowRun);
+    const unsubscribe = canvasEventBus.subscribe('freezone/run-node-action', (payload) => {
+      if (!payload.requestId) return;
+      calls += 1;
+      canvasEventBus.publish('freezone/node-action-accepted', { requestId: payload.requestId, nodeId, action: payload.action });
+      window.setTimeout(() => store.updateNodeData(nodeId, { videoUrl: '/static/project/completed.mp4' }), 10);
+      window.setTimeout(() => {
+        if (ending === 'cancel') cancelCanvasWorkflowExecution('canvas-a');
+        else unregisterOther = registerFreezoneCanvasRuntime('project-a', 'canvas-b', () => true);
+      }, 20);
+      window.setTimeout(() => store.updateNodeData(nodeId, { generationTaskKey: 'task:late-peer', generationTaskType: 'freezone_video_gen', generationTaskJobId: 'late-peer' }), 40);
+    });
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: 'run_workflow', node_ids: [nodeId] }] }]), { projectId: 'project-a', canvasId: 'canvas-a', actionTimeoutMs: 200, actionResultFieldTimeoutMs: 100 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+      expect(calls).toBe(1);
+      expect(vi.mocked(updateFreezoneWorkflowRun).mock.calls.flatMap(([, , , body]) => body.action_updates ?? []).some((row) => row.task_key === 'task:late-peer')).toBe(false);
+      expect(updateFreezoneWorkflowRun).toHaveBeenCalledWith('project-a', 'canvas-a', 'run-test', expect.objectContaining({ status: 'cancelled' }));
+    } finally { unsubscribe(); unregisterOther?.(); unregister(); vi.useRealTimers(); }
+  });
+
+  it('does not treat a new task descriptor beside an unchanged media URL as a new result', async () => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: 'Video', videoUrl: '/static/project/old.mp4' });
+    const unsubscribe = canvasEventBus.subscribe('freezone/run-node-action', (payload) => {
+      if (!payload.requestId) return;
+      canvasEventBus.publish('freezone/node-action-accepted', { requestId: payload.requestId, nodeId, action: payload.action });
+      store.updateNodeData(nodeId, { generationTaskKey: 'task:new', generationTaskType: 'freezone_video_gen', generationTaskJobId: 'new-job' });
+    });
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: 'run_workflow', node_ids: [nodeId], regenerate: true }] }]), { projectId: 'project-a', canvasId: 'canvas-a', actionTimeoutMs: 100, actionRetryDelayMs: 0 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.commandResults.some((row) => row.type === 'run_node_action' && row.status === 'success')).toBe(false);
+      expect(store.nodes.find((node) => node.id === nodeId)?.data.workflowGeneratedAt).toBeUndefined();
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it.each(['failed', 'cancelled', 'interrupted'] as const)('does not report success when native %s arrives during settlement', async (status) => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: 'Video' });
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async () => ({ run_id: 'run-test', status: 'running', actions: [] }) as unknown as FreezoneWorkflowRun);
+    vi.mocked(getFreezoneWorkflowRun).mockResolvedValueOnce({ run_id: 'run-test', status: 'running', actions: [] } as unknown as FreezoneWorkflowRun)
+      .mockResolvedValue({ run_id: 'run-test', status, actions: [] } as unknown as FreezoneWorkflowRun);
+    const unsubscribe = canvasEventBus.subscribe('freezone/run-node-action', (payload) => {
+      if (!payload.requestId) return;
+      canvasEventBus.publish('freezone/node-action-accepted', { requestId: payload.requestId, nodeId, action: payload.action });
+      store.updateNodeData(nodeId, { videoUrl: '/static/project/new.mp4' });
+      canvasEventBus.publish('freezone/node-action-result', { requestId: payload.requestId, nodeId, action: payload.action, status: 'success' });
+    });
+    try {
+      const pending = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: 'run_workflow', node_ids: [nodeId] }] }]), { projectId: 'project-a', canvasId: 'canvas-a', actionTimeoutMs: 500, actionResultFieldTimeoutMs: 200 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.commandResults.some((row) => row.type === 'run_node_action' && row.nodeId === nodeId && row.status === 'success')).toBe(false);
+      expect(result.errors.some((message) => message.includes(status))).toBe(true);
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it('normalizes settlement GET failure and explicitly ends the owned run without regeneration', async () => {
+    vi.useFakeTimers();
+    const store = useCanvasStore.getState();
+    const nodeId = store.addNode(CANVAS_NODE_TYPES.video, { x: 0, y: 0 }, { prompt: 'Video' });
+    let invocations = 0;
+    vi.mocked(updateFreezoneWorkflowRun).mockImplementation(async (_p, _c, _r, body) => ({ run_id: 'run-test', status: body.status === 'failed' ? 'failed' : 'running', actions: [] }) as unknown as FreezoneWorkflowRun);
+    vi.mocked(getFreezoneWorkflowRun).mockResolvedValueOnce({ run_id: 'run-test', status: 'running', actions: [] } as unknown as FreezoneWorkflowRun)
+      .mockRejectedValue(new Error('settlement network failure'));
+    const unsubscribe = canvasEventBus.subscribe('freezone/run-node-action', (payload) => {
+      if (!payload.requestId) return;
+      invocations += 1;
+      canvasEventBus.publish('freezone/node-action-accepted', { requestId: payload.requestId, nodeId, action: payload.action });
+      store.updateNodeData(nodeId, { videoUrl: '/static/project/new.mp4' });
+      canvasEventBus.publish('freezone/node-action-result', { requestId: payload.requestId, nodeId, action: payload.action, status: 'success' });
+    });
+    try {
+      const execution = applyCanvasChatCommandsAsync(extractCanvasChatCommandEnvelopes([{ schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+        commands: [{ type: 'run_workflow', node_ids: [nodeId] }] }]), { projectId: 'project-a', canvasId: 'canvas-a', actionTimeoutMs: 500, actionResultFieldTimeoutMs: 200 });
+      const pending = execution.then((value) => ({ value, thrown: null }), (thrown: unknown) => ({ value: null, thrown }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const outcome = await pending;
+      expect(outcome.thrown).toBeNull();
+      expect(outcome.value?.errors.some((message) => message.includes('settlement network failure'))).toBe(true);
+      expect(outcome.value?.commandResults.some((row) => row.type === 'run_node_action' && row.nodeId === nodeId && row.status === 'success')).toBe(false);
+      expect(updateFreezoneWorkflowRun).toHaveBeenCalledWith('project-a', 'canvas-a', 'run-test', expect.objectContaining({ status: 'failed', runner_id: expect.any(String) }));
+      expect(invocations).toBe(1);
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it.each([
     [
       "interrupted",
       "工作流运行已结束（interrupted），已停止启动后续节点；请继续工作流以完成未完成的部分。",
@@ -9642,7 +10176,8 @@ describe("canvas chat commands", () => {
         { projectId: "project-a", canvasId: "canvas-a", actionTimeoutMs: 100 },
       );
       expect(getFreezoneWorkflowRun).toHaveBeenCalledWith("project-a", "canvas-a", "run-test", 10);
-      expect(result.errors).toEqual([]);
+      if (reconciledStatus === 'running') expect(result.errors).toContain('生成产物已到达，但服务端执行证明尚未同步；请核对当前任务记录后继续，勿重复生成。');
+      else expect(result.errors).toEqual([]);
       expect(result.commandResults).toContainEqual(expect.objectContaining({
         nodeId: imageNodeId, status: expectedStepStatus,
       }));
@@ -11663,5 +12198,71 @@ describe("explicit workflow node scope", () => {
     store.addEdgeWithData(b, compose, { link_type: "media_input_for" });
     const targets = workflowGenerationTargetsForPreflight({ type: "run_workflow", node_ids: [a], direction: "node" });
     expect(targets.map((target) => target.nodeId)).toEqual([a]);
+  });
+});
+
+describe('approved native reference analysis command', () => {
+  it('starts the exact durable run from the async executor once and returns its receipt', async () => {
+    useCanvasStore.getState().setCanvasData([{ id: 'original', type: CANVAS_NODE_TYPES.video, position: {x:0,y:0},
+      data: {videoUrl: '/static/projects/project-a/video.mp4'} }], []);
+    const baseline = {nodes:useCanvasStore.getState().nodes,edges:[],revision:1};
+    const apply = vi.fn((remote, merge) => {
+      const local = useCanvasStore.getState();
+      const merged = merge(remote.nodes,remote.edges,local.nodes,local.edges);
+      local.setCanvasData(merged.nodes,merged.edges);
+      return true;
+    });
+    const unregister = registerFreezoneCanvasRuntime('project-a', 'canvas-a', apply, async () => true,undefined,undefined,undefined,() => baseline);
+    const saved = vi.spyOn(nativeReferenceCanvasApi,'getFreezoneCanvas').mockResolvedValue({project_id:'project-a',canvas_id:'canvas-a',revision:2,
+      nodes:[...baseline.nodes,{id:'native-transcript',type:CANVAS_NODE_TYPES.transcript,position:{x:600,y:0},data:{status:'needs_review'}},
+        {id:'native-story',type:CANVAS_NODE_TYPES.videoStory,position:{x:1140,y:0},data:{rows:[],isAnalyzing:true}}],
+      edges:[{id:'native-transcript-link',source:'original',target:'native-transcript'},
+        {id:'native-link',source:'original',target:'native-story'},
+        {id:'native-dependency',source:'native-transcript',target:'native-story'}]} as Awaited<ReturnType<typeof nativeReferenceCanvasApi.getFreezoneCanvas>>);
+    const run = {run_id:'native-run',project_id:'project-a',canvas_id:'canvas-a',agent_id:'director',source_node_id:'original',
+      analysis_node_id:'native-story',transcript_node_id:'native-transcript',status:'transcribing',task_id:'actual-task',task_key:'actual-key'};
+    const start = vi.spyOn(referenceApiClient, 'apiCall').mockResolvedValue(run);
+    const envelope: CanvasChatCommandEnvelope = {schema_version:CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,project_id:'project-a',canvas_id:'canvas-a',
+      commands:[{type:'run_node_action',node_id:'original',action:'run_video_analyze_story',parameters:{reference_analysis:{
+        project_id:'project-a',canvas_id:'canvas-a',source_node_id:'original',agent_id:'director',user_goal:'换成自己的产品',inputs:{plan_count:1},idempotency_key:'approved-reference'}}}]};
+    try {
+      const first = await applyCanvasChatCommandsAsync([envelope], {projectId:'project-a',canvasId:'canvas-a',actionAcceptTimeoutMs:1,actionTimeoutMs:5});
+      const second = await applyCanvasChatCommandsAsync([envelope], {projectId:'project-a',canvasId:'canvas-a',actionAcceptTimeoutMs:1,actionTimeoutMs:5});
+      expect(first.errors).toEqual([]);
+      expect(first.commandResults[0]?.output).toEqual({reference_analysis_run:run});
+      expect(second.commandResults[0]?.output).toEqual({reference_analysis_run:run});
+      expect(start).toHaveBeenCalledOnce();
+      expect(apply).toHaveBeenCalledOnce();
+      expect(useCanvasStore.getState().nodes.some(node => node.id === 'native-story')).toBe(true);
+      expect(useCanvasStore.getState().nodes.some(node => node.id === 'native-transcript')).toBe(true);
+      expect(useCanvasStore.getState().pendingFocusNodeId).toBe('native-transcript');
+      expect(start).toHaveBeenCalledWith('projects/project-a/freezone/canvases/canvas-a/reference-analysis-runs', {method:'POST',json:{
+        source_node_id:'original',agent_id:'director',user_goal:'换成自己的产品',inputs:{plan_count:1},idempotency_key:'approved-reference'}});
+    } finally {start.mockRestore();saved.mockRestore();unregister();}
+  });
+});
+
+describe('native reference admission fences', () => {
+  it.each(['source','scope'])('does not start a reference task if %s changes while saving approval', async (change) => {
+    useCanvasStore.getState().setCanvasData([{id:'original',type:CANVAS_NODE_TYPES.video,position:{x:0,y:0},data:{videoUrl:'/static/projects/project-a/video.mp4'}}],[]);
+    let release!: (ok:boolean)=>void;
+    const flush = vi.fn(()=>new Promise<boolean>(resolve=>{release=resolve;}));
+    const unregister = registerFreezoneCanvasRuntime('project-a','canvas-a',()=>true,flush);
+    const start = vi.spyOn(referenceApiClient,'apiCall');
+    let other: (()=>void) | undefined;
+    const envelope: CanvasChatCommandEnvelope = {schema_version:CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,project_id:'project-a',canvas_id:'canvas-a',commands:[{
+      type:'run_node_action',node_id:'original',action:'run_video_analyze_story',parameters:{reference_analysis:{project_id:'project-a',canvas_id:'canvas-a',source_node_id:'original',
+        user_goal:'复刻',inputs:{},idempotency_key:`fenced-${change}`,agent_id:'director'}}}]};
+    try {
+      const execution = applyCanvasChatCommandsAsync([envelope],{projectId:'project-a',canvasId:'canvas-a'});
+      await vi.waitFor(()=>expect(flush).toHaveBeenCalledOnce());
+      if(change==='source')useCanvasStore.getState().updateNodeData('original',{videoUrl:'/static/projects/project-a/replaced.mp4'});
+      else other=registerFreezoneCanvasRuntime('project-a','other',()=>true);
+      release(true);
+      const result = await execution;
+      expect(result.errors).toHaveLength(1);
+      expect(start).not.toHaveBeenCalled();
+      expect(result.commandResults[0]?.status).toBe('error');
+    }finally{start.mockRestore();other?.();unregister();}
   });
 });

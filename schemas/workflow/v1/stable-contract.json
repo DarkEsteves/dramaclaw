@@ -56,14 +56,22 @@
     "transcribe_media",
     "align_script",
     "compile_semantic_timeline",
-    "render_manifest"
+    "render_manifest",
+    "generate_production_plan_draft",
+    "generate_production_plan_arrangement",
+    "align_production_speech",
+    "compile_production_plan"
   ],
   "processing_action_input_roles": {
     "analyze_reference_video": ["reference_media"],
     "transcribe_media": ["reference_media"],
     "align_script": ["narration", "script"],
     "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
-    "render_manifest": ["composition_manifest"]
+    "render_manifest": ["composition_manifest"],
+    "generate_production_plan_draft": ["blueprint"],
+    "generate_production_plan_arrangement": ["production_plan"],
+    "align_production_speech": ["production_plan"],
+    "compile_production_plan": ["production_plan"]
   },
   "model_aliases_by_node_type": {
     "imageGenNode": {

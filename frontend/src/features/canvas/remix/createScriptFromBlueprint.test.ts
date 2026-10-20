@@ -11,7 +11,6 @@ const state = { nodes: [] as unknown[], edges: [] as unknown[], addNode, addEdge
 vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: { getState: () => state } }));
 
 import { createScriptFromBlueprint } from './createScriptFromBlueprint';
-import { consumeRemixScriptEditorRequest } from './remixScriptEditorRequests';
 
 describe('createScriptFromBlueprint', () => {
   beforeEach(() => {
@@ -27,7 +26,7 @@ describe('createScriptFromBlueprint', () => {
     state.edges = [];
   });
 
-  it('creates and opens one production plan for a new adaptation', () => {
+  it('creates and opens a production plan for a new adaptation', () => {
     expect(createScriptFromBlueprint('story-1')).toBe('script-new');
     expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 480, y: 20 }, expect.objectContaining({
       remixRole: 'production_plan',
@@ -37,37 +36,35 @@ describe('createScriptFromBlueprint', () => {
     expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
     expect(setSelectedNode).toHaveBeenCalledWith('script-new');
     expect(requestFocusNode).toHaveBeenCalledWith('script-new');
-    expect(consumeRemixScriptEditorRequest('script-new')).toBe(false);
   });
 
-  it('reopens a connected script without replacing or duplicating it', () => {
+  it('creates a new plan without opening an existing legacy script', () => {
     state.nodes.push({ id: 'script-existing', type: 'scriptNode', data: { remixRole: 'adaptation_script', remixScriptRef: { artifactId: 'saved-script', revision: 2 } } });
     state.edges = [{ source: 'story-1', target: 'script-existing' }];
-    expect(createScriptFromBlueprint('story-1')).toBe('script-existing');
-    expect(addNode).not.toHaveBeenCalled();
-    expect(addEdge).not.toHaveBeenCalled();
-    expect(setSelectedNode).toHaveBeenCalledWith('script-existing');
-    expect(requestFocusNode).toHaveBeenCalledWith('script-existing');
-    expect(consumeRemixScriptEditorRequest('script-existing')).toBe(true);
+    expect(createScriptFromBlueprint('story-1')).toBe('script-new');
+    expect(addNode).toHaveBeenCalledOnce();
+    expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
+    expect(updateNodeData).not.toHaveBeenCalledWith('script-existing', expect.anything());
   });
 
-  it('opens an existing production plan if that is the connected script', () => {
+  it('creates another plan when one is already connected', () => {
     state.nodes.push({ id: 'plan-existing', type: 'scriptNode', data: { remixRole: 'production_plan', productionPlanRef: { artifactId: 'plan', revision: 1 } } });
     state.edges = [{ source: 'story-1', target: 'plan-existing' }];
-    expect(createScriptFromBlueprint('story-1')).toBe('plan-existing');
-    expect(addNode).not.toHaveBeenCalled();
-    expect(updateNodeData).toHaveBeenCalledWith('plan-existing', { productionPlanOpenOnCreate: true });
+    expect(createScriptFromBlueprint('story-1')).toBe('script-new');
+    expect(addNode).toHaveBeenCalledOnce();
+    expect(addEdge).toHaveBeenCalledWith('story-1', 'script-new');
+    expect(updateNodeData).not.toHaveBeenCalledWith('plan-existing', expect.anything());
   });
 
-  it('opens an existing plan ahead of a legacy script when both are connected', () => {
-    state.nodes.push(
-      { id: 'plan-empty', type: 'scriptNode', data: { remixRole: 'production_plan' } },
-      { id: 'script-filled', type: 'scriptNode', data: { remixRole: 'adaptation_script', remixScriptDraft: { dialogue: '新台词' } } },
-    );
-    state.edges = [{ source: 'story-1', target: 'plan-empty' }, { source: 'story-1', target: 'script-filled' }];
-    expect(createScriptFromBlueprint('story-1')).toBe('plan-empty');
-    expect(addNode).not.toHaveBeenCalled();
-    expect(updateNodeData).toHaveBeenCalledWith('plan-empty', { productionPlanOpenOnCreate: true });
+  it('creates separate drafts for repeated clicks', () => {
+    addNode.mockReturnValueOnce('plan-first').mockReturnValueOnce('plan-second');
+    expect(createScriptFromBlueprint('story-1')).toBe('plan-first');
+    expect(createScriptFromBlueprint('story-1')).toBe('plan-second');
+    expect(addEdge).toHaveBeenNthCalledWith(1, 'story-1', 'plan-first');
+    expect(addEdge).toHaveBeenNthCalledWith(2, 'story-1', 'plan-second');
+    const first = addNode.mock.calls[0][2] as { productionPlanV2Draft: object };
+    const second = addNode.mock.calls[1][2] as { productionPlanV2Draft: object };
+    expect(first.productionPlanV2Draft).not.toBe(second.productionPlanV2Draft);
   });
 
   it('keeps the analyzed story as context for a new production plan', () => {

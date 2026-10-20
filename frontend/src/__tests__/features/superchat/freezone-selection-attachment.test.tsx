@@ -19,6 +19,7 @@ const superChatMocks = vi.hoisted(() => ({
   busy: false,
   activeTurnId: null as string | null,
   showToolEvents: false,
+  upsertAssistantMessagePart: vi.fn(),
   replaceAssistantMessagePart: vi.fn(),
 }));
 
@@ -195,7 +196,7 @@ vi.mock("@/features/superchat/use-superchat", () => ({
     streamText: "",
     switchModel: vi.fn(),
     togglePin: vi.fn(),
-    upsertAssistantMessagePart: vi.fn(),
+    upsertAssistantMessagePart: superChatMocks.upsertAssistantMessagePart,
     removeAssistantMessagePart: vi.fn(),
     replaceAssistantMessagePart: superChatMocks.replaceAssistantMessagePart,
   }),
@@ -221,6 +222,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
     vi.useRealTimers();
     superChatMocks.send.mockClear();
     superChatMocks.appendNotification.mockClear();
+    superChatMocks.upsertAssistantMessagePart.mockClear();
     superChatMocks.messages = [];
     superChatMocks.busy = false;
     superChatMocks.activeTurnId = null;
@@ -867,7 +869,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
     expect(screen.queryByRole("button", { name: "aiAssistant.actions.copy" })).not.toBeInTheDocument();
   });
 
-  it("keeps the thinking placeholder visible when only usage metadata has arrived", () => {
+  it("keeps the thinking placeholder visible when usage and an empty plan update have arrived", () => {
     superChatMocks.busy = true;
     superChatMocks.activeTurnId = "turn-a";
     superChatMocks.messages = [
@@ -892,6 +894,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
             type: "agent_usage",
             event: { usage: { size: 131072, used: 85913 } },
           },
+          { id: "plan", type: "agent_plan", event: { text: "Preparing plan", entries: [] } },
         ],
       },
     ];
@@ -911,6 +914,65 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
 
     expect(screen.getByText("正在思考中")).toBeInTheDocument();
     expect(screen.queryByLabelText("上下文用量")).not.toBeInTheDocument();
+  });
+
+  it("does not render an empty assistant bubble for a production card reference", () => {
+    superChatMocks.messages = [
+      {
+        id: "reference-card",
+        role: "assistant",
+        text: "",
+        displayName: "Agent",
+        timestamp: Date.now(),
+        turnId: "reference-card-turn",
+        parts: [{
+          id: "card-ref",
+          type: "reference_production",
+          event: { type: "reference.production.card", ref: { artifact_id: "direction", revision: 1 } },
+        }],
+      },
+    ];
+
+    render(
+      <SuperChatPanel
+        variant="freezone"
+        canvasId="canvas-a"
+        currentCanvasSelection={[]}
+        currentCanvasOntologyContext={buildCanvasOntologyContext([], [], {
+          canvasId: "canvas-a",
+          selectedNodeIds: [],
+        })}
+        pendingAttachments={[]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "aiAssistant.actions.copy" })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-id="reference-card"]')).not.toBeInTheDocument();
+  });
+
+  it("marks a failed production operation as an error reply", () => {
+    superChatMocks.messages = [{
+      id: "failed-production",
+      role: "assistant",
+      text: "操作未完成：Unsupported commission event",
+      timestamp: Date.now(),
+      turnId: "turn-a",
+    }];
+
+    render(
+      <SuperChatPanel
+        variant="freezone"
+        canvasId="canvas-a"
+        currentCanvasSelection={[]}
+        currentCanvasOntologyContext={buildCanvasOntologyContext([], [], {
+          canvasId: "canvas-a",
+          selectedNodeIds: [],
+        })}
+        pendingAttachments={[]}
+      />,
+    );
+
+    expect(screen.getByText("操作未完成：Unsupported commission event")).toHaveClass("text-red-300");
   });
 
   it("hides orphan recovered ui-event assistant messages without a matching user turn", () => {
@@ -1433,6 +1495,36 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
     expect(screen.getByText("已为你添加一个视频节点。")).toBeInTheDocument();
   });
 
+  it("shows one collapsed execution result in the original confirmation position", async () => {
+    const feedback = {
+      key: "bridge:bridge-a", applied: 3, openedUiActions: 0, errors: [], plans: [],
+      commandResults: [0, 1, 2].map((commandIndex) => ({ commandIndex, type: "create_node", status: "success", label: "创建节点" })),
+    };
+    superChatMocks.messages = [{
+      id: "assistant-a", role: "assistant", text: "已确认方向并创建复刻工作流。",
+      timestamp: Date.now(), turnId: "turn-a", attachments: [],
+      parts: [
+        { id: "approval", type: "canvas_approval", seq: 1, event: { id: "approval", key: "bridge:bridge-a", bridgeKey: "bridge-a", resolution: "confirmed", envelopes: [], plans: [], commandCount: 3, receivedAt: 1 } },
+        { id: "reply", type: "text", text: "已确认方向并创建复刻工作流。" },
+        { id: "feedback", type: "canvas_feedback", event: feedback },
+      ],
+    } as ChatMessage];
+
+    render(<SuperChatPanel variant="freezone" canvasId="canvas-a" currentCanvasSelection={[]}
+      currentCanvasOntologyContext={buildCanvasOntologyContext([], [], { canvasId: "canvas-a", selectedNodeIds: [] })}
+      pendingAttachments={[]} />);
+
+    const card = await screen.findByRole("button", { name: "画布执行完成，已执行 3 项" });
+    const reply = screen.getByText("已确认方向并创建复刻工作流。");
+    expect(card.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("画布操作确认")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "画布执行完成，已执行 3 项" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "确认执行" })).not.toBeInTheDocument();
+    expect(screen.queryByText("创建节点")).not.toBeInTheDocument();
+    fireEvent.click(card);
+    expect(screen.getByText("画布执行")).toBeInTheDocument();
+  });
+
   it("shows a canvas command approval even when the agent has no visible message yet", async () => {
     render(
       <SuperChatPanel
@@ -1871,6 +1963,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
       <SuperChatPanel
         variant="freezone"
         canvasId="canvas-a"
+        freezoneAgentId="agent-2"
         currentCanvasSelection={[]}
         currentCanvasOntologyContext={buildCanvasOntologyContext([], [], {
           canvasId: "canvas-a",
@@ -1884,6 +1977,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
       window.dispatchEvent(new CustomEvent("freezone/canvas-command-approval", {
         detail: {
           canvasId: "canvas-a",
+          agentId: "agent-2",
           turnId: "turn-a",
           bridgeKey: "bridge-a",
           envelopes: [
@@ -1919,6 +2013,7 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
     );
     expect(apiMocks.post).toHaveBeenCalledWith("api/v1/chat/ui-events", expect.objectContaining({
       json: expect.objectContaining({
+        scope: expect.objectContaining({ agentId: "agent-2" }),
         turn_id: "turn-a",
         event: expect.objectContaining({
           type: "canvas_command_result",
@@ -2222,4 +2317,20 @@ describe("SuperChatPanel Freezone selection attachment state", () => {
     expect(await screen.findByText("待确认的画布操作")).toBeInTheDocument();
     expect(screen.queryByText(/canvas_chat_commands\.v1/)).not.toBeInTheDocument();
   });
+});
+
+vi.mock('@/features/superchat/ReferenceProductionPanel', () => ({ ReferenceProductionPanel: () => <article aria-label="原生制作卡片"><button>确认原生方向</button></article> }));
+vi.mock('@/features/superchat/ReferenceAnalysisStatus', () => ({ ReferenceAnalysisStatus: () => <article aria-label="原生恢复卡片"><button>继续原生方案</button></article> }));
+it('contains native action and recovery cards in the actual composed conversation scroll root', async () => {
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() });
+  superChatMocks.messages = [{ id: 'ordinary-message', role: 'assistant', text: '普通对话卡片仍在', timestamp: 1 }];
+  const { container } = render(<SuperChatPanel variant="freezone" canvasId="canvas-a" currentCanvasSelection={[]} pendingAttachments={[]} />);
+  const action = await screen.findByRole('article', { name: '原生制作卡片' });
+  const recovery = screen.getByRole('article', { name: '原生恢复卡片' });
+  const scroller = action.closest('.overflow-y-auto');
+  expect(scroller).not.toBeNull();
+  expect(scroller?.contains(recovery)).toBe(true);
+  expect(scroller?.contains(screen.getByText('普通对话卡片仍在'))).toBe(true);
+  expect(scroller?.classList.contains('h-full')).toBe(true);
+  expect(container.querySelector('.sticky')?.contains(action)).toBe(false);
 });

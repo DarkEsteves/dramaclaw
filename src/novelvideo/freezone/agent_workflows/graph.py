@@ -215,7 +215,8 @@ def build_workflow_graph_commands(args: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "status": "invalid_external_input", "commands": [],
                     "skipped_edges": [], "warnings": [], "error": "external input alias is invalid"}
         node_by_plan_id[alias] = {
-            "plan_id": alias, "client_id": node_id, "node_type": "imageGenNode",
+            "plan_id": alias, "client_id": node_id,
+            "node_type": "videoStoryNode" if source.get("media_kind") == "reference_analysis" else "imageGenNode",
             "raw": source, "external": True,
         }
         external_input_aliases.add(alias)
@@ -357,10 +358,15 @@ def build_workflow_graph_commands(args: dict[str, Any]) -> dict[str, Any]:
             "target": target["client_id"],
             "link_type": link_type,
         }
-        if source.get("external"):
+        if source.get("external") and source["raw"].get("media_kind") == "image":
             media_urls = args.get("external_media_urls") or {}
             if isinstance(media_urls, dict) and media_urls.get(source["plan_id"]):
                 command["expected_source_image_url"] = media_urls[source["plan_id"]]
+        if source.get("external") and source["raw"].get("media_kind") == "reference_analysis":
+            snapshots = args.get("external_analysis_snapshots") or {}
+            snapshot = snapshots.get(source["plan_id"]) if isinstance(snapshots, dict) else None
+            if isinstance(snapshot, dict):
+                command["expected_source_analysis_snapshot"] = snapshot
         commands.append(command)
 
     groups = _groups(
@@ -415,16 +421,22 @@ def build_workflow_graph_commands(args: dict[str, Any]) -> dict[str, Any]:
     raw_run_after_create = args.get("run_after_create")
     run_after_create = _bool_value(raw_run_after_create, False)
     if run_after_create:
-        run_command = {
-            "type": "run_workflow",
-            "node_ids": [node["client_id"] for node in normalized_nodes],
-            "scope": "selection",
-        }
-        if story_frame_targets or story_asset_targets:
-            # Story images may reuse references already connected to videos.
-            # Run only this plan's nodes, not the surrounding canvas graph.
-            run_command["direction"] = "node"
-        commands.append(run_command)
+        is_reference_stage = (
+            isinstance(plan_skill, dict) and plan_skill.get("id") == "reference-video-remix"
+            and any(source.get("media_kind") == "reference_analysis" for source in payload.get("external_inputs") or [])
+        )
+        run_nodes = [node["client_id"] for node in normalized_nodes if not is_reference_stage or (
+            node["node_type"] == "scriptNode"
+            and node["raw"].get("data", {}).get("processingAction") == "generate_production_plan_draft"
+        )]
+        if run_nodes:
+            run_command = {
+                "type": "run_workflow", "node_ids": run_nodes, "scope": "selection",
+            }
+            if is_reference_stage or story_frame_targets or story_asset_targets:
+                # Use only this plan's nodes, not the surrounding canvas graph.
+                run_command["direction"] = "node"
+            commands.append(run_command)
 
     command_errors = validate_workflow_graph_commands(
         commands,

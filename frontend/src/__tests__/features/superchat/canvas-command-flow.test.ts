@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  appendCanvasCommandFeedbackCardForTest,
   assistantCompletionPrefix,
   backgroundCanvasCommandPendingResultForTest,
   buildCanvasCommandFlowItemsForTest,
   canvasCommandResultFromWorkflowRunForTest,
   canvasCommandFeedbackVisualToneForTest,
+  canvasCommandFeedbacksFromUiEventsForTest,
   canvasCommandFeedbackIsValidationOnlyForTest,
   canvasContextActivityVisualToneForTest,
   isGenerationSuccessSummaryText,
@@ -14,6 +16,8 @@ import {
   mergePendingCanvasCommandApprovalForTest,
   orderExternalMcpCanvasPartsForTest,
   resolveCanvasCommandFeedbackMessageIdForTest,
+  resolveFeedbackWorkflowRunIdForTest,
+  replaceCanvasCommandFeedbackCardForTest,
 } from "@/features/superchat/superchat-panel";
 import { looksLikeCanvasExecutionNarration } from "@/features/superchat/canvas-execution-narration";
 import { upsertAssistantMessageForTest } from "@/features/superchat/use-superchat";
@@ -45,6 +49,144 @@ describe("assistant success summary", () => {
 });
 
 describe("background canvas generation status", () => {
+  it("keeps a terminal UI event when an older canonical accepted event appears later", () => {
+    const step = { commandIndex: 0, type: "run_node_action", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft" };
+    const events = [
+      { type: "canvas_command_result", bridge_key: "request.executor.owner", turn_id: "turn", workflow_run_id: "run", result: { applied: 1, openedUiActions: 0, errors: [], commandResults: [{ ...step, status: "success", output: { workflow_run_id: "run", workflow_run_status: "completed" } }] } },
+      { type: "canvas_command_result", bridge_key: "request", turn_id: "turn", workflow_run_id: "run", result: { applied: 0, openedUiActions: 0, errors: [], commandResults: [{ ...step, status: "pending", output: { workflow_run_id: "run", reason: "native_action_accepted" } }] } },
+    ];
+    const feedbacks = canvasCommandFeedbacksFromUiEventsForTest(events);
+    expect(feedbacks).toHaveLength(1);
+    expect(feedbacks[0]).toMatchObject({ applied: 1, turnId: "turn", workflowRunId: "run", commandResults: [{ status: "success" }] });
+  });
+  it.each(["failed", "cancelled"])("keeps %s terminal feedback ahead of a late accepted event", (status) => {
+    const pending = { key: "bridge:request", bridgeKey: "request", turnId: "turn", workflowRunId: "run", applied: 0, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "pending", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { workflow_run_id: "run", reason: "native_action_accepted" } }] };
+    const terminal = { ...pending, errors: [status], cancelled: status === "cancelled", commandResults: [{ ...pending.commandResults[0], status: "error", output: { workflow_run_id: "run", workflow_run_status: status } }] };
+    const cards = mergeCanvasCommandFeedbacksForTest([terminal], [pending]);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ errors: [status], commandResults: [{ status: "error" }] });
+  });
+  it("does not revive a cancelled approval from a late accepted action", () => {
+    const cancelled = { applied: 0, openedUiActions: 0, errors: ["已取消"], cancelled: true, cancelReason: "user" as const, bridgeKey: "request", turnId: "turn", commandResults: [{ commandIndex: -1, type: "validate", status: "error", label: "已取消", error: "已取消" }] };
+    const pending = { applied: 0, openedUiActions: 0, errors: [], bridgeKey: "request.executor.owner", turnId: "turn", commandResults: [{ commandIndex: 0, type: "run_node_action", status: "pending", label: "生成方案", output: { reason: "native_action_accepted" } }] };
+    const merged = appendCanvasCommandFeedbackCardForTest(appendCanvasCommandFeedbackCardForTest([], "bridge:request", cancelled), "bridge:request.executor.owner", pending);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ cancelled: true, commandResults: [{ label: "已取消" }] });
+    expect(mergeCanvasCommandFeedbacksForTest([{ ...cancelled, key: "bridge:request" }], [{ ...pending, key: "bridge:request.executor.owner" }])[0].commandResults).toEqual([{ commandIndex: -1, type: "validate", status: "error", label: "已取消", error: "已取消" }]);
+  });
+  it("retains correlation fields while merging a persisted pending event and terminal result", () => {
+    const envelopes = [{ commands: [{ type: "run_node_action", node_id: "plan", action: "generate_production_plan_draft" }] }];
+    const [pending] = canvasCommandFeedbacksFromUiEventsForTest([{ type: "canvas_command_result", bridge_key: "request.executor.owner", turn_id: "turn", workflow_run_id: "run", envelopes, result: { applied: 0, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "pending", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { reason: "native_action_accepted", workflow_run_id: "run" } }] } }]);
+    const result = replaceCanvasCommandFeedbackCardForTest([pending], "bridge:request.executor.owner", { applied: 1, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "success", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { workflow_run_id: "run", workflow_run_status: "completed" } }] });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ turnId: "turn", bridgeKey: "request.executor.owner", workflowRunId: "run", envelopes, applied: 1 });
+  });
+
+  it("does not add applied counts or restore pending steps from duplicate accepted results", () => {
+    const terminal = { applied: 1, openedUiActions: 0, errors: [], workflowRunId: "run", turnId: "turn", bridgeKey: "request.executor.owner", commandResults: [{ commandIndex: 0, type: "run_node_action", status: "success", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { workflow_run_id: "run", workflow_run_status: "completed" } }] };
+    const pending = { ...terminal, applied: 0, commandResults: [{ ...terminal.commandResults[0], status: "pending", output: { workflow_run_id: "run", reason: "native_action_accepted" } }] };
+    const once = appendCanvasCommandFeedbackCardForTest([], "bridge:request.executor.owner", terminal);
+    const twice = appendCanvasCommandFeedbackCardForTest(once, "bridge:request", pending);
+    expect(twice).toHaveLength(1);
+    expect(twice[0]).toMatchObject({ applied: 1, workflowRunId: "run", commandResults: [{ status: "success" }] });
+  });
+  it("shows one terminal card for canonical and executor aliases of the same run", () => {
+    const pending = { key: "bridge:request", bridgeKey: "request", turnId: "turn", workflowRunId: "run", applied: 0, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "pending", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { reason: "native_action_accepted", workflow_run_id: "run" } }] };
+    const terminal = { ...pending, key: "bridge:request.executor.owner", bridgeKey: "request.executor.owner", applied: 1, commandResults: [{ commandIndex: 0, type: "run_node_action", status: "success", label: "生成方案", nodeId: "plan", action: "generate_production_plan_draft", output: { workflow_run_id: "run", workflow_run_status: "completed" } }] };
+    const cards = mergeCanvasCommandFeedbacksForTest([pending], [terminal]);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ applied: 1, turnId: "turn", workflowRunId: "run", commandResults: [{ status: "success" }] });
+    const latePending = mergeCanvasCommandFeedbacksForTest([terminal], [pending]);
+    expect(latePending[0]).toMatchObject({ bridgeKey: "request.executor.owner", commandResults: [{ status: "success" }] });
+    const appended = appendCanvasCommandFeedbackCardForTest(appendCanvasCommandFeedbackCardForTest([], terminal.key, terminal), pending.key, pending);
+    expect(appended[0]).toMatchObject({ bridgeKey: "request.executor.owner", commandResults: [{ status: "success" }] });
+  });
+
+  it("keeps distinct workflow runs separate even when the bridge alias is shared", () => {
+    const make = (run: string) => ({ key: "bridge:request", bridgeKey: "request", turnId: "turn", workflowRunId: run, applied: 1, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "success", label: "生成方案", output: { workflow_run_id: run, workflow_run_status: "completed" } }] });
+    expect(mergeCanvasCommandFeedbacksForTest([make("first")], [make("second")])).toHaveLength(2);
+  });
+
+  it("does not mix feedback with conflicting explicit and step run identities", () => {
+    const make = (run: string, stepRun: string) => ({ key: "bridge:request", bridgeKey: "request", turnId: "turn", workflowRunId: run, applied: 0, openedUiActions: 0, errors: [], commandResults: [{ commandIndex: 0, type: "run_node_action", status: "pending", label: "生成方案", output: { workflow_run_id: stepRun, reason: "native_action_accepted" } }] });
+    const first = appendCanvasCommandFeedbackCardForTest([], "bridge:request", make("first", "first"));
+    expect(appendCanvasCommandFeedbackCardForTest(first, "bridge:request", make("second", "first"))).toHaveLength(2);
+  });
+  it("recovers one native run identity from an old persisted step", () => {
+    expect(resolveFeedbackWorkflowRunIdForTest({
+      commandResults: [{ status: "pending", output: {
+        reason: "native_action_accepted", workflow_run_id: "run-first",
+      } }],
+    })).toBe("run-first");
+    expect(resolveFeedbackWorkflowRunIdForTest({
+      workflowRunId: "run-second",
+      commandResults: [{ status: "pending", output: { workflow_run_id: "run-first" } }],
+    })).toBeNull();
+  });
+
+  it("updates the matching native action without rewriting graph steps", () => {
+    const result = canvasCommandResultFromWorkflowRunForTest({
+      applied: 1, openedUiActions: 0, errors: [], key: "first-attempt",
+      commandResults: [
+        { commandIndex: 0, type: "create_node", status: "success", label: "创建方案节点" },
+        { commandIndex: 1, type: "run_node_action", status: "pending",
+          label: "生成可编辑作品方案（产物待同步）", nodeId: "plan", action: "generate_production_plan_draft",
+          output: { reason: "native_action_accepted", workflow_run_id: "run-first" } },
+      ],
+    }, {
+      schema_version: "freezone_workflow_run.v1", run_id: "run-first",
+      project_id: "p", canvas_id: "c", status: "cancelled", resumable: false,
+      created_at: "2026-10-14T00:00:00Z", started_at: "2026-10-14T00:00:00Z",
+      updated_at: "2026-10-14T00:01:00Z", actions: [{
+        node_id: "plan", action: "generate_production_plan_draft", status: "failed",
+        user_error: "Request timed out.",
+      }],
+    }, ((_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? _key) as never);
+    expect(result.commandResults[0]).toEqual(expect.objectContaining({
+      type: "create_node", status: "success", label: "创建方案节点",
+    }));
+    expect(result.commandResults[1]).toEqual(expect.objectContaining({
+      status: "error", label: "生成可编辑作品方案", error: "Request timed out.",
+    }));
+  });
+
+  it("keeps a multi-action workflow failed when a later action fails", () => {
+    const result = canvasCommandResultFromWorkflowRunForTest({
+      applied: 0, openedUiActions: 0, errors: [], key: "run-card",
+      commandResults: [{ commandIndex: 0, type: "run_workflow", status: "pending",
+        label: "执行工作流", output: { reason: "background_generation_running", workflow_run_id: "run-a" } }],
+    }, {
+      schema_version: "freezone_workflow_run.v1", run_id: "run-a",
+      project_id: "p", canvas_id: "c", status: "failed", resumable: false,
+      created_at: "2026-10-14T00:00:00Z", started_at: "2026-10-14T00:00:00Z",
+      updated_at: "2026-10-14T00:01:00Z", actions: [
+        { node_id: "plan", action: "draft", status: "completed" },
+        { node_id: "compose", action: "compile", status: "failed", user_error: "合成失败" },
+      ],
+    }, ((_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? _key) as never);
+    expect(result.commandResults[0]?.status).toBe("error");
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("shows a skipped native action as cancelled when its run is cancelled", () => {
+    const result = canvasCommandResultFromWorkflowRunForTest({
+      applied: 1, openedUiActions: 0, errors: [], key: "cancelled-native",
+      commandResults: [{ commandIndex: 1, type: "run_node_action", status: "pending",
+        label: "生成可编辑作品方案（产物待同步）", nodeId: "plan", action: "draft",
+        output: { reason: "native_action_accepted", workflow_run_id: "run-cancelled" } }],
+    }, {
+      schema_version: "freezone_workflow_run.v1", run_id: "run-cancelled",
+      project_id: "p", canvas_id: "c", status: "cancelled", resumable: false,
+      created_at: "2026-10-14T00:00:00Z", started_at: "2026-10-14T00:00:00Z",
+      updated_at: "2026-10-14T00:01:00Z", actions: [
+        { node_id: "plan", action: "draft", status: "skipped" },
+      ],
+    }, ((_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? _key) as never);
+    expect(result.commandResults[0]).toEqual(expect.objectContaining({
+      status: "error", label: "生成可编辑作品方案", error: "后台生成已取消。",
+    }));
+  });
+
   it("marks media and workflow commands as running instead of completed", () => {
     const result = backgroundCanvasCommandPendingResultForTest([
       { index: 0, type: "run_node_action", label: "生成音频", details: [] },

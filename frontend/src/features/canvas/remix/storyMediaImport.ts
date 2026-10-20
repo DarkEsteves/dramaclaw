@@ -84,15 +84,48 @@ export function storyMediaCounts(story: CanvasNode): { keyframes: number; clips:
   return { keyframes: storyFrames(data).length, clips: storyClips(data).length };
 }
 
-export function importStoryKeyframes(storyId: string): { imported: number; skipped: number } {
-  const frames = storyFrames(storyData(currentStory(storyId)));
+export type StoryKeyframeImportOptions = {
+  shotNumbers?: readonly string[];
+};
+
+export type StoryKeyframeImportResult = {
+  imported: number;
+  skipped: number;
+  createdNodeIds: string[];
+  skippedNodeIds: string[];
+  frames: Array<{
+    shot: string;
+    url: string;
+    nodeId: string;
+    status: 'created' | 'skipped';
+  }>;
+};
+
+export function importStoryKeyframes(
+  storyId: string,
+  options: StoryKeyframeImportOptions = {},
+): StoryKeyframeImportResult {
+  const selectedShots = options.shotNumbers === undefined
+    ? null
+    : new Set(options.shotNumbers
+      .filter((shot): shot is string => typeof shot === 'string')
+      .map((shot) => shot.trim())
+      .filter(Boolean));
+  const frames = storyFrames(storyData(currentStory(storyId)))
+    .filter((frame) => selectedShots === null || selectedShots.has(frame.shot));
   let imported = 0;
   let skipped = 0;
+  const createdNodeIds: string[] = [];
+  const skippedNodeIds: string[] = [];
+  const frameResults: StoryKeyframeImportResult['frames'] = [];
   for (const frame of frames) {
     const store = useCanvasStore.getState();
-    if (store.nodes.some((node) => node.type === CANVAS_NODE_TYPES.upload
-      && node.data.sourceStoryNodeId === storyId && node.data.imageUrl === frame.url)) {
+    const existing = store.nodes.find((node) => node.type === CANVAS_NODE_TYPES.upload
+      && node.data.sourceStoryNodeId === storyId && node.data.imageUrl === frame.url);
+    if (existing) {
       skipped += 1;
+      skippedNodeIds.push(existing.id);
+      frameResults.push({ shot: frame.shot, url: frame.url, nodeId: existing.id, status: 'skipped' });
       continue;
     }
     const nodeId = store.addNode(CANVAS_NODE_TYPES.upload, store.findNodePosition(storyId, 360, 360), {
@@ -115,8 +148,10 @@ export function importStoryKeyframes(storyId: string): { imported: number; skipp
       image.src = frame.url;
     }
     imported += 1;
+    createdNodeIds.push(nodeId);
+    frameResults.push({ shot: frame.shot, url: frame.url, nodeId, status: 'created' });
   }
-  return { imported, skipped };
+  return { imported, skipped, createdNodeIds, skippedNodeIds, frames: frameResults };
 }
 
 const importingStories = new Set<string>();

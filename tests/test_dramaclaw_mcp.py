@@ -633,3 +633,15 @@ def test_patch_schema_accepts_context_dependent_partial_changes(monkeypatch):
         }
         Draft202012Validator(schema).validate(payload)
         changes_model.model_validate(operation["changes"])
+
+
+def test_mcp_exposes_native_production_submission_schema(monkeypatch):
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'project')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'canvas')
+    monkeypatch.setenv('DRAMACLAW_CHAT_SURFACE', 'freezone')
+    listed = {tool.name: tool for tool in asyncio.run(dramaclaw_mcp.list_tools())}
+    schema = listed['freezone_prepare_production_nodes'].inputSchema
+    assert schema['required'] == ['commission_ref', 'goal', 'run_after_create']
+    assert schema['properties']['run_after_create']['type'] == 'boolean'
+    assert 'operation_id' not in schema['properties']
+    assert schema['additionalProperties'] is False

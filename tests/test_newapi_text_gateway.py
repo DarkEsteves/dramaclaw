@@ -185,6 +185,54 @@ def test_plain_text_brainclaw_recipe_request_preserves_routing_headers_and_omits
     )
 
 
+def test_production_plan_stage_sends_strict_native_json_schema_to_gateway(monkeypatch):
+    import asyncio
+    import json
+
+    import httpx
+    from pydantic_ai import Agent, NativeOutput, StructuredDict
+
+    import novelvideo.config as config
+    from novelvideo.freezone.remix.production_plan_draft_stages import draft_stage_native_schema
+
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "chatcmpl-plan-test", "object": "chat.completion", "created": 1,
+            "model": "brainclaw", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": json.dumps({
+                    "output": {"width": 1080, "height": 1920, "fps_num": 30,
+                               "fps_den": 1, "background": None},
+                    "beats": [], "creative_direction": "保留原片节奏",
+                })}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    monkeypatch.setattr(config, "_newapi_text_http_client_factory",
+                        lambda *, timeout_seconds: lambda: httpx.AsyncClient(
+                            transport=httpx.MockTransport(handler), timeout=timeout_seconds))
+    model = config._newapi_text_openai_model(
+        "brainclaw", api_key="key", base_url="https://example.test/v1",
+        timeout_seconds=12.0, profile=None,
+    )
+    schema = draft_stage_native_schema("outline")
+    result = asyncio.run(Agent(model, output_type=NativeOutput(
+        StructuredDict(schema, name="production_plan_outline"), strict=True,
+        template=False,
+    )).run("起草结构与台词"))
+
+    assert result.output["creative_direction"] == "保留原片节奏"
+    assert len(requests) == 1
+    response_format = requests[0]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert set(response_format["json_schema"]["schema"]["properties"]) == {
+        "output", "beats", "creative_direction",
+    }
+
+
 def test_newapi_text_provider_default_trusts_env(monkeypatch):
     import asyncio
 

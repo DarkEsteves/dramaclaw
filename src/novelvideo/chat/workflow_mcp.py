@@ -49,7 +49,12 @@ _REFERENCE_ROOT = (
     / "references"
 )
 _REFERENCE_NAMES = frozenset(
-    {"custom-topology.md", "error-recovery.md", "integration.md"}
+    {
+        "custom-topology.md",
+        "error-recovery.md",
+        "integration.md",
+        "reference-video-remix.md",
+    }
 )
 
 
@@ -399,11 +404,7 @@ async def list_tools() -> list[types.Tool]:
                     "skill_id": {"type": "string", "minLength": 1},
                     "reference": {
                         "type": "string",
-                        "enum": [
-                            "custom-topology.md",
-                            "error-recovery.md",
-                            "integration.md",
-                        ],
+                        "enum": sorted(_REFERENCE_NAMES),
                     },
                 },
                 ["skill_id", "reference"],

@@ -10,6 +10,13 @@ def refs(revision: int = 1) -> list[dict]:
     return [{"artifact_id": "artifact-a", "revision": revision, "project_id": "demo"}]
 
 
+def test_empty_media_bindings_are_current_only_for_empty_hash_snapshot(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    assert store.media_bindings_unchanged([], []) is True
+    assert store.media_bindings_unchanged([], ["sha256:" + "a" * 64]) is False
+    assert store.media_bindings_unchanged([], None) is False
+
+
 def test_retry_with_same_idempotency_key_returns_same_operation(tmp_path: Path) -> None:
     store = RemixOperationStore(tmp_path, "demo")
     first = store.start(idempotency_key="generate-a", input_refs=refs(), producer_version="recipe.v1", normalized_parameters={"size": "720p"}, node_revision=3)
@@ -224,6 +231,36 @@ def test_submission_fence_rejects_released_stale_owner_and_task_overwrite(tmp_pa
     store.bind_task(operation["operation_id"], task_id="current-task", owner="second", fencing_token=second)
     with pytest.raises(ValueError, match="already bound"):
         store.bind_task(operation["operation_id"], task_id="overwrite-task", owner="second", fencing_token=second)
+
+
+def test_definite_enqueue_rejection_is_terminal_and_fenced(tmp_path: Path) -> None:
+    store = RemixOperationStore(tmp_path, "demo")
+    operation = store.start(
+        idempotency_key="rejected-plan", input_refs=refs(),
+        producer_version="remix-process.v1", normalized_parameters={}, node_revision=1,
+    )
+    operation_id = operation["operation_id"]
+    token = store.claim_submission(operation_id, owner="first")
+
+    with pytest.raises(ValueError, match="fencing"):
+        store.reject_submission(
+            operation_id, owner="wrong", fencing_token=token,
+            reason="TASK_ENVELOPE_INVALID",
+        )
+    rejected = store.reject_submission(
+        operation_id, owner="first", fencing_token=token,
+        reason="TASK_ENVELOPE_INVALID",
+    )
+
+    assert rejected["status"] == "failed"
+    assert rejected["failure_reason"] == "TASK_ENVELOPE_INVALID"
+    assert rejected["task_id"] == ""
+    assert store.claim_submission(operation_id, owner="second") is None
+    with pytest.raises(ValueError, match="fencing"):
+        store.reject_submission(
+            operation_id, owner="first", fencing_token=token,
+            reason="another_error",
+        )
 
 
 def test_cancel_after_submission_lease_expiry_records_unknown_intent_until_slow_bind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

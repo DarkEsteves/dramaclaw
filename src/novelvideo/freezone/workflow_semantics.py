@@ -16,6 +16,8 @@ IO_ROLES = {
     "blueprint",
     "visual_asset",
     "composition",
+    "composition_manifest",
+    "production_plan",
 }
 DEFAULT_OUTPUT_ROLES = {
     "scriptNode": "planning_text",
@@ -41,7 +43,7 @@ ACCEPTED_INPUT_ROLES = {
         "video_output",
         "audio_output",
     },
-    "videoComposeNode": {"video_output", "audio_output"},
+    "videoComposeNode": {"video_output", "audio_output", "production_plan"},
     "videoStoryNode": {"reference_media"},
     "transcriptNode": {"reference_media", "narration"},
     "semanticTimelineNode": {"narration", "script", "aligned_words", "blueprint"},

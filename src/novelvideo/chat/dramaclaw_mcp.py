@@ -17,11 +17,13 @@ import sys
 import time
 import types as py_types
 from dataclasses import replace
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -216,22 +218,6 @@ def _adapt_external_agent_tool_result(name: str, value: Any) -> str:
         result = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         result = None
-    if (
-        isinstance(result, dict)
-        and result.get("ok") is True
-        and result.get("applied") is True
-    ):
-        from novelvideo.chat.canvas_outcome import CANVAS_FINAL_RESPONSE_INSTRUCTIONS
-
-        result["agent_instruction"] = (
-            CANVAS_FINAL_RESPONSE_INSTRUCTIONS
-            + " "
-            + str(result.get("agent_instruction") or "").replace(
-                "Report success briefly",
-                "Report success briefly in the JSON message field",
-            )
-        )
-        return json.dumps(result, ensure_ascii=False)
     if name not in {
         "freezone_prepare_workflow",
         "freezone_prepare_workflow_draft",
@@ -570,7 +556,14 @@ def _tool_validation_error(name, arguments, schema, exc, errors) -> dict[str, An
     from novelvideo.freezone.workflow_schema import workflow_plan_schema_diagnostics
 
     payload = mcp_runtime.validation_error_payload(name, arguments, schema, exc, errors)
-    diagnostics = workflow_plan_schema_diagnostics(arguments, schema)
+    material_diagnostic = _material_validation_diagnostic(name, arguments, schema, exc)
+    production_diagnostic = (
+        None if material_diagnostic else
+        _production_validation_diagnostic(name, arguments, schema, exc)
+    )
+    diagnostics = (
+        [] if material_diagnostic else workflow_plan_schema_diagnostics(arguments, schema)
+    )
     if diagnostics:
         payload.update(
             message="; ".join(
@@ -578,6 +571,27 @@ def _tool_validation_error(name, arguments, schema, exc, errors) -> dict[str, An
             ),
             path=diagnostics[0]["path"],
         )
+    diagnostic = material_diagnostic or production_diagnostic
+    if diagnostic is not None:
+        payload.update(path=diagnostic[0], message=diagnostic[1])
+        payload.pop("unexpected_fields", None)
+        payload.pop("integer_string_fields", None)
+    if production_diagnostic is not None:
+        from novelvideo.freezone.remix.production_command_schema import production_command_error_details
+
+        payload.update(
+            production_command_error_details(arguments.get("command")),
+            side_effects="none",
+        )
+        bound_project = os.environ.get("DRAMACLAW_PROJECT_ID", "").strip()
+        bound_canvas = os.environ.get("DRAMACLAW_CANVAS_ID", "").strip()
+        bound_turn = os.environ.get("DRAMACLAW_TURN_ID", "").strip()
+        if bound_project and bound_canvas and bound_turn:
+            payload.update(
+                project_id=bound_project,
+                canvas_id=bound_canvas,
+                retry_token=uuid.uuid4().hex,
+            )
     if name in {"freezone_prepare_workflow_plan_draft", "workflow_graph_compile"}:
         payload.update(
             status="workflow_validation_failed", phase="graph_compile", retryable=True
@@ -605,6 +619,148 @@ def _tool_call_hooks(name: str) -> mcp_runtime.ToolCallHooks:
         adapt_result=_adapt_external_agent_tool_result,
         normalize_result=_normalize_structured_result,
     )
+
+
+def _production_validation_diagnostic(
+    name: str, arguments: dict[str, Any], input_schema: dict[str, Any],
+    exc: SchemaError | ValidationError,
+) -> tuple[str, str] | None:
+    """Use native validation only as a bounded, non-executing explanation."""
+    if name != "freezone_prepare_production_edit" or not isinstance(exc, ValidationError):
+        return None
+    # An unrelated outer failure must keep its normal field/path diagnostic,
+    # even if the command happens to be malformed too.
+    errors = Draft202012Validator(input_schema).iter_errors(arguments)
+    if any(not error.absolute_path or error.absolute_path[0] != "command" for error in errors):
+        return None
+    command = arguments.get("command")
+    pending = [(command, 0)]
+    visited = 0
+    while pending:
+        value, depth = pending.pop()
+        visited += 1
+        if visited > 2048 or depth > 12:
+            return None
+        if isinstance(value, str) and len(value) > 4096:
+            return None
+        if isinstance(value, (dict, list)) and len(value) + len(pending) + visited > 2048:
+            return None
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) or len(key) > 128 for key in value):
+                return None
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
+    from novelvideo.freezone.remix.production_commands import validate_production_command
+
+    try:
+        validate_production_command(command)
+    except ValueError as native_error:
+        cause = native_error.__cause__
+        field_error = (native_error if callable(getattr(native_error, "errors", None))
+                       else cause)
+        if field_error is not None and callable(getattr(field_error, "errors", None)):
+            # Pydantic's default rendering includes input values. Only expose
+            # field locations and error codes, never dialogue or argument data.
+            message = "production command fields must match the native model: " + "; ".join(
+                f"{'.'.join(str(part) for part in issue['loc'])}: {issue['type']}"
+                for issue in field_error.errors(include_input=False)[:8]
+            )
+        else:
+            message = str(native_error)[:900]
+        kind = command.get("kind") if isinstance(command, dict) else None
+        if kind in {"insert_turn", "batch"}:
+            message += (
+                "; insert_turn requires payload={beat_id, turn:{id,text,speaker (optional)}, index}; "
+                "target_id must equal the new turn.id, not beat_id; beat_id belongs only in payload; "
+                "timing_status is not a TurnV2 field. "
+                "Atomic batch children have exactly {kind,target_id,payload}, without command_id or plan_ref. "
+                "Use the saved beat id and actual dialogue; do not probe with empty objects or invent timing."
+            )
+        return "command", message[:1600]
+    except (TypeError, KeyError):
+        return None
+    return None
+
+
+_MATERIAL_CONTRACT_GUIDE = (
+    "Native material contract: plan_ref={artifact_id,revision}; "
+    "requirement={id,description,media_kind,final_step_id,placement_ids/take_ids/turn_ids arrays,acceptance array}; "
+    "step={id,label,media_kind,source,recipe_id,prompt,depends_on,references,generation_inputs}. "
+    "source=generate needs matching general-image/video/audio Recipe and nonblank prompt. "
+    "Use actual IDs from the saved plan and the actual final step matching media_kind; "
+    "shared intermediate references are separate steps. Each reference has exactly one step_id or node_id and role. "
+    "Reread dramaclaw-workflows references/reference-video-remix.md material dependency graph section. "
+    "Execution and candidates are server owned; native approval and acceptance remain required."
+)
+
+
+def _material_validation_diagnostic(
+    name: str, arguments: dict[str, Any], input_schema: dict[str, Any],
+    exc: SchemaError | ValidationError,
+) -> tuple[str, str] | None:
+    """Explain material schema failures using only bounded schema paths/codes."""
+    if name != "freezone_prepare_material_work" or not isinstance(exc, ValidationError):
+        return None
+    material_fields = {"plan_ref", "requirements", "steps"}
+    # Exclude graph values only for this independent outer-field check. The
+    # original schema still rejects the call before any handler can execute.
+    outer_schema = {
+        **input_schema,
+        "properties": {key: ({} if key in material_fields else value)
+                       for key, value in input_schema.get("properties", {}).items()},
+        "required": [key for key in input_schema.get("required", []) if key not in material_fields],
+    }
+    if not Draft202012Validator(outer_schema).is_valid(arguments):
+        return None
+    pending = [(arguments.get(key), 0) for key in material_fields]
+    visited = 0
+    while pending:
+        value, depth = pending.pop()
+        visited += 1
+        if (visited > 2048 or depth > 12
+                or isinstance(value, str) and len(value) > 4096
+                or isinstance(value, (dict, list)) and len(value) + len(pending) + visited > 2048):
+            return "requirements", "material graph diagnostic limit reached; " + _MATERIAL_CONTRACT_GUIDE
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) or len(key) > 128 for key in value):
+                return "requirements", "material graph diagnostic limit reached; " + _MATERIAL_CONTRACT_GUIDE
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
+    issues: list[str] = []
+    first_path = "requirements"
+    for index, error in enumerate(Draft202012Validator(input_schema).iter_errors(arguments)):
+        if index >= 16:
+            issues.append("additional schema errors omitted")
+            break
+        # Only schema-declared names and array indices may enter output.
+        schema = input_schema
+        parts: list[str | int] = []
+        for part in error.absolute_path:
+            if isinstance(part, int):
+                parts.append(part)
+                schema = schema.get("items", {})
+            elif part in schema.get("properties", {}):
+                parts.append(part)
+                schema = schema["properties"][part]
+            else:
+                break
+        if error.validator == "required" and isinstance(error.instance, dict):
+            # Derive missing names from trusted schema data, never error text.
+            missing = [key for key in error.validator_value if key not in error.instance]
+            candidates = [f"{mcp_runtime._format_schema_path([*parts, key])}: required" for key in missing]
+        else:
+            candidates = [f"{mcp_runtime._format_schema_path(parts)}: {error.validator}"]
+        for issue in candidates:
+            if issue not in issues and len(issues) < 16:
+                if not issues:
+                    first_path = issue.split(":", 1)[0]
+                issues.append(issue)
+    if not issues:
+        return None
+    detail = "; ".join(issues)[:2200 - len(_MATERIAL_CONTRACT_GUIDE) - 2]
+    return first_path, detail + "; " + _MATERIAL_CONTRACT_GUIDE
 
 
 @SERVER.call_tool(validate_input=False)

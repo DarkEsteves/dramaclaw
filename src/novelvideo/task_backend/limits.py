@@ -12,7 +12,6 @@ PROJECT_LANE_LIMIT_DEFAULTS = {
     "video": 4,
     "world": 2,
     "ffmpeg": 2,
-    "speech": 1,
 }
 
 PROJECT_LANE_MIN_DEFAULTS = {
@@ -20,7 +19,6 @@ PROJECT_LANE_MIN_DEFAULTS = {
     "video": 1,
     "world": 1,
     "ffmpeg": 1,
-    "speech": 1,
 }
 
 PROJECT_USER_LANE_LIMIT_DEFAULTS = {
@@ -28,7 +26,6 @@ PROJECT_USER_LANE_LIMIT_DEFAULTS = {
     "video": 1,
     "world": 1,
     "ffmpeg": 1,
-    "speech": 1,
 }
 
 GLOBAL_LANE_CONCURRENCY_DEFAULTS = {
@@ -36,7 +33,6 @@ GLOBAL_LANE_CONCURRENCY_DEFAULTS = {
     "video": 2,
     "world": 1,
     "ffmpeg": 1,
-    "speech": 1,
 }
 
 GLOBAL_LANE_QUEUE_LIMIT_DEFAULTS = {
@@ -44,7 +40,6 @@ GLOBAL_LANE_QUEUE_LIMIT_DEFAULTS = {
     "video": 128,
     "world": 64,
     "ffmpeg": 64,
-    "speech": 64,
 }
 
 

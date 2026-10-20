@@ -1,4 +1,4 @@
-import { apiCall } from './client';
+import { apiBlob, apiCall } from './client';
 
 export interface RemixArtifactRef { artifactId: string; revision: number }
 export interface RemixArtifact { id: string; schema: string; revision: number; payload: Record<string, unknown>; upstream_refs?: Array<{ artifact_id: string; revision: number }> }
@@ -11,8 +11,11 @@ export type RemixProcessRequest =
   | { action: 'analyze_reference_video'; mediaPath: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'transcribe_media'; mediaPath: string; language: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'align_script'; mediaPath: string; scriptRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
+  | { action: 'align_production_speech'; mediaPath: string; planRef: RemixArtifactRef; turnId: string; placementId?: string; takeId?: string; idempotencyKey: string; nodeRevision: number }
   | { action: 'plan_broll'; scriptRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
   | { action: 'generate_script_draft'; blueprintRef: RemixArtifactRef; newTopic: string; idempotencyKey: string; nodeRevision: number }
+  | { action: 'generate_production_plan_arrangement'; planRef: RemixArtifactRef; idempotencyKey: string; nodeRevision: number }
+  | { action: 'generate_production_plan_draft'; topic: string; blueprintRef?: RemixArtifactRef | null; analysisContext?: Record<string, unknown> | null; idempotencyKey: string; nodeRevision: number }
   | { action: 'compile_take_timeline'; scriptRef: RemixArtifactRef; takeBindings: Array<{ segment_id: string; media_path: string }>; fps: number; idempotencyKey: string; nodeRevision: number }
   | { action: 'compile_semantic_timeline'; mediaPath: string; scriptRef: RemixArtifactRef; wordTimelineRef: RemixArtifactRef; blueprintRef: RemixArtifactRef; editMap: Record<string, unknown>[]; overrides: Record<string, unknown>[]; fps: number; idempotencyKey: string; nodeRevision: number };
 
@@ -25,9 +28,46 @@ export function reviseRemixArtifact(project: string, ref: RemixArtifactRef, payl
   return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${ref.artifactId}`, { method: 'PUT', json: { expected_revision: ref.revision, payload, upstream_refs: upstreamRefs.map(exactRef) } });
 }
 export function fetchRemixArtifact(project: string, ref: RemixArtifactRef) { return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${ref.artifactId}?revision=${ref.revision}`); }
+export function fetchLatestRemixArtifact(project: string, artifactId: string) { return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/artifacts/${artifactId}/latest`); }
 export function generateRemixScriptDraft(project: string, blueprintRef: RemixArtifactRef, newTopic: string) {
   return apiCall<{ dialogue: string; selections: Array<{ id: string; label: string; start: number; end: number }> }>(`projects/${project}/freezone/remix/script-drafts`, {
     method: 'POST', json: { blueprint_ref: exactRef(blueprintRef), new_topic: newTopic }, timeout: false,
+  });
+}
+export function generateProductionPlanDraft(project: string, topic: string, blueprintRef?: RemixArtifactRef | null, analysisContext?: Record<string, unknown> | null) {
+  return apiCall<Record<string, unknown>>(`projects/${project}/freezone/remix/production-plan-drafts`, {
+    method: 'POST', json: { topic, ...(blueprintRef ? { blueprint_ref: exactRef(blueprintRef) } : analysisContext ? { analysis_context: analysisContext } : {}) }, timeout: false,
+  });
+}
+export interface ProductionPlanProjection { plan_ref: { artifact_id: string; revision: number }; output_spec: Record<string, unknown>; beats: Record<string, unknown>[]; selections?: Record<string, unknown>[]; resources: Record<string, unknown>[]; placements: Record<string, unknown>[]; issues: Record<string, unknown>[]; ready: boolean }
+export function projectProductionPlan(project: string, planRef: RemixArtifactRef) {
+ return apiCall<ProductionPlanProjection>(`projects/${project}/freezone/remix/production-plans/project`, { method: 'POST', json: { plan_ref: exactRef(planRef) } });
+}
+export interface ProductionCommandResult { plan_ref: { artifact_id: string; revision: number }; changed_ids: string[]; invalidated: string[]; blockers: string[]; speech_estimates?: Record<string, unknown>[]; plan_diagnostics?: Record<string, unknown>[] }
+export interface ProductionCommandPreflightResult {
+  ok: boolean;
+  plan_ref: { artifact_id: string; revision: number } | null;
+  issues: Array<{ code: string; path: string; entity_id: string | null; message: string }>;
+  speech_estimates: Record<string, unknown>[];
+  plan_diagnostics: Record<string, unknown>[];
+}
+export function preflightProductionCommand(project: string, command: Record<string, unknown>) {
+  return apiCall<ProductionCommandPreflightResult>(`projects/${project}/freezone/remix/production-plans/commands/preflight`, { method: 'POST', json: command });
+}
+export function applyProductionCommand(project: string, command: Record<string, unknown>) {
+ return apiCall<ProductionCommandResult>(`projects/${project}/freezone/remix/production-plans/commands`, { method: 'POST', json: command });
+}
+export function migrateProductionPlan(project: string, planRef: RemixArtifactRef) {
+  return apiCall<RemixArtifact>(`projects/${project}/freezone/remix/production-plans/migrate`, { method: 'POST', json: { plan_ref: exactRef(planRef) } });
+}
+export function compileProductionPlan(project: string, planRef: RemixArtifactRef) {
+  return apiCall<Record<string, unknown>>(`projects/${project}/freezone/remix/production-plans/compile`, {
+    method: 'POST', json: { plan_ref: exactRef(planRef) }, timeout: false,
+  });
+}
+export function previewProductionFrame(project: string, planRef: RemixArtifactRef, frame: number) {
+  return apiBlob(`projects/${project}/freezone/remix/production-plans/preview-frame`, {
+    method: 'POST', json: { plan_ref: exactRef(planRef), frame }, timeout: false,
   });
 }
 export function generateRemixBrollPlan(project: string, scriptRef: RemixArtifactRef) {
@@ -70,10 +110,18 @@ export function submitRemixProcessAction(project: string, request: RemixProcessR
     ? { media_path: request.mediaPath, language: request.language }
     : request.action === 'align_script'
       ? { media_path: request.mediaPath, script_ref: exactRef(request.scriptRef) }
+      : request.action === 'align_production_speech'
+        ? { media_path: request.mediaPath, plan_ref: exactRef(request.planRef), turn_id: request.turnId,
+            ...(request.placementId ? { placement_id: request.placementId } : {}),
+            ...(request.takeId ? { take_id: request.takeId } : {}) }
       : request.action === 'plan_broll'
         ? { script_ref: exactRef(request.scriptRef) }
       : request.action === 'generate_script_draft'
         ? { blueprint_ref: exactRef(request.blueprintRef), new_topic: request.newTopic }
+      : request.action === 'generate_production_plan_draft'
+        ? { topic: request.topic, ...(request.blueprintRef ? { blueprint_ref: exactRef(request.blueprintRef) } : request.analysisContext ? { analysis_context: request.analysisContext } : {}) }
+      : request.action === 'generate_production_plan_arrangement'
+        ? { plan_ref: exactRef(request.planRef) }
       : request.action === 'compile_take_timeline'
         ? { script_ref: exactRef(request.scriptRef), take_bindings: request.takeBindings, fps: request.fps }
       : { media_path: request.mediaPath, script_ref: exactRef(request.scriptRef), word_timeline_ref: exactRef(request.wordTimelineRef), blueprint_ref: exactRef(request.blueprintRef), edit_map: request.editMap, overrides: request.overrides, fps: request.fps };

@@ -57,6 +57,74 @@ def test_recommended_model_materializes_one_scoped_catalog_configuration():
     }
 
 
+def test_production_material_duration_is_not_filled_with_generic_five_seconds():
+    from novelvideo.freezone.workflow_preflight import resolve_generation_recommendations
+
+    response = {'videoNode': {'ok': True, 'data': [{
+        'id': 'fixture-model', 'ratioOptions': ['9:16'],
+        'resolutionOptions': ['720P'], 'minDuration': 4, 'maxDuration': 15,
+        'supportsGenerateAudio': False,
+    }]}}
+    bound = {'id': 'material-1', 'node_type': 'videoNode', 'data': {
+        'model': 'fixture-model', 'aspectRatio': 'recommended',
+        'workflowCatalog': {'skillId': 'reference-video-remix',
+                            'recipeId': 'general-video', 'stepId': 'clip-1'},
+    }}
+    ordinary = {'id': 'ordinary', 'node_type': 'videoNode', 'data': {
+        'model': 'fixture-model', 'aspectRatio': 'recommended',
+    }}
+    assert resolve_generation_recommendations([bound, ordinary], response) == []
+    assert 'durationSec' not in bound['data']
+    assert ordinary['data']['durationSec'] == 5
+    preflight = evaluate_workflow_preflight(
+        {'plan': {'nodes': [bound], 'edges': []}},
+        model_responses=response,
+        limits={'ok': True, 'data': {'video': {'limit': 2, 'remaining': 1}}},
+    )
+    duration = [row for row in preflight['blockers'] if row['path'].endswith('.durationSec')]
+    assert duration[0]['code'] == 'production_node_duration_required'
+    assert duration[0]['recovery'] == 'plan_node_duration'
+    assert generation_clarification_request(preflight) is None
+
+
+@pytest.mark.parametrize('seconds,allowed', [
+    (1, False), (2, False), (3, False), (4, True),
+    (15, True), (16, False), (True, False), (4.5, False),
+])
+def test_material_duration_policy_boundary(seconds, allowed):
+    result = _check({
+        'model': 'video-model', 'aspectRatio': '16:9', 'quality': '720P',
+        'durationSec': seconds,
+        'workflowCatalog': {'skillId': 'reference-video-remix',
+                            'recipeId': 'general-video', 'stepId': 'clip-1'},
+    }, entry={
+        'id': 'video-model', 'ratioOptions': ['16:9'],
+        'resolutionOptions': ['720P'], 'minDuration': 1, 'maxDuration': 30,
+        'supportsGenerateAudio': False,
+    })
+    blocked = any(row['path'].endswith('.durationSec') for row in result.get('blockers', []))
+    assert blocked is (not allowed)
+
+
+def test_ordinary_video_can_use_catalog_three_second_duration():
+    result = _check({'model': 'video-model', 'durationSec': 3})
+    assert not any(row['path'].endswith('.durationSec') for row in result.get('blockers', []))
+
+
+def test_material_duration_intersects_discrete_model_options():
+    entry = {'id': 'video-model', 'ratioOptions': ['16:9'],
+             'resolutionOptions': ['720P'], 'minDuration': 4,
+             'maxDuration': 15, 'durationOptions': [5, 10],
+             'supportsGenerateAudio': False}
+    data = {'model': 'video-model', 'aspectRatio': '16:9', 'quality': '720P',
+            'workflowCatalog': {'skillId': 'reference-video-remix',
+                                'recipeId': 'general-video', 'stepId': 'clip-1'}}
+    assert any(row['path'].endswith('.durationSec') for row in _check(
+        {**data, 'durationSec': 4}, entry=entry)['blockers'])
+    assert not any(row['path'].endswith('.durationSec') for row in _check(
+        {**data, 'durationSec': 5}, entry=entry)['blockers'])
+
+
 def test_recommended_model_rejects_incompatible_explicit_ratio():
     plan = {"nodes": [{
         "id": "image", "node_type": "imageGenNode",

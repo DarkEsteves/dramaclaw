@@ -1,7 +1,7 @@
 import { enT, zhT } from "@/__tests__/helpers/i18n-fixtures";
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
-import { act, render, renderHook, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { useCanvasStore } from "@/stores/canvasStore";
 import {
@@ -27,6 +27,7 @@ import {
   revealIncompleteSkillStudioDraftForTurnForTest,
   pruneOldMessageCaches,
   resolveUiEventTurnIdForTest,
+  assistantPartsReplacingPartForTest,
   sanitizeMessagesForCache,
   shouldKeepActiveTurnAfterScopeSync,
   shouldRenderAgentToolStatusPart,
@@ -92,6 +93,7 @@ import {
   hydrateOrderedPartsWithUiEventsForTest,
   latestPendingAssistantClarificationEventForTest,
   latestPendingAssistantClarificationEventForActiveTurnForTest,
+  latestPendingAssistantClarificationEventForComposerForTest,
   latestPendingSkillStudioQuestionEventForTest,
   latestPendingSkillStudioQuestionEventForActiveTurnForTest,
   skillStudioQuestionEventIdentityForTest,
@@ -100,6 +102,7 @@ import {
   agentThoughtRuntimePresentationForTest,
   genericToolTitleForTest,
   toolStatusRuntimeTextForTest,
+  freezoneToolStatusForTest,
   messageIsWaitingForUserReplyForTest,
   messageHasSkillStudioUiEventForTest,
   messageHasAgentRuntimeActivityForTest,
@@ -119,9 +122,43 @@ import {
 } from "@/features/superchat/superchat-panel";
 import type { ChatMessage, ChatMessagePart, ChatRole } from "@/features/superchat/types";
 
+describe("canvas approval replacement order", () => {
+  it("shows one execution result at the original approval position in saved history", () => {
+    const feedback = { key: "bridge:bridge-a", applied: 1, openedUiActions: 0, errors: [], commandResults: [] };
+    const message = {
+      id: "assistant-a", role: "assistant", turnId: "turn-a", timestamp: 1,
+      text: "已确认方向并创建复刻工作流。",
+      parts: [
+        { id: "approval", type: "canvas_approval", seq: 1, event: { id: "approval", key: "bridge:bridge-a", bridgeKey: "bridge-a", resolution: "confirmed", envelopes: [], plans: [], commandCount: 1, receivedAt: 1 } },
+        { id: "reply", type: "text", text: "已确认方向并创建复刻工作流。" },
+        { id: "feedback", type: "canvas_feedback", seq: 3, event: feedback },
+      ],
+    } as ChatMessage;
+
+    const parts = visibleAssistantOrderedPartsForMessageForTest(message);
+    expect(parts.map((part) => part.type)).toEqual(["canvas_feedback", "text"]);
+    expect(parts[0]).toMatchObject({ seq: 1, event: feedback });
+  });
+
+  it("replaces a card in place and removes an already received copy of the same result", () => {
+    const replacement = { id: "feedback", type: "canvas_feedback", event: {} } as ChatMessagePart;
+    const parts = assistantPartsReplacingPartForTest([
+      { id: "before", type: "text", text: "我先提交操作。" },
+      { id: "approval", type: "canvas_approval", seq: 2, event: {} },
+      { id: "after", type: "text", text: "已提交。" },
+      replacement,
+    ], "approval", replacement);
+    expect(parts.map((part) => part.id)).toEqual(["before", "feedback", "after"]);
+    expect(parts[1].seq).toBe(2);
+  });
+});
+
 const MESSAGE_CACHE_PREFIX = "superchat:messages:v2:";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const apiPostMock = vi.hoisted(() => vi.fn(() => Promise.resolve({})));
+const approvalVideoCatalog = vi.hoisted(() => ({ models: null as Array<{
+  id: string; label: string; minDuration: number; maxDuration: number;
+}> | null }));
 
 describe("scope sync active turn recovery", () => {
   const pendingMessages: ChatMessage[] = [
@@ -157,10 +194,47 @@ vi.mock("@/features/canvas/hooks/useFreezoneImageModels", async (importOriginal)
 });
 vi.mock("@/features/canvas/hooks/useFreezoneVideoModels", async (importOriginal) => {
   const models = [{ id: "video-model", label: "测试视频模型", minDuration: 5, maxDuration: 15 }];
-  return { ...await importOriginal<typeof import("@/features/canvas/hooks/useFreezoneVideoModels")>(), useFreezoneVideoModels: () => ({ models }) };
+  return { ...await importOriginal<typeof import("@/features/canvas/hooks/useFreezoneVideoModels")>(), useFreezoneVideoModels: () => ({ models: approvalVideoCatalog.models ?? models }) };
 });
 
 describe("mixed workflow approval execution", () => {
+  it.each([
+    ["create node", { type: "create_node", client_id: "new-plan", node_type: "scriptNode", data: { displayName: "作品方案" } }],
+    ["draft plan", { type: "run_node_action", node_id: "plan", action: "generate_production_plan_draft" }],
+    ["edit plan", { type: "update_node_data", node_id: "plan", patch: { displayName: "修改后的作品方案" } }],
+  ])("keeps %s pending until the existing approval card is clicked", (name, command) => {
+    const previous = useCanvasStore.getState();
+    useCanvasStore.getState().setCanvasData([{
+      id: "plan", type: "scriptNode", position: { x: 0, y: 0 },
+      data: { displayName: "作品方案" },
+    }], []);
+    const before = structuredClone(useCanvasStore.getState().nodes);
+    const approval = {
+      id: `manual-${name}`, key: `manual-${name}`, bridgeKey: `bridge-${name}`,
+      messageId: "assistant-turn", receivedAt: 1, commandCount: 1, plans: [],
+      envelopes: [{ schema_version: "canvas_chat_commands.v1" as const,
+        commands: [command] }],
+    };
+    const onApply = vi.fn();
+    const props = { approval: approval as never, onApply, onCancel: vi.fn() };
+    const view = render(createElement(CanvasCommandApprovalCardForTest, props));
+    try {
+      expect(view.getByRole("button", { name: "确认执行" })).toBeTruthy();
+      expect(onApply).not.toHaveBeenCalled();
+      expect(useCanvasStore.getState().nodes).toEqual(before);
+      fireEvent.click(view.getByRole("button", { name: "确认执行" }));
+      expect(onApply).toHaveBeenCalledTimes(1);
+      expect(onApply.mock.calls[0][0].envelopes[0].commands).toEqual([command]);
+      view.rerender(createElement(CanvasCommandApprovalCardForTest, { ...props, isExecuting: true }));
+      fireEvent.click(view.getByRole("button", { name: "执行中..." }));
+      expect(onApply).toHaveBeenCalledTimes(1);
+      expect(useCanvasStore.getState().nodes).toEqual(before);
+    } finally {
+      view.unmount();
+      useCanvasStore.setState({ nodes: previous.nodes, edges: previous.edges });
+    }
+  });
+
   it("keeps confirmed media groups when upstream image/audio nodes complete", () => {
     const previous = useCanvasStore.getState();
     const nodes = [
@@ -189,6 +263,113 @@ describe("mixed workflow approval execution", () => {
       expect(view.getByLabelText("视频模型")).toBeTruthy();
       expect(view.container.textContent).toContain("纯音乐");
       expect(view.queryByText("待确认的画布操作")).toBeNull();
+    } finally {
+      view.unmount();
+      useCanvasStore.setState({ nodes: previous.nodes, edges: previous.edges });
+    }
+  });
+});
+
+describe("approval parameter handoff", () => {
+  function approvalFor(quality: unknown = "720p") {
+    return {
+      id: "actual-request", key: "actual-request", bridgeKey: "bridge-a", turnId: "turn-a",
+      agentId: "main", messageId: "assistant", receivedAt: 1, commandCount: 2, plans: [],
+      envelopes: [{
+        schema_version: "canvas_chat_commands.v1" as const,
+        project_id: "project-a", canvas_id: "canvas-a",
+        commands: [
+          { type: "create_node" as const, client_id: "video-a", node_type: "videoNode" as const,
+            data: { prompt: "实际镜头", model: "video-model", aspectRatio: "9:16",
+              quality, durationSec: 5, generateAudio: true, count: 1 } },
+          { type: "run_node_action" as const, node_id: "video-a", action: "generate_video" },
+        ],
+      }],
+    };
+  }
+
+  it.each([
+    ["480p", "480P"], ["480P", "480P"], [" 480p ", "480P"],
+    ["720p", "720P"], ["1080p", "1080P"], ["unsupported", "720P"],
+    [undefined, "720P"],
+  ])("honors supported portable quality %s as %s", (raw, expected) => {
+    const approval = approvalFor(raw);
+    approval.envelopes[0].commands[0].data!.quality = raw;
+    const groups = videoApprovalParamGroupsForTest(approval as never, [], [], [{
+      id: "video-model", resolutionOptions: ["480p", "720p", "1080p"],
+      ratioOptions: ["9:16"], minDuration: 4, maxDuration: 15, supportsGenerateAudio: true,
+    }], "video-model");
+    expect(groups[0]).toMatchObject({ quality: expected, durationSec: 5, generateAudio: true, count: 1 });
+    const amended = amendCanvasApprovalWithVideoParamsForTest(approval as never, groups[0]);
+    expect((amended.envelopes[0].commands[0] as { data: { quality: string } }).data.quality).toBe(expected);
+    expect(approval.envelopes[0].commands[0]).toMatchObject({ data: { quality: raw } });
+  });
+
+  it("keeps the supported fallback when 720P is absent", () => {
+    const groups = videoApprovalParamGroupsForTest(approvalFor("unsupported") as never, [], [], [{
+      id: "video-model", resolutionOptions: ["480p", "1080p"],
+    }], "video-model");
+    expect(groups[0].quality).toBe("480P");
+  });
+
+  it.each(["approval-clone", "canvas-clone", "edge-clone", "catalog-clone"])("preserves manual quality and sound on equivalent %s", (refresh) => {
+    const previous = useCanvasStore.getState();
+    useCanvasStore.setState({ nodes: [], edges: [] });
+    const approval = approvalFor();
+    const props = { approval: approval as never, onApply: vi.fn(), onCancel: vi.fn() };
+    const view = render(createElement(CanvasCommandApprovalCardForTest, props));
+    try {
+      fireEvent.click(view.getByRole("button", { name: /^视频参数：/ }));
+      fireEvent.click(view.getByRole("button", { name: "480P" }));
+      fireEvent.click(view.getByRole("switch"));
+      expect(view.getByRole("button", { name: /^视频参数：/ }).getAttribute("aria-label")).toContain("480P");
+      if (refresh === "approval-clone") {
+        view.rerender(createElement(CanvasCommandApprovalCardForTest, {
+          ...props, approval: structuredClone(approval) as never,
+        }));
+      } else if (refresh === "catalog-clone") {
+        approvalVideoCatalog.models = [{ id: "video-model", label: "测试视频模型", minDuration: 5, maxDuration: 15 }];
+        view.rerender(createElement(CanvasCommandApprovalCardForTest, props));
+      } else {
+        act(() => useCanvasStore.setState(refresh === "canvas-clone" ? { nodes: [] } : { edges: [] }));
+      }
+      expect(view.getByRole("button", { name: /^视频参数：/ }).getAttribute("aria-label")).toContain("480P");
+      expect(view.getByRole("switch").getAttribute("aria-checked")).toBe("false");
+      fireEvent.click(view.getByRole("button", { name: "确认执行" }));
+      expect(props.onApply).toHaveBeenCalledTimes(1);
+      const amended = props.onApply.mock.calls[0][0];
+      expect(amended.envelopes[0].commands[0]).toMatchObject({ data: {
+        quality: "480P", generateAudio: false, durationSec: 5, model: "video-model",
+      } });
+      expect(props.onCancel).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      approvalVideoCatalog.models = null;
+      useCanvasStore.setState({ nodes: previous.nodes, edges: previous.edges });
+    }
+  });
+
+  it.each(["new-request", "new-scope", "changed-parameters"])("resets defaults for %s instead of carrying prior edits", (change) => {
+    const previous = useCanvasStore.getState();
+    useCanvasStore.setState({ nodes: [], edges: [] });
+    const approval = approvalFor();
+    const props = { approval: approval as never, onApply: vi.fn(), onCancel: vi.fn() };
+    const view = render(createElement(CanvasCommandApprovalCardForTest, props));
+    try {
+      fireEvent.click(view.getByRole("button", { name: /^视频参数：/ }));
+      fireEvent.click(view.getByRole("button", { name: "480P" }));
+      fireEvent.click(view.getByRole("switch"));
+      const next = structuredClone(approval);
+      if (change === "new-request") next.id = next.key = "next-request";
+      else if (change === "new-scope") next.envelopes[0].canvas_id = "canvas-b";
+      else (next.envelopes[0].commands[0] as { data: { durationSec: number } }).data.durationSec = 8;
+      view.rerender(createElement(CanvasCommandApprovalCardForTest, { ...props, approval: next as never }));
+      expect(view.getByRole("button", { name: /^视频参数：/ }).getAttribute("aria-label")).toContain("720P");
+      expect(view.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+      fireEvent.click(view.getByRole("button", { name: "确认执行" }));
+      expect(props.onApply.mock.calls[0][0].envelopes[0].commands[0]).toMatchObject({ data: {
+        quality: "720P", generateAudio: true, durationSec: change === "changed-parameters" ? 8 : 5,
+      } });
     } finally {
       view.unmount();
       useCanvasStore.setState({ nodes: previous.nodes, edges: previous.edges });
@@ -988,6 +1169,54 @@ describe("updateAssistantUiEvents", () => {
 });
 
 describe("normalizeMessage", () => {
+  it("keeps reference remix system notices available to the chat", () => {
+    const notice = normalizeMessage({
+      id: 42,
+      role: "assistant",
+      content: "原片分析已完成，结果已保存到原片拆解节点。虾导将展示分析摘要与复刻建议，等待你确认复刻方向。",
+      turn_id: "reference-remix-run-1-notice-analysis-completed",
+      reference_remix_run_id: "run-1",
+    });
+    const liveNotice = normalizeMessage({
+      id: 43,
+      role: "assistant",
+      content: "原片分析已完成，结果已保存到原片拆解节点。",
+      turn_id: "reference-remix-run-1-notice-analysis-completed",
+      metadata: { reference_remix_run_id: "run-1" },
+    });
+    const ordinaryReply = normalizeMessage({
+      id: 44,
+      role: "assistant",
+      content: "原片分析已完成，以下是我的建议。",
+    });
+
+    expect(notice?.text).toContain("原片分析已完成");
+    expect(liveNotice?.text).toContain("原片分析已完成");
+    expect(ordinaryReply?.role).toBe("assistant");
+    expect(upsertServerAssistantMessageForTest([], {
+      id: 45,
+      role: "system",
+      content: "原片分析已完成，正在整理复刻建议。",
+      turn_id: "reference-remix-run-2-notice-analysis-completed",
+      metadata: { reference_remix_run_id: "run-2" },
+    })).toHaveLength(1);
+    expect(normalizeMessage({
+      id: "cached-notice",
+      role: "system",
+      text: "原片分析结果已保存；虾导准备方案时失败。可重试续跑。",
+      turnId: "reference-remix-run-2-notice-resume-failed-1",
+      raw: { recipient: "user", reference_remix_run_id: "run-2" },
+    })).not.toBeNull();
+    const directive = normalizeMessage({
+      id: 46,
+      role: "system",
+      content: "请读取已保存的原片分析并继续当前复刻阶段。",
+      turn_id: "reference-remix-run-2-resume-1-directive",
+      metadata: { reference_remix_run_id: "run-2", recipient: "agent", message_kind: "reference_remix_agent_directive" },
+    });
+    expect(directive).not.toBeNull();
+  });
+
   it("strips internal DramaClaw context blocks from displayed text", () => {
     const normalized = normalizeMessage({
       id: "backend-user-1",
@@ -1944,6 +2173,29 @@ describe("Skill Studio question response", () => {
       [endedAssistant],
       { busy: true, activeTurnId: "turn-ended" },
     )?.bridge_key).toBe("clarify-ended");
+  });
+
+  it("keeps an ended-turn generation parameter card answerable until the user submits it", () => {
+    const endedAssistant = message("assistant-ended-generation-card", "assistant", "", 100, "turn-ended");
+    endedAssistant.uiEvents = [
+      {
+        type: "assistant.clarification.request",
+        bridge_key: "generation-card",
+        clarification_id: "generation-parameters",
+        questions: [
+          {
+            id: "video_model",
+            options_source: "video_models",
+            options: [{ id: "model-a", label: "模型 A" }],
+          },
+        ],
+      },
+    ];
+
+    expect(latestPendingAssistantClarificationEventForComposerForTest(
+      [endedAssistant],
+      { busy: false, activeTurnId: null },
+    )?.bridge_key).toBe("generation-card");
   });
 
   it("does not surface ended-turn pending Skill Studio questions as the active composer prompt", () => {
@@ -5455,6 +5707,60 @@ describe("useSuperChat websocket lifecycle", () => {
     expect(closeCalls).toEqual([[4000, "client abort"]]);
   });
 
+  it.each(["same socket", "replacement socket"])(
+    "keeps a later connection live after Stop on %s",
+    async (scenario) => {
+      const scope = { kind: "project", id: `stop-grace-${scenario}`, surface: "freezone", canvasId: "canvas" };
+      class TestWebSocket {
+        static OPEN = 1;
+        readyState = 1;
+        onopen: (() => void) | null = null;
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        onerror: (() => void) | null = null;
+        onclose: ((event: CloseEvent) => void) | null = null;
+        frames: Array<Record<string, unknown>> = [];
+        closes: Array<[number | undefined, string | undefined]> = [];
+        constructor() { sockets.push(this); }
+        send(frame: string) { this.frames.push(JSON.parse(frame)); }
+        close(code?: number, reason?: string) { this.closes.push([code, reason]); this.readyState = 3; }
+      }
+      const sockets: TestWebSocket[] = [];
+      Object.defineProperty(globalThis, "WebSocket", { value: TestWebSocket, writable: true, configurable: true });
+      const hook = renderHook(() => useSuperChat({ project: scope.id, displayName: "Tester", surface: "freezone", freezoneCanvasId: scope.canvasId }));
+      await waitFor(() => expect(sockets).toHaveLength(1));
+      const acknowledgeScope = (socket: TestWebSocket) => {
+        socket.onopen?.();
+        socket.onmessage?.({ data: JSON.stringify({ type: "scope.changed", scope, history: [], busy: false }) } as MessageEvent);
+      };
+      await act(async () => acknowledgeScope(sockets[0]));
+      act(() => expect(hook.result.current.send("old turn", [])).toBe(true));
+      const oldTurnId = hook.result.current.activeTurnId;
+      vi.useFakeTimers();
+      act(() => hook.result.current.abort());
+      expect(hook.result.current.busy).toBe(false);
+      let currentSocket = sockets[0];
+      if (scenario === "replacement socket") {
+        act(() => {
+          sockets[0].readyState = 3;
+          sockets[0].onclose?.({ code: 1006, reason: "network lost" } as CloseEvent);
+          vi.advanceTimersByTime(1200);
+        });
+        expect(sockets).toHaveLength(2);
+        currentSocket = sockets[1];
+        act(() => acknowledgeScope(currentSocket));
+      } else {
+        act(() => expect(hook.result.current.send("next turn", [])).toBe(true));
+        expect(hook.result.current.activeTurnId).not.toBe(oldTurnId);
+      }
+      act(() => vi.advanceTimersByTime(abortTerminalGraceMsForTest() + 1));
+      expect(currentSocket.closes).toEqual([]);
+      expect(currentSocket.readyState).toBe(TestWebSocket.OPEN);
+      expect(hook.result.current.connected).toBe(true);
+      if (scenario !== "replacement socket") expect(hook.result.current.busy).toBe(true);
+      hook.unmount();
+    },
+  );
+
   it("defaults freezone canvas execution context to manual confirmation", () => {
     expect(freezoneCanvasCommandExecutionModeForTest()).toBe("manual_confirm");
   });
@@ -6188,6 +6494,36 @@ describe("tool status parts", () => {
     expect(messageHasVisibleAgentProgressActivityForTest(message)).toBe(false);
   });
 
+  it("keeps the thinking placeholder when a plan update has no displayable steps", () => {
+    const message = {
+      id: "assistant-turn-a",
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      turnId: "turn-a",
+      parts: [
+        { id: "plan", type: "agent_plan", event: { text: "Preparing plan", entries: [] } },
+      ],
+    } satisfies ChatMessage;
+
+    expect(messageHasVisibleAgentProgressActivityForTest(message)).toBe(false);
+  });
+
+  it("replaces the thinking placeholder when a plan update has a visible step", () => {
+    const message = {
+      id: "assistant-turn-a",
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      turnId: "turn-a",
+      parts: [
+        { id: "plan", type: "agent_plan", event: { entries: [{ status: "in_progress", content: "读取方案" }] } },
+      ],
+    } satisfies ChatMessage;
+
+    expect(messageHasVisibleAgentProgressActivityForTest(message)).toBe(true);
+  });
+
   it("does not force assistant messages wide for runtime-only status parts", () => {
     expect(assistantPartsPreferWideLayoutForTest([
       { id: "usage", type: "agent_usage", event: { usage: { used: 10 } } },
@@ -6354,6 +6690,38 @@ describe("tool status parts", () => {
     expect(genericToolTitleForTest((part as { event: ChatMessage }).event)).toBe("整理 Skill 方案");
   });
 
+  it("uses Chinese labels for reference production tool statuses", () => {
+    const tools = [
+      ["dramaclaw.freezone_start_reference_analysis", "分析原片"],
+      ["dramaclaw.freezone_get_reference_evidence", "读取原片证据"],
+      ["dramaclaw.freezone_advance_reference_production", "推进复刻流程"],
+      ["dramaclaw.freezone_create_production_plan", "创建作品方案"],
+      ["dramaclaw.freezone_get_production_state", "读取制作状态"],
+      ["dramaclaw.freezone_prepare_production_edit", "修改作品方案"],
+    ] as const;
+    for (const [name, title] of tools) {
+      expect(genericToolTitleForTest({
+        id: name,
+        role: "tool",
+        text: name,
+        timestamp: 1,
+        raw: { name },
+      })).toBe(title);
+    }
+  });
+
+  it("labels a decision tool from its structured kind", () => {
+    const title = (kind?: string) => genericToolTitleForTest({
+      id: `decision-${kind ?? 'old'}`, role: "tool", text: "", timestamp: 1,
+      raw: { name: "dramaclaw.freezone_prepare_reference_decision",
+        ...(kind ? { input: { kind } } : {}) },
+    });
+    expect(title("direction")).toBe("准备复刻方向");
+    expect(title("plan")).toBe("登记待确认作品方案");
+    expect(title("composition")).toBe("准备合成确认");
+    expect(title()).toBe("准备制作确认");
+  });
+
   it("uses a lightweight retry label for failed Skill Studio outline status", () => {
     const part = toolStatusPartForTest("agent.tool.updated", {
       type: "agent.tool.updated",
@@ -6370,6 +6738,20 @@ describe("tool status parts", () => {
       title: genericToolTitleForTest(toolMessage),
       toolMessage,
     })).toBe("待重新整理 Skill 方案");
+  });
+
+  it.each([
+    ["unverified", "failed"],
+    ["timeout", "failed"],
+    ["awaiting_approval", "running"],
+    ["accepted", "running"],
+    ["running", "running"],
+    ["completed", "done"],
+  ] as const)("shows verified operation status %s as %s", (status, expected) => {
+    expect(freezoneToolStatusForTest({
+      id: `operation-${status}`, role: "tool", text: "画布操作", timestamp: 1,
+      raw: { type: "agent.tool.updated", status },
+    })).toBe(expected);
   });
 
   it("uses friendly labels for Workflow Skill draft tool status", () => {
@@ -6544,7 +6926,8 @@ describe("tool status parts", () => {
 
     expect(historical.map((part) => part.id)).toEqual(["tool_status:turn-a:call-failed", "thought-a"]);
     expect(streaming.map((part) => part.id)).toEqual([
-      "tool_status:turn-a:call-running+tool_status:turn-a:call-completed",
+      "tool_status:turn-a:call-running",
+      "tool_status:turn-a:call-completed",
       "tool_status:turn-a:call-failed",
       "thought-a",
     ]);
@@ -7220,4 +7603,169 @@ describe("story approval continuity translations", () => {
       useCanvasStore.setState({ nodes: previous.nodes, edges: previous.edges });
     }
   });
+});
+
+describe("protected background interaction recovery integration", () => {
+  it.each([true, false])("recovers scoped work after original turn with WS enabled=%s", async (connectionEnabled) => {
+    apiPostMock.mockClear();
+    const { useAuthStore } = await import("@/stores/auth-store");
+    useAuthStore.setState({ username: "recovery-human" });
+    const urls: string[] = [];
+    class RecoverySocket {
+      static OPEN = 1; readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror = null; onclose = null;
+      constructor(url: string) { urls.push(url); }
+      send() {} close() {}
+    }
+    const previousSocket = globalThis.WebSocket;
+    Object.defineProperty(globalThis, "WebSocket", { value: RecoverySocket, configurable: true, writable: true });
+    const empty = { frames: [], messages: [], events: [], receipts: [], cursor: 17, event_cursor: "r24", has_more: false };
+    apiPostMock.mockImplementation((() => ({ json: () => Promise.resolve({ ok: true, data: empty }) })) as never);
+    const hook = renderHook(() => useSuperChat({ project: "project-recovery", displayName: "Recovery", surface: "freezone", freezoneCanvasId: "canvas-recovery", connectionEnabled }));
+    try {
+      if (connectionEnabled) await waitFor(() => expect(urls).toHaveLength(1));
+      else expect(urls).toHaveLength(0);
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith("api/v1/chat/pending-interactions", expect.anything()));
+      const first = (apiPostMock.mock.calls as unknown as Array<[string, unknown]>).find(call => call[0] === "api/v1/chat/pending-interactions") as unknown as [string, { json: { browser_id: string } }];
+      if (connectionEnabled) expect(new URL(urls[0]).searchParams.get("browser_id")).toBe(first[1].json.browser_id);
+      act(() => window.dispatchEvent(new Event("focus")));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith("api/v1/chat/pending-interactions", expect.objectContaining({ json: expect.objectContaining({ cursor: 17, event_cursor: "r24" }) })));
+    } finally {
+      hook.unmount();
+      useAuthStore.setState({ username: null });
+      Object.defineProperty(globalThis, "WebSocket", { value: previousSocket, configurable: true, writable: true });
+      apiPostMock.mockImplementation(() => Promise.resolve({}));
+    }
+  });
+});
+
+it("reconciles sent optimistic users with HTTP recovery by original turn without collapsing repeated prompts", async () => {
+  const { useAuthStore } = await import("@/stores/auth-store");
+  useAuthStore.setState({ username: "dedupe-human" });
+  const sent: Array<{ type: string; turn_id?: string }> = [];
+  const sockets: RecoverySocket[] = [];
+  class RecoverySocket {
+    static OPEN = 1; readyState = 1;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror = null; onclose = null;
+    constructor() { sockets.push(this); }
+    send(frame: string) { sent.push(JSON.parse(frame)); }
+    close() {}
+  }
+  const previousSocket = globalThis.WebSocket;
+  Object.defineProperty(globalThis, "WebSocket", { value: RecoverySocket, configurable: true, writable: true });
+  let messages: unknown[] = [];
+  apiPostMock.mockImplementation((() => ({ json: () => Promise.resolve({ ok: true, data: { frames: [], messages, events: [], receipts: [], cursor: messages.length, event_cursor: "", has_more: false } }) })) as never);
+  const scope = { kind: "project", id: "dedupe-project", surface: "freezone", canvasId: "dedupe-canvas", agentId: "agent-2" };
+  const hook = renderHook(() => useSuperChat({ project: scope.id, displayName: "Human", surface: "freezone", freezoneCanvasId: scope.canvasId, freezoneAgentId: scope.agentId }));
+  try {
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      sockets[0].onopen?.();
+      sockets[0].onmessage?.({ data: JSON.stringify({ type: "scope.changed", scope, history: [], busy: false }) } as MessageEvent);
+    });
+    act(() => { expect(hook.result.current.send("same prompt", [])).toBe(true); });
+    act(() => { expect(hook.result.current.send("same prompt", [])).toBe(true); });
+    const turns = sent.filter(frame => frame.type === "chat.message").map(frame => frame.turn_id!);
+    expect(new Set(turns).size).toBe(2);
+    expect(hook.result.current.messages.filter(message => message.role === "user")).toHaveLength(2);
+    messages = [{ id: 1, role: "user", content: "same prompt", turn_id: turns[0] }];
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(hook.result.current.messages.some(message => message.id === "1")).toBe(true));
+    expect(hook.result.current.messages.filter(message => message.role === "user")).toHaveLength(2);
+    expect(hook.result.current.messages.some(message => message.id === `user-${turns[1]}`)).toBe(true);
+    messages = [...messages, { id: 2, role: "user", content: "same prompt", turn_id: turns[1] }];
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(hook.result.current.messages.some(message => message.id === "2")).toBe(true));
+    expect(hook.result.current.messages.filter(message => message.role === "user").map(message => message.id).sort()).toEqual(["1", "2"]);
+    expect(apiPostMock).toHaveBeenCalledWith("api/v1/chat/pending-interactions", expect.objectContaining({ json: expect.objectContaining({ project_id: scope.id, canvas_id: scope.canvasId, agent_id: scope.agentId }) }));
+    let resolveOldActor!: (value: unknown) => void;
+    apiPostMock.mockImplementation((() => ({ json: () => new Promise(resolve => { resolveOldActor = resolve; }) })) as never);
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(resolveOldActor).toBeTypeOf("function"));
+    const deliverOldActor = resolveOldActor;
+    await act(async () => {
+      useAuthStore.setState({ username: "other-human" });
+      deliverOldActor({ ok: true, data: { frames: [], messages: [{ id: 777, role: "user", content: "same prompt", turn_id: turns[0] }], events: [], receipts: [], cursor: 777, event_cursor: "", has_more: false } });
+    });
+    expect(hook.result.current.messages.some(message => message.id === "777")).toBe(false);
+  } finally {
+    hook.unmount();
+    useAuthStore.setState({ username: null });
+    Object.defineProperty(globalThis, "WebSocket", { value: previousSocket, configurable: true, writable: true });
+    apiPostMock.mockImplementation(() => Promise.resolve({}));
+  }
+});
+
+
+describe("delayed clarification presentation", () => {
+  it("does not let an empty submit receipt close a pending generation card", () => {
+    const pending = {
+      type: "assistant.clarification.request",
+      bridge_key: "generation-card",
+      questions: [{ id: "video_model", options: [{ id: "model-a" }] }],
+      answers: { video_model: { option_ids: ["model-a"] } },
+    };
+    const emptySubmit = {
+      type: "assistant.clarification.request",
+      bridge_key: "generation-card",
+      submitted: true,
+      action: "submit",
+      answers: {},
+    };
+    const parts = visibleAssistantOrderedPartsForMessageForTest({
+      id: "assistant",
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      uiEvents: [pending, emptySubmit],
+      parts: [{ id: "generation-card", type: "clarification", event: pending }],
+    });
+    expect(parts[0]).toMatchObject({
+      event: {
+        submitted: false,
+        clarification_status: "pending_user_input",
+        answers: pending.answers,
+      },
+    });
+  });
+
+  it.each([[false, "question"], [true, "question"], [false, "question.executor.old"], [true, "question.executor.old"]])("preserves committed answers across pending snapshots (reverse=%s, key=%s)", (reverse, key) => {
+    const submitted = { type: "assistant.clarification.request", bridge_key: key as string, turn_id: "turn", submitted: true, answers: { duration: "30 seconds" } };
+    const pending = { type: "assistant.clarification.request", bridge_key: "question", turn_id: "turn", answers: {} };
+    const events = reverse ? [pending, submitted] : [submitted, pending];
+    const parts = visibleAssistantOrderedPartsForMessageForTest({ id: "assistant", role: "assistant", text: "", timestamp: 1, turnId: "turn", uiEvents: events, parts: [{ id: "question", type: "clarification", event: submitted }] });
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toMatchObject({ event: { submitted: true, answers: { duration: "30 seconds" } } });
+    const hydrated = hydrateOrderedPartsWithUiEventsForTest([{ id: "question", type: "clarification", event: submitted }], [pending]);
+    expect(hydrated?.[0]).toMatchObject({ event: { submitted: true, answers: { duration: "30 seconds" } } });
+  });
+});
+
+it("shows one completed clarification across canonical and executor ordered copies", () => {
+  const submitted = { type: "assistant.clarification.request", bridge_key: "completed.executor.old", submitted: true, answers: { duration: "30 seconds" } };
+  const pending = { type: "assistant.clarification.request", bridge_key: "completed", answers: {} };
+  const parts = visibleAssistantOrderedPartsForMessageForTest({ id: "assistant", role: "assistant", text: "", timestamp: 1, uiEvents: [submitted, pending], parts: [{ id: "submitted", type: "clarification", event: submitted }, { id: "pending", type: "clarification", event: pending }] });
+  expect(parts).toHaveLength(1);
+  expect(parts[0]).toMatchObject({ event: { submitted: true, answers: { duration: "30 seconds" } } });
+});
+
+it.each(["project_id", "canvas_id", "agent_id", "turn_id"])("preserves distinct clarification %s scopes", field => {
+  const first = { type: "assistant.clarification.request", bridge_key: "scope-question", [field]: "one", submitted: true, answers: { duration: "first" } };
+  const second = { type: "assistant.clarification.request", bridge_key: "scope-question.executor.next", [field]: "two", answers: {} };
+  const parts = visibleAssistantOrderedPartsForMessageForTest({ id: "assistant", role: "assistant", text: "", timestamp: 1, uiEvents: [first, second], parts: [{ id: "first", type: "clarification", event: first }, { id: "second", type: "clarification", event: second }] });
+  expect(parts).toHaveLength(2);
+  expect(parts[1]).toMatchObject({ event: { answers: {} } });
+  expect((parts[1] as { event: { submitted?: boolean } }).event.submitted).not.toBe(true);
+});
+
+it.each([false, true])("preserves submitted ordered duplicate without UI events (reverse=%s)", reverse => {
+  const pending = { id: "pending", type: "clarification" as const, event: { type: "assistant.clarification.request", bridge_key: "ordered-question", answers: {} } };
+  const submitted = { id: "submitted", type: "clarification" as const, event: { type: "assistant.clarification.request", bridge_key: "ordered-question.executor.old", submitted: true, answers: { duration: "30 seconds" } } };
+  const parts = visibleAssistantOrderedPartsForMessageForTest({ id: "assistant", role: "assistant", text: "", timestamp: 1, parts: reverse ? [submitted, pending] : [pending, submitted] });
+  expect(parts).toHaveLength(1);
+  expect(parts[0]).toMatchObject({ event: { submitted: true, answers: { duration: "30 seconds" } } });
 });

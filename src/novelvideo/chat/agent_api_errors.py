@@ -28,6 +28,73 @@ def _safe_error_string(value: Any, limit: int) -> str:
     return cleaned
 
 
+def _validation_error_items(detail: Any) -> list[dict[str, str]]:
+    """Keep bounded, field-level FastAPI validation diagnostics for agents."""
+    if not isinstance(detail, list):
+        return []
+    items: list[dict[str, str]] = []
+    for raw in detail[:8]:
+        if not isinstance(raw, dict):
+            continue
+        location = raw.get("loc")
+        if not isinstance(location, list):
+            continue
+        parts = location[1:] if location[:1] == ["body"] else location
+        path = ""
+        valid = True
+        for part in parts:
+            if type(part) is int and 0 <= part <= 9999:
+                path += f"[{part}]"
+            elif isinstance(part, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", part):
+                path += ("." if path else "") + part
+            else:
+                valid = False
+                break
+        message = _safe_error_string(raw.get("msg"), 240)
+        if valid and path and message:
+            items.append({"path": path, "message": message})
+    return items
+
+
+def _structured_error_items(value: Any) -> list[dict[str, str]]:
+    """Keep bounded path/message pairs from a structured API error."""
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, str]] = []
+    for raw in value[:5]:
+        if not isinstance(raw, dict):
+            continue
+        path = _safe_error_string(raw.get("path"), 160)
+        if (not path and type(raw.get("index")) is int
+                and 0 <= raw["index"] <= 9999):
+            path = f"edges[{raw['index']}]"
+        message = _safe_error_string(raw.get("message") or raw.get("reason"), 240)
+        if not path or not re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", path):
+            continue
+        items.append({"path": path, **({"message": message} if message else {})})
+    return items
+
+
+def _copy_material_diagnostics(result: dict[str, Any], source: Any) -> None:
+    if not isinstance(source, dict):
+        return
+    for field in ("phase", "side_effects", "request_id"):
+        value = _safe_error_string(source.get(field), 160)
+        if value and re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+            result[field] = value
+    value = _safe_error_string(source.get("code"), 96)
+    if value and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        result["code"] = value
+    value = _safe_error_string(source.get("next_action"), 96)
+    if value and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        result["next_action"] = value
+    if isinstance(source.get("retryable"), bool):
+        result["retryable"] = source["retryable"]
+    errors = _structured_error_items(source.get("errors"))
+    if errors:
+        result["errors"] = errors
+
+
 def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, Any]:
     """Expose only bounded validation diagnostics from the project API."""
     result: dict[str, Any] = {
@@ -41,8 +108,10 @@ def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, An
     data = _maybe_json(text)
     if 500 <= status_code < 600:
         if isinstance(data, dict):
+            source = data.get("detail") if isinstance(data.get("detail"), dict) else data
+            _copy_material_diagnostics(result, source)
             for field in ("error", "message", "detail"):
-                value = _safe_error_string(data.get(field), 300)
+                value = _safe_error_string(source.get(field), 300)
                 if value:
                     result["error"] = value
                     break
@@ -55,6 +124,12 @@ def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, An
         return result
     detail = data.get("detail")
     source = detail if isinstance(detail, dict) else data
+    validation_errors = _validation_error_items(detail)
+    if validation_errors:
+        result["errors"] = validation_errors
+        first = validation_errors[0]
+        result["error"] = f"{first['path']}: {first['message']}"
+    _copy_material_diagnostics(result, source)
     for field in ("status", "code", "next_action"):
         value = _safe_error_string(source.get(field), 80)
         if value and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
@@ -110,23 +185,7 @@ def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, An
             result["missing_parameters"] = safe_missing
     errors = source.get("errors")
     if isinstance(errors, list):
-        safe_errors = []
-        for item in errors[:5]:
-            if not isinstance(item, dict):
-                continue
-            path = _safe_error_string(item.get("path"), 160)
-            if (
-                not path
-                and type(item.get("index")) is int
-                and 0 <= item["index"] <= 9999
-            ):
-                path = f"edges[{item['index']}]"
-            message = _safe_error_string(item.get("message") or item.get("reason"), 240)
-            if not path or not re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", path):
-                continue
-            safe_errors.append(
-                {"path": path, **({"message": message} if message else {})}
-            )
+        safe_errors = _structured_error_items(errors)
         if safe_errors:
             result["errors"] = safe_errors
     while len(

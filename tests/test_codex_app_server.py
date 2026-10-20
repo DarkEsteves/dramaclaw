@@ -782,9 +782,11 @@ def test_shared_codex_private_sdk_bridge_is_compatible(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_codex_stream_maps_structured_runtime_events(monkeypatch, tmp_path):
+async def test_codex_stream_maps_structured_runtime_events(monkeypatch, tmp_path, caplog):
     from openai_codex.generated import v2_all as v2
     from openai_codex.models import Notification
+
+    caplog.set_level("INFO", logger=backend_sdk.__name__)
 
     turn_in_progress = {"id": "turn-1", "items": [], "status": "inProgress"}
     usage = {
@@ -980,6 +982,15 @@ async def test_codex_stream_maps_structured_runtime_events(monkeypatch, tmp_path
     assert plan.entries == [{"status": "inProgress", "step": "List projects"}]
     thought = next(event for event in events if event.type == "thought_delta")
     assert thought.name == "reasoning_summary"
+    reasoning_log = next(
+        record.message
+        for record in caplog.records
+        if "Codex reasoning summary event" in record.message
+    )
+    assert "method=item/reasoning/summaryTextDelta" in reasoning_log
+    assert "item_id=reasoning-1" in reasoning_log
+    assert "summary_index=0" in reasoning_log
+    assert "turn_id_match=True" in reasoning_log
     started = next(event for event in events if event.type == "tool_started")
     assert started.name == "dramaclaw.list_projects"
     assert started.call_id == "call-1"
@@ -997,7 +1008,7 @@ async def test_codex_stream_maps_structured_runtime_events(monkeypatch, tmp_path
 
 @pytest.mark.asyncio
 async def test_codex_stream_times_out_before_first_runtime_progress(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, caplog
 ):
     from openai_codex.generated import v2_all as v2
     from openai_codex.models import Notification
@@ -1073,6 +1084,16 @@ async def test_codex_stream_times_out_before_first_runtime_progress(
     assert events[-2].disposition == "timeout"
     assert events[-1].disposition == "timeout"
     assert events[-1].text == "Codex App Server 响应超时，请重试。"
+    timeout_log = next(record.message for record in caplog.records if "stream timed out" in record.message)
+    assert "kind=first-progress" in timeout_log
+    assert "thread=thread-timeout turn=turn-timeout" in timeout_log
+    assert "last_raw_event_type=turn/started" in timeout_log
+    assert "last_mapped_event_type=turn_started" in timeout_log
+    assert "last_tool_call_id=unavailable" in timeout_log
+    assert "time_since_raw_event=" in timeout_log
+    assert "time_since_progress=" in timeout_log
+    assert "queue_depth=" in timeout_log
+    assert "event_count=" in timeout_log
 
 
 def test_codex_first_progress_timeout_accepts_positive_environment_override(
@@ -1102,7 +1123,7 @@ def test_codex_first_progress_timeout_rejects_invalid_environment_override(
 
 
 @pytest.mark.asyncio
-async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tmp_path):
+async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tmp_path, caplog):
     from openai_codex.generated import v2_all as v2
     from openai_codex.models import Notification
 
@@ -1119,6 +1140,19 @@ async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tm
             ),
         ),
         Notification(
+            method="item/started",
+            payload=v2.ItemStartedNotification.model_validate({
+                "threadId": "thread-idle",
+                "turnId": "turn-idle",
+                "startedAtMs": 1,
+                "item": {
+                    "type": "mcpToolCall", "id": "call-idle", "server": "dramaclaw",
+                    "tool": "safe_tool", "arguments": {"secret": "must-not-log"},
+                    "status": "inProgress",
+                },
+            }),
+        ),
+        Notification(
             method="item/agentMessage/delta",
             payload=v2.AgentMessageDeltaNotification.model_validate(
                 {
@@ -1129,6 +1163,7 @@ async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tm
                 }
             ),
         ),
+        SimpleNamespace(method="custom/heartbeat", payload=object()),
     ]
 
     class FakeTurn:
@@ -1185,11 +1220,19 @@ async def test_codex_stream_times_out_after_runtime_becomes_idle(monkeypatch, tm
     assert events[-2].disposition == "timeout"
     assert events[-1].type == "complete"
     assert events[-1].disposition == "timeout"
+    timeout_log = next(record.message for record in caplog.records if "stream timed out" in record.message)
+    assert "last_raw_event_type=custom/heartbeat" in timeout_log
+    assert "last_mapped_event_type=assistant_delta" in timeout_log
+    assert "last_tool_call_id=call-idle" in timeout_log
+    assert "raw_event_count=4" in timeout_log
+    assert "event_count=5" in timeout_log
+    assert "must-not-log" not in timeout_log
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wait_expires", [False, True])
 async def test_codex_stream_does_not_idle_timeout_while_waiting_for_user_input(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, wait_expires, caplog
 ):
     from openai_codex.generated import v2_all as v2
     from openai_codex.models import Notification
@@ -1303,7 +1346,7 @@ async def test_codex_stream_does_not_idle_timeout_while_waiting_for_user_input(
     )
     monkeypatch.setattr(backend_sdk, "CODEX_STREAM_FIRST_PROGRESS_TIMEOUT", 1.0)
     monkeypatch.setattr(backend_sdk, "CODEX_STREAM_IDLE_TIMEOUT", 0.03)
-    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 0.5)
+    monkeypatch.setattr(backend_sdk, "CODEX_STREAM_TOTAL_TIMEOUT", 0.06 if wait_expires else 0.5)
 
     thread = CodexThread(
         codex_bin=None,
@@ -1319,11 +1362,20 @@ async def test_codex_stream_does_not_idle_timeout_while_waiting_for_user_input(
     )
     events = [event async for event in thread.stream("Create a skill")]
 
-    assert interrupt_calls == []
-    assert events[-1].type == "complete"
-    assert events[-1].text == "已确认"
-    assert events[-2].type == "egress_disposition"
-    assert events[-2].disposition == "completed"
+    if wait_expires:
+        assert interrupt_calls == ["turn-confirm"]
+        assert events[-1].type == "complete"
+        assert events[-1].error["kind"] == "user-input"
+        assert events[-1].disposition == "timeout"
+        timeout_log = next(record.message for record in caplog.records if "stream timed out" in record.message)
+        assert "kind=user-input" in timeout_log
+        assert "last_tool_call_id=call-confirm" in timeout_log
+    else:
+        assert interrupt_calls == []
+        assert events[-1].type == "complete"
+        assert events[-1].text == "已确认"
+        assert events[-2].type == "egress_disposition"
+        assert events[-2].disposition == "completed"
 
 
 @pytest.mark.asyncio

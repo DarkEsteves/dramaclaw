@@ -17,6 +17,8 @@ import {
   isNodeActionGenerationPending,
 } from "@/features/freezone/canvasChatCommands";
 import { useCanvasStore } from "@/stores/canvasStore";
+import { isProductionProcessingAction, recoverProductionWorkflowAction } from "@/features/canvas/remix/productionWorkflowRuntime";
+import { captureFreezoneCanvasScope } from "@/features/freezone/canvasSyncRuntime";
 import { useTaskCenterStore } from "@/task-center/store";
 
 const RESUMABLE_ACTION_STATUSES = new Set(["pending", "running", "failed", "blocked"]);
@@ -144,6 +146,8 @@ export function WorkflowRunRecoveryBar({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const staleCleanupRef = useRef(new Set<string>());
+  const reconciledProcessingRef = useRef(new Set<string>());
+  const recoverySessionRef = useRef<{ projectId: string; canvasId: string; active: boolean; scopeIsCurrent: (() => boolean) | null } | null>(null);
   const trackedTaskKeys = useMemo(
     () => new Set(
       runs.flatMap((item) =>
@@ -166,10 +170,48 @@ export function WorkflowRunRecoveryBar({
   }, [canvasId, projectId]);
 
   useEffect(() => {
+    const session = { projectId, canvasId, active: true, scopeIsCurrent: null as (() => boolean) | null };
+    recoverySessionRef.current = session;
+    return () => {
+      session.active = false;
+      if (recoverySessionRef.current === session) recoverySessionRef.current = null;
+    };
+  }, [canvasId, projectId]);
+
+  useEffect(() => {
     setDismissedRunId(null);
     setError(null);
+    reconciledProcessingRef.current.clear();
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    // Server task results outlive the browser runner. Restore verified native
+    // artifacts even when a completed run is no longer marked resumable.
+    const session = recoverySessionRef.current;
+    if (!session || session.projectId !== projectId || session.canvasId !== canvasId || !session.active) return;
+    if (!session.scopeIsCurrent) {
+      const captured = captureFreezoneCanvasScope(projectId, canvasId);
+      if (!captured()) return;
+      session.scopeIsCurrent = captured;
+    }
+    const isCurrent = () => session.active && recoverySessionRef.current === session && session.scopeIsCurrent?.() === true;
+    for (const run of runs) for (const action of run.actions) {
+      if (run.project_id !== projectId || run.canvas_id !== canvasId) continue;
+      if (run.status === 'running') continue;
+      if (!isProductionProcessingAction(action.action) || !action.result_ref) continue;
+      if (!(action.status === 'completed' && action.artifact_status === 'valid'
+        || action.status === 'blocked' && action.artifact_status === 'needs_review')) continue;
+      const key = `${projectId}:${canvasId}:${run.run_id}:${action.node_id}:${action.action}:${JSON.stringify(action.result_ref)}`;
+      if (reconciledProcessingRef.current.has(key)) continue;
+      reconciledProcessingRef.current.add(key);
+      void recoverProductionWorkflowAction(projectId, action, isCurrent, canvasId).then((status) => {
+        if (recoverySessionRef.current === session && (status === 'retry' || !isCurrent())) reconciledProcessingRef.current.delete(key);
+      }).catch(() => {
+        if (recoverySessionRef.current === session) reconciledProcessingRef.current.delete(key);
+      });
+    }
+  }, [canvasId, projectId, runs]);
 
   useEffect(() => {
     const staleRunIds = staleResumableWorkflowRunIds(runs, existingNodeIds)

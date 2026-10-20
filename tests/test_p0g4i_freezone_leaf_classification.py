@@ -14,7 +14,7 @@
   context 被吞进 kwargs 袋子里静默失效。
 
 改法是分发器内一张显式表，键由**调用点**提供。不能用「函数对象 → 分类」：
-22 个调用点的 import 都在 runner 函数体内，测试 monkeypatch 后拿到的是假对象，
+24 个调用点的 import 都在 runner 函数体内，测试 monkeypatch 后拿到的是假对象，
 模块级建的对象表必然查不中；`leaf.__name__` 同理。
 
 未列入表的 leaf 在组织上下文下**照旧抛**——默认仍 fail-closed（OI-47 护栏 a，
@@ -493,7 +493,7 @@ def test_classification_matches_the_real_leaf_signatures() -> None:
 
 
 def test_every_dispatch_site_names_a_classified_leaf() -> None:
-    """22 个调用点逐个对到表里；新增未分类的调用点即红。
+    """24 个调用点逐个对到表里；新增未分类的调用点即红。
 
     `leaf_name` 是必填位置参数，不是可选项——漏传是 `TypeError`，不是静默放行。
     """
@@ -521,8 +521,8 @@ def test_every_dispatch_site_names_a_classified_leaf() -> None:
 
     # 19 → 20：`origin/staging` 的 f33ac189（#279）带进来的
     # `generate_freezone_text`，正是上一条用例点名预言的那个形状。
-    # 白模生成与逐帧拉片均通过 leaf 分发器，合并后共 22 个调用点。
-    assert len(named) == 22
+    # 白模生成与逐帧拉片均通过 leaf 分发器，合并后共 24 个调用点。
+    assert len(named) == 24
     assert set(named) <= set(FREEZONE_LEAF_EGRESS)
 
 

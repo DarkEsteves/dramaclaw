@@ -32,6 +32,7 @@ import type { SkillDefinition, SkillInputRole } from "@/features/freezone/contex
 import { nodeAgentSceneDigest } from "@/features/previz/agentSceneEdit";
 import { agentSceneCatalog } from "@/features/previz/domain/agentEdit";
 import { STANDARD_TIME_OF_DAY_OPTIONS } from "@/lib/time-of-day";
+import { buildProductionWorkflowAction } from "@/features/canvas/remix/productionWorkflowRuntime";
 
 export type CanvasNodeActionExecution = "chat_command" | "requires_confirmation" | "manual_ui" | "frontend_node" | "tool";
 
@@ -1365,6 +1366,35 @@ function addFrontendNodeActions(
       description: "Submit this script node and generate a structured story script table from its prompt and upstream references.",
       parameters: { node_id: node.id },
     });
+    if (node.data.remixRole === 'production_plan') {
+      for (const action of ['generate_production_plan_draft', 'generate_production_plan_arrangement', 'align_production_speech'] as const) {
+        const descriptor = action === 'generate_production_plan_draft'
+          ? buildProductionWorkflowAction(node, [...(context?.nodes ?? [node])], [...(context?.edges ?? [])],
+            { action, parameters: { topic: String((node.data.productionPlanV2Draft as { goal?: unknown } | undefined)?.goal
+              ?? (node.data.processingPayload as { topic?: unknown } | undefined)?.topic ?? '') } })
+          : action === 'generate_production_plan_arrangement'
+            ? buildProductionWorkflowAction(node, [...(context?.nodes ?? [node])], [...(context?.edges ?? [])], { action }) : null;
+        const canRunNow = action === 'generate_production_plan_draft' || action === 'generate_production_plan_arrangement'
+          ? !descriptor?.blocked
+          : Boolean(node.data.productionPlanV2Ref && !node.data.productionPlanV2Dirty && !node.data.productionPlanV2Conflict);
+        actions.push({ action, execution: 'frontend_node', command_type: 'run_node_action',
+          description: action === 'generate_production_plan_draft'
+            ? '从已完成的原片分析和作品目标一次生成完整可编辑作品方案，包含结构、台词、素材与画面声音编排。完成后读取并审核方案。传 topic。方案已有内容时请新建方案节点。'
+            : action === 'generate_production_plan_arrangement' ? '仅用于继续历史保存的大纲：依据当前已保存方案安排画面与声音，只传精确 plan_ref；在同一方案保存新 revision。'
+            : '用已绑定的完整发声素材一次校准同源台词。传 turn_id 和 take_id 或 placement_id；不裁剪素材。',
+          can_run_now: canRunNow,
+          blocked_reasons: descriptor?.blocked ? [descriptor.blocked]
+            : !canRunNow ? ['请先保存可编辑作品方案并绑定发声素材'] : undefined,
+          parameters: action === 'generate_production_plan_draft'
+            ? { node_id: node.id, topic: { type: 'string', required: true },
+                requirements: { type: 'object', optional: true }, locked_turns: { type: 'array', optional: true },
+                requirements_fingerprint: { type: 'string', optional: true }, requirements_provenance: { type: 'object', optional: true } }
+            : action === 'generate_production_plan_arrangement' ? { node_id: node.id, plan_ref: { type: 'object', required: true } }
+            : { node_id: node.id, turn_id: { type: 'string', required: true }, take_id: { type: 'string', optional: true }, placement_id: { type: 'string', optional: true } },
+          instruction: '每阶段读取最新 node_action_catalog 和方案 ref。处理任务异步完成后再调用下一阶段。',
+        });
+      }
+    }
   }
 
   if (node.type === CANVAS_NODE_TYPES.skill) {
@@ -1464,21 +1494,34 @@ function addFrontendNodeActions(
   }
 
   if (node.type === CANVAS_NODE_TYPES.videoCompose) {
+    const productionPlanMode = Boolean(node.data.productionPlanNodeId && node.data.productionPlanV2Ref);
     actions.push({
       action: "auto_compose_video",
       execution: "frontend_node",
       command_type: "run_node_action",
-      description:
-        "Compose completed upstream video/audio nodes automatically. Reuse the saved timeline draft when present; otherwise order clips from the canvas and write the final video back to this compose node.",
+      description: productionPlanMode
+        ? "Export the connected saved production plan through its layered manifest, including bound visuals, overlays, subtitles, and audio. Requires a ready plan and exact canvas material bindings; does not require two video clips."
+        : "Compose completed upstream video/audio nodes automatically. Reuse the saved timeline draft when present; otherwise order clips from the canvas and write the final video back to this compose node.",
       parameters: { node_id: node.id },
     });
     actions.push({
       action: "open_video_compose_modal",
       execution: "manual_ui",
       command_type: "run_node_action",
-      description: "Open the video compose timeline editor for this node. After it opens, the user edits and exports manually in the modal.",
+      description: productionPlanMode
+        ? "Open the production plan composition workspace to inspect layered tracks, review timing, and export."
+        : "Open the video compose timeline editor for this node. After it opens, the user edits and exports manually in the modal.",
       parameters: { node_id: node.id },
     });
+    if (node.data.productionPlanNodeId || context?.edges?.some((edge) => edge.target === node.id
+      && context.nodes?.some((source) => source.id === edge.source && source.data.remixRole === 'production_plan'))) {
+      const descriptor = buildProductionWorkflowAction(node, [...(context?.nodes ?? [node])], [...(context?.edges ?? [])],
+        { action: 'compile_production_plan' });
+      actions.push({ action: 'compile_production_plan', execution: 'frontend_node', command_type: 'run_node_action',
+        description: '把当前已保存的可编辑作品方案精确编译为分层合成清单，返回清单版本；有台词时先完成语音校准和复核。',
+        can_run_now: !descriptor?.blocked, blocked_reasons: descriptor?.blocked ? [descriptor.blocked] : undefined,
+        parameters: { node_id: node.id }, instruction: '读取当前方案 ref，再调用。无台词的方案可直接编译。' });
+    }
   }
 
   if (
@@ -1551,6 +1594,27 @@ function addMediaActions(
   actions: CanvasNodeActionCatalogEntry[],
   context?: CanvasNodeActionCatalogContext,
 ): void {
+  if (node.type === CANVAS_NODE_TYPES.videoStory) {
+    actions.push({
+      action: "import_reference_keyframes",
+      execution: "frontend_node",
+      command_type: "run_node_action",
+      description: "将已保存原片分析中的关键帧导入为图片节点，不生成媒体。可选传入 shot_numbers 只导入指定镜头。",
+      parameters: {
+        node_id: node.id,
+        shot_numbers: {
+          type: "array",
+          items: { type: "string" },
+          optional: true,
+          description: "要导入的分析镜头编号；省略时导入全部可用关键帧。",
+        },
+      },
+      result_effect: {
+        target: "current canvas image nodes",
+        next_step: "读取动作返回的 createdNodeIds/skippedNodeIds，然后重新调用 freezone_list_reference_media，使用返回的图片节点 ID 绑定视觉参考。",
+      },
+    });
+  }
   if (node.type === CANVAS_NODE_TYPES.video && hasString((node.data as { videoUrl?: unknown }).videoUrl)) {
     actions.push({
       action: "capture_video_first_frame",

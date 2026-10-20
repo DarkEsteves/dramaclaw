@@ -139,6 +139,7 @@ export interface FreezoneWorkflowRunAction {
   updated_at?: string | null;
   error?: string | null;
   task_key?: string | null;
+  task_id?: string | null;
   task_type?: string | null;
   job_id?: string | null;
   error_category?: string | null;
@@ -146,7 +147,7 @@ export interface FreezoneWorkflowRunAction {
   error_fingerprint?: string | null;
   user_error?: string | null;
   retryable?: boolean | null;
-  artifact_status?: "valid" | "missing" | "unverified" | "not_required" | "stale" | null;
+  artifact_status?: "valid" | "needs_review" | "missing" | "unverified" | "not_required" | "stale" | null;
   recipe_id?: string | null;
   recipe_version?: string | null;
   generation_attempt_id?: string | null;
@@ -174,6 +175,7 @@ export interface FreezoneWorkflowRun {
   lease_expires_at?: string | null;
   actions: FreezoneWorkflowRunAction[];
   metadata?: Record<string, unknown>;
+  acceptance?: { workflow_run_id: string; completion_owner: "host" };
 }
 
 export async function createFreezoneWorkflowRun(
@@ -191,6 +193,7 @@ export async function createFreezoneWorkflowRun(
   }>,
   idempotencyKey?: string,
   runnerId?: string,
+  bridgeKey?: string,
 ): Promise<FreezoneWorkflowRun> {
   return await apiCall<FreezoneWorkflowRun>(
     `projects/${encodeURIComponent(projectId)}/freezone/canvases/${encodeURIComponent(canvasId)}/workflow-runs`,
@@ -200,6 +203,7 @@ export async function createFreezoneWorkflowRun(
         actions,
         ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
         ...(runnerId ? { runner_id: runnerId } : {}),
+        ...(bridgeKey ? { bridge_key: bridgeKey } : {}),
       },
     },
   );

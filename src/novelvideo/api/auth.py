@@ -181,7 +181,8 @@ def _enforce_agent_request_boundary(request: Request, user: dict) -> None:
                 detail="Agent session scope mismatch",
             )
 
-    if request.method.upper() in UNSAFE_METHODS:
+    saved_context_read = request.method.upper() == "POST" and re.fullmatch(r"(?:/api/v1)?/projects/[^/]+/freezone/canvases/[A-Za-z0-9_-]+/context/read", request.url.path)
+    if request.method.upper() in UNSAFE_METHODS and not saved_context_read:
         scopes = set(user.get("scopes") or [])
         if scopes.isdisjoint(AGENT_WRITE_SCOPES):
             raise HTTPException(status_code=403, detail="agent write scope missing")

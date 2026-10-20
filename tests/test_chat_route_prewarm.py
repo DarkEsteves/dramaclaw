@@ -502,7 +502,7 @@ async def test_late_canvas_result_completes_durable_workflow_draft(
         compiled={
             "ok": True,
             "skill_id": "video-ad",
-            "plan": {"nodes": [], "edges": [], "phases": []},
+            "plan": {"nodes": [{"id": "plan"}], "edges": [], "phases": []},
         },
     )
     claim_workflow_draft_confirmation(
@@ -530,6 +530,12 @@ async def test_late_canvas_result_completes_durable_workflow_draft(
         return SimpleNamespace(state_dir=tmp_path)
 
     monkeypatch.setattr(chat_route, "_project_context_for_scope", project_context)
+    from novelvideo.freezone import canvas_store
+    monkeypatch.setattr(canvas_store, "read_canvas", lambda *_args: {
+        "revision": 2, "nodes": [{"id": "saved-plan", "data": {
+            "workflowInstanceId": draft["draft_id"], "workflowPlanNodeId": "plan"}}],
+        "edges": [],
+    })
     from novelvideo import task_state
 
     monkeypatch.setattr(
@@ -548,6 +554,8 @@ async def test_late_canvas_result_completes_durable_workflow_draft(
         tool_call_status="completed",
         canvas_apply_status="applied",
         applied=True,
+        command_results=[{"type": "create_node", "status": "success",
+                          "createdNodeId": "saved-plan"}],
     )
 
     monkeypatch.setattr(
@@ -607,7 +615,7 @@ async def test_old_canvas_receipt_cannot_complete_a_retried_confirmation(
         compiled={
             "ok": True,
             "skill_id": "video-ad",
-            "plan": {"nodes": [], "edges": [], "phases": []},
+            "plan": {"nodes": [{"id": "plan"}], "edges": [], "phases": []},
         },
     )
     first, error = claim_workflow_draft_confirmation(
@@ -654,6 +662,12 @@ async def test_old_canvas_receipt_cannot_complete_a_retried_confirmation(
         return SimpleNamespace(state_dir=tmp_path)
 
     monkeypatch.setattr(chat_route, "_project_context_for_scope", project_context)
+    from novelvideo.freezone import canvas_store
+    monkeypatch.setattr(canvas_store, "read_canvas", lambda *_args: {
+        "revision": 2, "nodes": [{"id": "saved-plan", "data": {
+            "workflowInstanceId": draft["draft_id"], "workflowPlanNodeId": "plan"}}],
+        "edges": [],
+    })
     from novelvideo import task_state
 
     monkeypatch.setattr(
@@ -669,6 +683,8 @@ async def test_old_canvas_receipt_cannot_complete_a_retried_confirmation(
             canvas_id="canvas-a",
             canvas_apply_status="applied",
             applied=True,
+            command_results=[{"type": "create_node", "status": "success",
+                              "createdNodeId": "saved-plan"}],
         ),
         draft_receipt={
             "draft_id": draft["draft_id"],
@@ -710,7 +726,7 @@ async def test_canvas_receipt_accepts_pre_upgrade_confirmation_scope(
         compiled={
             "ok": True,
             "skill_id": "video-ad",
-            "plan": {"nodes": [], "edges": [], "phases": []},
+            "plan": {"nodes": [{"id": "plan"}], "edges": [], "phases": []},
         },
     )
     claimed, error = claim_workflow_draft_confirmation(
@@ -741,6 +757,12 @@ async def test_canvas_receipt_accepts_pre_upgrade_confirmation_scope(
         return SimpleNamespace(state_dir=tmp_path)
 
     monkeypatch.setattr(chat_route, "_project_context_for_scope", project_context)
+    from novelvideo.freezone import canvas_store
+    monkeypatch.setattr(canvas_store, "read_canvas", lambda *_args: {
+        "revision": 2, "nodes": [{"id": "saved-plan", "data": {
+            "workflowInstanceId": draft["draft_id"], "workflowPlanNodeId": "plan"}}],
+        "edges": [],
+    })
     from novelvideo import task_state
 
     queried_scopes: list[str] = []
@@ -765,6 +787,8 @@ async def test_canvas_receipt_accepts_pre_upgrade_confirmation_scope(
             canvas_id="canvas-a",
             canvas_apply_status="applied",
             applied=True,
+            command_results=[{"type": "create_node", "status": "success",
+                              "createdNodeId": "saved-plan"}],
         ),
         draft_receipt={
             "draft_id": draft["draft_id"],
@@ -1133,6 +1157,24 @@ def test_legacy_bridge_filter_uses_raw_message_kind_ttl(tmp_path) -> None:
     assert not pending_path.exists()
 
 
+async def _capture_registered_bridge_watcher(watch, **kwargs):
+    import asyncio
+    from novelvideo.chat.live_events import register_chat_websocket, unregister_chat_websocket
+    socket,scope,username=kwargs["websocket"],kwargs["scope"],kwargs["username"]
+    await register_chat_websocket(socket,username=username,scope=scope)
+    task=asyncio.create_task(watch(**kwargs))
+    try:
+        async def delivered():
+            while not socket.sent or not chat_route.chat_store.list_messages(username,scope)[-1].get("ui_events"):
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(delivered(),2)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await unregister_chat_websocket(socket)
+
+
 @pytest.mark.anyio
 async def test_watch_pending_skill_studio_events_emits_freezone_bridge_event(
     monkeypatch, tmp_path
@@ -1143,7 +1185,7 @@ async def test_watch_pending_skill_studio_events_emits_freezone_bridge_event(
 
         async def send_json(self, payload):
             self.sent.append(payload)
-            raise RuntimeError("stop watcher after first send")
+
 
     bridge_dir = tmp_path / "bridge"
     monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
@@ -1156,6 +1198,8 @@ async def test_watch_pending_skill_studio_events_emits_freezone_bridge_event(
         "title": "确定方向",
         "questions": [{"id": "scope", "title": "主要做什么？", "options": []}],
     }
+    for name,value in {"USERNAME":"admin","PROJECT_ID":"project-a","CANVAS_ID":"canvas-a","AGENT_ID":"agent-1","TURN_ID":"turn-a"}.items():
+        monkeypatch.setenv("DRAMACLAW_"+name,value)
     put_pending_skill_studio_event(
         key="skill-key-1",
         project_id="project-a",
@@ -1176,7 +1220,7 @@ async def test_watch_pending_skill_studio_events_emits_freezone_bridge_event(
         "admin", scope, "user", "创建一个 Skill", turn_id="turn-a"
     )
 
-    await chat_route._watch_pending_skill_studio_events(
+    await _capture_registered_bridge_watcher(chat_route._watch_pending_skill_studio_events,
         websocket=websocket,
         username="admin",
         scope=scope,
@@ -1186,23 +1230,11 @@ async def test_watch_pending_skill_studio_events_emits_freezone_bridge_event(
         started_at=0,
     )
 
-    assert websocket.sent == [
-        {
-            "type": "skill_studio.event",
-            "scope": {
-                "kind": "project",
-                "id": "project-a",
-                "surface": "freezone",
-                "canvasId": "canvas-a",
-                "agentId": "agent-1",
-            },
-            "turn_id": "turn-a",
-            "canvas_id": "canvas-a",
-            "agent_id": "agent-1",
-            "bridge_key": "skill-key-1",
-            "event": event,
-        }
-    ]
+    assert len(websocket.sent)==1
+    assert websocket.sent[0]["type"]=="skill_studio.event"
+    assert websocket.sent[0]["project_id"]=="project-a"
+    assert websocket.sent[0]["bridge_key"].startswith("skill-key-1.executor.")
+    assert websocket.sent[0]["event"]==event
     messages = chat_route.chat_store.list_messages("admin", scope)
     assert messages[-1]["turn_id"] == "turn-a"
     assert messages[-1]["ui_events"][0]["type"] == "skill_studio.questions"
@@ -1222,7 +1254,7 @@ async def test_watch_pending_skill_studio_events_emits_status_progress_event(
 
         async def send_json(self, payload):
             self.sent.append(payload)
-            raise RuntimeError("stop watcher after first send")
+
 
     bridge_dir = tmp_path / "bridge"
     monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
@@ -1235,6 +1267,8 @@ async def test_watch_pending_skill_studio_events_emits_status_progress_event(
         "status": "draft_recipe_ready",
         "message": "已生成 Recipe 1 / 2",
     }
+    for name,value in {"USERNAME":"admin","PROJECT_ID":"project-a","CANVAS_ID":"canvas-a","AGENT_ID":"agent-1","TURN_ID":"turn-a"}.items():
+        monkeypatch.setenv("DRAMACLAW_"+name,value)
     put_pending_skill_studio_event(
         key="skill-status-1",
         project_id="project-a",
@@ -1254,7 +1288,7 @@ async def test_watch_pending_skill_studio_events_emits_status_progress_event(
         "admin", scope, "user", "创建一个 Skill", turn_id="turn-a"
     )
 
-    await chat_route._watch_pending_skill_studio_events(
+    await _capture_registered_bridge_watcher(chat_route._watch_pending_skill_studio_events,
         websocket=websocket,
         username="admin",
         scope=scope,
@@ -1265,7 +1299,7 @@ async def test_watch_pending_skill_studio_events_emits_status_progress_event(
     )
 
     assert websocket.sent[0]["type"] == "skill_studio.event"
-    assert websocket.sent[0]["bridge_key"] == "skill-status-1"
+    assert websocket.sent[0]["bridge_key"].startswith("skill-status-1.executor.")
     assert websocket.sent[0]["event"] == event
     messages = chat_route.chat_store.list_messages("admin", scope)
     assert messages[-1]["ui_events"][0]["type"] == "skill_studio.status"
@@ -1882,7 +1916,7 @@ async def test_watch_pending_clarification_events_emits_freezone_bridge_event(
 
         async def send_json(self, payload):
             self.sent.append(payload)
-            raise RuntimeError("stop watcher after first send")
+
 
     bridge_dir = tmp_path / "bridge"
     monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
@@ -1895,6 +1929,8 @@ async def test_watch_pending_clarification_events_emits_freezone_bridge_event(
         "title": "先确认方向",
         "questions": [{"id": "scope", "title": "主要做什么？", "options": []}],
     }
+    for name,value in {"USERNAME":"admin","PROJECT_ID":"project-a","CANVAS_ID":"canvas-a","AGENT_ID":"agent-1","TURN_ID":"turn-a"}.items():
+        monkeypatch.setenv("DRAMACLAW_"+name,value)
     put_pending_clarification_event(
         key="clarify-key-1",
         project_id="project-a",
@@ -1915,33 +1951,28 @@ async def test_watch_pending_clarification_events_emits_freezone_bridge_event(
         "admin", scope, "user", "创建一个 Skill", turn_id="turn-a"
     )
 
-    await chat_route._watch_pending_clarification_events(
-        websocket=websocket,
-        username="admin",
-        scope=scope,
-        turn_id="turn-a",
-        send_lock=None,
-        emitted_bridge_keys=set(),
-        started_at=0,
-    )
-
-    assert websocket.sent == [
-        {
-            "type": "assistant.clarification.event",
-            "scope": {
-                "kind": "project",
-                "id": "project-a",
-                "surface": "freezone",
-                "canvasId": "canvas-a",
-                "agentId": "agent-1",
-            },
-            "turn_id": "turn-a",
-            "canvas_id": "canvas-a",
-            "agent_id": "agent-1",
-            "bridge_key": "clarify-key-1",
-            "event": event,
-        }
-    ]
+    import asyncio
+    from novelvideo.chat.live_events import register_chat_websocket, unregister_chat_websocket
+    await register_chat_websocket(websocket,username="admin",scope=scope)
+    watcher=asyncio.create_task(chat_route._watch_pending_clarification_events(
+        websocket=websocket,username="admin",scope=scope,turn_id="turn-a",send_lock=None,
+        emitted_bridge_keys=set(),started_at=0))
+    try:
+        async def first_frame():
+            while not websocket.sent or not chat_route.chat_store.list_messages("admin",scope)[-1].get("ui_events"):
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(first_frame(),2)
+    finally:
+        watcher.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await watcher
+        await unregister_chat_websocket(websocket)
+    assert len(websocket.sent)==1
+    frame=websocket.sent[0]
+    assert frame["project_id"]=="project-a"
+    assert frame["bridge_key"].startswith("clarify-key-1.executor.")
+    assert frame["turn_id"]=="turn-a"
+    assert frame["event"]==event
     messages = chat_route.chat_store.list_messages("admin", scope)
     assert messages[-1]["turn_id"] == "turn-a"
     assert messages[-1]["ui_events"][0]["type"] == "assistant.clarification.request"
@@ -1964,7 +1995,7 @@ async def test_watch_pending_clarification_events_redelivers_unanswered_card_to_
 
         async def send_json(self, payload):
             self.sent.append(payload)
-            raise RuntimeError("stop watcher after first send")
+
 
     bridge_dir = tmp_path / "bridge"
     monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
@@ -1976,6 +2007,8 @@ async def test_watch_pending_clarification_events_redelivers_unanswered_card_to_
         "clarification_id": "clarify_resume",
         "questions": [{"id": "image_model", "options": []}],
     }
+    for name,value in {"USERNAME":"admin","PROJECT_ID":"project-a","CANVAS_ID":"canvas-a","AGENT_ID":"agent-1","TURN_ID":"turn-a"}.items():
+        monkeypatch.setenv("DRAMACLAW_"+name,value)
     put_pending_clarification_event(
         key="clarify-key-resume",
         project_id="project-a",
@@ -1987,40 +2020,40 @@ async def test_watch_pending_clarification_events_redelivers_unanswered_card_to_
         kind="project", id="project-a", surface="freezone",
         canvas_id="canvas-a", agent_id="agent-1",
     )
-    first = CapturingWebSocket()
-    await chat_route._watch_pending_clarification_events(
-        websocket=first, username="admin", scope=scope, turn_id="turn-a",
-        send_lock=None, emitted_bridge_keys=set(), started_at=0,
-    )
-    assert [frame["turn_id"] for frame in first.sent] == ["turn-a"]
-
-    # The delivery lease is still live: a second turn must not duplicate the card.
-    second = CapturingWebSocket()
-    watcher = asyncio.ensure_future(chat_route._watch_pending_clarification_events(
-        websocket=second, username="admin", scope=scope, turn_id="turn-b",
-        send_lock=None, emitted_bridge_keys=set(), started_at=0,
-    ))
-    await asyncio.sleep(1.0)
-    watcher.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await watcher
-    assert second.sent == []
-
-    # Once the lease lapses without an answer, the next turn shows the same card again.
+    from novelvideo.chat.live_events import register_chat_websocket, unregister_chat_websocket
+    async def capture(socket,turn,expect_frame):
+        await register_chat_websocket(socket,username="admin",scope=scope)
+        task=asyncio.create_task(chat_route._watch_pending_clarification_events(
+            websocket=socket,username="admin",scope=scope,turn_id=turn,
+            send_lock=None,emitted_bridge_keys=set(),started_at=0))
+        try:
+            if expect_frame:
+                async def first_frame():
+                    while not socket.sent:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(first_frame(),2)
+            else:
+                await asyncio.sleep(.5)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await unregister_chat_websocket(socket)
+    first=CapturingWebSocket()
+    await capture(first,"turn-a",True)
+    assert first.sent[0]["turn_id"]=="turn-a"
+    second=CapturingWebSocket()
+    await capture(second,"turn-b",False)
+    assert second.sent==[]  # A new turn cannot adopt the original producer's card.
     with sqlite3.connect(canvas_command_bridge._bridge_db_path(bridge_dir)) as conn:
-        conn.execute(
-            "UPDATE canvas_command_messages SET lease_expires_at = 0 "
-            "WHERE bridge_key = 'clarify-key-resume'"
-        )
-    third = CapturingWebSocket()
-    await chat_route._watch_pending_clarification_events(
-        websocket=third, username="admin", scope=scope, turn_id="turn-c",
-        send_lock=None, emitted_bridge_keys=set(), started_at=0,
-    )
-    assert len(third.sent) == 1
-    assert third.sent[0]["turn_id"] == "turn-c"
-    assert third.sent[0]["bridge_key"] == "clarify-key-resume"
-    assert third.sent[0]["event"] == event
+        conn.execute("UPDATE canvas_command_messages SET lease_expires_at=0 WHERE bridge_key='clarify-key-resume'")
+    third=CapturingWebSocket()
+    await capture(third,"turn-a",True)
+    assert len(third.sent)==1
+    assert third.sent[0]["turn_id"]=="turn-a"
+    assert third.sent[0]["bridge_key"].startswith("clarify-key-resume.executor.")
+    assert third.sent[0]["bridge_key"] != first.sent[0]["bridge_key"]
+    assert third.sent[0]["event"]==event
     found = canvas_command_bridge.find_clarification_bridge_message(
         project_id="project-a", canvas_id="canvas-a",
         clarification_id="clarify_resume", bridge_dir=bridge_dir,
@@ -2284,8 +2317,38 @@ async def test_project_prewarm_ignores_unavailable_assistant_surface(
 
     assert warmed is True
     assert calls == [
-        (("alice",), {"project": "project-a", "surface": None, "agent_id": None})
+        (("alice",), {"project": "project-a", "surface": None, "agent_id": None,
+                       "canvas_id": None})
     ]
+
+
+@pytest.mark.anyio
+async def test_freezone_prewarm_keeps_the_requested_canvas_scope(monkeypatch) -> None:
+    from novelvideo.chat import hermes_pool
+
+    calls = []
+
+    async def available(**_kwargs):
+        return True
+
+    async def capture_prewarm(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(chat_route, "_assistant_surface_available", available)
+    monkeypatch.setattr(chat_route.chat_service, "_chat_backend", lambda: "hermes")
+    monkeypatch.setattr(hermes_pool, "pool", SimpleNamespace(prewarm=capture_prewarm))
+
+    await chat_route._prewarm_chat_scope_if_available(
+        user={"id": "usr_1", "username": "alice"}, username="alice",
+        scope=ChatScope(kind="project", id="project-a", surface="freezone",
+                        agent_id="main", canvas_id="canvas_a"),
+    )
+
+    assert calls == [(("alice",), {
+        "agent_profile": "freezone:main", "tool_mode": "freezone_canvas",
+        "scope_kind": "project", "project_id": "project-a",
+        "surface": "freezone", "canvas_id": "canvas_a",
+    })]
 
 
 @pytest.mark.anyio
@@ -2425,3 +2488,32 @@ def test_canvas_command_receipt_invalidates_revision_after_possible_write(
     if needs_refresh:
         assert "read its current persisted state" in result["agent_instruction"]
         assert "replay generation" in result["agent_instruction"]
+
+
+@pytest.mark.anyio
+async def test_codex_http_stop_resolves_saved_background_turn(monkeypatch):
+    import json
+    service = chat_route.chat_service
+    monkeypatch.setattr(service, 'get_chat_backend_name', lambda: 'codex')
+    async def allow_project(*_):
+        return SimpleNamespace()
+    monkeypatch.setattr(chat_route, '_project_context_for_scope', allow_project)
+    monkeypatch.setattr(service, '_load_active_codex_turns', lambda _: {})
+    scope = chat_route.ChatScopePayload(kind='project', id='project-a', surface='freezone', canvasId='canvas-a', agentId='main')
+    browser = service._codex_scope_key('project-a', agent_profile='freezone:main', canvas_id='canvas-a')
+    parts = json.loads(browser)
+    assert parts[-1].endswith(':current_browser')
+    parts[-1] = service._CODEX_FREEZONE_THREAD_PROTOCOL_VERSION + ':saved'
+    saved = json.dumps(parts, ensure_ascii=False, separators=(',', ':'))
+    calls = []
+    monkeypatch.setattr(service, 'interrupt_live_codex_turn', lambda *ids: calls.append(ids) or True)
+    with service._ACTIVE_CODEX_TURNS_LOCK:
+        service._ACTIVE_CODEX_TURNS.clear()
+        service._ACTIVE_CODEX_TURNS[('alice', saved)] = ('thread-saved', 'runtime-saved', 'business-a')
+    try:
+        result = await chat_route.cancel_chat_turn({'username': 'alice'}, payload=chat_route.CancelChatTurnRequest(scope=scope, turn_id='business-a'))
+        assert result == {'ok': True, 'data': {'cancelled': True}}
+        assert calls == [('thread-saved', 'runtime-saved')]
+    finally:
+        with service._ACTIVE_CODEX_TURNS_LOCK:
+            service._ACTIVE_CODEX_TURNS.clear()

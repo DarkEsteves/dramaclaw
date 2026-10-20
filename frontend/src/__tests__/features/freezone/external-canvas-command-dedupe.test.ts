@@ -110,4 +110,33 @@ describe("external canvas command delivery dedupe", () => {
       terminalReceipt: receipt,
     });
   });
+  it("dedupes owned command across executor transfer and rebinds genuine receipt", () => {
+    const seen = new Set<string>();
+    const frame = { type: "canvas.command" as const, request_id: "request-a", bridge_key: "request-a.executor.old", project_id: "p", canvas_id: "c", agent_id: "main", envelope: { commands: [] } };
+    expect(claimExternalCanvasCommand(seen, frame).accepted).toBe(true);
+    expect(claimExternalCanvasCommand(seen, { ...frame, bridge_key: "request-a.executor.new" }).accepted).toBe(false);
+    const receipt = { bridge_key: frame.bridge_key, project_id: "p", canvas_id: "c", agent_id: "main", canvas_apply_status: "applied", command_results: [{ native_id: "native-workflow" }] };
+    window.localStorage.setItem(RECEIPTS_KEY, JSON.stringify({ [frame.bridge_key]: { storedAt: Date.now(), payload: receipt } }));
+    expect(claimExternalCanvasCommand(new Set(), { ...frame, bridge_key: "request-a.executor.new" })).toMatchObject({ accepted: false, terminalReceipt: { ...receipt, bridge_key: "request-a.executor.new" } });
+  });
+  it("does not adopt a receipt from another scope or a nonterminal submission", () => {
+    const frame = { type: "canvas.command" as const, request_id: "request-a", bridge_key: "request-a.executor.new", project_id: "p", canvas_id: "c", agent_id: "main" };
+    const stored = (payload: object) => window.localStorage.setItem(RECEIPTS_KEY, JSON.stringify({ "request-a.executor.old": { storedAt: Date.now(), payload } }));
+    stored({ bridge_key: "request-a.executor.old", project_id: "peer", canvas_id: "c", agent_id: "main", canvas_apply_status: "applied" });
+    expect(claimExternalCanvasCommand(new Set(), frame).accepted).toBe(true);
+    stored({ bridge_key: "request-a.executor.old", project_id: "p", canvas_id: "c", agent_id: "main", canvas_apply_status: "accepted" });
+    expect(claimExternalCanvasCommand(new Set(), frame).accepted).toBe(true);
+  });
+
+});
+
+it('does not replay a real receipt saved by another browser actor', async () => {
+  const { useAuthStore } = await import('@/stores/auth-store');
+  const { readCanvasCommandReceipt } = await import('@/features/freezone/canvasCommandToolResult');
+  const prior = useAuthStore.getState().username;
+  useAuthStore.setState({ username: 'second-actor' });
+  try {
+    window.localStorage.setItem(RECEIPTS_KEY, JSON.stringify({ 'actor-command': { storedAt: Date.now(), actor: 'first-actor', payload: { bridge_key: 'actor-command.executor.first', canvas_apply_status: 'applied' } } }));
+    expect(readCanvasCommandReceipt('actor-command.executor.second')).toBeNull();
+  } finally { useAuthStore.setState({ username: prior }); }
 });

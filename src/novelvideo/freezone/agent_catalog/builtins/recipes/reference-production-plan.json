@@ -1,0 +1,70 @@
+{
+  "schema_version": "dramaclaw.recipe.v2",
+  "id": "reference-production-plan",
+  "enabled": true,
+  "version": "3.0.0",
+  "name": "参考片作品方案",
+  "description": "依据参考分析和用户目标直接起草当前可编辑作品方案。",
+  "output_kind": "text",
+  "action_keys": [
+    "reference-production-plan"
+  ],
+  "system_prompt": "依据用户目标、已确认的原片证据、制作要求和可选锁定台词，输出当前可编辑作品方案 JSON。先划分叙事作用，再规划各段的画面、声音和文字；同段可有多位说话者、多个镜头，也可无台词。按用户明确的保留与替换规则制作，不编造产品事实、原片证据、资源绑定、SRT 或语音对齐结果。台词默认不填 start_frame/end_frame；确需填写时应是所属段落内的估计帧数，不直接使用原片全局时间。普通 auto 口播段可省略 duration_frames，由本地测时补齐预估值；固定节奏、无台词段仍填写时长。可选 speech_pace=slow|normal|fast，额外独立停顿使用 extra_pause_seconds，边说边做不重复计时。整段画面使用 beat 的 start/end 边界；段内片段可填 beat 的 offset_frames，省略 edge 时表示从该段首计算。其他语义锚点必须有 ref_id 和 edge。字幕 kind=subtitle，role 可省略，填写时为 dialogue。不承担台词发声的同段独立镜头可跟随 turn 的起止，不能全部覆盖整段。承载台词的带声视频或独立人声先以 beat 边界、段内 offset 或已有确定时间安排独立范围；台词再通过 speech_placement_id 指向发声素材。发声素材不能直接或经 selection、其他 placement 反过来依赖自己承载的未定时台词。用可解析的起止锚点安排不同镜头；文字范围以 Unicode 字符偏移描述；text_hash，宿主保存时填充。台词的 speech_placement_id 只引用方案内尚可未绑定素材的发声 placement；可见连续表演优先评估一份带声视频，让多句台词共用同一 visual placement，并用 source_audio=true 表达选用视频原声。无台词动作声也可由带声视频自身承担。独立旁白、单独声音控制、模型能力限制或用户要求可选择 speech/narration audio placement。依据实际声音任务描述来源选择；不强制所有视频带声，也不为每句台词单独规划音频。资源绑定和语音时间证据保持空值。graphic.emphasis 可选；填写时须为 graphic.text 的逐字连续子串，不能写多个不连续词或样式描述。字幕默认不填 subtitle_x 与 subtitle_y，沿用默认布局；确需定位时同时填写两个非负整数坐标。只输出符合附加 JSON Schema 的对象。 provenance 为系统来源信息，返回空对象即可，由宿主填写。",
+  "must_have_items": [
+    "作品目标与输出参数",
+    "按叙事目的分组的段落",
+    "台词及实际所需的画面、声音来源",
+    "保留已确认台词"
+  ],
+  "planning_prompt": "先确定叙事作用的变化点，再在每段内规划台词的发声来源、实际所需的画面与声音。",
+  "result_summary": "可编辑作品方案草稿",
+  "input_contract": {
+    "required": [
+      "new_topic"
+    ]
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "schema_version",
+      "goal",
+      "output",
+      "beats",
+      "resources",
+      "placements",
+      "provenance"
+    ],
+    "properties": {
+      "schema_version": {
+        "const": 2
+      },
+      "goal": {
+        "type": "string",
+        "minLength": 1
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "width",
+          "height",
+          "fps_num",
+          "fps_den"
+        ]
+      },
+      "beats": {
+        "type": "array",
+        "minItems": 1
+      },
+      "resources": {
+        "type": "array"
+      },
+      "placements": {
+        "type": "array"
+      },
+      "provenance": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -1,4 +1,8 @@
+import { useCanvasStore } from '@/stores/canvasStore';
+import { captureFreezoneCanvasScope } from '@/features/freezone/canvasSyncRuntime';
+import { assertWorkflowAnalysisSnapshot } from "../workflowAnalysisSnapshot";
 import {htmlArtifactCommandError} from '@/features/html-artifacts/commands';
+import { parseProductionCanvasCommand, productionCanvasCommandError, preflightProductionCanvasCommand } from '@/features/canvas/remix/productionCanvasCommand';
 import { extractUpstreamContent } from "@/features/canvas/application/graphContentResolver";
 import type { CanvasEdge, CanvasNode, VideoGenMode } from "@/features/canvas/domain/canvasNodes";
 import { CANVAS_NODE_TYPES, type CanvasNodeData } from "@/features/canvas/domain/canvasNodes";
@@ -408,6 +412,13 @@ export function validateCanvasChatCommandEnvelopes(
               : undefined) !== command.expected_source_image_url) {
             addIssue(issues, path, `workflow source image changed: ${command.source}`);
           }
+          if (command.expected_source_analysis_snapshot) {
+            try {
+              assertWorkflowAnalysisSnapshot(nodeById.get(command.source), command.expected_source_analysis_snapshot, command.source);
+            } catch (error) {
+              addIssue(issues, path, error instanceof Error ? error.message : String(error));
+            }
+          }
           const linkType = normalizeCanvasEdgeSemanticKind(command.link_type);
           if (!linkType) {
             addIssue(
@@ -464,6 +475,12 @@ export function validateCanvasChatCommandEnvelopes(
           for (const id of command.node_ids) {
             if (!isKnownNodeRef(id)) addIssue(issues, path, missingNodeMessage(id));
           }
+          break;
+        }
+        case "production_plan_command": {
+          const parsed = parseProductionCanvasCommand(command);
+          const error = parsed ? productionCanvasCommandError(parsed, nodes) : '作品方案命令字段无效';
+          if (error) addIssue(issues, path, error);
           break;
         }
         case "run_node_action": {
@@ -613,4 +630,53 @@ function projectionKeyFromNode(node: CanvasNode): string | null {
   return typeof data?.projection_key === "string" && data.projection_key.trim()
     ? data.projection_key.trim()
     : null;
+}
+
+
+/** Structural and saved-plan business checks before the existing approval flow. */
+export async function preflightCanvasChatCommandEnvelopes(
+  envelopes: CanvasChatCommandEnvelope[], nodes: CanvasNode[], edges: CanvasEdge[], project: string, canvasId: string,
+): Promise<CanvasCommandValidationResult> {
+  const validation = validateCanvasChatCommandEnvelopes(envelopes, nodes, edges);
+  if (!validation.ok) return validation;
+  const issues: CanvasCommandValidationIssue[] = [];
+  const isCurrentScope = captureFreezoneCanvasScope(project, canvasId);
+  const checked: Array<{ nodeId: string; draft: unknown }> = [];
+  for (const [envelopeIndex, envelope] of envelopes.entries()) {
+    if (envelope.project_id && envelope.project_id !== project || envelope.canvas_id && envelope.canvas_id !== canvasId) {
+      addIssue(issues, `envelopes[${envelopeIndex}]`, '命令所属项目或画布与当前页面不一致，请重新读取');
+      continue;
+    }
+    for (const [commandIndex, command] of envelope.commands.entries()) {
+      if (command.type !== 'production_plan_command') continue;
+      const path = commandPath(envelopeIndex, commandIndex);
+      try {
+        const draft = useCanvasStore.getState().nodes.find((node) => node.id === command.node_id)?.data.productionPlanV2Draft;
+        const result = await preflightProductionCanvasCommand(command, project, canvasId);
+        checked.push({ nodeId: command.node_id, draft });
+        for (const issue of result.issues) addIssue(issues, `${path}${issue.path}`, issue.message);
+        if (!result.ok && result.issues.length === 0) addIssue(issues, path, '作品方案业务预检未通过，请重新读取方案');
+      } catch (error) {
+        addIssue(issues, path, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+  if (checked.length) {
+    if (!isCurrentScope()) addIssue(issues, 'envelopes', '当前项目或画布已切换，请重新校验');
+    else {
+      const currentNodes = useCanvasStore.getState().nodes;
+      for (const checkedNode of checked) {
+        const node = currentNodes.find((item) => item.id === checkedNode.nodeId);
+        if (!node || node.data.productionPlanV2Dirty || node.data.productionPlanV2Saving
+          || node.data.productionPlanV2Draft !== checkedNode.draft) {
+          addIssue(issues, 'envelopes', '作品方案在校验期间发生变化，请保存后重新校验');
+          break;
+        }
+      }
+      const currentValidation = validateCanvasChatCommandEnvelopes(envelopes, currentNodes, useCanvasStore.getState().edges);
+      issues.push(...currentValidation.issues);
+    }
+  }
+  const uniqueIssues = issues.filter((issue, index) => issues.findIndex((other) => other.path === issue.path && other.message === issue.message) === index);
+  return { ok: uniqueIssues.length === 0, issues: uniqueIssues };
 }

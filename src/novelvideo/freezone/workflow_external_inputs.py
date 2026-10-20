@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from novelvideo.freezone.canvas_media_scope import scan_foreign_media_refs
@@ -39,6 +41,45 @@ def resolve_external_image_inputs(
     for source in declarations:
         alias, node_id = source["id"], source["node_id"]
         node = nodes.get(node_id)
+        if source.get("media_kind") == "reference_analysis":
+            skill = plan.get("skill")
+            if not isinstance(skill, dict) or skill.get("id") != "reference-video-remix":
+                raise ValueError("reference analysis input requires reference-video-remix")
+            if node is None or node.get("type") != "videoStoryNode":
+                raise ValueError(f"workflow reference analysis is unavailable: {node_id}")
+            data = node.get("data") if isinstance(node.get("data"), dict) else {}
+            raw = data.get("rawResult")
+            story = raw.get("video_story") if isinstance(raw, dict) else None
+            structure = story.get("adaptation_structure") if isinstance(story, dict) else None
+            has_context = isinstance(story, dict) and (
+                isinstance(story.get("summary"), str) and bool(story["summary"].strip())
+                or isinstance(structure, dict) and (
+                    bool(structure.get("narrative_role")) or bool(structure.get("reusable_beats"))
+                )
+            )
+            blueprint = data.get("referenceBlueprintRef")
+            has_blueprint = (
+                isinstance(blueprint, dict) and not data.get("blueprintDirty")
+                and isinstance(blueprint.get("artifactId", blueprint.get("artifact_id")), str)
+                and bool(blueprint.get("artifactId", blueprint.get("artifact_id")))
+                and type(blueprint.get("revision")) is int and blueprint["revision"] > 0
+            )
+            media_url = data.get("sourceVideoUrl")
+            if (not has_context and not has_blueprint or data.get("isAnalyzing")
+                    or data.get("analysisError") or not isinstance(media_url, str) or not media_url.strip()):
+                raise ValueError(f"workflow reference analysis is not completed: {node_id}")
+            if scan_foreign_media_refs({"nodes": [node]}, project_id=project_id):
+                raise ValueError(f"workflow reference analysis belongs to another project: {node_id}")
+            snapshot = {key: data.get(key) for key in (
+                "rawResult", "referenceBlueprintRef", "blueprintDirty", "sourceVideoUrl",
+            )}
+            resolved[alias] = {
+                "node_id": node_id, "media_url": media_url, "canvas_revision": revision,
+                "display_name": str(data.get("displayName") or data.get("title") or node_id),
+                "analysis_snapshot": snapshot,
+                "analysis_fingerprint": hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+            }
+            continue
         if node is None or node.get("type") not in {
             "uploadNode",
             "imageGenNode",
@@ -78,6 +119,6 @@ def resolve_external_image_inputs(
         }
     if expected is not None and resolved != expected:
         raise ValueError(
-            "workflow external image or canvas changed; prepare a new draft"
+            "workflow external input or canvas changed; prepare a new draft"
         )
     return resolved

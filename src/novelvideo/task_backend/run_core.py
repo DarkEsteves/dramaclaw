@@ -1254,4 +1254,17 @@ def run_project_task_core_sync(
             )
         return result or {"ok": True}
     finally:
+        if task_type in {"remix_generate_production_plan_draft", "remix_generate_production_plan_arrangement", "remix_compile_production_plan",
+                         "remix_align_production_speech"}:
+            try:
+                from novelvideo.freezone.remix.production_processing_settlement import settle_native_task_delivery
+
+                settle_native_task_delivery(
+                    ctx, manager, payload=delivery.payload, task_type=task_type,
+                    expected_task_id=run_task_id, episode=episode, scope=scope,
+                )
+            except Exception:
+                # The task row and artifact are durable. The observer and run
+                # GET replay the same settlement after a worker failure.
+                logger.exception("native workflow task settlement deferred task_type=%s task_id=%s", task_type, run_task_id)
         _clear_project_task_metrics_context()

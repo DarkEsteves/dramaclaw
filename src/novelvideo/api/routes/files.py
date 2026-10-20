@@ -170,6 +170,10 @@ def _resolve_project_file(resolved: ProjectResolution, file_path: str) -> Path:
     if not requested.is_relative_to(project_dir.resolve()):
         raise HTTPException(status_code=403, detail="Access denied")
 
+    from novelvideo.utils.project_file_policy import is_internal_project_path
+    if is_internal_project_path(requested.relative_to(project_dir.resolve())):
+        raise HTTPException(status_code=403, detail="Internal project files require a scoped API")
+
     if not requested.exists() or not requested.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 

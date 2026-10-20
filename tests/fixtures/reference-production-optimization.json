@@ -1,0 +1,10 @@
+{
+  "verification_kind": "deterministic integration with synthetic identities and fake speech provider",
+  "cases": [
+    {"name": "spoken", "turns": 4, "source_count": 4, "expect_asr_calls": 4},
+    {"name": "silent", "turns": 0, "source_count": 3, "expect_asr_calls": 0},
+    {"name": "shared_source", "turns": 2, "source_count": 1, "expect_asr_calls": 1},
+    {"name": "reconnect", "completion_deliveries": 3, "expect_generation_calls": 1},
+    {"name": "edit_one_source", "source_count": 4, "expect_invalidated_takes": 1}
+  ]
+}

@@ -1,5 +1,126 @@
 # 参考视频改编：实施与发布验收状态
 
+## 2026-10-14 作品声音来源与起草可靠性增量
+
+现行作品方案现在可以在生成前让多句台词指向同一个待制作的带声视频；普通视频可明确选择是否使用自身原声。独立旁白、配乐和额外音效仍按实际需要单独规划。素材工作包按计划中的来源核对最终步骤，原生 `bind_media` 在真实资源绑定后建立同一发声实例；合成只投影一次该实例的音频。画布编辑器显示发声来源与视频原声选择，Agent 指导使用同一来源、绑定和审核契约。已有方案不依据描述文字自动合并或删除声音项。
+
+方案起草沿用原文本模型路由，单次请求默认输出上限为 16,384 token；显式配置仍有效。只有明确的截断结束原因才按输出上限失败，完整响应继续本地 JSON 和方案校验。截断、坏 JSON、业务校验及 provider 失败均停止，不自动扩大预算、修复重发或隐式启动第二次模型请求。现有任务日志保存受限诊断，包括实际模型、请求额度、结束原因、token 统计和阶段；不保存提示词正文或签名 URL。失败不发布半成品方案，也不发方案已保存的成功续接；用户明确再次发起仍走原动作和授权边界。
+
+确定性回归分成几条路径：模型文本替身返回两句共享视频来源的方案夹具，核对起草只请求一次；测试向素材工作包提交明确的 requirements 和 steps，再验证来源约束与原生工作流映射，并不测试系统自动制定素材计划；原生命令绑定真实测试媒体后建立一个发声实例，附上手工时间证据并用 FFmpeg 合成，检查独立配乐、覆盖画面的可选原声、主声音连续和同一来源只播放一次。原有任务结算测试模拟已保存的任务与操作回执，验证成功发布及失败不发布未认领产物；续接存储测试注入不同的失败与 `saved:plan-ready` 事件键，验证前者不能当作后者消费。
+
+补充一条 Agent 来源的跨层旅程：通过真实 Agent product operation 创建绑定方向的原生工作流草稿，手动 claim 前画布不变；旧方向 claim 被拒。确认后的画布回执提交真实 `generate_production_plan_draft` workflow action；只替换模型文本返回，本地 runner 保存方案，原生任务回执结算画布，`production_event` 从真实产物引用产生 `plan_ready`，观察器保存 commission 阶段并调用通知与续接。坏 JSON 分支只请求一次，任务失败、无方案引用、commission 仍处于起草阶段，观察器没有发送方案已保存通知。测试中的画布回执由夹具构造，通知/续接由受控 coordinator 记录调用；没有启动真实 Agent 回合或浏览器按钮。
+
+`uv run --no-sync pytest tests/test_production_audio_source_journey.py tests/test_production_processing_settlement.py tests/test_reference_remix_continuation.py -q`：**248 passed**；`uv run --no-sync pytest tests/test_api_freezone_workflow_runs.py -q`：**243 passed**，其中 Agent 来源联通测试的成功、坏 JSON 与旧方向拒绝分支 **3 passed**。画布起草按钮及原生工作流运行时的两个前端测试文件 **71 passed**。本计划其余 13 个相关后端测试文件 **402 passed**；现有手动工作流审批测试 **5 passed**。测试组有重叠，不合计为总数。既有回归分别覆盖单次模型调用、取消、旧修订冲突、无台词与独立旁白；现有跨层旅程不包含真实浏览器按钮、媒体生成或成片验收。
+
+**待现场验证：** 本次没有重启服务、点击用户画布、触发真实方案起草或付费视频／音频制作。计划 Task 6.1 的画布按钮来源与 Agent 来源尚未在同一浏览器旅程执行；画布确认回执、真实 Agent 消息投递和真实供应商均未在联通测试中运行。首次 length、业务校验失败、取消、旧 revision 回写与发布失败有各自既有测试，尚未全部纳入这条联通旅程。真实 provider 的 finish reason、耗时与计费、画布手动确认、声音内容、口型和字幕、浏览器端播放及用户项目里的最终成片均未验证。FFmpeg 合成音调只证明声音路由和覆盖期间连续性，不证明真实对白内容正确。
+
+## 2026-10-14 作品方案与 Agent 统一改造增量
+
+本次在隔离工作树接入作者文字锚点、无台词素材时长依据、素材目标的依赖范围计算，以及图文脚本的文字选区和单次素材使用设置。公共 `upsert_placement` 命令现在从已保存台词写入文字哈希并拒绝过期值。已审核的整句 SRT 即使没有逐词证据，也能定位整句边界并编译相应字幕；句中位置仍保持未解析。生成素材阶段可按保存的 `placement_ids` 只准备所选目标及其依赖，并区分复用、等待、待对账和显式重做。
+
+前端合成撤销只逆转本次改动的字段；方案自动保存遇到 409 时，先读取原修订和最新修订，只对未改的字段尝试一次安全重放。已保存但响应丢失时认领现有修订，同字段冲突保留本地草稿。图文脚本同页显示台词、画面和声音，可选文字添加内容关系，也可只修改选中素材的出现范围；发声校准在同一页展开。
+
+自动化已验证：相关后端 148 项、前端 86 项、原生插件与恢复 492 项通过；TypeScript、Ruff、生成命令契约与 workflow/Agent 契约检查通过。测试组有重叠，不合计为独立总数。尚未完成的交付边界：旧前端自动保存仍有整份 `production_plan.v2` revise 路径，尚未完全迁移到公共编辑命令；局部素材生成的画布入口和完整浏览器／真实模型旅程仍待实现及验收。本次没有重启服务或操作用户现场。
+
+## 2026-10-13 作品方案修改旅程回归（Task 7）
+
+最终跨模块复审又修复两项约束遗漏：用户在对话中确认或局部修改台词时，宿主按真实消息与既有锁定快照逐句核对并保存新文本；进入制作阶段的方案若时间修改违反当前明确的时长、镜头等可计算要求，会清除旧审核并重新审核。最终组合后端回归 **1330 passed、1 deselected**；前端相关 **509 passed**，TypeScript、Ruff 与生成命令契约检查通过。后台仅处理暂时性 SQLite 故障恢复；按用户要求不处理磁盘满专项。完整浏览器／真实模型旅程仍未执行。
+
+本轮在现有隔离工作树执行确定性验收，未修改用户运行态。计划指定的 12 个后端聚焦测试文件 **257 passed**；额外的原生工作流、审批卡、方向确认、分支和后台旅程测试 **97 passed**。生成的生产命令契约检查通过。计划原文的前端命令因第二个测试路径与实际目录不符，仅运行 1 个文件、29 项；改用实际路径重跑后为 **2 个文件、254 passed**。测试组可能重叠，不合计为独立总数。
+
+回归覆盖已保存新版先于旧方案展示接收、保存／commission／通知边界重启后只续接和通知一次、延迟旧确认被拒、分析节点与方案分支隔离、原生操作保存成功才唤醒、手动画布保存提示、人工确认卡的作用域与当前修订检查。补充的现有画布审批卡测试验证新增节点、起草和修改各自在点击前不改画布，点击后将原命令交给现有 `onApply` 回调，执行中不能二次点击；方案 workflow 图只含一次 `run_workflow`。补跑前端相关 3 文件 **509 passed**、后端相关 3 文件 **46 passed**。观察器无重复唤醒并不能单独证明原片分析任务未重复提交；真实模型对任意方向的理解、实际镜头和时长、浏览器自动及手动完整旅程均未在本轮运行。Chrome 只有用户现有项目画布，未找到可安全使用的专用一次性验收项目及无付费媒体输入；没有操作该画布、触发生成或代替用户确认。运行态如仍由旧进程服务，仍需正常部署／重载后再做现场验收。
+
+精确命令、输出摘要和场景边界记录在 `.superpowers/sdd/task-7-oct13-report.md`。
+
+## 2026-10-12 执行可靠性与素材策略代码回归
+
+- 原生作品方案产物统一使用已鉴权的请求者 ID 写入；提供默认只检查的历史空创建者修复脚本，只有任务、operation、画布归属与产物引用全部一致时才允许定点修复，写入前备份和审计。
+- 续接前复核当前制作阶段与原生任务，合并过期完成通知；按分析、方案、素材、合成阶段给 Agent 不同的事实指令。作品方案起草期间的旧分析通知不再重复启动创作回合。
+- 同一业务目标的失败重试只在收到已验证回执且输入修订未倒退后结算；失败记录仍保留。Agent 作品生成 admission 在回合退出时结算占位任务，并可重复修复跨存储的终态投影。
+- 素材工作包可读取已保存的原片、分析关键帧和已导入节点，核对真实媒体类型与来源；策略变更按最新 revision 原子修改受影响步骤，保留无关已接受素材。审核以来源和保留约束为依据，生成成功本身不代表验收通过。
+- 原片分析技术 ID 稳定规范化为 ASCII；多张已验证生成参数确认回执可按字段合并；参考制作 API 的 422 在后端记录受限字段路径，不记录请求体。Agent 规则改为通用阶段决策与自然语言解释，不增加案例关键词规则。
+- 统一流程回归运行相关测试文件：**1079 passed**；之后新增的维护备份目录防符号链接回归单独运行 **4 passed**。相关 Python 文件 `ruff check` 通过，`git diff --check` 通过。旧旅程夹具已改为验证原生工作流来源，旧直接写方案入口明确被拒绝。本轮未改前端、未自动操作浏览器、未触发付费生成。
+
+待验收：真实浏览器从用户方向回复到最终视频生成、播放和需求核对仍由用户手测。当前原生素材路径只支持图片参考，不能把视频节点伪装成图片；若只有画布已有的关键帧导入按钮可用，仍需用户先导入一次。进程异常退出后的 admission 自动清理还需要接入可信的 turn lease 失效事件，不能仅按等待时长误杀用户确认。历史现场尚未执行修复脚本的 dry-run，也未改写已有聊天错误记录。
+
+## 2026-10-12 原片转写入口、双节点及真实输入依赖
+
+- 视频工具栏恢复独立“转写”。点击“分析原片”时先建立视频→转写→原片拆解连线；有声视频先通过转写节点识别并保存逐词产物，再以该产物的精确修订执行原片分析。已校字的转写直接复用；已有识别正在进行时等待结果；无音轨视频直接进行视觉分析。
+- 拆解接口从已保存的画布和产物读取当前转写，核对项目、媒体哈希、词时间、修订及连线。手动重分析优先使用已连接到该拆解节点的转写；多个来源不明确时提示处理。原生 Agent 的分析续跑也核对转写修订及连线变化，避免旧结果覆盖校字。
+- 原片分析请求报错只写到拆解节点；不再把尚未开始识别的转写误报成失败。转写提交丢失回执时用原始请求身份恢复，重挂载及重试不产生第二个识别任务。
+- 独立复核为 Spec / Quality / Readiness Approved；冻结的 17 文件哈希与复核清单一致，精确增量 `git diff --check` 通过。前端相关 5 文件 **87 passed**，后端原片分析与续跑 **252 passed**，前端生产构建通过。补跑聊天、制作及原片链路关联门禁 **413 passed**；测试组有重叠，不累加。
+- 现场旧 API 的请求模型缺少 `transcript_node_id` 与 `analysis_node_id`，导致用户看到 422；旧 PID 81531 完成有界退出后重载本工作树 API。新监听 PID **99302**、端口 **8781** 的 OpenAPI 已含这两个字段，原项目画布只读 GET 正常，项目专用 Codex PID 5765 和前端 PID 4397 保持。启动使用 `DRAMACLAW_CHAT_BACKEND=codex`、项目指定的 `CODEX_BIN`、`ST_EDITION=ce` 和空 `ST_CONTROL_PLANE_DSN`。
+- 浏览器动作由用户手动验收；本轮没有代替用户点击分析或调用真实语音服务。页面上旧失败状态可刷新后重试，正在运行的转写须先等到保存完成。修复计划在 `docs/superpowers/plans/2026-10-12-restore-reference-transcript.md`；增量、审查和测试证据在 `.cache/reference-transcript-restore/`。
+- 更新后的一次用户操作已在只读 API 状态中显示：`remix_transcribe_media` 完成，转写节点保存了产物 `6da1c1b72edf4874aa4ab5a33905568b@1`，随后 `remix_joint_reference_analysis` 开始运行，其操作 `input_refs` 正是该产物修订。检查时分析仍在运行，因此不把这次现场分析或最终画面宣称为已通过验收。
+
+## 2026-10-12 聊天确认、转写节点与原片续接修复
+
+### 已实现
+
+- 手动模式的原片分析进入现有对话确认卡；点击前不提交分析，取消也不创建任务。自动模式沿用原有执行规则。新提交及缓存回执都核对真实任务、账号、项目、画布、Agent、操作身份和当前源文件字节哈希。
+- 同一次分析完成后，将真实逐词转写产物投影为画布转写节点，与原片及拆解节点关联；不再次识别，不制造词时间，不覆盖已有用户校字。恢复旧制作时也能补回漏建的转写节点。
+- 方向、方案、素材、语音及成片确认进入实际聊天滚动区，输入框旁保留默认折叠的制作摘要。卡片持久化原生身份、恢复授权范围内的真实状态；历史确认卡只读，旧卡片按最多 20 项分批加载。确认仍由原生 API 在画布及产物写锁内复核当前状态。
+- 方案起草失败显示对应阶段的原因，并在对话提供“继续准备方案”。素材逐词草稿与试听状态绑定真实素材身份，独立制作版本变化不会抹掉这些编辑。
+- 首个真实工具鉴权失败传到宿主后，中断对应运行时并结束本轮业务重试，保存原片结果和恢复原因。插件的分析回执及审批桥保留可信的失败诊断；普通内容中的错误字样不会触发鉴权判断。关闭、迟到启动及句柄清理的并发边界已覆盖；不能撤回已经发出的请求。
+- CLI 与 Gunicorn 共享有限优雅退出配置，默认 20 秒；CE CLI 不依赖可选 Gunicorn 包。重载必须验证旧 API 进程实际退出。
+
+### 验证与启用
+
+- 三个任务及最终集成增量均通过独立审查。最终复核为 Specification Approved / Quality Approved，无未关闭发现；43 个源代码及测试文件的当前哈希匹配审查清单。
+- 最新后端集成：`uv run pytest tests/test_api_reference_analysis_runs.py tests/test_reference_conversation_cards.py tests/test_reference_director_api.py tests/test_codex_auth_stop.py tests/test_codex_stream_close.py tests/test_cli_api_shutdown.py tests/test_reference_director_journey.py tests/test_reference_turn_outcome.py tests/test_reference_remix_continuation.py tests/test_reference_production_recovery.py tests/test_reference_production_automation_native.py tests/test_reference_production_multiworker.py tests/test_reference_production_optimization_journey.py tests/test_material_review_batch.py tests/test_candidate_speech_correction_api.py -q`，**352 passed**，32.12 秒，exit 0。
+- 最终插件鉴权修复针对性门禁 **115 passed**；其中 8 项将实际插件输出送入实际聊天服务，验证一次精确中断、无后续业务调用、失败终态、恢复提示及会话清理。此前 SDK、CLI/Gunicorn 与来源回执门禁的证据保留。各组测试重叠，不累加。
+- 前端相关 7 个文件 **125 passed**，TypeScript 检查及生产构建通过；原片审批/转写的 16 项前端回归另行通过。仅保留既有依赖弃用、Node localstorage 和构建体积告警。`gitleaks` hook 与源文件 `git diff --check` 通过。未修改设计 token。
+- 此前 PID 3080 在 SIGTERM 后仍存活，并用旧进程内工具凭据访问新后端导致 401，本轮已完成其退出。此次重载再次验证旧 API PID 65564 真正退出；旧版本等待 20 秒仍未结束时，仅终止该 API，随后启用新 PID **81531**，端口 **8781**。项目专用 Codex daemon PID 5765 及前端 PID 4397 保持。
+- 启动明确设置 `DRAMACLAW_CHAT_BACKEND=codex`、`CODEX_BIN=/Users/wwq/worknewnew/dramaclaw/runtime/codex-0.149.0-src/codex-rs/target/release/codex`、`ST_EDITION=ce`、空 `ST_CONTROL_PLANE_DSN`。指定二进制版本读取为 `codex-cli 0.149.0`；这是项目要求、带 DramaClaw 鉴权补丁的二进制。
+- 仅端口、进程及 OpenAPI 只读探针确认分析回执、聊天卡片、原片续接、制作状态、语音审阅/校正及决策确认接口已加载。用户要求自行测试，因此未自动操作浏览器、发送消息或确认素材；未新增生成或 ASR 请求。
+
+### 用户验收
+
+刷新当前画布。在已有分析的当前制作中，从对话点“继续准备方案”，恢复原片结果及漏建的转写节点后续接方案准备；无需重头分析。新手动分析须先出现对话确认卡。方案、素材、声音与交付确认应在对话内，制作进度只显示折叠摘要。实际声音/口型确认与现场成片验收仍由用户完成，本轮不声称已交付视频。
+
+设计及执行记录：`docs/superpowers/specs/2026-10-11-reference-remix-chat-repair-design.md`、`docs/superpowers/plans/2026-10-11-reference-remix-chat-repair.md`。本地增量与测试证据：`.cache/reference-remix-chat-repair/` 中的三个任务报告/审查、`final-fix-report.md`、`final-review.md`、`final-repair.diff`/哈希清单、`root-final-corrected-integration.log`、`api-shutdown.json`、`api-activation-probe.json`。缓存不作为可移植发布产物，验证命令和现场限制保存在本文。
+
+## 2026-10-11 制作恢复与语音审阅优化
+
+本轮代码在 `codex/reference-video-remix-plan` 工作树实现，沿用项目专用、带 DramaClaw 鉴权补丁的 Codex 0.149.0。浏览器动画不在本轮范围。
+
+### 已实现
+
+- 当前制作状态与历史分开；一个原片对应多个独立方案，素材清单通过明确操作关联。当前计数只包含该方案当前有效素材和待办。
+- 制作进度默认折叠，按账号、项目、画布、Agent 和方案记住状态；后台结果同步画布时保留未保存编辑，旧分析告警不重复覆盖当前制作状态。
+- 原生生成结果幂等登记，复用真实检查和人工回执；丢失确认记录或通知时恢复已有结果，无法确定 provider 是否受理时保留待恢复状态。
+- 按明确启用的制作范围自动推进登记、已通过素材采用、绑定、语音编排、编译和渲染；停止先保存意图，旧代次和过期通知不能继续写入。旧任务不会因刷新自动恢复。
+- 候选对白先识别完整源素材，按真实内容哈希、提供方配置与授权范围去重；原始识别不可变。逐词校正保留真实词时间和人工证据，声音、口型与文字一致分别展示。音乐、音效和无台词画面不自动调用 ASR。
+- 当前素材审阅卡支持逐词校正一次保存、按原声时间试听和明确勾选的批量内容确认；校字不会代替声音或口型审阅。没有真实词时间时不给出伪造的逐词编辑器。
+- 正式采用后复用源识别，生成可信逐词产物；同源多人保持一次播放，语音推动段落和后续镜头重排。词级锚点不能明确重映射时返回具体待处理目标。
+- 当前状态索引按宿主授权范围隔离，冷索引通过现有任务队列重建；缓存损坏不改变授权事实。历史验收证明在写锁外预计算，提交仍复核真实字节哈希、当前版本、媒体及租约。
+
+### 验证与限制
+
+确定性集成使用临时项目、合成身份、测试人工回执与假语音 provider，走真实源观察、采用、方案编译、操作结果和 FFmpeg 渲染；覆盖有声、无声、多人同源、重连与单源变化。该测试证明代码流程可运行，不代表现场四段对白已被试听或确认。
+
+本机 Apple M4、macOS arm64：200 个产物、1,000 条历史版本、10 个当前任务，原生后台重建后的热 API p95 18.343ms，历史目录扫描 0。200 项素材、199 次真实测试采用后，最终采用锁内耗时由 4.840s 降至 0.232s；完整耗时仍为 5.242s。数字只描述该隔离测试，不是 EE 部署承诺。
+
+现场黑咖啡作品的已有素材和确认保留；四段对白仍未取得实际试听/口型确认，现场视频尚未完成导出。新代码不代写这些确认。真实 EE 共享存储、队列与部署隔离仍需在对应环境验收；CE 临时目录测试不能替代该验收。
+
+### 最终复核与现场启用
+
+- A1–D3 的代码增量已完成独立审查；D2 最后复审为 `APPROVED`，16 个冻结文件哈希一致。新增真实 SQLite 回归覆盖 100 条新历史之后的旧制作停止、恢复及状态查询；独立跨页探针覆盖 205 条制作记录和作用域隔离。
+- 后端最后兼容门禁：`uv run pytest tests/test_reference_production_recovery.py tests/test_reference_production_automation_native.py tests/test_reference_production_multiworker.py tests/test_production_advancement.py tests/test_production_advancement_runtime.py tests/test_reference_production_state_api.py tests/test_reference_director_api.py tests/test_reference_remix_continuation.py -q`，**306 passed**。
+- 最后集成门禁：`uv run pytest tests/test_reference_production_recovery.py tests/test_reference_production_automation_native.py tests/test_reference_production_multiworker.py tests/test_reference_production_optimization_journey.py tests/test_reference_production_state_api.py tests/test_material_review_batch.py tests/test_candidate_speech_correction_api.py tests/test_codex_production_stop_hook.py -q`，**91 passed**。两组有重叠，不累加为总测试数；现有依赖弃用告警仍保留。
+- 前端针对本次变更的 8 个测试文件 **107 passed**，生产构建通过；恢复入口另有独立 19 项测试复核通过。
+- 2026-10-11 仅重载本工作树 API，端口 `8781`、新 PID `65564`。启动明确设置项目专用 `DRAMACLAW_CHAT_BACKEND=codex` 及指定 `CODEX_BIN`；既有项目 Codex PID `5765` 和前端 PID `4397` 保持。OpenAPI 只读探针确认当前状态、恢复、推进、语音状态、校正和批量确认的新接口已载入。
+- 用户要求先由其手动测试，因此停止浏览器自动验证；本轮不声称界面人工验收或现场成片通过。没有新增付费生成或 ASR 调用，也没有代写四段对白的试听/口型确认。
+
+证据位于工作树 `.cache/reference-remix-optimization/`：`D2-final-review.md`、`D1-generation-review.md`、`A3-resume-fix-review.md`、`C2-A3-D3-repair-review.md`、`D2-history-final-green.log`、`root-post-history-integration.log`、各任务精确增量与哈希清单。缓存不作为可移植发布产物；以上命令和限制保存在本文。
+
+
+## 2026-10-09 作品方案到视频合成主链路
+
+`production_plan.v2` 作为可编辑作品源数据，现支持旧方案显式迁移、直接连接 `videoComposeNode`、保存修订与并发冲突、项目素材哈希及画布版本检查、语义锚点和可编辑画面／声音／字幕轨。新工作台从原视频合成节点打开，编辑会回写同一方案；导出固定已保存修订，经 `composition_manifest.v2` 与现有渲染任务产生 MP4。新路径不套用旧改编 MVP 的竖屏、30 fps、60 秒限制。手动合成器及旧 manifest 路径仍保留。
+
+本轮验证：前端生产构建通过；全量前端 592 个测试文件、4945 项测试通过，最后新增的旧清单直连迁移用例另行聚焦通过；后端方案、API、渲染与任务 127 项测试通过。旧版编排保留为可找回的历史节点，v2 导出由服务端再次核对保存的画布连线和媒体版本。浏览器动画、HTML 效果及其多租户隔离按用户决定留在后续阶段。
+
 日期：2026-09-22。分支：`codex/reference-video-remix-plan`。基线：`origin/staging` 的 `dcfbc726`。
 
 ## 当前结论
@@ -8,19 +129,19 @@
 
 下面的发布矩阵记录的是 2026-09-22 一条连续单人旁白的验收结果，不能作为逐段口播流程的人工验收证据。
 
-本分支 **不是 production speech-ready**。真实中英文代表性样片、每种语言至少 100 个人工边界、授权/来源清单和模型权重许可证仍未提供，因此 P95 对齐误差与生产并发配额不得声称通过。
+本页所记录的旧版本 **不是 production speech-ready**。真实中英文代表性样片、每种语言至少 100 个人工边界、授权/来源清单和模型权重许可证仍未提供，因此 P95 对齐误差与生产并发配额不得声称通过。
 
 ## 2026-09-23 逐段表演流程增量
 
 画布脚本现在按说话者建立表演段落，由操作者逐段决定使用带声音的口播视频、独立旁白或裁出的原声视频，并选择人物、产品、场景、声音与原片镜头参考。画布节点生成或上传素材后绑定内容版本；后台对每段实际声音独立对齐，编译 `performance_timing.v2`；`manifest_version: 3` 将口播视频自身声音、独立旁白主画面、B-roll 和音效合成。保留旧的整段旁白路径。
 
-这部分通过了针对脚本、任务、时间轴、manifest、真实 FFmpeg 合成的 120 项后端测试，以及画布改编模块 321 项前端测试与生产构建。真实 WhisperX 逐段素材和完整浏览器人工旅程尚未在本轮运行；本地语音引擎当前未启用。下方 2026-09-22 的数值、样片哈希和验收结论仍只属于旧的整段旁白流程。
+这部分通过了针对脚本、任务、时间轴、manifest、真实 FFmpeg 合成的 120 项后端测试，以及画布改编模块 321 项前端测试与生产构建。真实 旧本地语音引擎 逐段素材和完整浏览器人工旅程尚未在本轮运行；本地语音引擎当前未启用。下方 2026-09-22 的数值、样片哈希和验收结论仍只属于旧的整段旁白流程。
 
 ## 已闭环功能
 
 | 阶段 | 已验收交付 |
 | --- | --- |
-| P0 试验架 | 六类样片协议、离线 WhisperX 探活、真实来源/标注防伪、P95/时间/内存/渲染报告。真实语音准确率门槛仍受外部输入阻塞。 |
+| P0 试验架 | 六类样片协议、离线 旧本地语音引擎 探活、真实来源/标注防伪、P95/时间/内存/渲染报告。真实语音准确率门槛仍受外部输入阻塞。 |
 | M1 证据与蓝图 | 项目内不可变 artifact revision/CAS，全片 VFR 证据，帧与台词精确引用，可编辑、审核、保存和重载的原片拆解节点。 |
 | M2 脚本与时钟 | Unicode 语义选区，重复词/增删词失效，精确脚本/对齐/旁白 hash 绑定，裁剪和变速后的整数帧编译，人工覆盖冲突处理。 |
 | M3 分层合成 | 显式背景/A-roll，图片/视频 B-roll，字幕安全区与逐词高亮，淡入淡出/缩放，旁白连续、BGM ducking、SFX，预览/导出共用同一 manifest。 |
@@ -40,8 +161,8 @@
 | 局部重跑 | 通过 | 字幕样式只重渲染；单个 B-roll 只重生该素材及合成；脚本/旁白才会重对齐和重编译。 |
 | 刷新/迟到/并发 | 通过 | 重开使用已绑定 task 对账；超时不重投；取消/过期/旧 revision 结果只留历史；提交和确认都有 fencing token。 |
 | 兼容与隔离 | 通过 | Recipe v1 指令不变，manifest v1 走旧 renderer，旧 canvas fixture 可读；跨项目 ref、绝对/上跳路径、symlink payload 被拒绝，删除产物不命中假缓存。 |
-| 资源限制 | 通过 | WhisperX 转写/对齐进独立 speech lane，全局、项目及项目用户默认并发都为 1，等待 64，进程内另有单槽信号量；无语音的参考视频分析保持 default lane，渲染进 ffmpeg lane，各 lane 互不阻塞；排队任务可取消，队列满映射 HTTP 429。 |
-| 独立 WhisperX Python | 通过（运行与完整浏览器旅程） | 浏览器人工检查先发现脚本启动丢失包上下文，随后发现独立环境没有应用侧 Pydantic。入口现显式加入包根；适配器内部的对照 DTO 改为仅用标准库，worker 无需安装应用依赖。readiness 直接启动真实 worker 的离线 probe，而非只探测 `import whisperx`。隔离 `-S` Python 回归、本机实际 WhisperX venv probe 和下述完整浏览器旅程均成功。 |
+| 资源限制 | 通过 | 旧本地语音引擎 转写/对齐进独立 speech lane，全局、项目及项目用户默认并发都为 1，等待 64，进程内另有单槽信号量；无语音的参考视频分析保持 default lane，渲染进 ffmpeg lane，各 lane 互不阻塞；排队任务可取消，队列满映射 HTTP 429。 |
+| 独立 旧本地语音引擎 Python | 通过（运行与完整浏览器旅程） | 浏览器人工检查先发现脚本启动丢失包上下文，随后发现独立环境没有应用侧 Pydantic。入口现显式加入包根；适配器内部的对照 DTO 改为仅用标准库，worker 无需安装应用依赖。readiness 直接启动真实 worker 的离线 probe，而非只探测 旧引擎模块导入。隔离 `-S` Python 回归、本机实际 旧本地语音引擎 venv probe 和下述完整浏览器旅程均成功。 |
 | 计费/授权 | 通过 | 确定性处理动作不伪造 Recipe 计费；创作 Recipe 继续使用预留/结算/待人工复核协议；读需 viewer、写/提交需 editor 且只能在项目 home node。 |
 | 真实语音边界 | **阻塞** | 合格中文/英文人工边界都是 0，P95 未测；模型权重许可证仍为 `unverified-local-cache`。 |
 
@@ -58,59 +179,43 @@
 ## 运行环境与模型版本
 
 - macOS 26.6.2 arm64；Python 3.12.13；FFmpeg/FFprobe 8.1。
-- WhisperX 3.8.6，CPU，`int8`，batch size 1，语音并发上限 1，离线模式且禁止下载。
+- 旧本地语音引擎 3.8.6，CPU，`int8`，batch size 1，语音并发上限 1，离线模式且禁止下载。
 - ASR：`Systran/faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120`。
 - 对齐：`zh-cn@99ccb2737be22b8bb50dcfcc39ad4d567fb90cfd`；英文缓存 SHA-256 `488fd4f16de84438ffc945334278c1b9fb9b7159a806c1080b16111a958c945d`。
 - 本机合成纯音不是真实语音；P0 报告保持 `blocked`，不会通过改命令行标签被伪造为通过。
 
 ## 人工画布完整旅程
 
-使用 `scripts/start-remix-speech.sh` 启动后，在空白项目画布完成了一次真实浏览器全流程：上传 18.1 秒、720×1280、带人声的参考视频，由 WhisperX 转写原片，得到 9 个拆解事件并逐项标记为已核对；生成并保存 `remix_script.v1` r5 英文脚本，标记 5 个语义选区；生成 1 张真实咖啡图片，并将它复用于 4 个 B-roll 区间。
+使用 `已移除的本地启动脚本` 启动后，在空白项目画布完成了一次真实浏览器全流程：上传 18.1 秒、720×1280、带人声的参考视频，由 旧本地语音引擎 转写原片，得到 9 个拆解事件并逐项标记为已核对；生成并保存 `remix_script.v1` r5 英文脚本，标记 5 个语义选区；生成 1 张真实咖啡图片，并将它复用于 4 个 B-roll 区间。
 
-语音供应商 TTS 曾停在 10% 后被取消，不能据此声称供应商 TTS 成功。随后上传一条与最终脚本逐字一致的 15.000 秒单人旁白 WAV；WhisperX forced alignment 完成 163 字符 token 对齐并生成 `performance_timing.v1` r1，五个事件帧区间为 `0–19`、`28–98`、`109–180`、`189–254`、`265–392`。另行上传独立的 1080×1920 背景，得到 `composition_manifest.v1` r1 并实际渲染成功。页面最终显示 `预览与导出一致`。
+语音供应商 TTS 曾停在 10% 后被取消，不能据此声称供应商 TTS 成功。随后上传一条与最终脚本逐字一致的 15.000 秒单人旁白 WAV；旧本地语音引擎 forced alignment 完成 163 字符 token 对齐并生成 `performance_timing.v1` r1，五个事件帧区间为 `0–19`、`28–98`、`109–180`、`189–254`、`265–392`。另行上传独立的 1080×1920 背景，得到 `composition_manifest.v1` r1 并实际渲染成功。页面最终显示 `预览与导出一致`。
 
 导出的 MP4 SHA-256 为 `0736f9a9f5a6897fd1c23b2bf4100d45702bfd04233cb18be4f0f91073cba4db`；FFprobe 为 H.264 `1080x1920`、`30/1` fps，AAC 16 kHz mono，时长 `15.000000` 秒。人工旅程还发现并促成两类边界修复：英文空格不应导致选区对齐误判（`ad2546af`）；长 raw 指纹曾被后端 256 字符字段限制拒绝（`dae22cd5`），随后增加安全长度上限（`93c9cb12`）。
 
 这次通过证明固定媒体画布的完整浏览器旅程可运行，但不改变真实语音生产门槛：它不是中英文各 100 个人工边界数据集，也不补足素材/权重许可证或目标 Linux/GPU 机器数据，因此仍不得声称 **production speech-ready**。
 
-## 精确验证命令
+## 当前验证方式
 
-```text
-uv run pytest -q tests/test_remix_*.py tests/test_workflow_stable_contract.py tests/test_recipe_runtime.py tests/test_recipe_v2_delivery.py tests/test_freezone_canvas_store.py tests/test_api_compose_export_contract.py tests/test_video_composer_result_contract.py tests/test_task_backend_limits.py tests/contract/test_l014_inline_task_backend_concurrency.py
-# 313 passed
+本页记录 2026-09-22 的历史验收，旧本地语音引擎及其启动脚本已移除。当前语音调用走 NewAPI `audio-transcribe`；按现行代码运行 `tests/test_newapi_remix_transcription.py`、`tests/test_remix_p0.py` 和画布任务测试。历史测试计数、P95 缺口与样片哈希不代表现行 NewAPI 模型的验收结果。
 
-uv run pytest -q
-# 6639 passed / 19 skipped / 3 deselected（语音并发和 worker 包装修复后）
+## 2026-10-12 原片复刻方案续接修复
 
-uv run pytest -q tests/test_remix_whisperx_adapter.py tests/test_remix_alignment.py tests/test_remix_p0.py tests/test_remix_tasks.py tests/test_task_backend_limits.py tests/test_task_runner_home_node_placement.py tests/contract/test_l014_inline_task_backend_concurrency.py
-# 102 passed（独立运行时零应用依赖与 readiness worker probe 修复后）
+已确认方向现在通过同一个原生 workflow 编译入口进入作品方案阶段。草稿保存了 commission、原片分析节点和方向版本绑定；审批前不写入画布，审批时重新核对方向。方案起草完成通知仅认领该草稿派生的节点，人工另开的分析或方案不会推进当前 Agent。阶段结果给 Agent 的下一步指向 `freezone_prepare_workflow_draft`，不再暴露不存在的直接创建方案工具。确定性草稿拒绝会结束已接纳的 workflow_result operation；真实参数卡回执只在同一任务、同一方向与参数要求下供后台续接使用，仍需画布操作审批。
 
-uv run pytest -q tests/test_remix_whisperx_adapter.py::test_external_whisperx_worker_script_bootstraps_project_package tests/test_remix_whisperx_adapter.py::test_external_whisperx_aligner_runs_real_worker_subprocess tests/test_remix_whisperx_adapter.py::test_external_whisperx_python_runs_isolated_worker
-# 3 passed；前两项是真实子进程，未 mock subprocess
+本轮后端定向测试 1383 项通过；前端审批相关 257 项通过；`git diff --check` 通过。跨层测试覆盖真实 API 草稿接纳、方向变更阻止旧草稿领取、审批前画布不变、并发成功回执优先，以及已绑定方案结果才能产生 `plan_ready`。本轮按用户要求未在浏览器自动验证，也未启动付费媒体生成。人工还需在现有项目中验证完整转写、分析、方向回复、方案审批、起草完成通知和失败重试。
 
-pnpm exec vitest run src/features/canvas/remix src/api/remix.test.ts src/__tests__/features/canvas/remix-nodes.test.tsx src/__tests__/features/freezone/workflow-run-recovery-bar.test.tsx src/__tests__/features/superchat/chat-task-status-bar.test.ts
-# 38 files / 297 passed
+## 2026-10-13 浏览器制作流程修复进展
 
-pnpm exec vitest run
-# 566 files / 4702 passed
+原生画布命令在工作流动作前加入已保存图的检查点；只创建节点时不启动媒体任务。Agent 产品准入绑定改用宿主业务回合 ID，实际 `reserved` 回执也进入回合结算。素材工作包预检失败保留原工作引用、就绪步骤和操作 ID。生成参数卡的工具调用在持久请求保存后结束，回答可经现有 bridge 续接；唯一匹配的产品准入可记录有时限的等待凭据，回答后转到续接回合，过期时由任务对账关闭。
 
-pnpm exec tsc -b --pretty false
-uv run python scripts/generate_workflow_contract.py --check
-UV_CACHE_DIR=/tmp/uv-task11-cache uvx pre-commit run gitleaks --all-files
-git diff --check
-```
+素材步骤的显式生成参数优先；缺省字段可复用同一委托、当前方向修订下已经由用户提交的参数，再交由原生模型目录补推荐值及校验能力。预检失败保留原生具体诊断，同时返回复用同一工作包的恢复指引，不会用新的工作包或静默换模型掩盖失败。
 
-## 外部阻塞与上线条件
+对话模式已隐藏额外素材规划卡、历史入口、依赖面板和独立的“采用素材清单”按钮，保留原生画布审批与真实媒体审看。对于方向中明确标记 `visual_identity: true` 的保留项，素材 requirement 现在需给出 `preservation_bindings`，并能追溯到实际项目图片节点；宿主记录图片哈希，在修订和提交前复查。仅保留叙事关系的方向不会被推断为必须复用原人物像素。后台不再把素材规划阶段描述成候选已登记；阶段回退不会在待答卡或原生任务运行中唤醒 Agent。
 
-上线生产语音前必须补齐：
+定向 Python 回归已通过（当前委托参数与 API 42 项、原生预检诊断 6 项）；工作流 Agent 契约检查为 778 项、0 错误、1 条既有未关联 Recipe 警告。前端 TypeScript 编译通过。大范围 Python 回归在 794 项通过后遇到 SQLite `disk I/O error`，由可用磁盘空间不足造成；其中先出现的 4 项预检诊断文本回归已修复并单独复测通过。生产打包在 Vite 写入阶段遇到 `ENOSPC`，因此整套回归和打包结果未验收。本轮未修改现有浏览器项目、未提交付费媒体，也未完成真实浏览器端到端验收。
 
-1. 中文、英文各至少 100 个绑定原音频 SHA-256 的人工边界，包含标注者、复核者和时间。
-2. 六类真实 fixture 的来源、许可证、审批 ID、取得时间和每个资产的 SHA-256 清单。
-3. 中英文 P95 边界误差均 ≤200 ms，同一脚本的两种语速都通过，所有必要事件解析或明确阻塞。
-4. 候选 ASR/对齐权重的非占位版本和许可证，以及目标 Linux/GPU 机器上的冷/热耗时、累计高水位内存和并发数据。
+## 2026-10-16 方案测时与素材可执行性修复
 
-在这些证据到位前，可以演示和验收固定媒体画布流程，不得对真实语音准确率或生产容量做通过声明。
+新方案起草的普通口播段可由本地测时填入草稿预估时长；已保存方案只读取新版本的测时与诊断，不暗改人工编排。方案审核独立检查明确无效的区间，语速偏紧只提示修正。原片关键帧的项目内缓存版本 URL 可读取，历史空作者证据仅能经原任务、画布与文件哈希核验后显式修复。方向语义核验保存有用户证据的视觉保留决策；缺失决策的旧方向会阻止新生成图片/视频，需沿原方向修订与方案复审流程补齐。
 
-## 操作入口
-
-新项目复现步骤、页面按钮、支持格式和常见恢复路径见[参考视频改编：画布操作与本地运行](../zh/guides/reference-video-remix.md)。本地语音依赖与离线探活细节见[Remix 本地语音引擎试运行](reference-video-remix-speech-setup.md)。
+参考素材规划读取当前模型能力与真实参数选择回执；每个视频生成步骤须显式提供所选模型支持的 4～15 秒整数时长。已保存素材工作包在提交下一批时再次核对时长和参数。推荐值、全局总时长以及工作流编译成功不能代替用户选择。已验收素材继续沿原有真实语音对齐和画布确认流程编排。本轮未触发真实供应商、付费生成或自动重试；仍需用户在浏览器验证现有项目的关键帧引用、参数卡、素材审看、真实发声和最终播放。

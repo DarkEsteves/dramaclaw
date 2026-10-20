@@ -1,11 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('./client', () => ({ apiCall: vi.fn(async (_path: string, _options?: unknown) => ({})) }));
+vi.mock('./client', () => ({ apiCall: vi.fn(async (_path: string, _options?: unknown) => ({})), apiBlob: vi.fn(async () => new Blob()) }));
 
-import { apiCall } from './client';
-import { confirmRemixOperation, createRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixBrollPlan, generateRemixScriptDraft, listRemixOperations, reconcileRemixOperation, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
+import { apiBlob, apiCall } from './client';
+import { migrateProductionPlan, previewProductionFrame, projectProductionPlan, confirmRemixOperation, createRemixArtifact, fetchLatestRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, generateRemixBrollPlan, generateRemixScriptDraft, listRemixOperations, reconcileRemixOperation, renderRemixManifest, submitRemixProcessAction, uploadRemixMedia } from './remix';
 
 describe('remix API contract', () => {
+  it('migrates and projects exact plan revisions', async () => {
+    await migrateProductionPlan('demo', { artifactId: 'plan', revision: 7 });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/production-plans/migrate', { method: 'POST', json: { plan_ref: { artifact_id: 'plan', revision: 7 } } });
+    await projectProductionPlan('demo', { artifactId: 'plan-v2', revision: 2 });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/production-plans/project', { method: 'POST', json: { plan_ref: { artifact_id: 'plan-v2', revision: 2 } } });
+    await fetchLatestRemixArtifact('demo', 'plan-v2');
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/artifacts/plan-v2/latest');
+  });
+
+  it('requests a binary preview from one exact plan revision and frame', async () => {
+    await previewProductionFrame('demo', { artifactId: 'plan-v2', revision: 4 }, 123);
+    expect(apiBlob).toHaveBeenCalledWith('projects/demo/freezone/remix/production-plans/preview-frame', {
+      method: 'POST', json: { plan_ref: { artifact_id: 'plan-v2', revision: 4 }, frame: 123 }, timeout: false,
+    });
+  });
+
   it('sends exact artifact refs and render revision to the backend routes', async () => {
     await createRemixArtifact('demo', 'remix_script.v1', { dialogue: 'hi' }, [{ artifactId: 'source', revision: 2 }]);
     expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/artifacts', {
@@ -88,6 +104,34 @@ describe('remix API contract', () => {
         payload: { blueprint_ref: { artifact_id: 'blueprint-1', revision: 3 }, new_topic: '把肌酸改成薯条' },
         idempotency_key: 'draft-key',
         node_revision: 5,
+      },
+    });
+  });
+
+  it('queues production plan drafting with the selected source snapshot', async () => {
+    await submitRemixProcessAction('demo', {
+      action: 'generate_production_plan_draft', topic: '黑咖啡',
+      analysisContext: { summary: '先提问' }, idempotencyKey: 'plan-key', nodeRevision: 2,
+    });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/actions', {
+      method: 'POST', json: {
+        action: 'generate_production_plan_draft', payload: { topic: '黑咖啡', analysis_context: { summary: '先提问' } },
+        idempotency_key: 'plan-key', node_revision: 2,
+      },
+    });
+  });
+
+  it('passes a selected speech take to alignment without requiring a legacy placement', async () => {
+    await submitRemixProcessAction('demo', {
+      action: 'align_production_speech', mediaPath: 'media/two-people.mp4',
+      planRef: { artifactId: 'plan', revision: 6 }, turnId: 'host', takeId: 'take-1',
+      idempotencyKey: 'take-align', nodeRevision: 6,
+    });
+    expect(apiCall).toHaveBeenCalledWith('projects/demo/freezone/remix/actions', {
+      method: 'POST', json: {
+        action: 'align_production_speech',
+        payload: { media_path: 'media/two-people.mp4', plan_ref: { artifact_id: 'plan', revision: 6 }, turn_id: 'host', take_id: 'take-1' },
+        idempotency_key: 'take-align', node_revision: 6,
       },
     });
   });

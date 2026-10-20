@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import json
 
@@ -389,15 +390,24 @@ async def test_generator_retries_two_speakers_written_on_one_line(monkeypatch: p
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from novelvideo.api.auth import get_api_user
+    from novelvideo.api import egress_binding
     from novelvideo.api.routes import remix as routes
 
     async def resolve(*, user, project_id, required_role):
         if project_id != "demo":
             raise HTTPException(403, "Access denied")
-        return SimpleNamespace(output_dir=str(tmp_path), project_id="demo", is_home_node=True)
+        return SimpleNamespace(
+            output_dir=str(tmp_path), project_id="demo", requester_user_id="alice-user",
+            is_home_node=True,
+        )
 
     monkeypatch.setattr(routes, "resolve_project_context", resolve)
     monkeypatch.setattr(routes, "require_project_home_node", lambda ctx, **kwargs: None)
+    @asynccontextmanager
+    async def local_egress_scope(**kwargs):
+        yield None
+
+    monkeypatch.setattr(egress_binding, "request_egress_scope", local_egress_scope)
     app = FastAPI()
     app.include_router(routes.router, prefix="/api/v1")
     app.dependency_overrides[get_api_user] = lambda: {"username": "alice"}
@@ -426,7 +436,10 @@ def test_script_draft_endpoint_reads_exact_blueprint_and_does_not_publish(api, m
     assert response.status_code == 200
     assert response.json()["data"]["dialogue"] == "用新咖啡开始一天。"
     assert calls == [(blueprint["payload"], "新咖啡", "alice")]
-    assert len(list((tmp_path / "freezone" / "_remix_artifacts").iterdir())) == 2
+    assert len([
+        path for path in (tmp_path / "freezone" / "_remix_artifacts").iterdir()
+        if path.is_dir()
+    ]) == 2
 
 
 def test_broll_plan_endpoint_publishes_validated_plan_from_exact_script(api, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -481,7 +494,7 @@ def test_script_draft_endpoint_rejects_blank_topic(api) -> None:
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("kind", ["legacy", "unreviewed", "broken_reference"])
+@pytest.mark.parametrize("kind", ["legacy", "broken_reference"])
 def test_script_draft_endpoint_rejects_blueprint_that_is_not_script_ready(api, tmp_path, kind: str) -> None:
     client, _ = api
     store = RemixArtifactStore(tmp_path, "demo")
@@ -504,3 +517,19 @@ def test_script_draft_endpoint_rejects_blueprint_that_is_not_script_ready(api, t
 
     assert response.status_code == 422
     assert "blueprint" in response.json()["detail"].lower()
+
+
+def test_unreviewed_reference_notes_can_generate_draft_without_forging_review(api, tmp_path, monkeypatch):
+    from novelvideo.api.routes import remix as routes
+    client, _ = api
+    store = RemixArtifactStore(tmp_path, 'demo')
+    evidence = create_evidence(store, 'unreviewed-allowed')
+    blueprint = store.create('reference_blueprint.v1', reviewed_blueprint_payload(evidence, review_state='needs_review'),
+        [{'artifact_id':evidence['id'],'revision':evidence['revision']}])
+    async def generate(**kwargs):
+        assert kwargs['blueprint']['events'][0]['user_override']['review_state'] == 'needs_review'
+        return {'dialogue':'咖啡新品','segments':[],'selections':[],'blueprint_mappings':[],'media_requirements':[]}
+    monkeypatch.setattr(routes, 'generate_script_draft', generate)
+    response = client.post('/api/v1/projects/demo/freezone/remix/script-drafts', json={
+        'blueprint_ref':{'artifact_id':blueprint['id'],'revision':blueprint['revision']},'new_topic':'咖啡'})
+    assert response.status_code == 200, response.text

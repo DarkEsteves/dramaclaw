@@ -49,7 +49,6 @@ const FORM_HEIGHT_PX = 184;
 export function AssetBoardImageGenForm({ nodeId }: { nodeId: string }): ReactElement {
   const { t } = useTranslation();
   const { formProps, isGenerating, referenceImageUrl, referenceErrors, referenceErrorsOpen, closeReferenceErrors, openReferenceErrors, mutateGenerationRequest } = useImageGenerationForm(nodeId);
-  const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const [isAssetLibraryOpen, setIsAssetLibraryOpen] = useState(false);
 
   // 功能节点（工具条点了某个一图流功能后建出来的那种）：输入框里多一枚可切可删的

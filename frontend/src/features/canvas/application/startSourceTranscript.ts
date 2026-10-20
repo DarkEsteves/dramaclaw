@@ -7,8 +7,16 @@ import { useCanvasStore } from '@/stores/canvasStore';
 
 const inFlight = new Map<string, Promise<string>>();
 
+/** Includes metadata preparation before the result node has been created. */
+export function isSourceTranscriptPreparing(sourceNodeId: string): boolean {
+  return [true, false].some(autoStart => [true, false].some(reuseExisting =>
+    inFlight.has(`${sourceNodeId}:${autoStart}:${reuseExisting}`)));
+}
+
 function isTranscriptRunning(data: Record<string, unknown>): boolean {
   return data.autoStartMode === 'transcribe'
+    || Boolean(data.transcriptSubmissionPending)
+    || Boolean(data.transcriptSubmissionRequest)
     || (typeof data.operationId === 'string' && Boolean(data.operationId))
     || (typeof data.managedOperationId === 'string' && Boolean(data.managedOperationId));
 }
@@ -43,7 +51,7 @@ async function createTranscript(sourceNodeId: string, autoStart: boolean, reuseE
     && (reuseExisting || isTranscriptRunning(node.data))));
   if (existing) {
     const child = current.nodes.find((node) => node.id === existing.target);
-    if (autoStart && child && Array.isArray(child.data.words) && child.data.words.length === 0 && !child.data.operationId) {
+    if (autoStart && child && Array.isArray(child.data.words) && child.data.words.length === 0 && !child.data.operationId && !child.data.managedOperationId && !child.data.transcriptSubmissionPending && !child.data.transcriptSubmissionRequest) {
       current.updateNodeData(child.id, { autoStartMode: 'transcribe' });
     }
     return existing.target;

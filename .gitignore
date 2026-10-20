@@ -57,6 +57,7 @@ scripts/incident_drills/.drill.local.env
 /.hermes/plugins/freezone-workflows/
 src/novelvideo/freezone/agent_catalog/builtins/skills/*
 src/novelvideo/freezone/agent_catalog/builtins/recipes/*
+!src/novelvideo/freezone/agent_catalog/builtins/recipes/reference-production-plan.json
 !src/novelvideo/freezone/agent_catalog/builtins/skills/retro-hong-kong-kungfu-comedy-video.json
 !src/novelvideo/freezone/agent_catalog/builtins/recipes/retro-kungfu-bgm.json
 !src/novelvideo/freezone/agent_catalog/builtins/recipes/retro-kungfu-key-elements.json

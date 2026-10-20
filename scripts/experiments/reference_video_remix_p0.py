@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Write an auditable, bounded P0 feasibility report for reference-video remix.
 
-This command never installs an ASR package or downloads model weights. It reports
-the actual host capabilities and fixture availability so a missing engine cannot be
-mistaken for an alignment result.
+This command tests the configured NewAPI audio-transcribe gateway against verified
+word-boundary fixtures. It never treats an unavailable gateway as alignment evidence.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
-import importlib.util
 import json
 import math
 import platform
@@ -23,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from novelvideo.freezone.remix.p0 import (
-    WhisperXAlignmentRunner,
+    NewApiAlignmentRunner,
     evaluate_p0_gate,
     execute_alignment_case,
     render_sample,
@@ -75,13 +72,6 @@ def _peak_memory_mb() -> float | None:
     ]
     divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
     return round(max(peaks) / divisor, 3)
-
-
-def _package_version(name: str) -> str | None:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return None
 
 
 def _input_probes(paths: list[Path], asset_root: Path) -> dict[str, Any]:
@@ -308,13 +298,9 @@ def _fixture_evidence_blockers(
 def _runtime_metadata_blockers(metadata: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     checks = {
-        "WhisperX version": metadata.get("whisperx_version"),
-        "WhisperX license": metadata.get("whisperx_license"),
+        "gateway": metadata.get("gateway"),
         "ASR model name": metadata.get("model"),
-        "ASR weight version": metadata.get("asr_weight", {}).get("version"),
-        "ASR weight license": metadata.get("asr_weight", {}).get("license"),
-        "alignment weight version": metadata.get("alignment_weight", {}).get("version"),
-        "alignment weight license": metadata.get("alignment_weight", {}).get("license"),
+        "ASR model version": metadata.get("model_version"),
         "platform support record": metadata.get("platform_support"),
     }
     for label, value in checks.items():
@@ -426,7 +412,7 @@ def _case_report(
     case: dict[str, Any],
     asset_root: Path,
     output_dir: Path,
-    runner: WhisperXAlignmentRunner | None,
+    runner: NewApiAlignmentRunner | None,
 ) -> tuple[dict[str, Any], list[float]]:
     started = time.monotonic()
     required_assets = [
@@ -560,7 +546,7 @@ def _case_report(
     errors.sort()
     report = {
         "case_id": case["case_id"],
-        "engine_version": runner.engine_version if runner else "whisperx-unavailable",
+        "engine_version": runner.engine_version if runner else "newapi-unavailable",
         "device": runner.device if runner else "unavailable",
         "duration_s": duration_s,
         "elapsed_s": round(time.monotonic() - started, 6),
@@ -588,13 +574,6 @@ def main() -> int:
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--asset-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument(
-        "--model", help="Explicit ASR model name; required for a passing run"
-    )
-    parser.add_argument("--compute-type", default="int8")
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--model-cache", type=Path)
     parser.add_argument(
         "--fixture-kind",
         choices=("approved-real", "synthetic-local", "unclassified"),
@@ -602,29 +581,17 @@ def main() -> int:
         help="Human-readable run label; gate qualification uses per-fixture evidence.",
     )
     parser.add_argument("--speech-concurrency", type=int, default=1)
-    parser.add_argument("--asr-weight-version", default="unrecorded")
-    parser.add_argument("--asr-weight-license", default="unrecorded")
-    parser.add_argument("--alignment-weight-version", default="unrecorded")
-    parser.add_argument("--alignment-weight-license", default="unrecorded")
+    parser.add_argument("--model-version", default="unrecorded")
     args = parser.parse_args()
     if args.speech_concurrency < 1:
         parser.error("--speech-concurrency must be at least 1")
 
     fixture_data = json.loads(args.cases.read_text(encoding="utf-8"))
-    whisperx_available = importlib.util.find_spec("whisperx") is not None
-    torch_available = importlib.util.find_spec("torch") is not None
-    asr_executable = whisperx_available and torch_available and bool(args.model)
-    runner = (
-        WhisperXAlignmentRunner(
-            device=args.device,
-            model_name=args.model,
-            compute_type=args.compute_type,
-            batch_size=args.batch_size,
-            model_cache=args.model_cache,
-        )
-        if asr_executable
-        else None
-    )
+    from novelvideo.config import get_newapi_runtime_credentials
+
+    api_key, base_url = get_newapi_runtime_credentials()
+    asr_executable = bool(api_key and base_url)
+    runner = NewApiAlignmentRunner() if asr_executable else None
     case_runs = [
         _case_report(case, args.asset_root, args.output_dir, runner)
         for case in fixture_data["cases"]
@@ -652,23 +619,12 @@ def main() -> int:
         for language in ("zh", "en")
     }
     runtime_metadata = {
-        "whisperx_version": _package_version("whisperx"),
-        "whisperx_license": "BSD-2-Clause",
-        "model": args.model,
-        "device": args.device,
-        "compute_type": args.compute_type,
-        "batch_size": args.batch_size,
+        "gateway": "newapi",
+        "model": "audio-transcribe",
+        "model_version": args.model_version,
+        "device": "provider-managed",
         "concurrency_limit": args.speech_concurrency,
-        "asr_weight": {
-            "version": args.asr_weight_version,
-            "license": args.asr_weight_license,
-        },
-        "alignment_weight": {
-            "version": args.alignment_weight_version,
-            "license": args.alignment_weight_license,
-        },
-        "platform_support": "measured host/device only; other operating systems and accelerators remain unverified",
-        "downloads_allowed": False,
+        "platform_support": "measured gateway response only; provider runtime is not inspected",
     }
     evidence_blockers = _fixture_evidence_blockers(fixture_data, args.asset_root)
     metadata_blockers = _runtime_metadata_blockers(runtime_metadata)
@@ -701,8 +657,7 @@ def main() -> int:
             "python": platform.python_version(),
             "ffmpeg": _command_version("ffmpeg"),
             "ffprobe": _command_version("ffprobe"),
-            "whisperx_available": whisperx_available,
-            "torch_available": torch_available,
+            "newapi_configured": asr_executable,
         },
         "speech_runtime": runtime_metadata,
         "fixture_evidence": {

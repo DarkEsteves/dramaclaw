@@ -28,12 +28,14 @@ compatibility: Requires Freezone/虾画 chat surface with frontend-injected curr
 - **创意咨询**：可以自然语言回答；如果用户希望"落到画布"，使用画布工具创建可继续工作的材料。
 - **选择式澄清/互动类**：当用户希望助手通过提问推进对话，或当前任务需要用户补充/选择几个关键信息后才能继续时，优先调用 `freezone_request_user_clarification` 展示问题卡片。适用场景包括：帮用户理清想法、做偏好选择、做小测验/问答互动、确认方向、收集必要条件。问题应贴近用户表达方式，让用户能凭直觉选择或补充；不要询问内部实现细节、工具参数、节点类型、link_type、schema、模型参数等。若只是普通闲聊、简单知识问答、单个自然追问，或用户已经给出明确指令，则直接自然语言回复，不要强行发卡片。
 - **全局画布请求**：用户说"看看画布""整理当前画布"时，优先使用当前注入的画布上下文；不足时再读取。
+- **已有作品方案的局部编辑**：`scriptNode` 且 `remixRole=production_plan` 的 V2 方案是版本化作品数据。先从已注入上下文或 `freezone_get_node_detail` 的只读 `production_plan.plan_ref` 取得已保存身份；调用 `freezone_get_production_state` 时，`artifact_id` 必须复制 `plan_ref.artifact_id`，并保留 `revision`，绝不能传画布 `node_id`。普通脚本 `prompt` 为空不代表原生方案不存在；`plan_ref=null` 才表示尚未保存 V2，`dirty/conflict` 表示本地修改仍待处理。读取保存状态后，再以 `freezone_prepare_production_edit` 提交审批修改。命令包含 `command_id`、精确 `plan_ref`、`kind`、`target_id`、`payload`；输出规格用 `kind="set_output"`、`target_id="output"`、`payload={"output":{...保留当前规格并修改用户要求的字段...}}`。这是明确单操作，不需要先加载工作流/拓扑指南，不加载 portable 包名，也不猜文件路径；禁止用普通 `update_node_data` 改作品数据，不重新生成方案、不运行素材或渲染，除非用户要求。
 - **运行已有工作流**：复用已有节点、内容和连线，优先运行已有工作流；不要重新规划一套重复节点，除非用户明确要求新增、重写或替换。
 - **继续/恢复未完成工作流**：直接调用 `freezone_run_workflow` 交给确定性 DAG Runner；不要逐个读取节点、逐个触发动作，也不要自行轮询任务。一次运行返回失败后，根据返回的错误类别暂停并说明下一步，不要在同一请求或后续自动恢复中反复修改节点。
 - **单节点工作流仍是工作流**：用户明确要求运行、执行、继续或恢复工作流时，即使其中只有一个可执行节点，也直接调用 `freezone_run_workflow`；不要读取子节点后改用 `freezone_run_node_action`。
 - **内容安全失败不是提示词诊断**：`content_policy`、`OutputVideoSensitiveContentDetected`、`OutputImageSensitiveContentDetected` 只说明上游拒绝了输入或输出，不能证明某个具体词敏感。除非上游错误明确指出具体字段或内容，禁止声称“全息”“服务器机柜”等词触发审核，禁止靠猜词反复改写提示词。
 - **审核失败的返工边界**：内容安全失败不可自动重试，也不可由 Agent 自主修改提示词。先保留原提示词和原始错误，向用户说明是输入素材审核还是输出内容审核；只有用户明确要求修改某个节点的提示词时，才修改该节点一次。修改后再次失败就暂停，等待用户更换素材、调整创意方向或手动编辑，不得继续换词试错。
 - **动态工作流**：工作流选择只使用 Hermes 原生 Skill 机制。用户可在输入框键入 `/` 选择 Workflow Skill；未显式选择且存在多个候选时，使用 `skills_list` 展示并让用户选择。纯图片工作流使用 `text-to-image`，只有用户要求视频阶段时才使用 `text-to-image-video`；社交平台套图需求才使用 `social-content-campaign`。加载后生成精简 `freezone_workflow_intent.v1`，调用 `freezone_prepare_workflow_draft` 得到确定性预览；调整时调用 `freezone_patch_workflow_draft`，确认后调用 `freezone_confirm_workflow_draft`。对于 `ecommerce-ad`、`text-to-image`、`text-to-image-video`、`video-tutorial`、`short-drama-quick`，优先传 `planner={mode:"standard", item_count, total_duration_seconds, deliverable, include_audio, units}`，其中 `units` 只描述每段的标题、内容、旁白和可选 `duration_seconds`；`include_audio=true` 时每个 unit 都必须带 `narration`（该段实际朗读的原文，不能缺省、不能写占位说明）；不要为标准流程选择 Recipe 或编写依赖。用户指定总时长时必须传 `total_duration_seconds`，编译器会为未指定时长的片段进行确定性分配。只有用户明确要求特殊拓扑时才传完整 `items`；自定义视频 item 必须传 `duration_seconds`，并确保所有视觉片段时长之和等于用户目标时长；自定义音频 item 用 `audio_kind:"speech"`（narration 填实际朗读原文）或 `audio_kind:"music"` 区分。不要使用固定 `workflow_type`，不要手写画布命令，也不要调用旧的模板 Plan Builder。草稿校验失败时按返回的 `errors`/`hint` 修正后重试即可，不要读插件源码。
+- **素材阶段状态**：素材工作包保存、工作流草稿准备、画布交付和实际生成是四个独立状态。以工具返回的 `material_lifecycle` 为准：工作包 `saved` 只表示数据已落库；草稿 `ready` 仍需调用现有 `freezone_confirm_workflow_draft` 并等待画布确认回执；只有 `canvas_delivery_status=delivered` 才能说画布交付；只有 `generation_status=completed` 或真实候选证据才能说素材生成完成。不要根据操作 `delivered`、草稿存在或 Agent 自己的描述推断画布节点或生成结果，失败后不要自动重试。
 - **已有图片作为 Recipe 输入**：在 Intent 顶层声明 `external_inputs=[{"id":"source_image","node_id":"画布真实节点 ID","media_kind":"image"}]`，目标 item 用 `reference_inputs=["source_image"]`；自定义 Plan 用同一声明及 `media_input_for` 边。保持源节点原样，等待草稿确认，不要退回普通 `add_next_node` 或手填图片 URL。
 - **外部 Skill 导入**：用户提供 Markdown 并明确要求转成虾画 Skill 时，调用 `freezone_import_external_skill` 提交后台转换，正文完整传入，不手工编码。ZIP 或带引用资料的完整包使用设置中的“导入外部 Skill”上传入口。返回后告知任务与导入编号，不反复轮询、不声称已安装。用户要求查看时调用 `freezone_get_skill_import`；完成的 `import_result.bundle` 是原生 Skill 与 Recipes 草稿，用户要求修改时交给现有 Skill Studio 草稿流程，不创建画布节点。
 - **Skill Studio 配置类**：用户明确要求创建、编辑、保存、沉淀 Skill / Recipe / 技能 / 配方时，这是 catalog 配置草稿流程，不是画布写入，也不是纯文本完成。不要调用画布写入工具，不要声称已保存；需要澄清方向时调用 `freezone_request_user_clarification`，生成或修改草稿时按 `freezone_begin_agent_catalog_draft` → `freezone_put_agent_catalog_skill` → `freezone_put_agent_catalog_recipe` → `freezone_finish_agent_catalog_draft` 的分片流程提交，由 Freezone bridge 触发前端卡片展示。
@@ -175,3 +177,17 @@ compatibility: Requires Freezone/虾画 chat surface with frontend-injected curr
 
 - 如果虾画工具返回 `not_configured`、`not_implemented` 或 `canvas_id is required`，简短说明当前虾画工具尚未完成注入或未绑定画布。
 - 不要改用 shell、curl、文件读写或猜测本地状态来绕过前端画布工具。
+
+### Complete plan drafting and historical outline continuation
+
+普通聊天由主 Agent 直接理解。待确认的审核方案只作为主 Agent 上下文提供
+当前的 `commission_ref`、`plan_ref` 和 `review_ref`；后端不再为每条消息
+额外发起意图识别请求。用户明确同意当前展示的完整方案后，才调用
+`freezone_confirm_reference_plan`，且只传精确的 `commission_ref` 和
+`plan_ref`。该动作必须返回主机确认回执后才能继续；修改方案走现有编辑/
+更新流程，普通消息和系统通知都不能代替用户确认。失败时读取返回的当前引用
+和字段路径，不自动重试。
+
+`generate_production_plan_draft` saves a complete editable plan in one model call (`authoring_stage=arranged`), including beats, dialogue, visuals, needed audio, subtitles and graphics. Wait for its actual completed task and saved plan reference, then read and review the content through the normal flow. Use existing `production_plan_command` edits for changes; direction changes use public node update fields. Draft completion is not user confirmation or permission to generate media. Do not submit another generation or retry automatically.
+
+Only a historical saved outline (`authoring_stage=outline` with no arrangement) needs `generate_production_plan_arrangement`. When the user authorizes continuing, invoke it on the same node through `freezone_run_node_action`, respecting the existing action confirmation. Parameters are exactly `{"plan_ref":{"artifact_id":"CURRENT_SAVED_ID","revision":CURRENT_SAVED_REVISION}}`; read the latest saved revision after edits. Preserve its structure, dialogue and human edits; do not reconstruct source inputs or reuse internal outline files. Failure preserves the saved content; only an explicit retry repeats arrangement. The stage flag is informational: manually completed and historical plans still use existing readiness checks. No new stage cards or confirmation tools are needed.

@@ -154,7 +154,7 @@ export interface CanvasEventMap {
   };
   'remix-node/action': {
     nodeId: string;
-    action: 'open_media' | 'transcribe' | 'align' | 'export_transcript_json' | 'export_transcript_srt' | 'align_script' | 'analyze' | 'continue_story' | 'edit_script' | 'plan_broll' | 'create_narration' | 'compile' | 'prepare_compose' | 'save_manifest' | 'resolve_manifest_conflicts' | 'render_export' | 'create_timeline' | 'create_compose';
+    action: 'open_media' | 'transcribe' | 'align' | 'export_transcript_json' | 'export_transcript_srt' | 'align_script' | 'analyze' | 'continue_story' | 'edit_script' | 'edit_production_plan' | 'open_production_timeline' | 'plan_broll' | 'create_narration' | 'compile' | 'prepare_compose' | 'save_manifest' | 'resolve_manifest_conflicts' | 'render_export' | 'create_timeline' | 'create_compose';
   };
   'tool-dialog/open': {
     nodeId: string;

@@ -5,21 +5,31 @@ const state = vi.hoisted(() => ({
   nodes: [
     { id: 'audio', data: { remixMedia: { media_path: 'narration.wav', media_kind: 'audio', url: '/media/narration.wav' } } },
     { id: 'transcript', data: { words: [], status: 'needs_review', artifactRef: null } },
-  ] as Array<{ id: string; data: Record<string, unknown> }>,
+  ] as Array<{ id: string; type?: string; data: Record<string, unknown> }>,
   edges: [{ source: 'audio', target: 'transcript' }],
+  listeners: new Set<() => void>(),
+  subscribe: (listener: () => void) => { state.listeners.add(listener); return () => { state.listeners.delete(listener); }; },
   updateNodeData: vi.fn((id: string, patch: Record<string, unknown>) => {
     const node = state.nodes.find((item) => item.id === id);
     if (node) node.data = { ...node.data, ...patch };
+    for (const listener of state.listeners) listener();
   }),
   setSelectedNode: vi.fn(),
+  addNode: vi.fn((type: string, _position: unknown, data: Record<string, unknown> = {}) => { state.nodes.push({ id: 'story', type, data }); return 'story'; }),
+  addEdge: vi.fn((source: string, target: string) => { state.edges.push({ source, target }); return `${source}-${target}`; }),
+  deleteNode: vi.fn(), findNodePosition: vi.fn(() => ({ x: 0, y: 0 })),
 }));
 
 vi.mock('@xyflow/react', () => ({ Handle: () => null, Position: { Left: 'left', Right: 'right' }, useUpdateNodeInternals: () => () => {} }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({ NodeHeader: () => null, NODE_HEADER_FLOATING_POSITION_CLASS: '' }));
 vi.mock('@/features/canvas/ui/NodeResizeHandle', () => ({ NodeResizeHandle: () => null }));
-vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state }) }));
+vi.mock('@/stores/canvasStore', () => ({ useCanvasStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state, subscribe: state.subscribe }) }));
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
+const joint = vi.hoisted(() => vi.fn());
+vi.mock('@/api/client', () => ({ apiCall: joint }));
+vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true) }));
 vi.mock('@/api/remix', () => ({
+  attachRemixMedia: vi.fn(),
   submitRemixProcessAction: vi.fn(async () => ({ operation_id: 'operation-1' })),
   fetchRemixOperation: vi.fn(async () => ({ operation_id: 'operation-1', status: 'needs_confirmation', output_refs: [{ artifact_id: 'words-1', revision: 1 }] })),
   fetchRemixTaskStatus: vi.fn(async () => null),
@@ -34,16 +44,125 @@ import { TranscriptNode } from '../nodes/TranscriptNode';
 import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction } from '@/api/remix';
 import { reviseTranscriptArtifact } from './transcriptArtifactApi';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
+import { analyzeReferenceVideo } from '@/features/canvas/application/analyzeReferenceVideo';
 
 const flowProps = { type: 'transcriptNode', zIndex: 0, draggable: true, dragging: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
 
 describe('TranscriptNode', () => {
   beforeEach(() => {
+    state.listeners.clear();
+    state.nodes[0] = { id: 'audio', data: { remixMedia: { media_path: 'narration.wav', media_kind: 'audio', url: '/media/narration.wav' } } };
     state.nodes.splice(2);
-    state.edges.splice(1);
+    state.edges.splice(0, state.edges.length, { source: 'audio', target: 'transcript' });
     state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null };
     state.updateNodeData.mockClear();
     vi.clearAllMocks();
+  });
+  it('shares a synchronous submission marker before React rerenders duplicate commands', async () => {
+    let release!: (value: unknown) => void;
+    vi.mocked(submitRemixProcessAction).mockReturnValueOnce(new Promise(resolve => { release = resolve; }) as never);
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    try {
+      act(() => {
+        canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' });
+        canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' });
+      });
+      expect(submitRemixProcessAction).toHaveBeenCalledTimes(1);
+      expect(state.nodes[1].data.transcriptSubmissionPending).toBeTruthy();
+      expect(state.nodes[1].data.operationId).toBeFalsy();
+    } finally {
+      await act(async () => { release({ operation_id: 'operation-1' }); });
+    }
+    await waitFor(() => expect(state.nodes[1].data.transcriptSubmissionPending).toBeFalsy());
+  });
+  it('waits for actual component transcription before starting exact-reference analysis', async () => {
+    const url = '/static/projects/demo/video.mp4';
+    state.nodes[0] = { id: 'video', type: 'videoNode', data: { videoUrl: url, remixMedia: { media_path: 'video.mp4', media_hash: 'hash', media_kind: 'video', has_audio: true, url } } };
+    state.nodes[1] = { id: 'transcript', type: 'transcriptNode', data: { words: [], status: 'needs_review', autoStartMode: 'transcribe', sourceMediaPath: 'video.mp4', sourceMediaHash: 'hash' } };
+    state.edges.splice(0, state.edges.length, { source: 'video', target: 'transcript' });
+    let release!: (value: unknown) => void;
+    vi.mocked(submitRemixProcessAction).mockReturnValueOnce(new Promise(resolve => { release = resolve; }) as never);
+    joint.mockResolvedValueOnce({ operation_id: 'analysis-op', status: 'completed', analysis_ref: { artifact_id: 'analysis', revision: 1 } });
+    const originalFetch = vi.mocked(fetchRemixArtifact).getMockImplementation()!;
+    vi.mocked(fetchRemixArtifact).mockImplementation(async (project, ref) => {
+      if (ref.artifactId === 'analysis') return { schema: 'reference_analysis.v1', payload: { media_hash: 'sha256:hash', transcript_status: 'completed', transcript_ref: { artifact_id: 'words-1', revision: 1 }, story: { video_story: { summary: 'Actual words input' } } } } as never;
+      const actual = await originalFetch(project, ref);
+      return { ...actual, payload: { ...actual.payload, media_hash: 'sha256:hash' } } as never;
+    });
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const analysis = analyzeReferenceVideo('video', { videoUrl: url });
+    try {
+      await act(async () => { await Promise.resolve(); });
+      expect(joint).not.toHaveBeenCalled();
+      await act(async () => { release({ operation_id: 'operation-1' }); });
+      await act(async () => { await analysis.completion; });
+      expect(joint).toHaveBeenCalledOnce();
+      expect(submitRemixProcessAction).toHaveBeenCalledOnce();
+      expect(state.nodes.find(node => node.id === 'story')?.data.referenceTranscriptRef).toEqual(state.nodes[1].data.artifactRef);
+    } finally {
+      await act(async () => { release({ operation_id: 'operation-1' }); });
+      vi.mocked(fetchRemixArtifact).mockImplementation(originalFetch);
+    }
+    await waitFor(() => expect(state.nodes[1].data.transcriptSubmissionPending).toBeFalsy());
+  });
+  it('releases a failed standalone submission marker so retry can enqueue', async () => {
+    vi.mocked(submitRemixProcessAction).mockRejectedValueOnce(new Error('入队失败'));
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' }));
+    await waitFor(() => expect(screen.getByText('入队失败')).toBeTruthy());
+    expect(state.nodes[1].data.transcriptSubmissionPending).toBeNull();
+    expect(state.nodes[1].data.transcriptSubmissionRequest).toBeTruthy();
+    const original = vi.mocked(submitRemixProcessAction).mock.calls[0][1];
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' }));
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(submitRemixProcessAction).mock.calls[1][1]).toEqual(original);
+  });
+  it('reconciles a persisted lost standalone receipt by replaying its exact original admission', async () => {
+    const request = { action: 'transcribe_media', mediaPath: 'narration.wav', language: 'auto', idempotencyKey: 'actual-prior-key', nodeRevision: 3 };
+    state.nodes[1].data = { words: [], status: 'needs_review', transcriptSubmissionPending: 'actual-prior-key', transcriptSubmissionRequest: { project: 'demo', request } };
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledWith('demo', request));
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
+    expect(submitRemixProcessAction).toHaveBeenCalledTimes(1);
+    expect(state.nodes[1].data.transcriptSubmissionPending).toBeNull();
+    expect(state.nodes[1].data.transcriptSubmissionRequest).toBeNull();
+  });
+  it('joins a still-active local admission across remount without issuing another request', async () => {
+    let release!: (value: unknown) => void;
+    vi.mocked(submitRemixProcessAction).mockReturnValueOnce(new Promise(resolve => { release = resolve; }) as never);
+    state.nodes[1].data.autoStartMode = 'transcribe';
+    const view = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    view.unmount();
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    try { expect(submitRemixProcessAction).toHaveBeenCalledTimes(1); }
+    finally { await act(async () => release({ operation_id: 'operation-1' })); }
+    await waitFor(() => expect(state.nodes[1].data.artifactRef).toEqual({ artifactId: 'words-1', revision: 1 }));
+    expect(submitRemixProcessAction).toHaveBeenCalledTimes(1);
+  });
+  it('bounds failed remount reconciliation to one attempt and leaves retry enabled with the original key', async () => {
+    const request = { action: 'transcribe_media', mediaPath: 'narration.wav', language: 'auto', idempotencyKey: 'lost-response-key', nodeRevision: 1 };
+    state.nodes[1].data = { words: [], status: 'needs_review', transcriptSubmissionPending: 'lost-response-key', transcriptSubmissionRequest: { project: 'demo', request } };
+    vi.mocked(submitRemixProcessAction).mockRejectedValueOnce(new Error('回执读取失败'));
+    const view = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(screen.getByText('回执读取失败')).toBeTruthy());
+    view.rerender(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    expect(submitRemixProcessAction).toHaveBeenCalledTimes(1);
+    expect(state.nodes[1].data.transcriptSubmissionPending).toBeNull();
+    expect(state.nodes[1].data.transcriptSubmissionRequest).toEqual({ project: 'demo', request });
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'transcript', action: 'transcribe' }));
+    await waitFor(() => expect(submitRemixProcessAction).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(submitRemixProcessAction).mock.calls[1][1]).toEqual(request);
+  });
+  it.each(['project', 'source'])('releases a remounted busy marker when its %s scope cannot be reconciled', async changed => {
+    const request = { action: 'transcribe_media', mediaPath: 'narration.wav', language: 'auto', idempotencyKey: 'original-scope-key', nodeRevision: 1 };
+    const saved = { project: changed === 'project' ? 'other-project' : 'demo', request };
+    state.nodes[1].data = { words: [], status: 'needs_review', transcriptSubmissionPending: 'original-scope-key', transcriptSubmissionRequest: saved };
+    if (changed === 'source') state.edges.splice(0);
+    render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    await waitFor(() => expect(state.nodes[1].data.transcriptSubmissionPending).toBeNull());
+    expect(submitRemixProcessAction).not.toHaveBeenCalled();
+    expect(state.nodes[1].data.transcriptSubmissionRequest).toEqual(saved);
+    expect(screen.getByText(changed === 'project' ? '原转写提交范围已变化，请核对已有任务' : '请先连接已上传的音频或带声音视频')).toBeTruthy();
   });
 
   it('starts transcription automatically when created by its source node', async () => {
@@ -78,11 +197,11 @@ describe('TranscriptNode', () => {
 
   it('releases a failed worker task so transcription can be retried', async () => {
     vi.mocked(fetchRemixOperation).mockResolvedValueOnce({ operation_id: 'operation-1', status: 'pending', output_refs: [], task_type: 'remix_transcribe_media', task_scope: 'scope-1' } as never);
-    vi.mocked(fetchRemixTaskStatus).mockResolvedValueOnce({ status: 'failed', error: 'WhisperX worker failed' });
+    vi.mocked(fetchRemixTaskStatus).mockResolvedValueOnce({ status: 'failed', error: 'NewAPI transcription failed' });
     state.nodes[1].data = { words: [], status: 'needs_review', artifactRef: null, operationId: 'operation-1' };
     render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
     await waitFor(() => expect(state.nodes[1].data).toMatchObject({ operationId: null, status: 'failed' }));
-    expect(screen.getByText('WhisperX worker failed')).toBeTruthy();
+    expect(screen.getByText('NewAPI transcription failed')).toBeTruthy();
   });
 
   it('transcribes the connected audio and persists a word timeline reference', async () => {
@@ -119,6 +238,29 @@ describe('TranscriptNode', () => {
     fireEvent.click(screen.getByRole('button', { name: '跳转到 world，00:02.100' }));
 
     expect(audio.currentTime).toBe(2.1);
+  });
+
+  it('keeps video playback usable in the compact transcript media panel', () => {
+    state.nodes[0] = { id: 'video', type: 'videoNode', data: { remixMedia: { media_path: 'clip.mp4', media_kind: 'video', has_audio: true, url: '/media/clip.mp4' } } };
+    state.edges.splice(0, state.edges.length, { source: 'video', target: 'transcript' });
+    const { container } = render(<TranscriptNode {...flowProps} id="transcript" data={state.nodes[1].data as never} selected={false} />);
+    const video = container.querySelector('video')!;
+    Object.defineProperty(video, 'duration', { configurable: true, value: 18 });
+    fireEvent.loadedMetadata(video);
+
+    let paused = true;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+    const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; fireEvent.play(video); });
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; fireEvent.pause(video); });
+    fireEvent.click(screen.getByRole('button', { name: '播放原片' }));
+    expect(play).toHaveBeenCalledOnce();
+
+    fireEvent.change(screen.getByRole('slider', { name: '播放进度' }), { target: { value: '4.5' } });
+    expect(video.currentTime).toBe(4.5);
+    expect(screen.getByText('00:04 / 00:18')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '暂停原片' }));
+    expect(pause).toHaveBeenCalledOnce();
   });
 
   it('highlights the word at the current playback time', () => {

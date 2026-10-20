@@ -190,6 +190,7 @@ def _node_branch_schemas() -> list[dict[str, Any]]:
         _recipe_node_schema(),
         _resource_text_node_schema(),
         _compose_node_schema(),
+        _process_node_schema(),
         _html_node_schema(),
     ]
 
@@ -607,7 +608,7 @@ def _process_node_schema() -> dict[str, Any]:
         {
             "node_type": {
                 "type": "string",
-                "enum": ["videoStoryNode", "transcriptNode", "semanticTimelineNode"],
+                "enum": ["videoStoryNode", "transcriptNode", "semanticTimelineNode", "scriptNode", "videoComposeNode"],
             },
             "data": {
                 "type": "object",
@@ -665,7 +666,7 @@ def workflow_plan_json_schema() -> dict[str, Any]:
                     "properties": {
                         "id": {"type": "string", "minLength": 1},
                         "node_id": {"type": "string", "minLength": 1},
-                        "media_kind": {"const": "image"},
+                        "media_kind": {"enum": ["image", "reference_analysis"]},
                     },
                     "required": ["id", "node_id", "media_kind"],
                     "additionalProperties": False,
@@ -826,6 +827,10 @@ def workflow_intent_json_schema() -> dict[str, Any]:
             "Put composition policy at intent.include_compose, never inside intent.planner."
         ),
         "properties": {
+            "reference_commission_id": {
+                "type": "string", "minLength": 1,
+                "description": "Saved reference commission to continue when one analysis has multiple branches.",
+            },
             "external_inputs": {
                 "type": "array", "maxItems": 24,
                 "items": {
@@ -833,7 +838,7 @@ def workflow_intent_json_schema() -> dict[str, Any]:
                     "properties": {
                         "id": {"type": "string", "minLength": 1},
                         "node_id": {"type": "string", "minLength": 1},
-                        "media_kind": {"const": "image"},
+                        "media_kind": {"enum": ["image", "reference_analysis"]},
                     },
                     "required": ["id", "node_id", "media_kind"],
                     "additionalProperties": False,

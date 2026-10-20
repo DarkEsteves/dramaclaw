@@ -498,9 +498,11 @@ const transcriptNodeDefinition: CanvasNodeDefinition<TranscriptNodeData> = {
 
 const semanticTimelineNodeDefinition: CanvasNodeDefinition<SemanticTimelineNodeData> = {
   type: CANVAS_NODE_TYPES.semanticTimeline,
-  menuLabelKey: 'node.menu.semanticTimeline', menuIcon: 'text', visibleInMenu: true,
+  menuLabelKey: 'node.menu.semanticTimeline', menuIcon: 'text', visibleInMenu: false,
   capabilities: { toolbar: false, promptInput: false },
-  connectivity: { sourceHandle: true, targetHandle: true, connectMenu: { fromSource: true, fromTarget: true } },
+  // Existing graphs still render and connect to compose. New graphs use
+  // production_plan -> videoCompose and should not spawn this legacy step.
+  connectivity: { sourceHandle: true, targetHandle: true, connectMenu: { fromSource: false, fromTarget: false } },
   createDefaultData: () => ({ displayName: 'Semantic timeline', artifactRef: null, events: [] }),
 };
 
@@ -823,14 +825,14 @@ const UPSTREAM_SOURCE_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasN
 // 目标收口（谁能连进我），这张按源收口（我能连去谁）。两张表一起构成建边规则，
 // 同样被所有建边路径查询。不在表中的源类型表示「不额外限制下游类型」。
 //
-// 音频是目前唯一需要按源收口的类型：只有视频节点（声轨素材）和视频合成（音频轨）
-// 会读上游音频，连到图片 / 脚本 / 3D 等节点上不产生任何效果，只是画布上一根骗人
-// 的线。这条规则本来就写在别处了 —— getDownstreamSpawnTypes(audio) 只给
-// [video, videoCompose]，Canvas.resolveAllowedNodeTypes 里图片节点的上游菜单也
+// 音频是目前唯一需要按源收口的类型：视频节点、成片编排、转写与作品方案
+// 会读取上游音频。连到图片 / 3D 等节点上不产生任何效果，只是画布上一根骗人的线。
+// 这条规则本来就写在别处了 —— getDownstreamSpawnTypes(audio) 只给
+// 视频、转写与合成，Canvas.resolveAllowedNodeTypes 里图片节点的上游菜单也
 // 明写「不收音频」—— 但那两处只管菜单能创建什么，拖线落到一个**既有**节点上时
 // 谁都没拦。放进这里才真正收口。
 const DOWNSTREAM_TARGET_WHITELIST: Partial<Record<CanvasNodeType, readonly CanvasNodeType[]>> = {
-  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline],
+  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline, CANVAS_NODE_TYPES.script],
   // 风格节点只是图片节点 styleTemplateId 的投影，连到别处不产生任何效果。
   [CANVAS_NODE_TYPES.style]: [CANVAS_NODE_TYPES.imageGen],
 };
@@ -938,11 +940,10 @@ export const DOWNSTREAM_SPAWN_WHITELIST: Partial<
     CANVAS_NODE_TYPES.transcript,
     CANVAS_NODE_TYPES.videoStory,
   ],
-  // 音频：下游只有视频（声轨素材）与视频合成（音频轨）读得懂。
-  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline],
-  [CANVAS_NODE_TYPES.transcript]: [CANVAS_NODE_TYPES.videoStory, CANVAS_NODE_TYPES.semanticTimeline, CANVAS_NODE_TYPES.script],
-  [CANVAS_NODE_TYPES.videoStory]: [CANVAS_NODE_TYPES.script, CANVAS_NODE_TYPES.semanticTimeline],
-  [CANVAS_NODE_TYPES.script]: [CANVAS_NODE_TYPES.semanticTimeline],
+  // 音频：可作为视频声轨、独立转写素材或合成音轨。
+  [CANVAS_NODE_TYPES.audio]: [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript],
+  [CANVAS_NODE_TYPES.transcript]: [CANVAS_NODE_TYPES.videoStory, CANVAS_NODE_TYPES.script],
+  [CANVAS_NODE_TYPES.videoStory]: [CANVAS_NODE_TYPES.script],
   [CANVAS_NODE_TYPES.semanticTimeline]: [CANVAS_NODE_TYPES.videoCompose],
   // 360° 全景查看器：截图都是图片，下游只接图片类节点。
   [CANVAS_NODE_TYPES.pano360Viewer]: [

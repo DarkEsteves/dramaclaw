@@ -234,13 +234,29 @@ def _remember_generation_answers(
 
 
 def _remembered_generation_answers(
-    project: str | None, canvas: str | None
+    project: str | None, canvas: str | None, *, commission_id: str | None = None,
 ) -> dict[str, Any] | None:
     scope = _generation_answer_scope(project, canvas)
     if scope is None:
         return None
     answers = _PENDING_GENERATION_ANSWERS.get(scope)
-    return _clone_json(answers) if isinstance(answers, dict) else None
+    if isinstance(answers, dict):
+        return _clone_json(answers)
+    # This envelope is installed by the host for one authenticated continuation
+    # turn. Never accept a receipt supplied through the model's tool arguments.
+    if not commission_id:
+        return None
+    try:
+        receipt = json.loads(os.environ.get("DRAMACLAW_REFERENCE_PARAMETER_ANSWERS", ""))
+    except ValueError:
+        return None
+    if not isinstance(receipt, dict) or (
+        receipt.get("project_id"), receipt.get("canvas_id"), receipt.get("turn_id"),
+        receipt.get("commission_id"),
+    ) != (*scope, commission_id):
+        return None
+    trusted = receipt.get("answers")
+    return _clone_json(trusted) if isinstance(trusted, dict) and trusted else None
 
 
 def _effective_generation_answers(
@@ -371,6 +387,12 @@ def _request_headers(user_agent: str) -> dict[str, str]:
         "Accept": "application/json",
         "User-Agent": user_agent,
     }
+    turn_id = os.environ.get("DRAMACLAW_TURN_ID", "").strip()
+    if turn_id:
+        headers["X-DramaClaw-Turn-ID"] = turn_id
+    profile = os.environ.get("DRAMACLAW_AGENT_PROFILE", "").strip()
+    if profile.startswith("freezone:"):
+        headers["X-DramaClaw-Agent-ID"] = profile.split(":", 1)[1]
     token = _current_agent_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -507,7 +529,15 @@ def _request(
         # A validation failure can carry an object in FastAPI's `detail`.
         # Never forward the raw response: it may contain server-only fields.
         text = exc.read(65537).decode("utf-8", errors="replace")
-        return _http_error_result(exc.code, text, str(exc.reason))
+        recovery_suffix = {"GET": "production-state", "POST": "advance-production"}.get(method.upper())
+        production_recovery = recovery_suffix is not None and bool(re.fullmatch(
+            r"/api/v1/projects/[^/]+/freezone/canvases/[^/]+/director/"
+            + recovery_suffix,
+            api_path,
+        ))
+        return _http_error_result(
+            exc.code, text, str(exc.reason), production_recovery=production_recovery
+        )
     except URLError as exc:
         return {"ok": False, "error": f"network_error: {exc.reason}"}
 
@@ -529,12 +559,282 @@ def _maybe_json(text: str) -> Any:
         return stripped
 
 
-def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, Any]:
-    if _SHARED_API_ERRORS is None:
-        return {"ok": False, "status": "failed", "status_code": status_code, "error": "HTTP request failed"}
-    return _SHARED_API_ERRORS._http_error_result(status_code, text, reason)
+def _safe_error_string(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = " ".join(value.split())[:limit]
+    if re.search(r"traceback|authorization|bearer\s|api[_-]?key|secret|password", cleaned, re.I):
+        return ""
+    return cleaned
 
 
+def _safe_recovery_token(value: Any, limit: int = 160) -> str:
+    # IDs and machine tokens must survive exactly; never truncate or rewrite an
+    # actionable reference. URLs, credentials and prose are not identifiers.
+    if (not isinstance(value, str) or not 0 < len(value) <= limit
+            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", value)
+            or _safe_error_string(value, limit) != value):
+        return ""
+    return value
+
+
+def _safe_recovery_ref(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    artifact_id = _safe_recovery_token(value.get("artifact_id"))
+    revision = value.get("revision")
+    if not artifact_id or type(revision) is not int or not 1 <= revision <= 2**53 - 1:
+        return None
+    result = {"artifact_id": artifact_id, "revision": revision}
+    if "project_id" in value:
+        project_id = _safe_recovery_token(value["project_id"])
+        if not project_id:
+            return None
+        result["project_id"] = project_id
+    return result
+
+
+def _safe_recovery_action(value: Any, *, user_action: bool = False) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    kind = _safe_recovery_token(value.get("kind"), 80)
+    if not kind or (not user_action and not {"owner", "action_id"} <= value.keys()):
+        return None
+    result = {"kind": kind}
+    if "owner" in value:
+        owner = value["owner"]
+        allowed_owners = ("user",) if user_action else ("system", "agent", "user")
+        if owner not in allowed_owners:
+            return None
+        result["owner"] = owner
+    for field in ("action_id", "node_id", "step_id", "operation_id", "task_id"):
+        if field in value:
+            token = _safe_recovery_token(value[field])
+            if not token:
+                return None
+            result[field] = token
+    for field in ("commission_ref", "plan_ref", "work_ref", "review_ref", "result_ref"):
+        if field in value:
+            ref = _safe_recovery_ref(value[field])
+            if ref is None:
+                return None
+            result[field] = ref
+    # Copy only declared fields and bound each action independently. Server
+    # instructions, approval flags, arbitrary nesting and signed URLs stay out.
+    return result if len(json.dumps(result).encode("utf-8")) <= 1024 else None
+
+
+def _production_http_error_fields(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in ("code", "retry_scope"):
+        token = _safe_recovery_token(source.get(field), 80)
+        if token:
+            result[field] = token
+    if type(source.get("retryable")) is bool:
+        result["retryable"] = source["retryable"]
+    for field in ("next_action", "required_user_action", "existing_result_ref"):
+        if field not in source:
+            continue
+        value = source[field]
+        if value is None:
+            result[field] = None
+            continue
+        safe = (_safe_recovery_ref(value) if field == "existing_result_ref"
+                else _safe_recovery_action(value, user_action=field == "required_user_action"))
+        if safe is not None:
+            result[field] = safe
+    return result
+
+
+def _workflow_http_recovery_fields(status_code: int, text: str) -> dict[str, Any]:
+    """Forward bounded compiler diagnostics, never arbitrary API detail."""
+    if not 400 <= status_code < 500 or len(text) > 65536:
+        return {}
+    try:
+        data = _maybe_json(text)
+    except (ValueError, RecursionError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    source = data.get("detail") if isinstance(data.get("detail"), dict) else data
+    result: dict[str, Any] = {}
+    if source.get('code') == 'direction_needs_discussion':
+        if source.get('verdict') in ('clarify', 'not_authorized'):
+            result['verdict'] = source['verdict']
+        reason = source.get('reason')
+        # Keep actionable admission diagnostics across HTTP -> MCP, while
+        # retaining the shared guard against secrets, URLs and unbounded output.
+        if (isinstance(reason, str) and len(reason) <= 2000 and '://' not in reason
+                and _safe_error_string(reason, len(reason))):
+            result['reason'] = _safe_error_string(reason, 2000)
+            result['error'] = result['reason']
+        if type(source.get('retryable')) is bool:
+            result['retryable'] = source['retryable']
+    for field, limit in (("field_path", 160), ("operation_status", 80), ("next_action", 80)):
+        value = source.get(field)
+        if isinstance(value, str) and len(value) <= limit and re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", value):
+            result[field] = value
+    if type(source.get("requires_new_operation")) is bool:
+        result["requires_new_operation"] = source["requires_new_operation"]
+    allowed = source.get("allowed_fields")
+    if isinstance(allowed, list) and len(allowed) <= 100 and all(
+        isinstance(value, str) and len(value) <= 160 and re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", value)
+        for value in allowed
+    ):
+        result["allowed_fields"] = allowed
+    instruction = source.get("agent_instruction")
+    if (isinstance(instruction, str) and len(instruction) <= 2000
+            and "://" not in instruction and _safe_error_string(instruction, len(instruction))):
+        result["agent_instruction"] = instruction
+    errors = source.get("errors")
+    if isinstance(errors, list):
+        safe_errors = []
+        for item in errors[:5]:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_error_string(item.get("path"), 160)
+            if not path and type(item.get("index")) is int and 0 <= item["index"] <= 9999:
+                path = f"edges[{item['index']}]"
+            if not path or not re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", path):
+                continue
+            safe_item = {"path": path}
+            for field in ("message", "hint"):
+                raw = item.get(field) or (item.get("reason") if field == "message" else None)
+                if isinstance(raw, str) and "://" not in raw and _safe_error_string(raw, len(raw)):
+                    safe_item[field] = _safe_error_string(raw, 240)
+            safe_errors.append(safe_item)
+        if safe_errors:
+            result["errors"] = safe_errors
+    for field, expected_type in (("compact_example", dict),):
+        value = source.get(field)
+        if not isinstance(value, expected_type):
+            continue
+        encoded = json.dumps(value, ensure_ascii=False)
+        if (len(encoded) <= 8192 and "://" not in encoded
+                and _safe_error_string(encoded, len(encoded))):
+            result[field] = value
+    return result
+
+
+def _http_error_result(
+    status_code: int, text: str, reason: str, *, production_recovery: bool = False
+) -> dict[str, Any]:
+    """Expose only bounded validation diagnostics from the project API."""
+    if not production_recovery and _SHARED_API_ERRORS is not None:
+        result = _SHARED_API_ERRORS._http_error_result(status_code, text, reason)
+        result.update(_workflow_http_recovery_fields(status_code, text))
+        return result
+    result: dict[str, Any] = {
+        "ok": False,
+        "status": "failed",
+        "status_code": status_code,
+        "error": _safe_error_string(reason, 300) or "HTTP request failed",
+    }
+    if production_recovery and "://" in result["error"]:
+        result["error"] = "HTTP request failed"
+    if len(text) > 65536:
+        return result
+    if production_recovery and 400 <= status_code < 600:
+        try:
+            data = _maybe_json(text)
+        except (ValueError, RecursionError):
+            return result
+        detail = data.get("detail") if isinstance(data, dict) else None
+        source = detail if isinstance(detail, dict) else data
+        result.update(_production_http_error_fields(source))
+        result.update(_workflow_http_recovery_fields(status_code, text))
+        if isinstance(source, dict):
+            for field in ("error", "message", "detail"):
+                raw = source.get(field)
+                value = _safe_error_string(raw, 300)
+                # Inspect the whole diagnostic before bounding it so a URL or
+                # credential after the visible prefix cannot escape filtering.
+                if (value and isinstance(raw, str) and "://" not in raw
+                        and _safe_error_string(raw, len(raw))):
+                    result["error"] = value
+                    break
+        elif isinstance(source, str) and not source.lstrip().startswith("<"):
+            if "://" not in source and _safe_error_string(source, len(source)):
+                result["error"] = _safe_error_string(source, 300) or result["error"]
+        return result
+    data = _maybe_json(text)
+    if 500 <= status_code < 600:
+        if isinstance(data, dict):
+            for field in ("error", "message", "detail"):
+                value = _safe_error_string(data.get(field), 300)
+                if value:
+                    result["error"] = value
+                    break
+        elif isinstance(data, str) and not data.lstrip().startswith("<"):
+            result["error"] = _safe_error_string(data, 300) or result["error"]
+        return result
+    if not 400 <= status_code < 500:
+        return result
+    if not isinstance(data, dict):
+        return result
+    detail = data.get("detail")
+    source = detail if isinstance(detail, dict) else data
+    result.update(_workflow_http_recovery_fields(status_code, text))
+    for field in ("status", "code", "next_action"):
+        value = _safe_error_string(source.get(field), 80)
+        if value and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            result[field] = value
+    for field in ("error", "message"):
+        value = _safe_error_string(source.get(field), 300)
+        if value:
+            result[field] = value
+    if isinstance(detail, str):
+        result["error"] = _safe_error_string(detail, 300) or result["error"]
+    if isinstance(source.get("retryable"), bool):
+        result["retryable"] = source["retryable"]
+    if result.get("code") == "generation_parameters_required":
+        # Bounded copy of the standard clarification request so the agent can
+        # answer it; anything malformed is dropped rather than forwarded.
+        missing = source.get("missing_parameters")
+        safe_missing: list[dict[str, Any]] = []
+        if isinstance(missing, list):
+            for item in missing[:50]:
+                if not isinstance(item, dict):
+                    continue
+                node_type = _safe_error_string(item.get("node_type"), 40)
+                node_id = _safe_error_string(item.get("node_id"), 160)
+                fields = item.get("fields")
+                if node_type not in {"imageGenNode", "videoNode"} or not isinstance(fields, list):
+                    continue
+                safe_fields = [
+                    value
+                    for value in (_safe_error_string(field, 40) for field in fields[:12])
+                    if value and re.fullmatch(r"[A-Za-z0-9_]+", value)
+                ]
+                if node_id and safe_fields:
+                    safe_missing.append(
+                        {"node_id": node_id, "node_type": node_type, "fields": safe_fields}
+                    )
+        if safe_missing:
+            result["missing_parameters"] = safe_missing
+    errors = source.get("errors")
+    if isinstance(errors, list):
+        safe_errors = []
+        for item in errors[:5]:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_error_string(item.get("path"), 160)
+            if not path and type(item.get("index")) is int and 0 <= item["index"] <= 9999:
+                path = f"edges[{item['index']}]"
+            message = _safe_error_string(item.get("message") or item.get("reason"), 240)
+            if not path or not re.fullmatch(r"[A-Za-z0-9_.\[\]-]+", path):
+                continue
+            safe_errors.append({"path": path, **({"message": message} if message else {})})
+        if safe_errors:
+            result["errors"] = safe_errors
+    while (
+        len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 4096
+        and result.get("errors")
+    ):
+        result["errors"].pop()
+    return result
 def _scope_meta(project: str, canvas: str | None = None) -> dict[str, Any]:
     return {
         "project_id": project,
@@ -896,6 +1196,8 @@ def _emit_clarification_event(
 
 
 def _clarification_timeout_seconds() -> int:
+    if os.environ.get("DRAMACLAW_CANVAS_READ_MODE", "current_browser") == "saved":
+        return 1
     try:
         return max(
             1,
@@ -939,6 +1241,25 @@ def _clarification_timeout_result(
 def _await_clarification_result(
     key: str, project: str | None, canvas: str | None, event: dict[str, Any]
 ) -> str:
+    if os.environ.get('DRAMACLAW_TURN_ID', '').startswith('reference-remix-') and any(isinstance(question, dict)
+           and question.get("id") in _GENERATION_ANSWER_DATA_FIELDS
+           for question in event.get("questions", [])):
+        return tool_result({
+            "ok": True,
+            "status": "waiting_user",
+            "tool_call_status": "completed",
+            "clarification_status": "pending_user_input",
+            "bridge_key": key,
+            "clarification_id": event.get("clarification_id"),
+            "project_id": project,
+            "canvas_id": canvas,
+            "type": event.get("type"),
+            "answers": {},
+            "agent_instruction": (
+                "End this turn. The saved parameter request owns the wait; "
+                "resume only after its authenticated answer arrives."
+            ),
+        })
     resolved = wait_clarification_result(
         key, timeout_seconds=_clarification_timeout_seconds()
     )
@@ -1518,6 +1839,8 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
                 "description": " ".join(part for part in description_parts if part),
                 "questions": questions,
                 "answers": answers,
+                **({"workflow_draft_id": draft_id,
+                    "workflow_expected_revision": draft_revision} if draft_id else {}),
                 "allow_recommended": bool(args.get("allow_recommended", False)),
                 **({"recommended_answers": recommended_answers} if recommended_answers else {}),
                 "allow_skip": bool(args.get("allow_skip", True)),
@@ -3095,8 +3418,39 @@ def _handle_node_detail(args: dict[str, Any], **_: Any) -> str:
     return _request_canvas_context_from_frontend(
         project=project,
         canvas=canvas,
-        requests=[{"type": "node_detail", "node_id": node_id}],
+        requests=[{"type": "node_detail", "node_id": node_id, **({"cursor": args["cursor"]} if args.get("cursor") else {})}],
     )
+
+
+def _handle_get_production_state(args: dict[str, Any], **_: Any) -> str:
+    """Read a compact saved plan state through the authorized project API."""
+    try:
+        project = _project_from_args(args)
+    except ValueError as exc:
+        return _structured_tool_result({"ok": False, "status": "scope_required", "error": str(exc)},
+                                       tool_name="freezone_get_production_state")
+    if mismatch := _bound_scope_mismatch(project, None):
+        return _structured_tool_result(mismatch, tool_name="freezone_get_production_state")
+    artifact_id = str(args.get("artifact_id") or "").strip()
+    revision = args.get("revision")
+    entity_id = args.get("entity_id")
+    include_words = args.get("include_words", False)
+    if (not artifact_id or not all(ch.isalnum() or ch in "_-" for ch in artifact_id)
+            or len(artifact_id) > 64 or revision is not None and (type(revision) is not int or revision < 1)
+            or entity_id is not None and (not isinstance(entity_id, str) or not 0 < len(entity_id) <= 128)
+            or type(include_words) is not bool or include_words and not entity_id):
+        return _structured_tool_result({"ok": False, "status": "invalid_plan_ref", "error": "artifact_id or revision is invalid"},
+                                       tool_name="freezone_get_production_state")
+    path = f"/api/v1/projects/{quote(project, safe='')}/freezone/remix/production-plans/{quote(artifact_id, safe='')}/state"
+    query = {key: value for key, value in {"revision": revision, "entity_id": entity_id,
+                                         "include_words": include_words if include_words else None}.items() if value is not None}
+    response = _request("GET", path, query=query or None)
+    data = response.get("data")
+    if not response.get("ok") or not isinstance(data, dict):
+        return _structured_tool_result({"ok": False, "status": "production_state_unavailable",
+                                        "error": response.get("error") or response.get("message") or "Plan state could not be read"},
+                                       tool_name="freezone_get_production_state")
+    return _structured_tool_result({"ok": True, "status": "ready", **data}, tool_name="freezone_get_production_state")
 
 
 def _handle_neighbor_graph(args: dict[str, Any], **_: Any) -> str:
@@ -3113,6 +3467,8 @@ def _handle_neighbor_graph(args: dict[str, Any], **_: Any) -> str:
             {"ok": False, "status": "node_id_required", "error": "node_id is required"}
         )
     request: dict[str, Any] = {"type": "neighbor_graph", "node_id": node_id}
+    if args.get("cursor"):
+        request["cursor"] = args["cursor"]
     if isinstance(args.get("depth"), (int, float)) and args["depth"] > 0:
         request["depth"] = args["depth"]
     return _request_canvas_context_from_frontend(
@@ -3345,7 +3701,7 @@ def _handle_summarize_canvas(args: dict[str, Any], **_: Any) -> str:
     return _request_canvas_context_from_frontend(
         project=project,
         canvas=canvas,
-        requests=[{"type": "canvas_summary"}],
+        requests=[{"type": "canvas_summary", **({"cursor": args["cursor"]} if args.get("cursor") else {})}],
     )
 
 
@@ -3373,6 +3729,7 @@ _COMMAND_TYPES = {
     "run_node_action",
     "run_workflow",
     "open_mainline_projection",
+    "production_plan_command",
 }
 
 _COMMAND_REQUIRED_FIELDS = {
@@ -3385,6 +3742,7 @@ _COMMAND_REQUIRED_FIELDS = {
     "select_nodes": ("node_ids",),
     "run_node_action": ("node_id", "action"),
     "open_mainline_projection": ("request",),
+    "production_plan_command": ("node_id", "command"),
 }
 
 _AGENT_FORBIDDEN_MAINLINE_ACTIONS = frozenset(
@@ -3421,13 +3779,15 @@ _WORKFLOW_HINTS = (
 
 
 def _emit_command_error(
-    project: str | None, canvas: str | None, status: str, error: str
+    project: str | None, canvas: str | None, status: str, error: str,
+    *, details: dict[str, Any] | None = None,
 ) -> str:
     return tool_result(
         {
             "ok": False,
             "status": status,
             "error": error,
+            **(details or {}),
             **_scope_meta(project or "", canvas),
         }
     )
@@ -3717,6 +4077,19 @@ def _validate_write_commands_shape(
                 "invalid_command_schema",
                 f"commands[{index}] {command_type} missing required field(s): {', '.join(missing_required)}",
             )
+        if command_type == "production_plan_command":
+            if set(command) != {"type", "node_id", "command"} or not isinstance(command.get("node_id"), str) or not command["node_id"].strip():
+                return _emit_command_error(project, canvas, "invalid_command_schema",
+                                           f"commands[{index}] production_plan_command requires node_id and command only")
+            try:
+                from novelvideo.freezone.remix.production_commands import validate_production_command
+                validate_production_command(command["command"])
+            except (ValueError, TypeError) as exc:
+                from novelvideo.freezone.remix.production_command_schema import production_command_error_details
+                details = production_command_error_details(command.get("command"))
+                return _emit_command_error(project, canvas, "invalid_command_schema",
+                                           f"commands[{index}] {exc}",
+                                           details={**details, "side_effects": "none"})
         if (
             command_type == "run_node_action"
             and str(command.get("action") or "").strip()
@@ -4958,6 +5331,7 @@ def _approval_required_for_commands(commands: list[Any]) -> tuple[bool, list[str
         "move_nodes",
         "select_nodes",
         "clear_canvas",
+        "production_plan_command",
     }
     costly_or_ui = {"run_node_action", "run_workflow", "open_mainline_projection"}
     if any(command_type in destructive for command_type in command_types):
@@ -4974,7 +5348,7 @@ def _approval_required_for_commands(commands: list[Any]) -> tuple[bool, list[str
 
 
 def _requires_frontend_canvas_executor(commands: list[Any]) -> bool:
-    frontend_types = {"html_artifact", "run_node_action", "run_workflow", "open_mainline_projection"}
+    frontend_types = {"html_artifact", "run_node_action", "run_workflow", "open_mainline_projection", "production_plan_command"}
     return any(
         isinstance(command, dict)
         and str(command.get("type") or "").strip() in frontend_types
@@ -5133,6 +5507,12 @@ def _dispatch_mcp_approved_frontend_commands(
         and str(command["data"].get("workflowInstanceId") or "").strip()
         for command in commands
     )
+    is_workflow_batch = is_workflow_batch or any(
+        isinstance(command, dict) and command.get("action") == "run_video_analyze_story"
+        and isinstance(command.get("parameters"), dict)
+        and isinstance(command["parameters"].get("reference_analysis"), dict)
+        for command in commands
+    )
     if is_workflow_batch and canvas_command_idempotency_key is not None:
         key = canvas_command_idempotency_key(
             project_id=project,
@@ -5241,9 +5621,6 @@ def _dispatch_frontend_canvas_commands(
         "canvas_id": canvas,
         "commands": commands,
     }
-    key = canvas_command_bridge_key(
-        project_id=project, canvas_id=canvas, commands=commands
-    )
     is_workflow_batch = any(
         isinstance(command, dict)
         and command.get("type") == "create_node"
@@ -5251,13 +5628,25 @@ def _dispatch_frontend_canvas_commands(
         and str(command["data"].get("workflowInstanceId") or "").strip()
         for command in commands
     )
-    put_pending_canvas_command(
+    is_reference_analysis = any(
+        isinstance(command, dict) and command.get("action") == "run_video_analyze_story"
+        and isinstance(command.get("parameters"), dict)
+        and isinstance(command["parameters"].get("reference_analysis"), dict)
+        for command in commands
+    )
+    key = (canvas_command_idempotency_key if is_reference_analysis else canvas_command_bridge_key)(
+        project_id=project, canvas_id=canvas, commands=commands
+    )
+    immediate_result = put_pending_canvas_command(
         key=key,
         project_id=project,
         canvas_id=canvas,
         commands=commands,
         envelope=envelope,
     )
+    if immediate_result is not None and is_reference_analysis:
+        return tool_result(_summarize_canvas_command_result(immediate_result, bridge_key=key, commands=commands)
+                           if slim_result else immediate_result)
     try:
         timeout_seconds = max(
             1,
@@ -5287,7 +5676,7 @@ def _dispatch_frontend_canvas_commands(
     resolved = wait_canvas_command_result(
         key,
         timeout_seconds=timeout_seconds,
-        timeout_result=None if is_workflow_batch else timeout_result,
+        timeout_result=None if is_workflow_batch or is_reference_analysis else timeout_result,
     )
     if resolved is not None:
         return tool_result(
@@ -5665,6 +6054,21 @@ def _direct_apply_canvas_commands(
                     raise ValueError(
                         f"edge source/target not found: {source} -> {target}"
                     )
+                edge_data = {"link_type": link_type}
+                analysis_snapshot = command.get("expected_source_analysis_snapshot")
+                if isinstance(analysis_snapshot, dict):
+                    source_node = nodes_by_id[source]
+                    source_data = source_node.get("data") or {}
+                    if (
+                        source_node.get("type") != "videoStoryNode"
+                        or source_data.get("isAnalyzing")
+                        or source_data.get("analysisError")
+                        or any(source_data.get(key) != analysis_snapshot.get(key)
+                               for key in ("rawResult", "referenceBlueprintRef", "sourceVideoUrl"))
+                        or bool(source_data.get("blueprintDirty")) != bool(analysis_snapshot.get("blueprintDirty"))
+                    ):
+                        raise ValueError(f"workflow source analysis changed: {source}")
+                    edge_data["workflowExternalInputAnalysisSnapshot"] = _clone_json(analysis_snapshot)
                 edge = {
                     "id": _edge_id(source, target, link_type),
                     "source": source,
@@ -5672,7 +6076,7 @@ def _direct_apply_canvas_commands(
                     "sourceHandle": "source",
                     "targetHandle": "target",
                     "type": "disconnectableEdge",
-                    "data": {"link_type": link_type},
+                    "data": edge_data,
                 }
                 edges = [item for item in edges if item.get("id") != edge["id"]]
                 edges.append(edge)
@@ -5994,6 +6398,35 @@ def _emit_canvas_commands(
     )
 
 
+def _production_bind_has_missing_resource(commands: list[Any], errors: list[Any]) -> bool:
+    for command in commands:
+        if not isinstance(command, dict) or command.get("type") != "production_plan_command":
+            continue
+        edit = command.get("command")
+        if not isinstance(edit, dict):
+            continue
+        edits = [edit]
+        if edit.get("kind") == "batch":
+            payload = edit.get("payload")
+            children = payload.get("commands") if isinstance(payload, dict) else None
+            if not isinstance(children, list) or not 1 <= len(children) <= 100:
+                continue
+            edits = children
+        for child in edits:
+            if not isinstance(child, dict) or child.get("kind") != "bind_media":
+                continue
+            payload = child.get("payload")
+            resource_id = payload.get("resource_id") if isinstance(payload, dict) else None
+            if (not isinstance(resource_id, str) or not 1 <= len(resource_id) <= 128
+                    or "\r" in resource_id or "\n" in resource_id):
+                continue
+            pattern = r"\bresource " + re.escape(resource_id) + r" not found\b"
+            if any(isinstance(error, str) and re.search(pattern, error[:2048])
+                   for error in errors[:3]):
+                return True
+    return False
+
+
 def _summarize_canvas_command_result(
     resolved: dict[str, Any],
     *,
@@ -6028,6 +6461,10 @@ def _summarize_canvas_command_result(
     agent_instruction = resolved.get("agent_instruction") or (
         "Canvas command result has been summarized. Do not ask for or print the full commands."
     )
+    if (resolved.get("ok") is False and resolved.get("canvas_apply_status") == "failed"
+            and resolved.get("cancelled") is not True
+            and _production_bind_has_missing_resource(commands, errors)):
+        agent_instruction += " " + _PRODUCTION_MEDIA_RESOURCE_GUIDANCE
     if resolved.get("ok") and resolved.get("canvas_apply_status") == "accepted":
         if _commands_include_type(commands, "run_workflow"):
             agent_instruction = (
@@ -6078,6 +6515,23 @@ def _summarize_canvas_command_result(
             else "Before the next revision-based write, re-read the current persisted canvas/story "
                  "and recheck the intended changes. Do not reuse earlier revisions or replay generation."
         )
+    production_ref = None
+    production_command_id = None
+    production_command_steps = None
+    if (len(commands) == 1 and isinstance(commands[0], dict)
+            and commands[0].get('type') == 'production_plan_command'
+            and resolved.get('ok') is True
+            and resolved.get('canvas_apply_status') == 'applied'):
+        steps = resolved.get('command_results')
+        if isinstance(steps, list) and len(steps) == 1 and isinstance(steps[0], dict):
+            step = steps[0]
+            output = step.get('output')
+            if (step.get('type') == 'production_plan_command'
+                    and step.get('status') == 'success'
+                    and isinstance(output, dict)):
+                production_ref = output.get('plan_ref')
+                production_command_id = output.get('command_id')
+                production_command_steps = output.get('executed_commands')
     return {
         "ok": bool(resolved.get("ok")),
         "tool_call_status": resolved.get("tool_call_status") or "completed",
@@ -6104,6 +6558,18 @@ def _summarize_canvas_command_result(
         "errors": [str(item)[:240] for item in errors[:3]],
         "message": resolved.get("message") or "Canvas command finished.",
         "agent_instruction": agent_instruction,
+        **({'production_plan_ref': production_ref} if production_ref is not None else {}),
+        **({'production_command_id': production_command_id}
+           if production_command_id is not None else {}),
+        **({'production_command_steps': production_command_steps}
+           if production_command_steps is not None else {}),
+        **({"command_results": resolved.get("command_results") or [],
+            **_reference_analysis_auth_diagnostic(resolved)} if any(
+            isinstance(command, dict) and command.get("action") == "run_video_analyze_story"
+            and isinstance(command.get("parameters"), dict)
+            and isinstance(command["parameters"].get("reference_analysis"), dict)
+            for command in commands
+        ) else {}),
     }
 
 
@@ -6116,6 +6582,28 @@ def _handle_emit_canvas_command(args: dict[str, Any], **_: Any) -> str:
     canvas = str(args.get("canvas_id") or _default_canvas_id()).strip() or None
     commands = args.get("commands")
     return _emit_canvas_commands(project, canvas, commands, slim_result=True)
+
+
+def _handle_prepare_production_edit(args: dict[str, Any], **_: Any) -> str:
+    """Submit exactly one bounded plan edit to the existing canvas approval bridge."""
+    project = str(args.get("project_id") or _default_project_id()).strip() or None
+    canvas = str(args.get("canvas_id") or _default_canvas_id()).strip() or None
+    node_id = args.get("node_id")
+    command = args.get("command")
+    result = _emit_canvas_commands(project, canvas, [
+        {"type": "production_plan_command", "node_id": node_id, "command": command}
+    ], slim_result=True, require_canvas_receipt=True)
+    try:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except (TypeError, ValueError):
+        payload = None
+    if (isinstance(payload, dict) and payload.get('ok') is False
+            and payload.get('side_effects') == 'none'):
+        # The host records this opaque link against the rejected call in the
+        # current turn. It conveys no write authority or success by itself.
+        payload['retry_token'] = uuid.uuid4().hex
+        return tool_result(payload) if isinstance(result, str) else payload
+    return result
 
 
 def _skill_import_tool_result(response: dict[str, Any], *, submitted: bool) -> str:
@@ -6360,7 +6848,7 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
         return tool_result(error)
     _forget_generation_answers(project, canvas)
     result = public_workflow_draft(payload, compact_preview=True)
-    result["next_action"] = "review_and_confirm"
+    result["next_action"] = "submit_canvas_approval"
     planner = validated.get("planner") if isinstance(validated.get("planner"), dict) else {}
     if planner.get("selected_by") == "template_isomorphic":
         preview_instruction = (
@@ -6376,8 +6864,10 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
         preview_instruction
         + "Do not call freezone_get_workflow: this result is the durable draft receipt. "
         "Do not mention credits, billing, pricing, or editions. "
-        "Wait for user confirmation, then call freezone_confirm_workflow_draft with the exact "
-        "draft_id and revision. To change the topology, prepare a new complete Plan draft; never "
+        "If the user has authorized this workflow, call freezone_confirm_workflow_draft now with "
+        "the exact draft_id and revision; that tool opens the existing canvas approval in manual "
+        "mode. Do not ask for a separate workflow confirmation. To change the topology, prepare "
+        "a new complete Plan draft; never "
         "fall back to direct canvas commands."
     )
     return tool_result(result)
@@ -6423,11 +6913,12 @@ def _delivered_workflow_draft_for_operation(
     if payload is None:
         return None
     result = public_workflow_draft(payload, compact_preview=True)
-    result["next_action"] = "review_and_confirm"
+    result["next_action"] = "submit_canvas_approval"
     result["agent_instruction"] = (
         "Reuse this durable draft receipt. Do not prepare a replacement draft or call "
-        "freezone_get_workflow. Present the compact preview, then confirm with the exact "
-        "draft_id and revision only when authorized."
+        "freezone_get_workflow. If the user has authorized this workflow, call "
+        "freezone_confirm_workflow_draft with the exact draft_id and revision so the existing "
+        "canvas approval can handle manual mode."
     )
     return result
 
@@ -6876,9 +7367,14 @@ def _handle_workflow_operation(args: dict[str, Any], *, action: str) -> str:
                 }
             )
         if "generation_answers" in args:
-            generation_choices, answers_error = _generation_choices_from_answers(
-                args["generation_answers"], plan=args.get("plan")
-            )
+            if has_intent:
+                generation_choices, answers_error = _parse_generation_answers(
+                    args["generation_answers"]
+                )
+            else:
+                generation_choices, answers_error = _generation_choices_from_answers(
+                    args["generation_answers"], plan=args.get("plan")
+                )
             if answers_error is not None:
                 return tool_result(answers_error)
         if has_plan:
@@ -7154,6 +7650,105 @@ def _handle_get_workflow(args: dict[str, Any], **_: Any) -> str:
     return _handle_workflow_operation(args, action="get")
 
 
+def _handle_prepare_production_nodes(args: dict[str, Any], **_: Any) -> str:
+    """Prepare a native draft and submit it through the existing approval handler."""
+    project_id, canvas_id, scope_error = _workflow_draft_scope(args)
+    if scope_error:
+        return tool_result(scope_error)
+    allowed = {"project_id", "canvas_id", "commission_ref", "goal", "run_after_create", "plan_count",
+               "requirements", "preserve_replace"}
+    invalid = next((key for key in args if key not in allowed), None)
+    ref = args.get("commission_ref")
+    if invalid is None and (not isinstance(ref, dict)
+            or not isinstance(ref.get("artifact_id"), str) or not ref["artifact_id"].strip()
+            or type(ref.get("revision")) is not int or ref["revision"] < 1
+            or ref.get("project_id", project_id) != project_id):
+        invalid = "commission_ref"
+    goal = args.get("goal")
+    if invalid is None and (not isinstance(goal, str) or not goal.strip() or len(goal) > 20000):
+        invalid = "goal"
+    if invalid is None and type(args.get("run_after_create")) is not bool:
+        invalid = "run_after_create"
+    count = args.get("plan_count", 1)
+    if invalid is None and (type(count) is not int or not 1 <= count <= 100):
+        invalid = "plan_count"
+    if invalid is not None:
+        return tool_result({"ok": False, "status": "invalid_production_nodes_request",
+                            "code": "invalid_production_nodes_request", "field_path": invalid,
+                            "error": f"Invalid or missing {invalid}"})
+    if args.get("requirements") is not None and not isinstance(args["requirements"], dict):
+        return tool_result({"ok": False, "status": "invalid_production_nodes_request",
+                            "code": "invalid_production_nodes_request", "field_path": "requirements",
+                            "error": "requirements must be an object"})
+    if args.get("preserve_replace") is not None and (
+            not isinstance(args["preserve_replace"], list)
+            or len(args["preserve_replace"]) > 30
+            or any(not isinstance(item, dict) for item in args["preserve_replace"])):
+        return tool_result({"ok": False, "status": "invalid_production_nodes_request",
+                            "code": "invalid_production_nodes_request", "field_path": "preserve_replace",
+                            "error": "preserve_replace must be a bounded list of objects"})
+    body = {key: args[key] for key in (
+        "commission_ref", "goal", "run_after_create", "plan_count",
+        "requirements", "preserve_replace",
+    ) if key in args}
+    try:
+        response = _request(
+            "POST", f"/projects/{quote(project_id, safe='')}/freezone/canvases/{quote(canvas_id, safe='')}/director/production-nodes/prepare",
+            body=body,
+        )
+    except TimeoutError:
+        return tool_result({
+            "ok": False, "status": "production_nodes_outcome_unknown",
+            "error": "Request timed out; inspect the current commission's native plan stage before retrying",
+            "retryable": False,
+            "next_action": {"kind": "inspect_before_retry", "tool": "freezone_get_production_progress",
+                            "project_id": project_id, "canvas_id": canvas_id, "commission_ref": ref},
+            "agent_instruction": "Read the persisted native plan stage for this commission before any retry. Reuse its draft, approval, nodes or task receipt; do not submit another prepare or confirm while the outcome is unknown.",
+        })
+    payload, error = _workflow_draft_response(response)
+    if payload is None:
+        return tool_result(error)
+    if payload.get("status") == "ready":
+        if not payload.get("draft_id") or type(payload.get("revision")) is not int:
+            return tool_result({"ok": False, "status": "workflow_draft_unavailable",
+                                "error": "Preparation returned no valid draft identity"})
+        return _handle_confirm_workflow_draft({"project_id": project_id, "canvas_id": canvas_id,
+                                              "draft_id": payload["draft_id"], "revision": payload["revision"]})
+    native_plan_stage = payload.get("native_plan_stage")
+    if isinstance(native_plan_stage, dict) and native_plan_stage.get("state") == "failed":
+        failed_slot = next((slot for slot in native_plan_stage.get("slots", [])
+                            if isinstance(slot, dict) and slot.get("state") == "failed"), None)
+        plan_node_id = failed_slot.get("plan_node_id") if isinstance(failed_slot, dict) else None
+        retry_hint = (
+            f" 对绑定方案节点 {plan_node_id} 的重试入口是 freezone_run_node_action "
+            "(action=generate_production_plan_draft)，仍须经过原有画布动作确认。"
+            if isinstance(plan_node_id, str) and plan_node_id else ""
+        )
+        return tool_result({
+            "ok": False,
+            "status": "production_plan_failed",
+            "code": "production_plan_failed",
+            "error": "现有作品方案起草任务已失败；本次 prepare 只复用了原草稿，没有提交新的起草任务。",
+            "project_id": payload.get("project_id", project_id),
+            "canvas_id": payload.get("canvas_id", canvas_id),
+            "draft_id": payload.get("draft_id"),
+            "revision": payload.get("revision"),
+            "native_plan_stage": native_plan_stage,
+            "next_action": native_plan_stage.get("next_action") or {"owner": "agent", "kind": "inspect_failure"},
+            "agent_instruction": (
+                "不要把 status=confirmed 或 draft_id/task_id 当成新的生成提交；本次没有重新起草，"
+                "也不要向用户声称任务正在后台运行。先保留原草稿并说明失败状态。"
+                "只有当前用户明确授权重试时才调用一次绑定节点的动作入口，不要再次调用 prepare，"
+                "不要手写或清空 parameters；重试入口会复用节点保存的原始起草参数。读取不到原始参数时停止，"
+                "不要自动重试。" + retry_hint
+            ),
+        })
+    receipt_fields = _output_schema("freezone_prepare_production_nodes")["properties"]
+    receipt = {key: value for key, value in payload.items() if key in receipt_fields
+               and key not in {"compiled", "intent", "plan"}}
+    return _structured_tool_result({**receipt, "ok": True}, tool_name="freezone_prepare_production_nodes")
+
+
 def _handle_prepare_workflow_draft(args: dict[str, Any], **_: Any) -> str:
     if not _workflow_draft_dependencies_available():
         return _workflow_draft_unavailable()
@@ -7193,10 +7788,13 @@ def _handle_prepare_workflow_draft(args: dict[str, Any], **_: Any) -> str:
         )
     generation_answers = _effective_generation_answers(
         args.get("generation_answers"),
-        _remembered_generation_answers(project_id, canvas_id),
+        _remembered_generation_answers(
+            project_id, canvas_id,
+            commission_id=str(intent.get("reference_commission_id") or "") or None,
+        ),
     )
     if generation_answers is not None:
-        choices, answers_error = _generation_choices_from_answers(
+        choices, answers_error = _parse_generation_answers(
             generation_answers
         )
         if answers_error is not None:
@@ -7210,6 +7808,8 @@ def _handle_prepare_workflow_draft(args: dict[str, Any], **_: Any) -> str:
     compiled = compile_workflow_intent(intent)
     if not compiled.get("ok"):
         return tool_result(compiled)
+    if generation_answers is not None and isinstance(compiled.get("plan"), dict):
+        _apply_generation_choices_to_plan(compiled["plan"], choices, missing_only=True)
     preflight = _workflow_runtime_preflight(compiled, project_id=project_id)
     compiled["preflight"] = preflight
     if preflight["blockers"]:
@@ -7246,15 +7846,16 @@ def _handle_prepare_workflow_draft(args: dict[str, Any], **_: Any) -> str:
         return tool_result(error)
     _forget_generation_answers(project_id, canvas_id)
     result = public_workflow_draft(payload, compact_preview=True)
-    result["next_action"] = "review_and_confirm"
+    result["next_action"] = "submit_canvas_approval"
     result["agent_instruction"] = (
         "Present the compact preview in product language. Do not call "
         "freezone_get_workflow: this result is the durable draft receipt. Before asking for "
         "confirmation, "
         "do not mention credits, billing, pricing, or editions. "
-        "Wait for user confirmation. "
         "For adjustments, patch this draft instead of rebuilding the intent. "
-        "After confirmation, call freezone_confirm_workflow_draft with draft_id and revision."
+        "If the user has authorized this workflow, call freezone_confirm_workflow_draft "
+        "with draft_id and revision now; in manual mode the existing canvas command card "
+        "is the approval, so do not ask for a separate workflow confirmation."
     )
     return tool_result(result)
 
@@ -7356,12 +7957,14 @@ def _handle_patch_workflow_draft(args: dict[str, Any], **_: Any) -> str:
         return tool_result(error)
     result = public_workflow_draft(payload, compact_preview=True)
     result["status"] = "workflow_draft_updated"
-    result["next_action"] = "review_and_confirm"
+    result["next_action"] = "submit_canvas_approval"
     result["agent_instruction"] = (
         "Present only the resulting product-level changes and compact preview. Do not call "
         "freezone_get_workflow: this result is the durable updated receipt. "
         "Do not mention credits, billing, pricing, or editions. "
-        "Keep using this draft_id and revision for further adjustments or confirmation."
+        "Keep using this draft_id and revision for further adjustments. If the current "
+        "workflow is authorized, call freezone_confirm_workflow_draft with this exact revision "
+        "to open the existing canvas approval in manual mode."
     )
     return tool_result(result)
 
@@ -7582,7 +8185,7 @@ def _plan_has_explicit_video_durations(plan: Any) -> bool:
 
 
 def _generation_choices_from_answers(
-    answers: Any, *, plan: Any = None,
+    answers: Any, *, plan: Any = None, _require_complete: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     receipt_choices: Any = None
     if isinstance(answers, dict) and "answers" in answers:
@@ -7627,6 +8230,8 @@ def _generation_choices_from_answers(
                 expected = choices.get(question_id)
                 if type(value) is not type(expected) or value != expected:
                     raise ValueError(f"conflicting generation choice: {question_id}")
+        if not _require_complete:
+            return choices, None
         for media, mandatory in {
             "image": ("model", "aspect_ratio", "resolution", "variants_per_node"),
             "video": (
@@ -7667,9 +8272,16 @@ def _generation_choices_from_answers(
     return choices, None
 
 
+def _parse_generation_answers(answers: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Validate submitted values without requesting choices for future nodes."""
+    return _generation_choices_from_answers(answers, _require_complete=False)
+
+
 def _apply_generation_choices_to_plan(
     plan: dict[str, Any], choices: dict[str, Any], *, missing_only: bool = True
 ) -> None:
+    from novelvideo.freezone.workflow_preflight import is_production_material_node
+
     shared_inputs = {
         question_id: value
         for question_id, value in choices.items()
@@ -7746,6 +8358,8 @@ def _apply_generation_choices_to_plan(
             continue
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
         for field, value in node_choices:
+            if field == "durationSec" and is_production_material_node(node):
+                continue
             current = data.get(field)
             symbolic = (
                 isinstance(current, str)
@@ -7830,6 +8444,7 @@ def _apply_workflow_generation_answers(
             "workflow_instance_id": draft_id,
             "external_node_ids": {key: value["node_id"] for key, value in verified.items()},
             "external_media_urls": {key: value["media_url"] for key, value in verified.items()},
+            "external_analysis_snapshots": {key: value["analysis_snapshot"] for key, value in verified.items() if value.get("analysis_snapshot")},
         })
         if not graph.get("ok"):
             return graph
@@ -7855,12 +8470,13 @@ def _apply_workflow_generation_answers(
         "plan_digest": updated["plan_digest"],
         "run_after_create": updated["run_after_create"],
         "draft_updated": True,
-        "next_action": "review_and_confirm",
+        "next_action": "submit_canvas_approval",
         "message": "Generation choices were saved to the same workflow draft.",
         "agent_instruction": (
             "Present the updated compact preview and revision to the user. Do not call "
             "freezone_get_workflow: this result is the durable updated receipt. "
-            "Wait for confirmation before calling freezone_confirm_workflow_draft."
+            "If the workflow is authorized, call freezone_confirm_workflow_draft now; "
+            "manual mode uses the existing canvas approval card."
         ),
     }
 
@@ -7995,6 +8611,7 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
             "workflow_instance_id": draft_id,
             "external_node_ids": {alias: value["node_id"] for alias, value in verified_inputs.items()},
             "external_media_urls": {alias: value["media_url"] for alias, value in verified_inputs.items()},
+            "external_analysis_snapshots": {alias: value["analysis_snapshot"] for alias, value in verified_inputs.items() if value.get("analysis_snapshot")},
         })
         if not checked_graph.get("ok"):
             return tool_result(checked_graph)
@@ -8097,6 +8714,11 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
                 alias: value["media_url"]
                 for alias, value in (compiled.get("external_inputs_verified") or {}).items()
             },
+            "external_analysis_snapshots": {
+                alias: value["analysis_snapshot"]
+                for alias, value in (compiled.get("external_inputs_verified") or {}).items()
+                if value.get("analysis_snapshot")
+            },
         }
     )
     if not built.get("ok"):
@@ -8150,7 +8772,9 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
             project_id,
             canvas_id,
             draft_id,
-            outcome="ready",
+            # Dispatch may have reached the browser before the transport
+            # failed. Keep the admitted attempt for its late canvas receipt.
+            outcome="submitted",
             task_id=confirmation_task_id,
             revision=revision,
         )
@@ -8183,11 +8807,13 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
             result, result_payload, draft_id=draft_id, run_after_create=run_after_create
         )
     else:
+        # Only the authenticated canvas receipt handler may prove a cancellation
+        # had zero saved side effects and release the draft for another attempt.
         _finish_workflow_draft(
             project_id,
             canvas_id,
             draft_id,
-            outcome="ready",
+            outcome="submitted",
             task_id=confirmation_task_id,
             revision=revision,
         )
@@ -8208,6 +8834,38 @@ def _single_write_command(args: dict[str, Any], command: dict[str, Any]) -> str:
     project = str(args.get("project_id") or _default_project_id()).strip() or None
     canvas = str(args.get("canvas_id") or _default_canvas_id()).strip() or None
     return _emit_canvas_commands(project, canvas, [command], slim_result=True)
+
+
+def _saved_native_plan_action_parameters(
+    *, project: str, canvas: str, node_id: str,
+) -> dict[str, Any] | None:
+    """Read the persisted native draft payload for an explicit plan retry."""
+    response = _request(
+        "GET",
+        f"/projects/{quote(project, safe='')}/freezone/canvases/{quote(canvas, safe='')}",
+    )
+    if response.get("ok") is not True:
+        return None
+    saved = response.get("data")
+    if not isinstance(saved, dict):
+        return None
+    node = next((item for item in saved.get("nodes", [])
+                 if isinstance(item, dict) and item.get("id") == node_id), None)
+    data = node.get("data") if isinstance(node, dict) else None
+    if not isinstance(data, dict):
+        return None
+    submission = data.get("productionWorkflowSubmission")
+    if isinstance(submission, dict):
+        payload = submission.get("payload")
+        if isinstance(payload, dict) and payload.get("topic"):
+            return _clone_json(payload)
+        request_payload = submission.get("requestPayload")
+        if isinstance(request_payload, dict) and request_payload.get("topic"):
+            return _clone_json(request_payload)
+    processing_payload = data.get("processingPayload")
+    if isinstance(processing_payload, dict) and processing_payload.get("topic"):
+        return _clone_json(processing_payload)
+    return None
 
 
 def _validate_dynamic_recipe_action_binding(
@@ -8554,6 +9212,164 @@ def _handle_select_nodes(args: dict[str, Any], **_: Any) -> str:
     return _single_write_command(args, command)
 
 
+def _reference_analysis_auth_diagnostic(response: Any) -> dict[str, Any]:
+    """Retain only failed transport auth fields, never nested business content."""
+    if (not isinstance(response, dict) or response.get("ok") is not False
+            or response.get("cancelled") is True):
+        return {}
+    status_code = response.get("status_code")
+    code = response.get("code")
+    auth_code = isinstance(code, str) and code in {
+        "invalid_agent_session", "agent_session_invalid", "invalid_session", "auth_invalid",
+    }
+    exact_error = any(response.get(key) == "Invalid agent session" for key in ("error", "detail", "message"))
+    auth_status = type(status_code) is int and status_code == 401
+    if not (auth_status or auth_code or exact_error):
+        return {}
+    diagnostic = {}
+    if auth_status:
+        diagnostic["status_code"] = status_code
+    if auth_code:
+        diagnostic["code"] = code
+    diagnostic["error"] = ("Invalid agent session" if exact_error else next(
+        (safe for key in ("error", "detail", "message")
+         if (safe := _safe_error_string(response.get(key), 300))),
+        "Agent session authentication failed",
+    ))
+    return diagnostic
+
+
+def _reference_analysis_current_state(project: str, canvas: str, agent_id: str) -> dict[str, Any]:
+    path = (f"/api/v1/projects/{quote(project, safe='')}/freezone/canvases/"
+            f"{quote(canvas, safe='')}/director/production-state")
+    return _request("GET", path, query={"agent_id": agent_id})
+
+
+def _handle_start_reference_analysis(args: dict[str, Any], **_: Any) -> str:
+    project = str(args.get("project_id") or _default_project_id()).strip()
+    canvas = str(args.get("canvas_id") or _default_canvas_id()).strip()
+    source = str(args.get("source_node_id") or "").strip()
+    goal = str(args.get("user_goal") or "").strip()
+    idempotency_key = str(args.get("idempotency_key") or "").strip()
+    if not project or not canvas or not source or not goal or not idempotency_key:
+        return _structured_tool_result({"ok": False, "status": "invalid_reference_analysis_request", "error": "Current project/canvas, source_node_id, user_goal and idempotency_key are required."}, tool_name="freezone_start_reference_analysis")
+    from novelvideo.freezone.remix.reference_analysis_identity import analysis_admission_key
+
+    idempotency_key = analysis_admission_key(
+        project_id=project, canvas_id=canvas, source_node_id=source,
+        user_goal=goal, inputs=args.get("inputs") or {}, operation_id=idempotency_key,
+    )
+    mismatch = _bound_scope_mismatch(project, canvas)
+    if mismatch:
+        return _structured_tool_result(mismatch, tool_name="freezone_start_reference_analysis")
+    profile = os.environ.get("DRAMACLAW_AGENT_PROFILE", "").strip()
+    agent_id = (profile.removeprefix("freezone:").strip() if profile.startswith("freezone:")
+                else os.environ.get("DRAMACLAW_AGENT_ID", "main").strip()) or "main"
+    # A follow-up may omit inputs.remix_direction. The saved source/commission,
+    # rather than an Agent-authored hint, determines whether analysis is reusable.
+    current = _reference_analysis_current_state(project, canvas, agent_id)
+    if current.get("ok") is not True:
+        return _structured_tool_result({"ok": False, "submitted": False,
+            "status": "reference_analysis_preflight_failed", "project_id": project, "canvas_id": canvas,
+            "error": current.get("error") or current.get("detail") or "无法读取当前原片分析状态"},
+            tool_name="freezone_start_reference_analysis")
+    branches = (current.get("data") or {}).get("branches") or []
+    matching = [branch for branch in branches if branch.get("source_node_id") == source
+                and branch.get("analysis_node_id") and branch.get("run_id")
+                and branch.get("phase")
+                and isinstance(branch.get("commission_ref"), dict)]
+    if len(matching) > 1:
+        return _structured_tool_result({"ok": False, "submitted": False,
+            "status": "ambiguous_existing_reference", "project_id": project, "canvas_id": canvas,
+            "source_node_id": source,
+            "error": "同一原片有多个现有制作分支，请先选择要修改的方案",
+            "agent_instruction": "Read freezone_get_production_progress and identify the requested commission before editing. Do not rerun source analysis."},
+            tool_name="freezone_start_reference_analysis")
+    if len(matching) == 1:
+        branch = matching[0]
+        return _structured_tool_result({"ok": True, "submitted": False,
+            "status": "reference_analysis_reused", "project_id": project, "canvas_id": canvas,
+            "source_node_id": source, "run_id": branch["run_id"],
+            "analysis_node_id": branch["analysis_node_id"],
+            "commission_ref": branch["commission_ref"],
+            "agent_instruction": "The same source already has a saved analysis and direction stage. Do not start analysis or create another commission. Read this commission with freezone_get_production_progress, prepare the user's new direction decision, and continue in this same turn."},
+            tool_name="freezone_start_reference_analysis")
+    body = {"project_id": project, "canvas_id": canvas, "source_node_id": source, "user_goal": goal, "inputs": args.get("inputs") or {},
+            "idempotency_key": idempotency_key,
+            "agent_id": agent_id}
+    response = _emit_canvas_commands(project, canvas, [{"type": "run_node_action", "node_id": source,
+        "action": "run_video_analyze_story", "parameters": {"reference_analysis": body}}],
+        slim_result=True, require_canvas_receipt=True)
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except (ValueError, TypeError):
+            response = None
+    if not isinstance(response, dict):
+        response = {"ok": False, "error": "Reference analysis browser receipt is unavailable."}
+    if response.get("ok") is not True or response.get("cancelled") is True:
+        return _structured_tool_result({"ok": False, "submitted": False, "project_id": project, "canvas_id": canvas,
+            "status": "reference_analysis_cancelled" if response.get("cancelled") is True else "reference_analysis_not_submitted",
+            "error": response.get("error") or response.get("errors") or response.get("message") or "原片分析没有提交",
+            "agent_instruction": "Do not claim analysis was submitted. " + str(response.get("agent_instruction") or ""),
+            **_reference_analysis_auth_diagnostic(response)},
+            tool_name="freezone_start_reference_analysis")
+    run = None
+    for step in response.get("command_results") or []:
+        if (isinstance(step, dict) and step.get("status") == "success"
+                and step.get("type") == "run_node_action" and step.get("nodeId") == source
+                and step.get("action") == "run_video_analyze_story"):
+            output = step.get("output")
+            candidate = output.get("reference_analysis_run") if isinstance(output, dict) else None
+            if (not isinstance(candidate, dict) or not isinstance(candidate.get("run_id"), str)
+                    or not candidate["run_id"].strip()):
+                continue
+            # A durable bridge cache is a historical delivery receipt, not
+            # proof that this saved source still belongs to the original run.
+            verified = _request("GET", f"/projects/{quote(project, safe='')}/freezone/canvases/{quote(canvas, safe='')}/reference-analysis-runs/{quote(candidate['run_id'], safe='')}/receipt?" +
+                urlencode({"source_node_id": source, "agent_id": agent_id, "idempotency_key": idempotency_key}))
+            auth_diagnostic = _reference_analysis_auth_diagnostic(verified)
+            if auth_diagnostic:
+                return _structured_tool_result({"ok": False, "submitted": False,
+                    "status": "reference_analysis_not_submitted", "project_id": project, "canvas_id": canvas,
+                    "agent_instruction": "End this turn. Restore the agent session before retrying native receipt verification.",
+                    **auth_diagnostic}, tool_name="freezone_start_reference_analysis")
+            fresh = verified.get("data") if verified.get("ok") is True else None
+            if (not isinstance(fresh, dict) or any(fresh.get(key) != candidate.get(key) for key in ("run_id", "analysis_node_id"))
+                    or any(candidate.get(key) is not None and fresh.get(key) != candidate[key] for key in ("task_id", "task_key"))):
+                continue
+            candidate = fresh
+            progress_states = {"awaiting_direction", "drafting_plan", "awaiting_plan_review", "awaiting_plan_confirmation",
+                "preparing_materials", "aligning_speech", "composing", "reviewing_output", "completed"}
+            if (isinstance(candidate, dict) and not candidate.get("error")
+                    and candidate.get("status") in ({"submitting", "transcribing", "analyzing", "analysis_ready", "resuming"} | progress_states)
+                    and all(candidate.get(key) == value for key, value in
+                    (("project_id", project), ("canvas_id", canvas), ("source_node_id", source), ("agent_id", agent_id)))
+                    and all(isinstance(candidate.get(key), str) and candidate[key].strip() for key in ("run_id", "analysis_node_id"))
+                    and (all(isinstance(candidate.get(key), str) and candidate[key].strip() for key in ("task_id", "task_key"))
+                         or (candidate.get("status") not in {"transcribing", "analyzing"} and all(candidate.get(key) is None for key in ("task_id", "task_key"))))
+                    and (candidate.get("status") not in progress_states or (
+                        candidate.get("commission_phase") == candidate.get("status")
+                        and isinstance(candidate.get("commission_ref"), dict)
+                        and isinstance(candidate["commission_ref"].get("artifact_id"), str)
+                        and candidate["commission_ref"]["artifact_id"].strip()
+                        and type(candidate["commission_ref"].get("revision")) is int
+                        and candidate["commission_ref"]["revision"] >= 1))):
+                run = candidate
+                break
+    if run is None:
+        return _structured_tool_result({"ok": False, "status": "reference_analysis_receipt_missing", "project_id": project, "canvas_id": canvas,
+            "submitted": False, "error": "A matching native reference analysis run receipt is required.",
+            "agent_instruction": "Do not claim analysis was submitted. A matching native run receipt is required."},
+            tool_name="freezone_start_reference_analysis")
+    return _structured_tool_result({
+        "ok": True, "status": "reference_analysis_submitted", "submitted": True,
+        "project_id": project, "canvas_id": canvas, "run": run, "idempotency_key": body["idempotency_key"],
+        **{key: run[key] for key in ("run_id", "analysis_node_id", "task_id", "task_key") if key in run},
+        "agent_instruction": "End this turn. Do not poll nodes or tasks. The host will save the real analysis, notify the user and resume a new turn at the saved production stage. Present the analysis and confirm the recreation direction before drafting a plan; retain actual earlier creative decisions.",
+    }, tool_name="freezone_start_reference_analysis")
+
+
 def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
     node_id = str(args.get("node_id") or "").strip()
     action = str(args.get("action") or "").strip()
@@ -8565,11 +9381,57 @@ def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
         return tool_result(
             {"ok": False, "status": "action_required", "error": "action is required"}
         )
+    if action in {"generate_production_plan_draft", "generate_production_plan_arrangement"}:
+        project = str(args.get("project_id") or args.get("project") or _default_project_id()).strip()
+        canvas = str(args.get("canvas_id") or _default_canvas_id()).strip()
+        profile = os.environ.get("DRAMACLAW_AGENT_PROFILE", "").strip()
+        agent_id = (profile.removeprefix("freezone:").strip() if profile.startswith("freezone:")
+                    else os.environ.get("DRAMACLAW_AGENT_ID", "main").strip()) or "main"
+        current = _reference_analysis_current_state(project, canvas, agent_id)
+        if current.get("ok") is not True:
+            return tool_result({"ok": False, "status": "native_plan_state_unavailable",
+                                "error": "Current production binding could not be verified"})
+        data = current.get("data") or {}
+        branches = data.get("branches") if isinstance(data.get("branches"), list) else [data]
+        stages = [branch.get("native_plan_stage") for branch in branches
+                  if isinstance(branch, dict) and branch.get("phase") == "drafting_plan"
+                  and isinstance(branch.get("native_plan_stage"), dict)]
+        conflicts = [stage for stage in stages if stage.get("state") == "binding_conflict"]
+        bound = sorted({slot.get("plan_node_id") for stage in stages
+                        for slot in stage.get("slots", []) if isinstance(slot, dict)
+                        and isinstance(slot.get("plan_node_id"), str) and slot.get("plan_node_id")})
+        if conflicts:
+            return tool_result({"ok": False, "status": "binding_conflict", "code": "binding_conflict",
+                                "candidate_node_ids": sorted({node for stage in conflicts
+                                                              for node in stage.get("candidate_node_ids", [])})})
+        if any(slot.get("plan_node_id") == node_id and slot.get("state") == "resolve_conflict"
+               for stage in stages for slot in stage.get("slots", []) if isinstance(slot, dict)):
+            return tool_result({"ok": False, "status": "resolve_conflict", "code": "resolve_conflict",
+                                "node_id": node_id, "error": "The bound plan node changed; inspect the current canvas state"})
+        if bound and node_id not in bound:
+            return tool_result({"ok": False, "status": "bound_plan_node_required",
+                                "code": "bound_plan_node_required", "node_id": bound[0] if len(bound) == 1 else None,
+                                "candidate_node_ids": bound,
+                                "error": "Use the plan node bound to the current production branch"})
     raw_parameters = args.get("parameters") or args.get("params")
     parameters_provided = isinstance(raw_parameters, dict)
     parameters = raw_parameters
     if not isinstance(parameters, dict):
         parameters = {}
+    if action == "generate_production_plan_draft" and not parameters:
+        saved_parameters = _saved_native_plan_action_parameters(
+            project=project, canvas=canvas, node_id=node_id,
+        )
+        if saved_parameters is None:
+            return tool_result({
+                "ok": False,
+                "status": "native_plan_parameters_missing",
+                "code": "native_plan_parameters_missing",
+                "error": "未读取到当前方案节点保存的起草参数，未创建重试确认卡。",
+                "agent_instruction": "先读取当前绑定方案节点和保存的 processingPayload；没有原始起草目标和 blueprint_ref 时停止，不要提交空参数重试，也不要创建新方案节点。",
+            })
+        parameters = saved_parameters
+        parameters_provided = True
     # Keep dynamic Recipe bindings explicit even when an MCP caller places
     # them beside the action fields instead of inside parameters.
     for key in ("recipe_id", "recipeId", "skill_id", "skillId", "source_node_id", "sourceNodeId", "target_node_id", "targetNodeId"):
@@ -8618,6 +9480,38 @@ def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
 
 
 def _handle_run_workflow(args: dict[str, Any], **_: Any) -> str:
+    workflow_draft_id = str(args.get("workflow_draft_id") or "").strip()
+    if workflow_draft_id:
+        project = str(args.get("project_id") or _default_project_id()).strip()
+        canvas = str(args.get("canvas_id") or _default_canvas_id()).strip()
+        if not project or not canvas:
+            return tool_result({
+                "ok": False,
+                "status": "workflow_draft_scope_required",
+                "error": "project_id and canvas_id are required when workflow_draft_id is supplied",
+            })
+        draft_response = _request(
+            "GET", _workflow_draft_api_path(project, canvas, workflow_draft_id),
+        )
+        draft_data = draft_response.get("data") if draft_response.get("ok") else None
+        draft_status = (
+            draft_data.get("draft_status") or draft_data.get("status")
+            if isinstance(draft_data, dict) else ""
+        )
+        if draft_status in {"ready", "confirming", "submitted"}:
+            return tool_result({
+                "ok": False,
+                "status": "material_workflow_confirmation_required",
+                "code": "material_workflow_confirmation_required",
+                "workflow_draft_id": workflow_draft_id,
+                "draft_status": draft_status,
+                "error": "素材工作流尚未完成原生画布确认，不能通过通用 run_workflow 直接执行。",
+                "agent_instruction": (
+                    "保留这个 workflow_draft_id 和返回的 revision，调用现有 "
+                    "freezone_confirm_workflow_draft 并等待画布确认回执；不要改用 "
+                    "freezone_run_workflow，也不要自动重试。"
+                ),
+            })
     raw_node_ids = args.get("node_ids") or []
     node_ids = [
         str(node_id).strip() for node_id in raw_node_ids if str(node_id).strip()
@@ -8750,6 +9644,29 @@ def _request_canvas_context_from_frontend(
     canvas: str | None,
     requests: list[Any],
 ) -> str:
+    # Only the server's per-turn environment selects saved reads. Tool args do not.
+    if os.environ.get("DRAMACLAW_CANVAS_READ_MODE", "current_browser") == "saved":
+        mismatch = _bound_scope_mismatch(project, canvas)
+        if mismatch is not None:
+            return tool_result(mismatch)
+        supported = {"node_detail", "neighbor_graph", "canvas_summary", "canvas_ontology"}
+        dynamic = any(not isinstance(item, dict) or item.get("type") not in supported for item in requests)
+        if dynamic:
+            presence = _request("GET", f"/projects/{quote(str(project or ''), safe='')}/freezone/canvases/{quote(str(canvas or ''), safe='')}/context/browser-presence")
+            if presence.get("ok") is not True or (presence.get("data") or {}).get("online") is not True:
+                return tool_result({"ok": False, "status": "requires_browser", "code": "requires_browser", "error": "This capability requires current browser state."})
+        else:
+            resolved = _request("POST", f"/projects/{quote(str(project or ''), safe='')}/freezone/canvases/{quote(str(canvas or ''), safe='')}/context/read",
+                                body={"requests": requests, "read_consistency": "saved"})
+            if not resolved.get("ok"):
+                return tool_result(resolved)
+            data = resolved.get("data")
+            if not isinstance(data, dict):
+                return tool_result({"ok": False, "code": "invalid_saved_context_response", "error": "Saved context API returned an invalid response."})
+            responses = data.get("responses") or []
+            if responses and all(isinstance(item, dict) and item.get("status") == "unsupported" for item in responses):
+                return tool_result({"ok": False, "status": "unsupported", "code": "unsupported", "error": "Saved canvas ontology is not implemented; read supported node detail or summary.", **data})
+            return tool_result({"ok": True, "status": "resolved", **data})
     envelope = {
         "schema_version": "canvas_context_request.v1",
         **({"canvas_id": canvas} if canvas else {}),
@@ -8975,6 +9892,7 @@ _RESULT_OBJECT_FIELDS = frozenset(
         "operations",
         "required_choices",
         "selections",
+        "material_lifecycle",
     }
 )
 _RESULT_STRING_FIELDS = frozenset(
@@ -9029,6 +9947,26 @@ _RESULT_STRING_FIELDS = frozenset(
 
 
 def _result_field_schema(field: str) -> dict[str, Any]:
+    if field == "error_path":
+        return {"type": "string"}
+    if field == "expected_branch":
+        return {"type": ["string", "null"]}
+    if field == "missing_fields":
+        return {"type": "array", "items": {"type": "string"}}
+    if field == "side_effects":
+        return {"const": "none"}
+    if field == "retry_token":
+        return {"type": "string", "minLength": 1}
+    if field == "production_plan_ref":
+        return {"type": "object", "properties": {
+            "artifact_id": {"type": "string"}, "revision": {"type": "integer"}},
+            "required": ["artifact_id", "revision"]}
+    if field == "production_command_id":
+        return {"type": "string", "minLength": 1}
+    if field == "production_command_steps":
+        return {"type": "array", "items": {"type": "object", "properties": {
+            "kind": {"type": "string"}, "target_id": {"type": "string"}},
+            "required": ["kind", "target_id"]}}
     if field == "batch_id":
         return {"type": "string", "minLength": 1}
     if field == "imports":
@@ -9300,6 +10238,12 @@ _RESULT_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "freezone_get_saved_skill": ("id", "kind", "item", "available_ids"),
     "freezone_get_saved_recipe": ("id", "kind", "item", "available_ids"),
+    "freezone_start_reference_analysis": ("project_id", "canvas_id", "submitted", "run", "run_id", "analysis_node_id", "source_node_id", "commission_ref", "task_id", "task_key", "idempotency_key"),
+    "freezone_get_production_state": (
+        "plan_ref", "goal", "output", "beats", "turns", "placements", "resources",
+        "speech_takes", "speech_cues", "resource_count", "placement_count",
+        "unbound_placement_ids", "speech_cues_pending", "entity",
+    ),
     "freezone_get_workflow_skill": (
         "schema_version", "skill_id", "user_goal", "source", "skill", "recipes",
         "recipe_definitions_omitted", "available_recipes", "capabilities",
@@ -9326,6 +10270,7 @@ _RESULT_FIELDS: dict[str, tuple[str, ...]] = {
         "expires_at",
         "task_id",
     ),
+    "freezone_prepare_production_nodes": (*_WORKFLOW_RESULT_FIELDS, "native_plan_stage", "task_id", "draft_status"),
     "freezone_prepare_workflow_draft": _WORKFLOW_RESULT_FIELDS,
     "freezone_patch_workflow_draft": (
         *_WORKFLOW_RESULT_FIELDS,
@@ -9338,6 +10283,9 @@ _RESULT_FIELDS: dict[str, tuple[str, ...]] = {
         "schema_version",
     ),
     "freezone_emit_canvas_command": (*_CANVAS_RESULT_FIELDS, "commands"),
+    "freezone_prepare_production_edit": (*_CANVAS_RESULT_FIELDS, "error_path", "expected_branch",
+                                         "missing_fields", "side_effects", "retry_token", "production_plan_ref",
+                                         "production_command_id", "production_command_steps"),
     "freezone_confirm_canvas_action": _CANVAS_RESULT_FIELDS,
     "freezone_cancel_canvas_action": _CANVAS_RESULT_FIELDS,
     "freezone_create_node": (*_CANVAS_RESULT_FIELDS, "node_id", "node_type"),
@@ -9422,6 +10370,8 @@ _RESULT_SUCCESS_REQUIRED: dict[str, tuple[str, ...]] = {
     "freezone_list_agent_catalog": ("kind", "items", "count"),
     "freezone_get_saved_skill": ("id", "kind", "item"),
     "freezone_get_saved_recipe": ("id", "kind", "item"),
+    "freezone_start_reference_analysis": ("submitted", "run_id", "analysis_node_id"),
+    "freezone_get_production_state": ("plan_ref", "goal", "beats"),
     "freezone_get_link_type_catalog": ("link_types", "count"),
     "freezone_get_selection": ("node_ids", "edge_ids", "selection"),
     "freezone_get_node_detail": ("node_id", "node"),
@@ -9439,6 +10389,7 @@ _RESULT_SUCCESS_REQUIRED: dict[str, tuple[str, ...]] = {
 }
 
 _WORKFLOW_RESULT_TOOLS = {
+    "freezone_prepare_production_nodes",
     "freezone_get_workflow",
     "freezone_revise_workflow",
     "freezone_prepare_workflow",
@@ -9451,6 +10402,7 @@ _WORKFLOW_RESULT_TOOLS = {
 
 _CANVAS_RESULT_TOOLS = {
     "freezone_emit_canvas_command",
+    "freezone_prepare_production_edit",
     "freezone_confirm_canvas_action",
     "freezone_cancel_canvas_action",
     "freezone_create_node",
@@ -9517,13 +10469,19 @@ def _canvas_application_receipt_contract(
 
 
 def _success_contract(name: str) -> dict[str, Any]:
+    if name == "freezone_create_production_plan":
+        return {"allOf": [
+            {"required": list(_RESULT_SUCCESS_REQUIRED[name])},
+            _canvas_application_receipt_contract(),
+            {"properties": {"canvas_apply_status": {"const": "direct_applied"}}},
+        ]}
     if name == "freezone_import_external_skill":
         return {"required": ["batch_id", "imports"]}
     if name == "freezone_get_skill_import":
         return {"required": ["import_result"]}
     if name == "freezone_request_user_clarification":
         return {
-            "properties": {"status": {"const": "clarification_frontend_result"}},
+            "properties": {"status": {"enum": ["clarification_frontend_result", "waiting_user"]}},
             "required": list(_RESULT_SUCCESS_REQUIRED[name]),
         }
     if name in _SKILL_STUDIO_PROGRESS_TOOLS:
@@ -9563,7 +10521,7 @@ def _success_contract(name: str) -> dict[str, Any]:
                     {"required": ["run_id"]},
                 ]
             }
-        if name == "freezone_confirm_workflow_draft":
+        if name in {"freezone_confirm_workflow_draft", "freezone_prepare_production_nodes"}:
             # Confirmation returns the executor's receipt after the draft was
             # committed. It need not repeat the planning/run identifiers.
             receipt = _canvas_application_receipt_contract()
@@ -9684,6 +10642,24 @@ def _output_schema(name: str) -> dict[str, Any]:
         raise RuntimeError(f"missing output contract for {name}")
     properties = dict(_RESULT_COMMON_PROPERTIES)
     properties.update({field: _result_field_schema(field) for field in fields})
+    if name == "freezone_start_reference_analysis":
+        properties["status_code"] = {"type": "integer", "const": 401}
+    if name in {"freezone_get_production_progress", "freezone_advance_production"}:
+        properties["scope"] = {
+            "type": "object",
+            "properties": {key: {"type": "string", "minLength": 1}
+                           for key in ("project_id", "canvas_id", "agent_id")},
+            "required": ["project_id", "canvas_id", "agent_id"],
+            "additionalProperties": False,
+        }
+        progress_fields = ("materials_total", "materials_available", "materials_accepted",
+                           "final_materials_total", "final_materials_accepted", "user_action_count")
+        properties["progress"] = {
+            "type": "object",
+            "properties": {key: {"type": "integer", "minimum": 0} for key in progress_fields},
+            "required": list(progress_fields),
+            "additionalProperties": False,
+        }
     schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": f"{name}.result",
@@ -9723,6 +10699,12 @@ def _output_schema(name: str) -> dict[str, Any]:
                 "then": {"required": ["draft_id", "revision", "preview"]},
             }
         )
+    if name == "freezone_prepare_production_nodes":
+        schema["properties"]["field_path"] = {"type": "string"}
+        schema["properties"]["next_action"] = {"type": ["object", "string", "null"]}
+        schema["properties"]["native_plan_stage"] = {"type": "object"}
+        schema["properties"]["verdict"] = {"enum": ["clarify", "not_authorized"]}
+        schema["properties"]["reason"] = {"type": "string", "maxLength": 2000}
     response_type = _CANVAS_CONTEXT_RESPONSE_TYPES.get(name)
     if response_type:
         # The frontend bridge returns typed responses, not the legacy flattened
@@ -9748,6 +10730,11 @@ def _output_schema(name: str) -> dict[str, Any]:
             "bridge_key": {"type": "string"},
             "canvas_id": {"type": "string"},
             "project_id": {"type": "string"},
+            "schema_version": {"type": "string"},
+            "source": {"enum": ["saved_canvas", "current_browser"]},
+            "read_consistency": {"enum": ["saved", "current_browser"]},
+            "canvas_revision": {"type": ["string", "integer", "null"]},
+            "coverage": {"type": "object"},
         })
         schema["allOf"][0]["then"] = {
             "anyOf": [
@@ -9772,6 +10759,8 @@ def _schema(
     *,
     reject_unknown: bool = True,
 ) -> dict[str, Any]:
+    if name in {"freezone_get_node_detail", "freezone_get_neighbor_graph", "freezone_summarize_canvas"}:
+        properties = {**properties, "cursor": {"type": "string", "maxLength": 2048, "description": "Saved context next-page cursor returned by the same read. Browser reads ignore it."}}
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": properties,
@@ -10645,6 +11634,9 @@ _AGENT_CREATABLE_NODE_TYPE_VALUES = [
     "previzNode",
     "skillNode",
     "htmlArtifactNode",
+    "videoStoryNode",
+    "transcriptNode",
+    "semanticTimelineNode",
 ]
 
 _NODE_CREATE_SCHEMA_TYPE_VALUES = [*_AGENT_CREATABLE_NODE_TYPE_VALUES]
@@ -10749,6 +11741,88 @@ _OTHER_AGENT_CREATABLE_NODE_TYPE_VALUES = [
     if value != "textAnnotationNode"
 ]
 
+_PRODUCTION_MEDIA_RESOURCE_GUIDANCE = (
+    "bind_media payload.resource_id names a saved plan resource, not a guessed canvas node_id, "
+    "filename stem or media_path. Read the actual plan resources first. For media already generated "
+    "on the current canvas, use freezone_prepare_material_work with source=existing, the actual "
+    "node_id and no recipe_id; then freezone_review_material_candidate and "
+    "freezone_accept_material_candidate after technical/content acceptance. If content review is "
+    "unavailable, authenticated human confirmation remains required. Review/accept does not register "
+    "the resource in plan.resources. For its first binding, supply payload.resource_id=resource.id "
+    "and payload.resource as the returned full ResourceV2 unchanged; an already registered "
+    "resource can use id-only binding. Native project-media probing still verifies media_path, media_hash, media_kind, "
+    "duration_us and has_audio; never invent or edit that metadata, force acceptance, transfer "
+    "execution receipts, or repeat the same invalid binding. Preserve existing outputs and "
+    "do not regenerate media to solve a missing registration."
+)
+
+
+_PRODUCTION_COMMAND_PAYLOAD_GUIDANCE = _PRODUCTION_MEDIA_RESOURCE_GUIDANCE + "\n" + """Use kind=batch for coordinated beat/dialogue edits, target_id=plan, payload.commands with 1 to
+100 children. Each child has exactly kind,target_id,payload; command_id and the exact saved
+plan_ref belong only to the outer command. No nested batches. edit_beat accepts
+purpose,duration_frames,timing_mode (auto or fixed). edit_turn accepts speaker,text; include
+invalidate_speech_timing=true only for an explicitly authorized changed text that invalidates
+accepted speech timing; word anchors still require the dedicated correction flow. insert_turn
+requires beat_id,turn:{id,speaker,text},index (explicit insertion position); target_id equals
+the new turn id. Do not send direction on edit_beat, timing_status on edit_turn, flat
+speaker/text on insert_turn, or beats/turns on batch. Narrative intent belongs in supported
+purpose/text fields only when it is the actual content to save; do not stuff instructions into
+unrelated fields. insert_beat requires beat:{id,purpose,duration_frames},index; label and
+description are not BeatV2 fields. upsert_placement requires placement with id, kind
+(visual/audio/subtitle/graphic), role (primary for a main visual), track_id, start and end.
+For an existing shared take with only draft timing, reassign_speech_source targets its beat
+with payload={placement_id:null or a new audible placement ID,turn_ids:[every turn in take order]}.
+It moves the whole group and creates draft cues when the new source is bound. Accepted timing,
+word anchors, or take/cue anchor dependencies must be resolved before reassignment.
+For a beat-bound shot use start:{kind:"beat",ref_id:"BEAT_ID",edge:"start"} and
+end:{kind:"beat",ref_id:"BEAT_ID",edge:"end"}; plain frame numbers are invalid anchors.
+Use the real shot description, never submit a probe or placeholder edit to discover schema.
+Example with placeholder IDs and revision: replace the saved plan_ref and
+existing entity IDs with values read from the current saved plan; choose a fresh new turn ID.
+```json
+{
+  "command_id": "edit-example-1",
+  "plan_ref": {"artifact_id": "PLAN_ARTIFACT_ID", "revision": 1},
+  "kind": "batch",
+  "target_id": "plan",
+  "payload": {"commands": [
+    {"kind": "edit_beat", "target_id": "BEAT_ID", "payload": {"purpose": "Opening question", "duration_frames": 96, "timing_mode": "auto"}},
+    {"kind": "edit_turn", "target_id": "TURN_ID", "payload": {"speaker": "Host", "text": "Why now?"}},
+    {"kind": "insert_turn", "target_id": "NEW_TURN_ID", "payload": {"beat_id": "BEAT_ID", "turn": {"id": "NEW_TURN_ID", "speaker": "Guest", "text": "Here is why."}, "index": 1}}
+  ]}
+}
+```"""
+
+
+# The generated contract comes from the server's Pydantic entity models. This
+# plugin runs in an isolated environment, so it loads the checked-in artifact.
+_PRODUCTION_SCHEMA_ARTIFACT = json.loads(
+    (_PLUGIN_DIR / "production_command_schema.json").read_text(encoding="utf-8")
+)
+
+
+def _inline_production_refs(value: Any, definitions: dict[str, Any]) -> Any:
+    if isinstance(value, list):
+        return [_inline_production_refs(item, definitions) for item in value]
+    if isinstance(value, dict):
+        if "$ref" in value:
+            name = value["$ref"].removeprefix("#/$defs/")
+            return _inline_production_refs(definitions[name], definitions)
+        return {key: _inline_production_refs(item, definitions)
+                for key, item in value.items() if key not in {"$defs", "title"}}
+    return value
+
+
+_PRODUCTION_COMMAND_SCHEMA = _inline_production_refs(
+    _PRODUCTION_SCHEMA_ARTIFACT, _PRODUCTION_SCHEMA_ARTIFACT.get("$defs", {})
+)
+_PRODUCTION_COMMAND_SCHEMA["properties"]["payload"]["description"] = _PRODUCTION_COMMAND_PAYLOAD_GUIDANCE
+_PRODUCTION_INSERT_TURN_SCHEMA = next(
+    branch["properties"]["payload"]["properties"]["turn"]
+    for branch in _PRODUCTION_COMMAND_SCHEMA["oneOf"]
+    if branch["properties"]["kind"].get("const") == "insert_turn"
+)
+
 # Keep this JSON Schema mechanically aligned with the frontend's
 # CanvasChatCommand discriminated union. A single object containing every
 # optional field makes some providers fill the union with zero values and omit
@@ -10822,6 +11896,11 @@ _CANVAS_COMMAND_ITEM_SCHEMA = {
             "update_node_data",
             {"node_id": _NON_EMPTY_STRING, "data": {"type": "object"}},
             ["node_id", "data"],
+        ),
+        _command_variant(
+            "production_plan_command",
+            {"node_id": _NON_EMPTY_STRING, "command": _PRODUCTION_COMMAND_SCHEMA},
+            ["node_id", "command"],
         ),
         _command_variant("delete_nodes", {"node_ids": _NODE_IDS_SCHEMA}, ["node_ids"]),
         _command_variant("clear_canvas", {}, []),
@@ -10911,6 +11990,10 @@ _CANVAS_COMMAND_ITEM_SCHEMA = {
                         "enum": ["connected", "node", "downstream"],
                     },
                     "regenerate": {"type": "boolean"},
+                    "workflow_draft_id": {
+                        "type": "string",
+                        "description": "Optional native draft id. Pending material drafts must use freezone_confirm_workflow_draft.",
+                    },
                 },
             ),
             "anyOf": [
@@ -11009,6 +12092,15 @@ _STORY_CANVAS_TOOLS = (
 TOOLS = (
     *_INTERACTIVE_STORY_TOOLS,
     *_STORY_CANVAS_TOOLS,
+    (
+        "freezone_start_reference_analysis",
+        _schema("freezone_start_reference_analysis",
+                "Start analysis only for a reference without a completed same-source analysis. For changed product/dialogue on an existing reference, read freezone_get_production_progress and continue its commission. If status=reference_analysis_reused, no analysis was submitted: continue this same turn using commission_ref. End the turn only after an actual submission; do not poll.",
+                {"source_node_id": {"type": "string"}, "user_goal": {"type": "string"},
+                 "inputs": {"type": "object"}, "idempotency_key": {"type": "string"}},
+                ["source_node_id", "user_goal", "idempotency_key"]),
+        _handle_start_reference_analysis,
+    ),
     (
         "freezone_import_external_skill",
         _schema("freezone_import_external_skill", "Convert user-provided external Skill Markdown into native Skill JSON plus Recipes in a background task. Only submit when the user asks to import/convert. Provide the complete Markdown; for ZIP packages with references use the settings upload. Does not install or modify the canvas.", {
@@ -11561,6 +12653,23 @@ TOOLS = (
         _handle_node_detail,
     ),
     (
+        "freezone_get_production_state",
+        _schema(
+            "freezone_get_production_state",
+            "Read the current or exact saved ProductionPlanV2 revision for a reference-video remix. First read freezone_get_node_detail: copy artifact_id and revision from node_detail.production_plan.plan_ref. artifact_id is the saved author artifact identity, never the canvas node_id; an empty generic script prompt does not mean the native plan is absent. Returns actual beat duration_frames/timing_mode and bounded saved placement descriptions/graphics. Review actual shots/effects and numeric durations using output fps; goal or purpose prose cannot replace placements. Summary is insufficient for authoring: read the saved placement with entity_id before upsert_placement, preserve all untargeted fields and anchors. Any truncated preview requires an entity read. Read-only; use freezone_prepare_production_edit for an edit.",
+            {
+                **_SCOPE_PROPS,
+                "artifact_id": {**_NON_EMPTY_STRING, "description": "Copy node_detail.production_plan.plan_ref.artifact_id. Never pass the canvas node_id here."},
+                "revision": {"type": "integer", "minimum": 1},
+                "entity_id": {**_NON_EMPTY_STRING, "description": "Read the saved entity before upsert_placement; preserve all untargeted fields and anchors. Read full content when a summary preview is truncated."},
+                "include_words": {"type": "boolean", "description": "For one turn entity only, include at most 500 word anchors."},
+            },
+            ["artifact_id"],
+            reject_unknown=True,
+        ),
+        _handle_get_production_state,
+    ),
+    (
         "freezone_get_neighbor_graph",
         _schema(
             "freezone_get_neighbor_graph",
@@ -11833,6 +12942,62 @@ TOOLS = (
         _handle_get_workflow,
     ),
     (
+        "freezone_prepare_production_nodes",
+        _schema(
+            "freezone_prepare_production_nodes",
+            "Prepare native production nodes from the agreed concise creative brief, preserving all user constraints without inventing scenes, dialogue or use cases. The host verifies the bound human conversation, then uses the existing canvas approval. run_after_create=true starts only the structure/dialogue task after that approval; false creates nodes only. The saved outline is editable and ends that task. Visual/audio arrangement requires a separate explicit generate_production_plan_arrangement action on the same node with only the latest saved plan_ref, under existing authorization and action confirmation. Never auto-submit it from a completion notification. Neither action generates materials or renders. Treat replies resolving previously requested creative choices in context; respect explicit discussion-only or no-drafting restrictions. On direction_needs_discussion read the reason, correct your unsupported additions or ask about the actual ambiguity; never create a separate direction decision or repeat an unchanged rejected request. Pending approval and running tasks are reused; await completion events. If native_plan_stage.state=failed, prepare only reuses the existing draft and does not submit a new task; do not report it as running. After explicit user retry authorization, use the failed slot's exact plan_node_id with freezone_run_node_action(action=generate_production_plan_draft); the tool reuses the node's saved topic, requirements and blueprint, so do not send an empty or newly invented parameter payload. Report submission only after a fresh canvas run receipt; never call prepare again or retry automatically.",
+            {**_SCOPE_PROPS,
+             "commission_ref": {"type": "object", "required": ["artifact_id", "revision"],
+                                "properties": {"artifact_id": {"type": "string", "minLength": 1},
+                                               "revision": {"type": "integer", "minimum": 1},
+                                               "project_id": {"type": "string"}}},
+             "goal": {"type": "string", "minLength": 1, "maxLength": 20000},
+             "run_after_create": {"type": "boolean", "description": "After existing canvas confirmation, true runs generate_production_plan_draft for structure/dialogue only; arrangement is a separate explicit action. False creates nodes without drafting. Neither generates materials or renders the video."},
+             "plan_count": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1},
+             "requirements": {"type": ["object", "null"], "additionalProperties": False,
+                              "properties": {
+                                  "dialogue": {"type": ["object", "null"], "additionalProperties": False,
+                                               "properties": {
+                                                   "mode": {"type": "string", "enum": ["preserve_source", "use_confirmed_text", "rewrite", "unspecified"]},
+                                                   "source_turn_ids": {"type": ["array", "null"], "items": {"type": "string"}, "minItems": 1, "maxItems": 80},
+                                                   "confirmed_turns": {"type": ["array", "null"], "items": {
+                                                       "type": "object", "additionalProperties": False,
+                                                       "properties": {"speaker": {"type": "string", "maxLength": 80},
+                                                                      "text": {"type": "string", "minLength": 1, "maxLength": 2000}},
+                                                       "required": ["speaker", "text"]},
+                                                       "minItems": 1, "maxItems": 80}},
+                                               "required": ["mode"]},
+                                  "primary_shots": {"type": ["object", "null"], "additionalProperties": False,
+                                                    "properties": {"min": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+                                                                   "max": {"type": ["integer", "null"], "exclusiveMinimum": 0}}},
+                                  "duration_us": {"type": ["object", "null"], "additionalProperties": False,
+                                                  "properties": {"min": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+                                                                 "max": {"type": ["integer", "null"], "exclusiveMinimum": 0}}},
+                                  "output_requirements": {"type": ["object", "null"], "additionalProperties": False,
+                                                          "properties": {"width": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+                                                                         "height": {"type": ["integer", "null"], "exclusiveMinimum": 0}}},
+                                  "semantic": {"type": ["array", "null"], "items": {
+                                      "type": "object", "additionalProperties": False,
+                                      "properties": {"id": {"type": "string", "minLength": 1},
+                                                     "text": {"type": "string", "minLength": 1}},
+                                      "required": ["id", "text"]},
+                                      "maxItems": 80}},
+                              "description": "Optional typed hard constraints already stated by the user. The host validates the same closed production-requirements model."},
+             "preserve_replace": {"type": ["array", "null"], "maxItems": 30, "items": {
+                                  "type": "object", "additionalProperties": False,
+                                  "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 300},
+                                                 "action": {"type": "string", "enum": ["preserve", "replace"]},
+                                                 "entity_kind": {"type": "string", "minLength": 1, "maxLength": 300},
+                                                 "entity_id": {"type": "string", "minLength": 1, "maxLength": 300},
+                                                 "visual_identity": {"type": "boolean"},
+                                                 "evidence": {"type": "string", "minLength": 1, "maxLength": 300}},
+                                  "required": ["id", "action", "entity_kind", "entity_id", "visual_identity", "evidence"]},
+                                  "description": "Optional explicit preserve/replace choices. Each entry must cite an exact excerpt from the authenticated human turn."}},
+            ["commission_ref", "goal", "run_after_create"], reject_unknown=True,
+        ),
+        _handle_prepare_production_nodes,
+    ),
+    (
         "freezone_prepare_workflow_draft",
         _schema(
             "freezone_prepare_workflow_draft",
@@ -12004,6 +13169,22 @@ TOOLS = (
             reject_unknown=True,
         ),
         _handle_emit_canvas_command,
+    ),
+    (
+        "freezone_prepare_production_edit",
+        _schema(
+            "freezone_prepare_production_edit",
+            "Propose exactly one bounded ProductionPlanV2 edit (including one atomic batch for coordinated content changes) through the canvas approval bridge. Every command MUST include plan_ref:{artifact_id,revision} copied from node_detail.production_plan.plan_ref; node_id alone is insufficient. insert_beat requires payload={beat:{id,purpose,duration_frames},index}. insert_turn requires payload={beat_id,turn:{id,text,speaker (optional)},index}; beat_id belongs outside turn and timing_status is not a TurnV2 field. Follow command.payload guidance and its placeholder example. Read the exact plan revision first. The browser validates business preconditions before the existing canvas confirmation, then applies the project-scoped command and updates the node. An unbound planned speaking picture uses edit_turn.speech_placement_id; bind_speech_source requires an already bound audible video or audio resource. After real media is bound, for several consecutive speakers in one source use kind=bind_speech_source, target_id=beat id, payload={placement_id,turn_ids:[ordered consecutive turn ids]}; this creates one shared take and draft cues for calibration. Changing speech_pace or extra_pause_seconds recalculates only the estimate; explicitly edit duration_frames to change saved beat length. An accepted cue is protected: changing dialogue text or voice media requires explicit invalidate_speech_timing=true in edit_turn or bind_media, and word-anchored edits still require manual correction. This does not write the plan directly from the Agent process. " + _PRODUCTION_MEDIA_RESOURCE_GUIDANCE,
+            {
+                **_CANVAS_COMMAND_TOOL_SCOPE_PROPS,
+                "node_id": _NON_EMPTY_STRING,
+                "command": _PRODUCTION_COMMAND_SCHEMA,
+                "retry_of": _NON_EMPTY_STRING,
+            },
+            ["node_id", "command"],
+            reject_unknown=True,
+        ),
+        _handle_prepare_production_edit,
     ),
     (
         "freezone_confirm_canvas_action",
@@ -12386,6 +13567,15 @@ TOOLS = (
         _handle_run_node_action,
     ),
 )
+
+
+# Load the focused director adapters beside this plugin (also when imported by
+# the standalone MCP test loader rather than as a Python package).
+import importlib.util as _director_importlib  # noqa: E402
+_director_spec = _director_importlib.spec_from_file_location("_freezone_director_tools", Path(__file__).with_name("director_tools.py"))
+_director_module = _director_importlib.module_from_spec(_director_spec)
+_director_spec.loader.exec_module(_director_module)
+TOOLS = (*TOOLS, *_director_module.build_director_tools(globals()))
 
 
 def _bind_structured_result_input(handler):

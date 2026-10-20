@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,271 @@ from novelvideo.brainclaw_contract import (
     BrainClawProfileVariant,
 )
 from novelvideo.freezone import recipe_runtime
+from novelvideo import llm_instrumentation
 from novelvideo.freezone.agent_catalog_schema import validate_agent_recipe_config
+
+
+@pytest.mark.asyncio
+async def test_plan_invalid_json_stops_after_one_attempt_without_content(monkeypatch, caplog):
+    from novelvideo.freezone.remix import production_plan
+    from test_production_plan import native_plan
+
+    secret = "full-original-video-transcript"
+    replies = ["not-json-" + secret, json.dumps(native_plan(), ensure_ascii=False)]
+
+    async def generate(**_kwargs):
+        return replies.pop(0)
+
+    monkeypatch.setattr(production_plan, "get_recipe_for_runtime", lambda **_kwargs: {})
+    monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
+    monkeypatch.setattr(production_plan, "validate_structured_recipe_output", lambda *_args: None)
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(task_id="task-1"):
+            with pytest.raises(ValueError, match="json_parse_failed"):
+                await production_plan.generate_production_plan_draft(
+                    topic="做个新故事", blueprint=None, username="alice",
+                )
+    events = [json.loads(record.getMessage()) for record in caplog.records
+              if record.name == "novelvideo.llm_instrumentation" and record.getMessage().startswith("{")]
+    assert len(replies) == 1
+    assert [item["attempt"] for item in events if item["event"] == "production_plan.validation_started"] == [1]
+    assert any(item["event"] == "production_plan.validation_failed" and item["error_code"] == "json_parse_failed"
+               and item["attempt"] == 1 for item in events)
+    assert not any(item["event"] == "production_plan.validation_succeeded" for item in events)
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_plan_output_preferences_distinguish_source_clip_duration_from_film(monkeypatch):
+    from novelvideo.freezone.remix import production_plan
+    from test_production_plan import native_plan, _stage_response
+
+    captured: dict[str, object] = {}
+
+    async def generate(**kwargs):
+        captured.update(kwargs)
+        return _stage_response(native_plan(), kwargs)
+
+    monkeypatch.setattr(production_plan, "get_recipe_for_runtime", lambda **_kwargs: {})
+    monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
+    monkeypatch.setattr(production_plan, "validate_structured_recipe_output", lambda *_args: None)
+    await production_plan.generate_production_plan_draft(
+        topic="做一条黑咖啡短片", blueprint=None, username="alice",
+        output_preferences={"aspect_ratio": "9:16", "source_clip_duration_seconds": 5},
+    )
+    assert captured["user_goal"] == "做一条黑咖啡短片"
+    context = json.loads(captured["upstream_text"])
+    assert context["output_preferences"]["source_clip_duration_seconds"] == 5
+    assert "单条素材" in captured["node_prompt"]
+    assert "成片总时长" in captured["node_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_plan_recipe_timeout_logs_correlated_request_without_prompt(monkeypatch, caplog):
+    secret = "secret-source-transcript-content"
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": secret, "_catalog_source": "builtin",
+    })
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self, _task):
+            raise TimeoutError(secret)
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_name="real-route-model"))
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(
+            project_id="demo", workflow_run_id="run-1", operation_id="op-1", task_id="task-1", attempt="1"
+        ):
+            with pytest.raises(TimeoutError):
+                await recipe_runtime.generate_recipe_text(
+                    username="local", recipe_id="reference-production-plan", node_kind="text",
+                    node_prompt=secret, user_goal=secret,
+                )
+    events = [json.loads(record.getMessage()) for record in caplog.records
+              if record.name == "novelvideo.llm_instrumentation" and record.getMessage().startswith("{")]
+    started = next(item for item in events if item["event"] == "production_plan.model_request_started")
+    failed = next(item for item in events if item["event"] == "production_plan.model_request_failed")
+    assert started["model_call_id"] == failed["model_call_id"]
+    assert started["workflow_run_id"] == failed["workflow_run_id"] == "run-1"
+    assert started["model"] == "real-route-model"
+    assert started["timeout_seconds"] == 540
+    assert failed["stage"] == "requesting"
+    assert failed["response_received"] is False
+    assert failed["elapsed_ms"] >= 0
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_plan_recipe_logs_actual_usage_and_retry_count_when_available(monkeypatch, caplog):
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": "draft", "_catalog_source": "builtin",
+    })
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self, _task):
+            return SimpleNamespace(
+                output="short output", retry_count=1, request_id="req-123",
+                usage=lambda: SimpleNamespace(input_tokens=42, output_tokens=17),
+            )
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_name="route-model", available_tokens=8192))
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(task_id="task-1"):
+            await recipe_runtime.generate_recipe_text(
+                username="local", recipe_id="reference-production-plan", node_kind="text", node_prompt="draft",
+            )
+    events = [json.loads(record.getMessage()) for record in caplog.records
+              if record.name == "novelvideo.llm_instrumentation" and record.getMessage().startswith("{")]
+    started = next(item for item in events if item["event"] == "production_plan.model_request_started")
+    returned = next(item for item in events if item["event"] == "production_plan.model_request_returned")
+    assert started["available_tokens"] == 8192
+    assert returned["input_tokens"] == 42
+    assert returned["output_tokens"] == 17
+    assert returned["sdk_retry_count"] == 1
+    assert returned["provider_request_id"] == "req-123"
+
+
+@pytest.mark.asyncio
+async def test_plan_recipe_disables_agent_retries_and_logs_one_return(monkeypatch, caplog):
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": "draft", "_catalog_source": "builtin",
+    })
+    agent_options = []
+
+    class FakeAgent:
+        def __init__(self, *_args, **kwargs):
+            agent_options.append(kwargs)
+
+        async def run(self, _task, **_kwargs):
+            return SimpleNamespace(output="{}", usage=lambda: SimpleNamespace(output_tokens=2))
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_name="writer"))
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(task_id="task-1"):
+            await recipe_runtime.generate_recipe_text(
+                username="local", recipe_id="reference-production-plan", node_kind="text",
+                node_prompt="draft", plan_deadline=recipe_runtime.time.monotonic() + 3,
+            )
+    records = [json.loads(row.getMessage()) for row in caplog.records
+               if row.name == "novelvideo.llm_instrumentation" and row.getMessage().startswith("{")]
+    assert agent_options[0]["retries"] == 0
+    assert sum(row["event"] == "production_plan.model_request_returned" for row in records) == 1
+
+
+@pytest.mark.asyncio
+async def test_known_model_output_limit_rejects_plan_budget_before_request(monkeypatch, caplog):
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": "draft", "_catalog_source": "builtin",
+    })
+    called = []
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            called.append(True)
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(
+                            model_name="limited-writer", max_output_tokens=8192))
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(task_id="task-a"):
+            with pytest.raises(ValueError, match="production_plan_output_budget_exceeds_model_limit"):
+                await recipe_runtime.generate_recipe_text(
+                    username="local", recipe_id="reference-production-plan", node_kind="text",
+                    node_prompt="draft", plan_deadline=recipe_runtime.time.monotonic() + 3,
+                )
+    assert called == []
+    records = [json.loads(row.getMessage()) for row in caplog.records
+               if row.name == "novelvideo.llm_instrumentation" and row.getMessage().startswith("{")]
+    assert any(row["event"] == "production_plan.model_configuration_failed"
+               and row["error_code"] == "production_plan_output_budget_exceeds_model_limit"
+               for row in records)
+
+
+@pytest.mark.asyncio
+async def test_structured_provider_limit_is_logged_without_response_text(monkeypatch, caplog):
+    secret = "private full transcript"
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": "draft", "_catalog_source": "builtin",
+    })
+
+    class ProviderOutputLimit(RuntimeError):
+        body = {"error": {"code": "max_output_tokens"}}
+        status_code = 400
+        request_id = "req-structured-limit"
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self, _task, **_kwargs):
+            raise ProviderOutputLimit(secret)
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_name="writer"))
+    with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
+        with llm_instrumentation.production_plan_diagnostic_context(
+            operation_id="operation-a", task_id="task-a"
+        ):
+            with pytest.raises(ValueError, match="model_output_limit"):
+                await recipe_runtime.generate_recipe_text(
+                    username="local", recipe_id="reference-production-plan",
+                    node_kind="text", node_prompt=secret,
+                    plan_deadline=recipe_runtime.time.monotonic() + 3,
+                )
+    records = [json.loads(row.getMessage()) for row in caplog.records
+               if row.name == "novelvideo.llm_instrumentation" and row.getMessage().startswith("{")]
+    failed = next(row for row in records if row["event"] == "production_plan.model_request_failed")
+    assert failed["finish_reason"] == "max_tokens"
+    assert failed["error_code"] == "model_output_limit"
+    assert failed["provider_http_status"] == 400
+    assert failed["provider_request_id"] == "req-structured-limit"
+    assert failed["response_received"] is True
+    assert failed["operation_id"] == "operation-a"
+    assert failed["task_id"] == "task-a"
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_plan_recipe_passes_empty_response_to_json_validation(monkeypatch):
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "version": "1", "output_kind": "text",
+        "system_prompt": "draft", "_catalog_source": "builtin",
+    })
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self, _task, **_kwargs):
+            return SimpleNamespace(output="", usage=lambda: None)
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_name="writer"))
+    content = await recipe_runtime.generate_recipe_text(
+        username="local", recipe_id="reference-production-plan", node_kind="text",
+        node_prompt="draft", plan_deadline=recipe_runtime.time.monotonic() + 3,
+    )
+    assert content == ""
 
 
 def test_builtin_text_recipes_produce_final_deliverables():
@@ -28,10 +293,10 @@ def test_builtin_text_recipes_produce_final_deliverables():
         validated = validate_agent_recipe_config(payload)
         text_recipe_ids.append(str(validated["id"]))
 
-    assert len(text_recipe_ids) == 27
+    assert len(text_recipe_ids) == 28
     assert "general-text" in text_recipe_ids
     assert "ecommerce-text-plan" in text_recipe_ids
-    assert {"reference-blueprint", "reference-remix-script", "reference-broll-plan"} <= set(text_recipe_ids)
+    assert {"reference-blueprint", "reference-remix-script", "reference-broll-plan", "reference-production-plan"} <= set(text_recipe_ids)
 
 
 @pytest.mark.parametrize(
@@ -809,6 +1074,202 @@ async def test_generate_recipe_text_sends_v2_output_schema_to_executor(monkeypat
     assert "Return only one JSON value" in str(captured["task"])
     for field in ("event_id", "required", "purpose", "suggested_query"):
         assert field in str(captured["task"])
+
+
+@pytest.mark.asyncio
+async def test_internal_plan_repair_uses_patch_contract_without_full_plan_instruction(monkeypatch):
+    import time
+    from novelvideo.freezone.remix.production_plan_execution import PlanExecutionPolicy
+
+    captured = {}
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "schema_version": "dramaclaw.recipe.v2", "id": "reference-production-plan",
+        "output_kind": "text", "system_prompt": "输出完整作品方案 JSON",
+        "output_schema": {"type": "object", "required": ["beats"]},
+    })
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self, task, *, model_settings):
+            captured["task"] = task
+            return SimpleNamespace(output='{"base_digest":"abc","changes":[]}',
+                                   usage=lambda: SimpleNamespace(output_tokens=10))
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *_args, **_kwargs: object())
+    patch_schema = {"type": "object", "required": ["base_digest", "changes"]}
+    await recipe_runtime.generate_recipe_text(
+        username="local", recipe_id="reference-production-plan", node_kind="text",
+        node_prompt="修复字段", structured_upstream={"repair_scope": {}},
+        structured_output_contract=patch_schema,
+        plan_policy=PlanExecutionPolicy(10, 100, False),
+        plan_deadline=time.monotonic() + 5,
+    )
+    assert "输出完整作品方案 JSON" not in captured["task"]
+    assert json.dumps(patch_schema, ensure_ascii=False, sort_keys=True) in captured["task"]
+
+
+@pytest.mark.asyncio
+async def test_plan_stages_use_distinct_small_contracts_on_same_model_route(monkeypatch):
+    import time
+    from pydantic import TypeAdapter
+    from novelvideo.freezone.remix.production_plan_execution import PlanExecutionPolicy
+
+    captured = []
+    output_schemas = []
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "schema_version": "dramaclaw.recipe.v2", "output_kind": "text",
+        "system_prompt": "保持人物和画面连续", "output_schema": {"type": "object"},
+    })
+
+    class FakeAgent:
+        def __init__(self, model, **kwargs):
+            assert kwargs["retries"] == 0
+            output_schemas.append(TypeAdapter(kwargs["output_type"].outputs).json_schema())
+
+        async def run(self, task, *, model_settings):
+            captured.append((task, model_settings))
+            return SimpleNamespace(output='{}', usage=lambda: SimpleNamespace(output_tokens=2))
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    model_requests = []
+
+    def model_factory(setting, *args, **kwargs):
+        model_requests.append((setting, kwargs))
+        return SimpleNamespace(model_name="writer")
+
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        model_factory)
+    for stage in ("outline", "arrangement"):
+        await recipe_runtime.generate_recipe_text(
+            username="local", recipe_id="reference-production-plan", node_kind="text",
+            node_prompt="当前目标", production_plan_stage=stage,
+            plan_policy=PlanExecutionPolicy(10, 200, False),
+            plan_deadline=time.monotonic() + 5,
+        )
+    assert "creative_direction" in output_schemas[0]["properties"]
+    assert "speech_bindings" not in output_schemas[0]["properties"]
+    assert "speech_bindings" in output_schemas[1]["properties"]
+    assert "creative_direction" not in output_schemas[1]["properties"]
+    assert all("JSON Schema:\n" not in task for task, _ in captured)
+    assert all("保持人物和画面连续" in task for task, _ in captured)
+    assert [settings["max_tokens"] for _, settings in captured] == [200, 200]
+    assert [setting for setting, _ in model_requests] == ["FREEZONE_TEXT_WRITER_MODEL"] * 2
+    assert all(kwargs["brainclaw_profile"] == BrainClawProfile.FREEZONE_RECIPE_TEXT_GENERATION
+               for _, kwargs in model_requests)
+
+
+def test_plan_stage_native_schema_is_strict_compatible_and_closes_known_turns():
+    from novelvideo.freezone.remix.production_plan_draft_stages import draft_stage_native_schema
+
+    unsupported = {"allOf", "if", "then", "else", "oneOf", "not", "patternProperties"}
+
+    def check(fragment):
+        if isinstance(fragment, list):
+            for item in fragment:
+                check(item)
+        elif isinstance(fragment, dict):
+            assert not unsupported.intersection(fragment)
+            if fragment.get("type") == "object":
+                assert fragment["additionalProperties"] is False
+                assert set(fragment["required"]) == set(fragment["properties"])
+            for value in fragment.values():
+                check(value)
+
+    outline = draft_stage_native_schema("outline")
+    arrangement = draft_stage_native_schema("arrangement", turn_ids=["turn-1", "turn-2"])
+    check(outline)
+    check(arrangement)
+    bindings = arrangement["properties"]["speech_bindings"]
+    assert set(bindings["properties"]) == {"turn-1", "turn-2"}
+    assert bindings["properties"]["turn-1"]["type"] == ["string", "null"]
+
+
+@pytest.mark.asyncio
+async def test_plan_stage_uses_native_strict_output_and_returns_stage_json(monkeypatch):
+    import time
+    from pydantic_ai import NativeOutput
+    from novelvideo.freezone.remix.production_plan_execution import PlanExecutionPolicy
+
+    captured = []
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: {
+        "id": "reference-production-plan", "output_kind": "text", "system_prompt": "规划作品",
+        "output_schema": {"type": "object"},
+    })
+
+    class FakeAgent:
+        def __init__(self, _model, **kwargs):
+            captured.append(kwargs)
+
+        async def run(self, task, *, model_settings):
+            return SimpleNamespace(output={
+                "creative_direction": "保留结构", "output": {
+                    "width": 1080, "height": 1920, "fps_num": 30, "fps_den": 1,
+                    "background": None,
+                }, "beats": [],
+            }, usage=lambda: SimpleNamespace(output_tokens=10))
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *args, **kwargs: SimpleNamespace(model_name="writer"))
+    content = await recipe_runtime.generate_recipe_text(
+        username="local", recipe_id="reference-production-plan", node_kind="text",
+        node_prompt="规划", production_plan_stage="outline",
+        plan_policy=PlanExecutionPolicy(10, 200, False),
+        plan_deadline=time.monotonic() + 5,
+    )
+    assert isinstance(captured[0]["output_type"], NativeOutput)
+    assert captured[0]["output_type"].strict is True
+    assert json.loads(content)["output"] == {
+        "width": 1080, "height": 1920, "fps_num": 30, "fps_den": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_builtin_plan_stage_tasks_carry_one_stage_schema_and_confirmed_context(monkeypatch):
+    import time
+    from pydantic import TypeAdapter
+    from novelvideo.freezone.remix.production_plan_execution import PlanExecutionPolicy
+
+    recipe_path = Path(__file__).parents[1] / (
+        "src/novelvideo/freezone/agent_catalog/builtins/recipes/reference-production-plan.json")
+    builtin_recipe = json.loads(recipe_path.read_text())
+    monkeypatch.setattr(recipe_runtime, "get_recipe_for_runtime", lambda **_kwargs: builtin_recipe)
+    tasks = []
+    schemas = []
+
+    class FakeAgent:
+        def __init__(self, _model, **kwargs):
+            assert kwargs["retries"] == 0
+            schemas.append(TypeAdapter(kwargs["output_type"].outputs).json_schema())
+
+        async def run(self, task, *, model_settings):
+            tasks.append(task)
+            return SimpleNamespace(output="{}", usage=lambda: SimpleNamespace(output_tokens=2))
+
+    monkeypatch.setattr(recipe_runtime, "Agent", FakeAgent)
+    monkeypatch.setattr("novelvideo.config.get_newapi_text_pydantic_model",
+                        lambda *args, **kwargs: SimpleNamespace(model_name="writer"))
+    context = {"requirements": {"dialogue": {"mode": "use_confirmed_text"}},
+               "locked_turns": [{"speaker": "甲", "text": "黑咖啡。"}],
+               "draft_outline": {"beats": [{"id": "beat-1", "turns": [
+                   {"id": "turn-1", "speaker": "甲", "text": "黑咖啡。"}]}]}}
+    for stage in ("outline", "arrangement"):
+        await recipe_runtime.generate_recipe_text(
+            username="alice", recipe_id="reference-production-plan", node_kind="text",
+            node_prompt="已确认方向", structured_upstream=context,
+            upstream_text=json.dumps(context, ensure_ascii=False),
+            production_plan_stage=stage,
+            plan_policy=PlanExecutionPolicy(10, 200, False),
+            plan_deadline=time.monotonic() + 5,
+        )
+    assert set(schemas[0]["properties"]) == {"creative_direction", "output", "beats"}
+    assert set(schemas[1]["properties"]) == {"selections", "placements", "speech_bindings"}
+    assert set(schemas[1]["properties"]["speech_bindings"]["properties"]) == {"turn-1"}
+    assert all("黑咖啡。" in task and "use_confirmed_text" in task for task in tasks)
 
 
 @pytest.mark.asyncio

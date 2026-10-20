@@ -45,6 +45,9 @@ def test_stable_contract_registers_remix_nodes_and_typed_processing_actions() ->
         "align_script",
         "compile_semantic_timeline",
         "render_manifest",
+        "generate_production_plan_draft", "generate_production_plan_arrangement",
+        "align_production_speech",
+        "compile_production_plan",
     ]
     assert PROCESSING_ACTION_INPUT_ROLES["analyze_reference_video"] == ["reference_media"]
     assert PROCESSING_ACTION_INPUT_ROLES["render_manifest"] == ["composition_manifest"]
@@ -54,6 +57,10 @@ def test_stable_contract_registers_remix_nodes_and_typed_processing_actions() ->
         "align_script": ["narration", "script"],
         "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
         "render_manifest": ["composition_manifest"],
+        "generate_production_plan_draft": ["blueprint"],
+        "generate_production_plan_arrangement": ["production_plan"],
+        "align_production_speech": ["production_plan"],
+        "compile_production_plan": ["production_plan"],
     }
     assert DEFAULT_OUTPUT_ROLES["videoStoryNode"] == "blueprint"
     assert DEFAULT_OUTPUT_ROLES["transcriptNode"] == "aligned_words"

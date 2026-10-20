@@ -14,7 +14,7 @@ vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo' }) }));
 const attachRemixMedia = vi.hoisted(() => vi.fn());
 vi.mock('@/api/remix', () => ({ attachRemixMedia }));
 
-import { startSourceTranscript } from './startSourceTranscript';
+import { isSourceTranscriptPreparing, startSourceTranscript } from './startSourceTranscript';
 
 describe('startSourceTranscript', () => {
   beforeEach(() => {
@@ -109,5 +109,25 @@ describe('startSourceTranscript', () => {
     state.addEdge.mockReturnValueOnce(null);
     await expect(startSourceTranscript('audio-1')).rejects.toThrow('连接转写节点失败');
     expect(state.nodes).toHaveLength(1);
+  });
+  it.each([{ autoStart: true, reuseExisting: false }, { autoStart: false, reuseExisting: true }, { autoStart: true, reuseExisting: true }, { autoStart: false, reuseExisting: false }])('exposes exact source preparation and releases it for %o', async options => {
+    let release!: (value: unknown) => void;
+    attachRemixMedia.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    state.nodes[0].id = 'audio:child';
+    const pending = startSourceTranscript('audio:child', options);
+    expect(isSourceTranscriptPreparing('audio:child')).toBe(true);
+    expect(isSourceTranscriptPreparing('audio')).toBe(false);
+    release({ media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true });
+    await pending;
+    expect(isSourceTranscriptPreparing('audio:child')).toBe(false);
+  });
+  it('reuses a synchronously submitting transcript without adding an auto-start behind it', async () => {
+    state.nodes[0].data.remixMedia = { media_path: 'freezone/_uploads/voice.wav', media_hash: 'hash', media_kind: 'audio', has_audio: true };
+    state.nodes.push({ id: 'transcript-1', type: 'transcriptNode', data: { words: [], sourceMediaPath: 'freezone/_uploads/voice.wav', sourceMediaHash: 'hash', transcriptSubmissionPending: 'actual-submission', autoStartMode: null } });
+    state.edges.push({ source: 'audio-1', target: 'transcript-1' });
+    await expect(startSourceTranscript('audio-1')).resolves.toBe('transcript-1');
+    expect(state.addNode).not.toHaveBeenCalled();
+    expect(state.nodes[1].data.autoStartMode).toBeNull();
+    expect(state.nodes[1].data.transcriptSubmissionPending).toBe('actual-submission');
   });
 });

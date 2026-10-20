@@ -38,21 +38,15 @@ interface Props {
   events: ReferenceEvent[];
   videoUrl?: string | null;
   onOverrideChange?: (eventId: string, patch: ReferenceEventPatch) => void;
-  onReviewAll?: () => void;
 }
 
-export function ReferenceEventList({ events, videoUrl, onOverrideChange, onReviewAll }: Props) {
+export function ReferenceEventList({ events, videoUrl, onOverrideChange }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
-  const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
 
   return <div className="ui-scrollbar nowheel h-full overflow-auto text-xs text-text-dark">
     <div className="border-b border-white/[0.08] px-3 py-2 text-text-muted">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span>按原片时间排列 · {events.length} 个事件</span>
-        {events.length > 0 && <div className="flex items-center gap-2">
-          <span className={pendingReviewCount > 0 ? 'text-amber-300' : 'text-emerald-300'}>{pendingReviewCount > 0 ? `还剩 ${pendingReviewCount} 项待核对` : '已全部核对'}</span>
-          {pendingReviewCount > 0 && onReviewAll && <button type="button" onClick={onReviewAll} className="tap-button tap-button-quiet-primary nodrag">全部标记为已核对</button>}
-        </div>}
       </div>
       <div className="mt-1">展开事件可修正画面描述和字幕，也可修改叙事作用；台词错词请在转写节点保存校字后重新分析原片。</div>
     </div>
@@ -65,43 +59,35 @@ export function ReferenceEventList({ events, videoUrl, onOverrideChange, onRevie
       const visualText = event.user_visual_observation ?? event.visual_observation;
       const captionText = event.user_visible_text ?? event.visible_text;
       const narrativeText = event.user_narrative_role ?? event.narrative_inference;
-      const reviewState = event.review_state ?? 'needs_review';
       return <div key={eventId} className="border-b border-white/[0.06]">
       <button type="button" className="nodrag flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-white/[0.04]" onClick={() => setSelected((current) => current === index ? null : index)}>
         <span className="w-20 shrink-0 font-mono text-[11px] text-text-muted">{seconds(event.start_us)}–{seconds(event.end_us)} 秒</span>
         {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-14 w-10 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
         <span className="grid min-w-0 flex-1 gap-1">
-          <span className={selected === index ? '' : 'line-clamp-2'}><span className="mr-2 text-text-muted">画面{event.user_visual_observation !== undefined ? ' · 已修正' : ''}</span>{event.note_status === 'missing_frame' ? '画面未核实' : visualText || '待核对画面'}</span>
+          <span className={selected === index ? '' : 'line-clamp-2'}><span className="mr-2 text-text-muted">画面{event.user_visual_observation !== undefined ? ' · 已修正' : ''}</span>{event.note_status === 'missing_frame' ? '画面未核实' : visualText || '暂无画面描述'}</span>
           <span className={selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">同期台词</span>{spokenText || '无同期台词'}</span>
           {event.user_visible_text !== undefined && <span className={selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">画面字幕 · 已修正</span>{captionText || '无可见字幕'}</span>}
           {event.user_visible_text === undefined && (event.transcript_warnings ?? []).map((warning, warningIndex) => <span key={`${warning.transcript_word}-${warning.caption_word}-${warningIndex}`} className="text-amber-300">疑似转写错词：{warning.transcript_word} → 画面字幕 {warning.caption_word}</span>)}
           <span className={selected === index ? '' : 'line-clamp-1'}><span className="mr-2 text-text-muted">叙事作用{event.user_narrative_role !== undefined ? ' · 已修正' : ''}</span>{narrativeText || '待补充'}</span>
           {observedFrame && <span className="font-mono text-[11px] text-text-muted">画面 {seconds(observedFrame.time_us)} 秒 · PTS {observedFrame.pts ?? '未知'} · {observedFrame.time_base ?? '未知 time_base'}</span>}
         </span>
-        <span className="grid shrink-0 justify-items-end gap-1 text-[11px]"><span className={reviewState === 'reviewed' ? 'text-emerald-300' : 'text-amber-300'}>{event.note_status === 'missing_frame' ? '缺少画面' : reviewState === 'reviewed' ? '已核对' : reviewState === 'reviewed_uncertain' ? '已核对 · 保留不确定' : '待核对'}</span><span className="text-text-muted">{selected === index ? '收起校对' : '展开校对'}</span></span>
+        <span className="grid shrink-0 justify-items-end gap-1 text-[11px]">{event.note_status === 'missing_frame' ? <span className="text-warning">缺少画面</span> : null}<span className="text-text-muted">{selected === index ? '收起编辑' : '展开编辑'}</span></span>
       </button>
-      {onOverrideChange && <div className="nodrag grid grid-cols-[1fr_auto] gap-2 px-3 pb-2">
+      {onOverrideChange && <div className="nodrag grid gap-2 px-3 pb-2">
         <label className="text-[11px] text-text-muted">叙事作用 · 你的判断
           <input aria-label={`事件 ${index + 1} 叙事作用`} value={event.user_narrative_role ?? event.narrative_inference ?? ''} onChange={(change) => onOverrideChange(eventId, { narrativeRole: change.target.value })} className="mt-1 w-full rounded-[12px] border border-border-dark bg-surface-field px-2 py-1 text-text-dark" />
-        </label>
-        <label className="text-[11px] text-text-muted">核对状态
-          <select aria-label={`事件 ${index + 1} 核对状态`} value={reviewState} onChange={(change) => onOverrideChange(eventId, { reviewState: change.target.value as ReferenceEvent['review_state'] })} className="mt-1 block rounded-[12px] border border-border-dark bg-surface-field px-2 py-1 text-text-dark">
-            <option value="needs_review">待核对</option>
-            <option value="reviewed">已核对</option>
-            <option value="reviewed_uncertain">已核对，保留不确定</option>
-          </select>
         </label>
       </div>}
       {selected === index && <div className="border-t border-white/[0.06] bg-surface-field/40 px-3 py-2">
         {videoUrl && <video key={index} aria-label="原片事件预览" src={videoUrl} controls className="mb-2 max-h-32 w-full" ref={(element) => { if (element) element.currentTime = event.start_us / 1_000_000; }} onTimeUpdate={(playback) => { if (playback.currentTarget.currentTime >= event.end_us / 1_000_000) playback.currentTarget.pause(); }} />}
         {onOverrideChange && <div className="nodrag mb-2 grid gap-2">
-          <label className="text-[11px] text-text-muted">画面描述 · 你核对后的内容
+          <label className="text-[11px] text-text-muted">画面描述 · 可修正
             <textarea aria-label={`事件 ${index + 1} 画面描述`} value={visualText ?? ''} onChange={(change) => onOverrideChange(eventId, { visualObservation: change.target.value })} rows={2} className="ui-field mt-1 w-full resize-y px-2 py-1.5 text-xs text-text-dark" />
           </label>
           <label className="text-[11px] text-text-muted">画面字幕 · 只写实际可见的字
             <input aria-label={`事件 ${index + 1} 画面字幕`} value={captionText ?? ''} onChange={(change) => onOverrideChange(eventId, { visibleText: change.target.value })} className="ui-field mt-1 w-full px-2 py-1.5 text-xs text-text-dark" />
           </label>
-          <p className="text-[11px] text-text-muted">修正后请再选择核对状态；同期台词请到转写节点校字。</p>
+          <p className="text-[11px] text-text-muted">修改会保存在原片分析节点；同期台词请到转写节点校字。</p>
         </div>}
         <details className="nodrag text-[11px] text-text-muted"><summary className="cursor-pointer">查看时间与证据</summary>
           <p className="mt-1">分析画面时间：{observedFrame ? `${seconds(observedFrame.time_us)} 秒` : event.analysis_frame_time_us == null ? '暂无' : `${seconds(event.analysis_frame_time_us)} 秒`}</p>

@@ -21,6 +21,8 @@ const translations: Record<string, string> = {
   "node.menu.video": "视频",
   "node.menu.audio": "音频",
   "node.menu.videoStory": "视频故事",
+  "node.menu.transcript": "转写/对齐",
+  "node.menu.semanticTimeline": "语义时间轴",
   "node.menu.videoCompose": "视频合成",
   "node.menu.script": "脚本",
   "node.menu.pano360Viewer": "360° 全景",
@@ -36,6 +38,21 @@ vi.mock("react-i18next", () => ({
 }));
 
 describe("NodeSelectionMenu", () => {
+  it("hides retired semantic timelines while retaining active node choices", () => {
+    render(
+      <NodeSelectionMenu
+        position={{ x: 12, y: 16 }}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "语义时间轴" })).not.toBeInTheDocument();
+    for (const name of ["转写/对齐", "视频故事", "视频合成", "视频", "音频", "脚本", "上传资源", "360° 全景", "3D 世界"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
   it("shows standalone shot context in the add-node menu", () => {
     render(
       <NodeSelectionMenu

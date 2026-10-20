@@ -14,7 +14,7 @@ describe('SegmentReferenceEditor', () => {
     render(<SegmentReferenceEditor bindings={[]} nodes={nodes} onChange={onChange} />);
     expect(screen.getByText('未使用参考素材')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
-    expect(onChange).toHaveBeenCalledWith([{ nodeId: 'portrait', purpose: '参考画面内容' }]);
+    expect(onChange).toHaveBeenCalledWith([{ nodeId: 'portrait', purpose: '' }]);
   });
 
   it('shows legacy bindings and permits changing purpose or removing one', () => {

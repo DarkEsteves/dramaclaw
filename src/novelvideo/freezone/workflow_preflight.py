@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 import math
 
-from novelvideo.api.schemas import FREEZONE_DEFAULT_IMAGE_MODEL
+from novelvideo.freezone.generation_defaults import FREEZONE_DEFAULT_IMAGE_MODEL
 from novelvideo.freezone.video_node import FREEZONE_DEFAULT_VIDEO_BACKEND
 
 _RECOMMENDED_GENERATION_MODEL_VALUES = {
@@ -39,6 +39,14 @@ _VIDEO_CATALOG_MODES = {
     "allReference": "all_reference",
     "videoEdit": "video_edit",
 }
+
+
+def is_production_material_node(node: dict[str, Any]) -> bool:
+    data = node.get('data') if isinstance(node.get('data'), dict) else {}
+    catalog = data.get('workflowCatalog') if isinstance(data.get('workflowCatalog'), dict) else {}
+    return (node.get('node_type') == 'videoNode'
+            and catalog.get('skillId') == 'reference-video-remix'
+            and bool(catalog.get('stepId')) and bool(catalog.get('recipeId')))
 
 
 def _preferred_option(entry: dict[str, Any], key: str, preferences: tuple[str, ...]) -> str | None:
@@ -185,7 +193,7 @@ def resolve_generation_recommendations(
             minimum = entry.get("minDuration")
             maximum = entry.get("maxDuration")
             duration = data.get("durationSec")
-            if duration is None:
+            if duration is None and not is_production_material_node(node):
                 duration = 5
                 if isinstance(minimum, (int, float)) and minimum > duration:
                     duration = int(math.ceil(minimum))
@@ -243,8 +251,36 @@ def _video_duration_blockers(node: dict[str, Any]) -> list[dict[str, Any]]:
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
     node_id = str(node.get("id") or "video").strip()
     duration = data.get("durationSec")
+    if is_production_material_node(node) and duration is not None and type(duration) is not int:
+        return [{
+            'path': f'runtime.models.{node_id}.durationSec',
+            'code': 'production_node_duration_invalid',
+            'message': f'Material step {data["workflowCatalog"]["stepId"]} needs an integer durationSec of 4–15 seconds; got {duration!r}',
+            'recovery': 'plan_node_duration',
+            'node_id': node_id,
+            'step_id': data['workflowCatalog']['stepId'],
+        }]
+    if is_production_material_node(node) and duration is not None and not 4 <= duration <= 15:
+        return [{
+            'path': f'runtime.models.{node_id}.durationSec',
+            'code': 'production_node_duration_out_of_range',
+            'message': f'Material step {data["workflowCatalog"]["stepId"]} durationSec {duration} is outside 4–15 seconds',
+            'recovery': 'plan_node_duration',
+            'node_id': node_id,
+            'step_id': data['workflowCatalog']['stepId'],
+            'minimum': 4, 'maximum': 15,
+        }]
     if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0:
         return []
+    if is_production_material_node(node):
+        return [{
+            'path': f'runtime.models.{node_id}.durationSec',
+            'code': 'production_node_duration_required',
+            'message': 'Set this material step durationSec from its planned placement and the selected model capability',
+            'recovery': 'plan_node_duration',
+            'node_id': node_id,
+            'step_id': data['workflowCatalog']['stepId'],
+        }]
     return [
         {
             "path": f"runtime.models.{node_id}.durationSec",
@@ -588,11 +624,15 @@ def _workflow_node_capability_blockers(
         duration = float(data["durationSec"])
         minimum = catalog_entry.get("minDuration")
         maximum = catalog_entry.get("maxDuration")
+        declared = catalog_entry.get("durationOptions")
+        discrete = ([value for value in declared if type(value) is int and value > 0]
+                    if isinstance(declared, list) else [])
         if (
             isinstance(minimum, (int, float))
             and duration < float(minimum)
             or isinstance(maximum, (int, float))
             and duration > float(maximum)
+            or discrete and duration not in discrete
         ):
             blockers.append(
                 {
@@ -601,10 +641,12 @@ def _workflow_node_capability_blockers(
                         f"durationSec value {data['durationSec']!r} is not supported "
                         f"by model {model_id}"
                         f"; supported duration range: {minimum!r} to {maximum!r} seconds"
+                        + (f"; allowed values: {discrete!r}" if discrete else "")
                     ),
                     "code": "model_capability_unsupported",
                     "minimum": minimum,
                     "maximum": maximum,
+                    **({"allowed_values": discrete} if discrete else {}),
                 }
             )
     if (
@@ -768,6 +810,7 @@ def evaluate_workflow_preflight(
                                     "qualityOptions",
                                     "minDuration",
                                     "maxDuration",
+                                    "durationOptions",
                                     "supportsGenerateAudio",
                                     "supportedModes",
                                 )

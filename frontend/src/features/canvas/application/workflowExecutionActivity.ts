@@ -42,7 +42,14 @@ export interface WorkflowProductOperationContext {
   generationAttemptId?: string;
 }
 
+export interface WorkflowGenerationContext {
+  projectId: string;
+  workflowRunId: string;
+  generationAttemptId: string;
+}
+
 const workflowProductOperations = new Map<string, WorkflowProductOperationContext>();
+const workflowGenerationContexts = new Map<string, WorkflowGenerationContext>();
 
 export function bindWorkflowProductOperation(
   nodeId: string,
@@ -60,6 +67,25 @@ export function workflowProductOperation(
 
 export function clearWorkflowProductOperation(nodeId: string): void {
   workflowProductOperations.delete(nodeId);
+}
+
+export function bindWorkflowGenerationContext(
+  nodeId: string,
+  context: WorkflowGenerationContext,
+): void {
+  if (!nodeId.trim() || !context.projectId.trim() || !context.workflowRunId.trim()
+      || !context.generationAttemptId.trim()) return;
+  workflowGenerationContexts.set(nodeId, context);
+}
+
+export function workflowGenerationContext(
+  nodeId: string | null | undefined,
+): WorkflowGenerationContext | undefined {
+  return nodeId ? workflowGenerationContexts.get(nodeId) : undefined;
+}
+
+export function clearWorkflowGenerationContext(nodeId: string): void {
+  workflowGenerationContexts.delete(nodeId);
 }
 
 export function reportWorkflowExecutionActivity(

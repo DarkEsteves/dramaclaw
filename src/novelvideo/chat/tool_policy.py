@@ -121,16 +121,42 @@ FREEZONE_CANVAS_WRITE_TOOLS: frozenset[str] = frozenset(
         "freezone_layout_nodes",
         "freezone_move_nodes",
         "freezone_open_mainline_projection",
+        "freezone_prepare_production_edit",
         "freezone_run_node_action",
         "freezone_run_workflow",
         "freezone_select_nodes",
         "freezone_update_node_data",
     }
 )
-"""Freezone tools that mutate the canvas and complete through the browser bridge receipt."""
+"""Canvas mutations requiring a browser receipt or an actual saved canvas revision."""
+
+FREEZONE_ARTIFACT_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "freezone_prepare_reference_decision",
+        "freezone_review_production_plan",
+        "freezone_prepare_reference_branches",
+        "freezone_associate_material_upload",
+        "freezone_review_production_output",
+        "freezone_prepare_material_work",
+        "freezone_prepare_material_stage",
+        "freezone_review_material_candidate",
+        "freezone_accept_material_candidate",
+        "freezone_retry_material_step",
+        "freezone_revise_material_strategy",
+        "freezone_prepare_speech_correction",
+        "freezone_select_material_work",
+        "freezone_advance_reference_production",
+        "freezone_advance_production",
+    }
+)
+"""Native director outcomes verified by saved refs, including server-owned production binding."""
+
+FREEZONE_BACKGROUND_SUBMISSION_TOOLS: frozenset[str] = frozenset({"freezone_start_reference_analysis"})
+"""Background operations acknowledged by their saved run and task identities."""
 
 FREEZONE_TERMINAL_WRITE_TOOLS: frozenset[str] = frozenset(
     {
+        "freezone_start_reference_analysis",
         "freezone_run_workflow",
     }
 )
@@ -138,6 +164,8 @@ FREEZONE_TERMINAL_WRITE_TOOLS: frozenset[str] = frozenset(
 
 FREEZONE_WORKFLOW_DRAFT_PREPARE_TOOLS: frozenset[str] = frozenset(
     {
+        "freezone_prepare_material_work",
+        "freezone_prepare_material_stage",
         "freezone_prepare_workflow_draft",
         "freezone_prepare_workflow_plan_draft",
     }
@@ -155,14 +183,19 @@ FREEZONE_WORKFLOW_DRAFT_TOOLS: frozenset[str] = (
 )
 """Workflow draft tools. Repeated reads of these are legitimate and exempt from the read guard."""
 
-AGENT_PRODUCT_RESULT_TOOLS: frozenset[str] = frozenset(
+AGENT_WORKFLOW_RESULT_TOOLS: frozenset[str] = frozenset(
     {
         "freezone_prepare_workflow",
         "freezone_prepare_workflow_draft",
         "freezone_prepare_workflow_plan_draft",
-        "freezone_put_agent_catalog_recipe",
-        "freezone_put_agent_catalog_skill",
+        "freezone_prepare_material_work",
+        "freezone_prepare_material_stage",
     }
+)
+"""Workflow-result tools whose actual call carries its admitted operation_id."""
+
+AGENT_PRODUCT_RESULT_TOOLS: frozenset[str] = AGENT_WORKFLOW_RESULT_TOOLS | frozenset(
+    {"freezone_put_agent_catalog_recipe", "freezone_put_agent_catalog_skill"}
 )
 """Tools whose result binds an admitted Agent product operation to the executing tool call."""
 

@@ -70,6 +70,30 @@ async def _resume_director_auto_best_effort(application: FastAPI) -> None:
         application.state.director_auto_startup_error = ""
 
 
+async def _resume_reference_remix_best_effort(application: FastAPI) -> None:
+    """Recover the opt-in reference Skill without changing API availability."""
+    try:
+        from novelvideo.chat.reference_remix_continuation import (
+            automatic_reference_continuation_enabled, coordinator,
+        )
+
+        if not automatic_reference_continuation_enabled():
+            application.state.reference_remix_available = False
+            application.state.reference_remix_startup_error = "automatic reference continuation is disabled"
+            return
+
+        await coordinator.resume()
+        from novelvideo.chat.reference_production_observer import observer
+        await observer.resume()
+    except Exception as exc:
+        application.state.reference_remix_available = False
+        application.state.reference_remix_startup_error = str(exc)
+        logger.exception("Reference remix recovery failed (non-fatal)")
+    else:
+        application.state.reference_remix_available = True
+        application.state.reference_remix_startup_error = ""
+
+
 def _request_body_limit(request: Request) -> int:
     content_type = request.headers.get("content-type", "").lower()
     if (
@@ -428,6 +452,7 @@ def create_app() -> FastAPI:
             raise
 
         await _resume_director_auto_best_effort(application)
+        await _resume_reference_remix_best_effort(application)
 
     @application.on_event("shutdown")
     async def shutdown() -> None:
@@ -448,6 +473,11 @@ def create_app() -> FastAPI:
         close_piko_world = getattr(piko_world_hub, "close", None)
         if close_piko_world is not None:
             await close_piko_world()
+        from novelvideo.chat.reference_remix_continuation import coordinator as reference_remix_coordinator
+
+        from novelvideo.chat.reference_production_observer import observer as reference_production_observer
+        await reference_production_observer.shutdown()
+        await reference_remix_coordinator.shutdown()
 
         try:
             lifecycle = get_port("lifecycle")
@@ -456,6 +486,8 @@ def create_app() -> FastAPI:
         await lifecycle.on_shutdown()
 
     application.include_router(api_router)
+    from novelvideo.api.routes.canvas_context import router as canvas_context_router
+    application.include_router(canvas_context_router, prefix="/api/v1")
 
     @application.get(
         "/static/projects/{project}/{file_path:path}", include_in_schema=False

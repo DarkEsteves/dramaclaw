@@ -114,6 +114,20 @@ export async function apiCall<T>(
   }
 }
 
+/** Read an authorized binary response through the same session-aware client. */
+export async function apiBlob(path: string, options?: Options): Promise<Blob> {
+  try {
+    return await baseClient(path, options).blob();
+  } catch (err) {
+    if (err instanceof HTTPError) {
+      const cause = (err as HTTPError & { cause?: unknown }).cause;
+      if (cause instanceof Error) throw cause;
+      throw new ApiError(err.message, err.response.status);
+    }
+    throw err;
+  }
+}
+
 /**
  * 同 {@link apiCall}，但把**整个信封**交给调用方。
  *

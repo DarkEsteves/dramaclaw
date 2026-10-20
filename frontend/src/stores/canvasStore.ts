@@ -1305,7 +1305,7 @@ function sortParentNodesBeforeChildren(nodes: CanvasNode[]): CanvasNode[] {
   return sorted;
 }
 
-function normalizeCanvasData(
+export function normalizeCanvasData(
   rawNodes: CanvasNode[],
   rawEdges: CanvasEdge[],
 ): CanvasHistorySnapshot {
@@ -3440,6 +3440,50 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         // [FMV自动承接] 提示词段，而不是拖到下次生成入口（ensureVideoContinuity 的
         // independent 分支仍作幂等兑底）。手动参考边与已截帧图片节点保留。
         let preparedData = mergedData;
+        if (node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'production_plan') {
+          const previousPayload = node.data.processingPayload as Record<string, unknown> | undefined;
+          const nextPayload = nodePatch.processingPayload as Record<string, unknown> | undefined;
+          const previousDraft = node.data.productionPlanV2Draft as { goal?: unknown } | undefined;
+          const nextDraft = nodePatch.productionPlanV2Draft as { goal?: unknown } | undefined;
+          const payloadGoalChanged = typeof nextPayload?.topic === 'string'
+            && nextPayload.topic !== previousPayload?.topic;
+          const payloadConstraintsChanged = nextPayload != null
+            && ['requirements', 'locked_turns'].some((field) =>
+              JSON.stringify(nextPayload[field] ?? null) !== JSON.stringify(previousPayload?.[field] ?? null));
+          const editorGoalChanged = !node.data.productionPlanV2Ref
+            && nodePatch.productionPlanV2Dirty === true
+            && typeof nextDraft?.goal === 'string'
+            && nextDraft.goal !== previousDraft?.goal;
+          if (payloadGoalChanged || editorGoalChanged || payloadConstraintsChanged) {
+            const topic = editorGoalChanged ? nextDraft!.goal as string
+              : payloadGoalChanged ? nextPayload!.topic as string
+                : previousPayload?.topic as string;
+            const payload = { ...(mergedData.processingPayload ?? {}) } as Record<string, unknown>;
+            // A changed goal cannot inherit the old direction's signed hard
+            // constraints. Explicit constraints in this same edit remain valid.
+            for (const field of ['requirements', 'locked_turns', 'requirements_fingerprint', 'requirements_provenance']) {
+              if (!nextPayload || !Object.prototype.hasOwnProperty.call(nextPayload, field)) delete payload[field];
+            }
+            if (payloadConstraintsChanged) {
+              // Host-signed evidence for the previous constraint set cannot
+              // authorize the edited node, even when its topic is unchanged.
+              delete payload.requirements_fingerprint;
+              delete payload.requirements_provenance;
+            }
+            const draft = mergedData.productionPlanV2Draft as Record<string, unknown> | undefined;
+            preparedData = {
+              ...mergedData,
+              processingPayload: { ...payload, topic },
+              remixDirectionEdited: true,
+              ...(!node.data.productionPlanV2Ref && !node.data.productionPlanV2Dirty && draft
+                ? { productionPlanV2Draft: { ...draft, goal: topic } } : {}),
+              remixNodeRevision: Math.max(
+                Number(node.data.remixNodeRevision ?? 0) + 1,
+                Number(nodePatch.remixNodeRevision ?? 0),
+              ),
+            } as CanvasNodeData;
+          }
+        }
         if (
           fmvIndependentCleanup(
             node,

@@ -31,8 +31,11 @@ function metaString(t: TaskState, key: string): string {
  * 词条里有 `tasks.types.<task_type>` 就以词条为准，没有才退回后端那份（新任务类型上线
  * 时前端还没补词条，宁可显示中文也别显示裸 key）。
  */
-export const taskTypeLabel = (t: TaskState, tFn: TFn): string =>
-  tFn(`tasks.types.${t.task_type}`, { defaultValue: t.task_type_label || t.task_type });
+export const taskTypeLabel = (t: TaskState, tFn: TFn): string => {
+  if (t.task_type === 'remix_generate_production_plan_draft' && metaString(t, 'authoring_stage') === 'outline')
+    return tFn('tasks.types.production_plan_outline', { defaultValue: 'AI 生成结构与台词' });
+  return tFn(`tasks.types.${t.task_type}`, { defaultValue: t.task_type_label || t.task_type });
+};
 
 export const displayLabel = (t: TaskState, tFn: TFn): string => {
   // display_name_localizable === false 表示这串是用户自定义名称（画布名、素材名之类），
@@ -46,6 +49,7 @@ export const displayLabel = (t: TaskState, tFn: TFn): string => {
     // as the task title. Keep it available in task details for diagnostics.
     return typeLabel;
   }
+  if (["remix_generate_production_plan_draft", "remix_generate_production_plan_arrangement"].includes(t.task_type)) return typeLabel;
   if (["freezone_video_gen", "freezone_image_vectorize", "freezone_image_animate_gif"].includes(t.task_type)) {
     // scope is the opaque generation job id (for example 043a1944...); it is
     // useful in details but not meaningful as a task title.

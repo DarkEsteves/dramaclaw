@@ -43,6 +43,15 @@ describe('reference blueprint model', () => {
     expect(payload.observations).toEqual([expect.objectContaining({ description: '人物举杯', source: 'reference_event', verified: false })]);
     expect(payload.inferences).toEqual([expect.objectContaining({ interpretation: '产品登场', source: 'reference_event' })]);
   });
+  it('keeps analyzed row conversions usable without inventing a human review', () => {
+    const payload = buildReferenceBlueprint({
+      source: { mediaPath: 'reference.mp4', mediaHash: 'hash', durationUs: 2_000_000, videoUrl: '/video.mp4', transcriptRef: null },
+      rows: [{ startTime: '0', endTime: '1', visualDescription: '杯子特写', narrative: '引出产品' }],
+      narrativeRole: '产品演示', preserveRule: '', replaceRule: '', evidenceRef: { artifactId: 'evidence-1', revision: 1 },
+    });
+    expect(payload.events).toEqual([expect.objectContaining({ user_override: expect.objectContaining({ review_state: 'needs_review' }) })]);
+    expect(blueprintReadinessErrors(payload)).toEqual([]);
+  });
 
   it('links every event to an exact evidence frame and transcript range', () => {
     const payload = buildReferenceBlueprint({
@@ -113,6 +122,8 @@ describe('reference blueprint model', () => {
     };
     expect(blueprintReadinessErrors(payload)).toEqual(expect.arrayContaining([expect.stringMatching(/画面证据/)]));
     (payload.events[0].observed_frame.evidence_ref as { artifact_id: string; revision: number }) = { artifact_id: 'evidence-1', revision: 1 };
+    expect(blueprintReadinessErrors(payload)).toEqual([]);
+    payload.events[0].user_override.review_state = 'needs_review';
     expect(blueprintReadinessErrors(payload)).toEqual([]);
   });
 

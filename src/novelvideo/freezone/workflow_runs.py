@@ -54,6 +54,10 @@ PROCESSING_ACTION_ARTIFACT_SCHEMAS = {
     "transcribe_media": "word_timeline.v1",
     "align_script": "word_timeline.v1",
     "compile_semantic_timeline": "performance_timing.v1",
+    "generate_production_plan_draft": "production_plan.v2",
+    "generate_production_plan_arrangement": "production_plan.v2",
+    "align_production_speech": "word_timeline.v1",
+    "compile_production_plan": "composition_manifest.v2",
 }
 WORKFLOW_ACTIONS = GENERATION_ACTIONS | PROCESSING_ACTIONS | {"generate_html", "save"}
 NON_RETRYABLE_ERROR_MARKERS = {
@@ -806,6 +810,32 @@ def _workflow_request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _completed_action_subset_replay(
+    *, existing: dict[str, Any], requested: list[dict[str, Any]],
+    project_id: str, canvas_id: str,
+) -> bool:
+    """Accept a replay that omitted only already completed approved actions."""
+    original = existing.get("actions") or []
+    requested_keys = [(item["node_id"], item["action"]) for item in requested]
+    original_keys = [(item.get("node_id"), item.get("action")) for item in original]
+    if (not requested_keys or len(requested_keys) >= len(original_keys)
+            or [key for key in original_keys if key in requested_keys] != requested_keys):
+        return False
+    omitted = [item for item in original
+               if (item.get("node_id"), item.get("action")) not in requested_keys]
+    if not omitted or any(item.get("status") not in {"completed", "skipped"} for item in omitted):
+        return False
+    omitted_nodes = {item.get("node_id") for item in omitted}
+    remaining = [{**item, "depends_on": [node_id for node_id in item.get("depends_on") or []
+                                          if node_id not in omitted_nodes]}
+                 for item in original if (item.get("node_id"), item.get("action")) in requested_keys]
+    return _workflow_request_fingerprint(
+        project_id=project_id, canvas_id=canvas_id, actions=remaining,
+    ) == _workflow_request_fingerprint(
+        project_id=project_id, canvas_id=canvas_id, actions=requested,
+    )
+
+
 def bind_workflow_action_product_operation(
     *,
     project_dir: Path,
@@ -1019,6 +1049,71 @@ def bind_workflow_media_task(
         )
 
 
+def bind_workflow_generation_task(
+    *,
+    project_dir: Path,
+    canvas_id: str,
+    run_id: str,
+    node_id: str,
+    generation_attempt_id: str,
+    task_key: str,
+    task_type: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Persist a canvas generation task without requiring a Recipe operation."""
+    _validate_scope(canvas_id, run_id)
+    values = {
+        "node_id": str(node_id or "").strip(),
+        "attempt_id": str(generation_attempt_id or "").strip(),
+        "task_key": str(task_key or "").strip(),
+        "task_type": str(task_type or "").strip(),
+        "job_id": str(job_id or "").strip(),
+    }
+    if not all(values.values()):
+        raise ValueError("workflow generation task binding requires complete identity")
+    allowed = {
+        "generate_image": {"freezone_gen"},
+        "generate_video": {"freezone_video_gen"},
+        "generate_text_video": {"freezone_video_gen"},
+        "generate_audio": {"freezone_audio_speech", "freezone_audio_eleven_music"},
+    }
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        payload = _read_run(conn, canvas_id=canvas_id, run_id=run_id)
+        if payload is None:
+            raise ValueError("workflow run not found")
+        action = next(
+            (
+                item for item in payload.get("actions", [])
+                if isinstance(item, dict) and item.get("node_id") == values["node_id"]
+            ),
+            None,
+        )
+        if action is None or action.get("action") not in allowed:
+            raise ValueError("generation workflow action not found")
+        if action.get("generation_attempt_id") != values["attempt_id"]:
+            raise ValueError("generation attempt does not match workflow action")
+        if values["task_type"] not in allowed[action["action"]]:
+            raise ValueError("generation task type does not match workflow action")
+        for field, value in (("task_key", values["task_key"]), ("task_type", values["task_type"]), ("job_id", values["job_id"])):
+            existing = str(action.get(field) or "").strip()
+            if existing and existing != value:
+                raise ValueError("workflow generation action is bound to another task")
+        now = _now()
+        action.update(
+            status="running",
+            phase="generating",
+            updated_at=now,
+            error=None,
+            task_key=values["task_key"],
+            task_type=values["task_type"],
+            job_id=values["job_id"],
+        )
+        payload["updated_at"] = now
+        _write_run(conn, payload)
+        return payload
+
+
 def renew_workflow_media_claim(
     *,
     project_dir: Path,
@@ -1212,6 +1307,7 @@ def create_workflow_run(
     metadata: dict[str, Any] | None = None,
     idempotency_key: str = "",
     runner_id: str = "",
+    recover_runner: bool = False,
 ) -> dict[str, Any]:
     _validate_scope(canvas_id)
     checked_idempotency_key = idempotency_key.strip()
@@ -1232,6 +1328,11 @@ def create_workflow_run(
         actions=normalized_actions,
     )
     run_metadata = dict(metadata or {})
+    native_context = run_metadata.get("native_execution_context")
+    if isinstance(native_context, dict):
+        run_metadata["native_execution_context"] = {**native_context, "run_id": run_id}
+    if recover_runner and (not checked_runner_id or not run_metadata.get("canvas_bridge_key")):
+        raise ValueError("runner recovery requires an approved bridge and runner")
     run_metadata["request_fingerprint"] = request_fingerprint
     if checked_idempotency_key:
         run_metadata["idempotency_key"] = checked_idempotency_key
@@ -1282,15 +1383,52 @@ def create_workflow_run(
                             canvas_id=str(existing.get("canvas_id") or ""),
                             actions=existing.get("actions") or [],
                         )
-                    if existing_fingerprint != request_fingerprint:
+                    bridge_key = run_metadata.get("canvas_bridge_key")
+                    if bridge_key and existing_metadata.get("canvas_bridge_key") != bridge_key:
+                        raise WorkflowRunIdempotencyConflict(
+                            "workflow run idempotency key belongs to another canvas bridge"
+                        )
+                    same_request = existing_fingerprint == request_fingerprint
+                    if (not same_request and bridge_key
+                            and existing.get("project_id") == project_id
+                            and existing.get("canvas_id") == canvas_id
+                            and existing.get("actor_id") == (actor_id or None)):
+                        same_request = _completed_action_subset_replay(
+                            existing=existing, requested=normalized_actions,
+                            project_id=project_id, canvas_id=canvas_id,
+                        )
+                    if not same_request:
                         raise WorkflowRunIdempotencyConflict(
                             "workflow run idempotency key reused for a different request"
                         )
+                    if recover_runner:
+                        if existing.get("actor_id") != (actor_id or None):
+                            raise WorkflowRunIdempotencyConflict(
+                                "workflow run idempotency key belongs to another actor"
+                            )
+                        if existing.get("status") == "running":
+                            current_owner = str(existing.get("runner_id") or "").strip()
+                            expires = _parse_timestamp(existing.get("lease_expires_at"))
+                            if (current_owner and current_owner != checked_runner_id
+                                    and expires and expires > current):
+                                raise WorkflowRunLeaseConflict(
+                                    "another workflow runner is active on this canvas"
+                                )
+                            existing["runner_id"] = checked_runner_id
+                            existing["lease_expires_at"] = _lease_expires_at(current)
+                            existing["updated_at"] = now
+                            _write_run(conn, existing)
                     return existing
         existing_runs = _list_runs_in_transaction(conn, canvas_id=canvas_id)
         for existing in existing_runs:
             if existing.get("status") != "running":
                 continue
+            existing_metadata = existing.get("metadata") or {}
+            if (isinstance(existing_metadata, dict)
+                    and existing_metadata.get("native_completion_owner") == "host"):
+                raise WorkflowRunLeaseConflict(
+                    "a host-owned workflow is active on this canvas"
+                )
             existing_runner_id = str(existing.get("runner_id") or "").strip()
             lease_expires_at = _parse_timestamp(existing.get("lease_expires_at"))
             if existing_runner_id and lease_expires_at and lease_expires_at > current:
@@ -1483,6 +1621,12 @@ def interrupt_stale_workflow_runs(
             canvas_id=canvas_id,
             statuses={"running"},
         ):
+            metadata = payload.get("metadata") or {}
+            if (isinstance(metadata, dict)
+                    and metadata.get("native_completion_owner") == "host"):
+                # The host owns dispatch and task reconciliation after the
+                # browser leaves; a browser heartbeat is not its lease.
+                continue
             lease_expires_at = _parse_timestamp(payload.get("lease_expires_at"))
             updated_at = _parse_timestamp(payload.get("updated_at"))
             stale = (
@@ -1747,6 +1891,88 @@ def update_workflow_run(
         return payload
 
 
+def recover_completed_generation_task(
+    *,
+    project_dir: Path,
+    canvas_id: str,
+    run_id: str,
+    node_id: str,
+    task_key: str,
+    task_type: str,
+    job_id: str,
+    result_ref: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind an already completed generation task to its saved canvas action.
+
+    Generation nodes are submitted by the canvas node, so the browser can lose
+    its final PATCH after the task has already been accepted.  This recovery
+    only records a unique, provider-completed task identity and its verified
+    artifact.  It never enqueues work, changes the run status, or reopens a
+    cancelled run.
+    """
+    _validate_scope(canvas_id, run_id)
+    checked_node_id = str(node_id or "").strip()
+    checked_task_key = str(task_key or "").strip()
+    checked_task_type = str(task_type or "").strip()
+    checked_job_id = str(job_id or "").strip()
+    if not checked_node_id or not checked_task_key or not checked_task_type or not checked_job_id:
+        raise ValueError("completed generation recovery requires task identity")
+    if not isinstance(result_ref, dict) or not result_ref:
+        raise ValueError("completed generation recovery requires a result reference")
+    allowed_task_types = {
+        "generate_image": {"freezone_gen"},
+        "generate_video": {"freezone_video_gen"},
+        "generate_text_video": {"freezone_video_gen"},
+        "generate_audio": {"freezone_audio_speech", "freezone_audio_eleven_music"},
+    }
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        payload = _read_run(conn, canvas_id=canvas_id, run_id=run_id)
+        if payload is None:
+            raise ValueError("workflow run not found")
+        action = next(
+            (
+                item for item in payload.get("actions", [])
+                if isinstance(item, dict)
+                and item.get("node_id") == checked_node_id
+                and item.get("action") in allowed_task_types
+            ),
+            None,
+        )
+        if action is None:
+            raise ValueError("generation workflow action not found")
+        if checked_task_type not in allowed_task_types[action["action"]]:
+            raise ValueError("completed generation task type does not match action")
+        existing_task_key = str(action.get("task_key") or "").strip()
+        if existing_task_key and existing_task_key != checked_task_key:
+            raise ValueError("generation workflow action is bound to another task")
+        existing_task_type = str(action.get("task_type") or "").strip()
+        if existing_task_type and existing_task_type != checked_task_type:
+            raise ValueError("generation workflow action is bound to another task type")
+        existing_job_id = str(action.get("job_id") or "").strip()
+        if existing_job_id and existing_job_id != checked_job_id:
+            raise ValueError("generation workflow action is bound to another job")
+        now = _now()
+        action.update(
+            status="completed",
+            phase="syncing_result",
+            updated_at=now,
+            error=None,
+            task_key=checked_task_key,
+            task_type=checked_task_type,
+            job_id=checked_job_id,
+            artifact_status="valid",
+            result_ref=dict(result_ref),
+        )
+        metadata = payload.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        metadata["last_generation_task_recovery_at"] = now
+        payload["metadata"] = metadata
+        payload["updated_at"] = now
+        _write_run(conn, payload)
+        return payload
+
+
 def workflow_media_failure_awaits_retry(
     *, project_dir: Path, run: dict[str, Any], action: dict[str, Any], error: str | None
 ) -> bool:
@@ -1841,13 +2067,14 @@ def _processing_operation_proof(
     ):
         return "invalid", "processing operation identity does not match workflow action", None
     parameters = operation.get("normalized_parameters")
+    expected_payload = item.get("payload") or {}
     if not isinstance(parameters, dict) or (
         parameters.get("action") != item.get("action")
-        or parameters.get("payload") != (item.get("payload") or {})
+        or parameters.get("payload") != expected_payload
     ):
         return "invalid", "processing operation inputs do not match workflow action", None
     expected_inputs = []
-    for key in ("script_ref", "word_timeline_ref", "blueprint_ref", "manifest_ref"):
+    for key in ("script_ref", "word_timeline_ref", "blueprint_ref", "manifest_ref", "plan_ref"):
         ref = (item.get("payload") or {}).get(key)
         if isinstance(ref, dict):
             expected_inputs.append({
@@ -1865,6 +2092,49 @@ def _processing_operation_proof(
     if not isinstance(task_output, dict) or operation.get("output_refs") != [task_output]:
         return "invalid", "processing operation output does not match task result", None
     return "valid", None, task_output
+
+
+def _recover_processing_task_identity(
+    *, item: dict[str, Any], run: dict[str, Any], tasks_by_key: dict[str, dict[str, Any]], artifact_project_dir: Path,
+) -> dict[str, str] | None:
+    """Repair the enqueue→workflow-write gap using immutable operation proof.
+
+    This only associates an already submitted task. It neither dispatches work
+    nor takes a runner lease, so read-side reconciliation can report its outcome
+    after the browser runner expired.
+    """
+    action = str(item.get("action") or "")
+    operation_id = str(item.get("processing_operation_id") or "")
+    if action not in PROCESSING_ACTIONS or not operation_id or item.get("task_key"):
+        return None
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.task_identity import project_task_state_key
+    try:
+        operation = RemixOperationStore(artifact_project_dir, str(run["project_id"])).get(operation_id)
+    except (FileNotFoundError, ValueError):
+        return None
+    expected_payload = item.get("payload") or {}
+    parameters = operation.get("normalized_parameters") or {}
+    if (operation.get("canvas_id") != run.get("canvas_id") or operation.get("node_id") != item.get("node_id")
+            or operation.get("node_revision") != item.get("node_revision") or not operation.get("task_id")
+            or parameters.get("action") != action or parameters.get("payload") != expected_payload):
+        return None
+    expected_inputs = []
+    for key in ("script_ref", "word_timeline_ref", "blueprint_ref", "manifest_ref", "plan_ref"):
+        ref = (item.get("payload") or {}).get(key)
+        if isinstance(ref, dict):
+            expected_inputs.append({"artifact_id": ref.get("artifact_id"), "revision": ref.get("revision"), "project_id": run["project_id"]})
+    if operation.get("input_refs") != expected_inputs:
+        return None
+    task_type = "remix_render" if action == "render_manifest" else f"remix_{action}"
+    scope = str(parameters.get("job_id") or "") if action == "render_manifest" else operation_id
+    if not scope:
+        return None
+    task_key = project_task_state_key(task_type, str(run["project_id"]), 0, scope=scope)
+    task = tasks_by_key.get(task_key)
+    if not isinstance(task, dict) or task.get("task_id") != operation["task_id"]:
+        return None
+    return {"task_key": task_key, "task_type": task_type, "job_id": scope}
 
 
 def reconcile_workflow_runs_with_tasks(
@@ -1907,6 +2177,16 @@ def reconcile_workflow_runs_with_tasks(
                 ):
                     continue
                 task_key = str(item.get("task_key") or "").strip()
+                if not task_key and item.get("processing_operation_id"):
+                    recovered = _recover_processing_task_identity(
+                        item=item, run=payload, tasks_by_key=tasks_by_key,
+                        artifact_project_dir=artifact_project_dir or project_dir,
+                    )
+                    if recovered is not None:
+                        item.update(recovered)
+                        item["updated_at"] = timestamp
+                        task_key = recovered["task_key"]
+                        changed = True
                 task = tasks_by_key.get(task_key) if task_key else None
                 if not isinstance(task, dict):
                     continue
@@ -2007,6 +2287,26 @@ def reconcile_workflow_runs_with_tasks(
                 if any(item.get(key) != value for key, value in updates.items()):
                     item.update(updates)
                     item["updated_at"] = timestamp
+                    changed = True
+            # A failed prerequisite can never produce the input for its pending
+            # descendants. Settle the whole failed branch instead of leaving a
+            # run apparently active forever after its only task has ended.
+            failed_nodes = {
+                str(item.get("node_id") or "")
+                for item in actions
+                if isinstance(item, dict) and item.get("status") == "failed"
+            }
+            while failed_nodes:
+                blocked = [
+                    item for item in actions
+                    if isinstance(item, dict) and item.get("status") == "pending"
+                    and any(dependency in failed_nodes for dependency in item.get("depends_on") or [])
+                ]
+                if not blocked:
+                    break
+                for item in blocked:
+                    item.update(status="blocked", error="prerequisite action failed", updated_at=timestamp)
+                    failed_nodes.add(str(item.get("node_id") or ""))
                     changed = True
             if not changed:
                 continue

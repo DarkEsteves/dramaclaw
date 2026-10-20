@@ -89,6 +89,7 @@ import {
   type ComposeTrackKind,
 } from "./timelineModel";
 import { CoverEditor } from "./CoverEditor";
+import { ProductionComposeWorkspace } from "./ProductionComposeWorkspace";
 import { useComposePlayback } from "./useComposePlayback";
 import { getFilmstrip, pickFrame, type FilmstripFrame } from "./filmstrip";
 
@@ -106,6 +107,9 @@ export interface VideoComposeModalProps {
   initialTimeline?: ComposeTimelineState | null;
   /** 关闭弹窗时回传当前时间线，供宿主持久化为草稿。 */
   onPersistDraft?: (timeline: ComposeTimelineState) => void;
+  /** Production plans reuse this same full-screen editor entry point. */
+  productionPlanNodeId?: string;
+  composeNodeId?: string;
 }
 
 interface SelectedClipRef {
@@ -589,7 +593,7 @@ function SyncedAudioTrack({
   return <audio ref={ref} className="hidden" />;
 }
 
-export function VideoComposeModal({
+function ManualVideoComposeModal({
   project,
   canvasId,
   seedNodeIds,
@@ -2275,6 +2279,14 @@ export function VideoComposeModal({
     </div>,
     document.body,
   );
+}
+
+export function VideoComposeModal(props: VideoComposeModalProps) {
+  if (props.productionPlanNodeId && props.composeNodeId) {
+    return <ProductionComposeWorkspace project={props.project} canvasId={props.canvasId}
+      planNodeId={props.productionPlanNodeId} composeNodeId={props.composeNodeId} onClose={props.onClose} />;
+  }
+  return <ManualVideoComposeModal {...props} />;
 }
 
 // Wrap zoom icons so ToolButton's `icon` typing stays a single component type.

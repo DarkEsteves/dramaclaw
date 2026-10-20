@@ -188,7 +188,6 @@ interface FullscreenStoryTableProps {
   events: ReferenceEvent[];
   onCellCommit: (rowIndex: number, colKey: keyof VideoStoryRow, nextValue: string) => void;
   onOverrideChange: (eventId: string, patch: ReferenceEventPatch) => void;
-  onReviewAll: () => void;
   onPreviewKeyframe: (url: string, shot: string, aspectRatio: string) => void;
   onExportKeyframe: (url: string, shot: string, aspectRatio: string) => void;
 }
@@ -197,11 +196,10 @@ function eventSeconds(timeUs: number | null | undefined): string {
   return typeof timeUs === 'number' ? `${(timeUs / 1_000_000).toFixed(1)} 秒` : '暂无';
 }
 
-function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, onReviewAll, onPreviewKeyframe, onExportKeyframe }: FullscreenStoryTableProps) {
+function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, onPreviewKeyframe, onExportKeyframe }: FullscreenStoryTableProps) {
   const { t } = useTranslation();
-  const pendingReviewCount = events.filter((event) => (event.review_state ?? 'needs_review') === 'needs_review').length;
   const itemCount = Math.max(rows.length, events.length);
-  const metaColumnWidths = [150, 360, 300, 300];
+  const metaColumnWidths = [360, 300, 300];
   const tableWidth = metaColumnWidths.reduce((total, width) => total + width, 0)
     + COLUMNS.reduce((total, column) => total + column.widthPx, 0);
   const headerClass = 'border-b border-[rgba(255,255,255,0.1)] px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-text-muted';
@@ -210,16 +208,6 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
     <div className="flex h-full min-h-0 flex-col text-xs text-text-dark">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3 py-2 text-text-muted">
         <span>完整拆解字段 · {itemCount} 个事件</span>
-        <div className="flex items-center gap-2">
-          <span className={pendingReviewCount > 0 ? 'text-amber-300' : 'text-emerald-300'}>
-            {pendingReviewCount > 0 ? `还剩 ${pendingReviewCount} 项待核对` : '已全部核对'}
-          </span>
-          {pendingReviewCount > 0 && (
-            <button type="button" onClick={onReviewAll} className="tap-button tap-button-quiet-primary nodrag">
-              全部标记为已核对
-            </button>
-          )}
-        </div>
       </div>
       <div className="ui-scrollbar nowheel min-h-0 flex-1 overflow-auto">
         <table aria-label="原片拆解完整字段" className="table-fixed border-collapse text-left text-[12px]" style={{ width: tableWidth }}>
@@ -229,7 +217,6 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
           </colgroup>
           <thead className="sticky top-0 z-10 bg-bg-dark/95 backdrop-blur">
             <tr>
-              <th className={`${headerClass} min-w-[150px]`}>核对状态</th>
               <th className={`${headerClass} min-w-[360px]`}>原片事件证据</th>
               <th className={`${headerClass} min-w-[300px]`}>同期台词与词语时间</th>
               <th className={`${headerClass} min-w-[300px]`}>模型判断与叙事作用</th>
@@ -247,35 +234,20 @@ function FullscreenStoryTable({ rows, events, onCellCommit, onOverrideChange, on
               const frameUrl = event?.frame_url ?? observedFrame?.url;
               const displayRow = row.keyframeUrl && isRenderableImageSrc(row.keyframeUrl)
                 ? row : { ...row, keyframeUrl: frameUrl };
-              const reviewState = event?.review_state ?? 'needs_review';
               const spokenText = event?.spoken_text ?? event?.spoken_range?.text;
               return (
                 <tr key={eventId} className="border-b border-white/[0.06] align-top hover:bg-bg-dark/40">
-                  <td className="min-w-[150px] px-3 py-3">
-                    {event ? (
-                      <select
-                        aria-label={`事件 ${index + 1} 核对状态`}
-                        value={reviewState}
-                        onChange={(change) => onOverrideChange(eventId, { reviewState: change.target.value as ReferenceEvent['review_state'] })}
-                        className="rounded-[12px] border border-border-dark bg-surface-field px-2 py-1 text-text-dark"
-                      >
-                        <option value="needs_review">待核对</option>
-                        <option value="reviewed">已核对</option>
-                        <option value="reviewed_uncertain">已核对，保留不确定</option>
-                      </select>
-                    ) : <span className="text-text-muted/60">—</span>}
-                  </td>
                   <td className="px-3 py-3 align-top">
                     {event ? <div className="grid gap-1.5 whitespace-pre-wrap break-words">
                       <div className="flex gap-3">
                         {frameUrl && <img src={frameUrl} alt={`事件画面 ${index + 1}`} className="h-24 w-16 shrink-0 rounded-[4px] bg-surface-field object-cover" />}
                         <div className="grid content-start gap-1">
-                          <span>{event.user_visual_observation ?? event.visual_observation ?? '待核对画面'}</span>
+                          <span>{event.user_visual_observation ?? event.visual_observation ?? '暂无画面描述'}</span>
                           <span className="text-text-muted">事件 {eventSeconds(event.start_us)}–{eventSeconds(event.end_us)}</span>
                           <span className="font-mono text-[11px] text-text-muted">画面 {eventSeconds(observedFrame?.time_us ?? event.analysis_frame_time_us)} · PTS {(observedFrame?.pts ?? event.frame_pts?.join('、')) || '未知'} · {observedFrame?.time_base ?? '未知 time_base'}</span>
                         </div>
                       </div>
-                      <label className="text-[11px] text-text-muted">画面描述 · 核对后修正
+                      <label className="text-[11px] text-text-muted">画面描述 · 可修正
                         <textarea aria-label={`事件 ${index + 1} 画面描述`} value={event.user_visual_observation ?? event.visual_observation ?? ''} onChange={(change) => onOverrideChange(eventId, { visualObservation: change.target.value })} rows={2} className="ui-field mt-1 w-full resize-y px-2 py-1.5 text-xs text-text-dark" />
                       </label>
                       <label className="text-[11px] text-text-muted">画面字幕 · 实际可见文字
@@ -428,6 +400,9 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
   const hasRows = rows.length > 0;
   const referenceEvents = Array.isArray(data.referenceEvents) ? data.referenceEvents as ReferenceEvent[] : [];
   const hasReferenceEvents = referenceEvents.length > 0;
+  const nextStep = isAnalyzing ? '分析原片中…'
+    : hasError ? '重新分析原片'
+      : hasReferenceEvents || hasRows ? '新建作品方案' : '分析原片';
   const stageLabel: Record<string, string> = { preparing: '准备原片', extracting: '提取画面证据', transcribing: '转写同期台词', analyzing: '对照画面与台词' };
 
   // 表格单元格编辑：把编辑后的值写回 data.rows[idx][colKey]。
@@ -463,12 +438,6 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
     updateNodeData(id, { referenceEvents: nextEvents, referenceBlueprintRef: null, blueprintDirty: true });
   }, [id, referenceEvents, updateNodeData]);
 
-  const handleReviewAll = useCallback(() => {
-    const nextEvents = referenceEvents.map((event) => (event.review_state ?? 'needs_review') === 'needs_review'
-      ? { ...event, review_state: 'reviewed' as const }
-      : event);
-    updateNodeData(id, { referenceEvents: nextEvents, referenceBlueprintRef: null, blueprintDirty: true });
-  }, [id, referenceEvents, updateNodeData]);
 
   const exportKeyframe = useCallback((url: string, shot: string, aspectRatio: string) => {
     const imageNodeId = addNode(CANVAS_NODE_TYPES.upload, findNodePosition(id, 360, 360), {
@@ -496,7 +465,7 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
       try {
         createScriptFromBlueprint(id);
       } catch (cause) {
-        setScriptError(cause instanceof Error ? cause.message : '无法创建改编脚本。');
+        setScriptError(cause instanceof Error ? cause.message : '无法创建作品方案。');
       }
     }
   }), [id]);
@@ -572,12 +541,15 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
           ) : hasError ? (
             <ErrorStoryState message={data.analysisError ?? t(`${V}.unknownError`)} />
           ) : hasReferenceEvents ? (
-            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} onReviewAll={handleReviewAll} />
+            <ReferenceEventList events={referenceEvents} videoUrl={data.sourceVideoUrl} onOverrideChange={handleReferenceOverride} />
           ) : hasRows ? (
             <StoryTable rows={rows} compact onCellCommit={handleCellCommit} onPreviewKeyframe={previewKeyframe} onExportKeyframe={exportKeyframe} />
           ) : (
             <EmptyStoryState rawResult={data.rawResult ?? null} />
           )}
+        </div>
+        <div className="border-t border-[var(--ui-border-soft)] px-3 py-2 text-[11px] text-text-muted">
+          下一步：{nextStep}
         </div>
 
         {isAnalyzing && (
@@ -621,7 +593,6 @@ export const VideoStoryNode = memo(({ id, data, selected }: VideoStoryNodeProps)
                 rows={rows}
                 events={referenceEvents}
                 onOverrideChange={handleReferenceOverride}
-                onReviewAll={handleReviewAll}
                 onCellCommit={handleCellCommit}
                 onPreviewKeyframe={previewKeyframe}
                 onExportKeyframe={exportKeyframe}

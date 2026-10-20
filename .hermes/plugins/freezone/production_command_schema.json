@@ -1,0 +1,3008 @@
+{
+  "$defs": {
+    "AnchorV2": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "program_frame"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "affinity": {
+                "type": "null"
+              },
+              "char_offset": {
+                "type": "null"
+              },
+              "edge": {
+                "type": "null"
+              },
+              "frame": {
+                "type": "integer"
+              },
+              "offset_frames": {
+                "const": 0
+              },
+              "ref_id": {
+                "type": "null"
+              },
+              "text_hash": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "frame"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "char_offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "edge": {
+                "type": "null"
+              },
+              "frame": {
+                "type": "null"
+              },
+              "ref_id": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "ref_id",
+              "char_offset"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "enum": [
+                    "program_frame",
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "affinity": {
+                "type": "null"
+              },
+              "char_offset": {
+                "type": "null"
+              },
+              "edge": {
+                "enum": [
+                  "start",
+                  "end"
+                ]
+              },
+              "frame": {
+                "type": "null"
+              },
+              "ref_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "text_hash": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "ref_id",
+              "edge"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "affinity": {
+          "anyOf": [
+            {
+              "enum": [
+                "before",
+                "after"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affinity"
+        },
+        "char_offset": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Offset"
+        },
+        "edge": {
+          "anyOf": [
+            {
+              "enum": [
+                "start",
+                "end"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edge"
+        },
+        "frame": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frame"
+        },
+        "kind": {
+          "enum": [
+            "program_frame",
+            "beat",
+            "turn",
+            "word",
+            "selection",
+            "placement",
+            "take",
+            "cue",
+            "text"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "offset_frames": {
+          "default": 0,
+          "title": "Offset Frames",
+          "type": "integer"
+        },
+        "ref_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ref Id"
+        },
+        "text_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Hash"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "AnchorV2",
+      "type": "object"
+    },
+    "ExactArtifactRefV2": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision"
+      ],
+      "title": "ExactArtifactRefV2",
+      "type": "object"
+    },
+    "GraphicEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "accent": {
+          "default": "#00BDCF",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Accent",
+          "type": "string"
+        },
+        "background": {
+          "default": "#111827",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Background",
+          "type": "string"
+        },
+        "emphasis": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Emphasis"
+        },
+        "enter": {
+          "default": "fade",
+          "enum": [
+            "none",
+            "fade",
+            "pop"
+          ],
+          "title": "Enter",
+          "type": "string"
+        },
+        "enter_frames": {
+          "default": 6,
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Enter Frames",
+          "type": "integer"
+        },
+        "exit_frames": {
+          "default": 6,
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Exit Frames",
+          "type": "integer"
+        },
+        "font_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "foreground": {
+          "default": "#FFFFFF",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Foreground",
+          "type": "string"
+        },
+        "template": {
+          "enum": [
+            "question_card",
+            "keyword",
+            "title_bar"
+          ],
+          "title": "Template",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        },
+        "y": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Y"
+        }
+      },
+      "required": [
+        "template",
+        "text"
+      ],
+      "title": "GraphicEffect",
+      "type": "object"
+    },
+    "SourceWordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "end_char": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Char"
+        },
+        "end_us": {
+          "exclusiveMinimum": 0,
+          "title": "End Us",
+          "type": "integer"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "start_char": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Char"
+        },
+        "start_us": {
+          "minimum": 0,
+          "title": "Start Us",
+          "type": "integer"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "start_us",
+        "end_us"
+      ],
+      "title": "SourceWordV2",
+      "type": "object"
+    },
+    "SpeechTimingV2": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_ref": {
+          "$ref": "#/$defs/ExactArtifactRefV2"
+        },
+        "media_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Media Hash",
+          "type": "string"
+        },
+        "placement_id": {
+          "minLength": 1,
+          "title": "Placement Id",
+          "type": "string"
+        },
+        "source_in_us": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source In Us"
+        },
+        "source_out_us": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Out Us"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "text_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Text Hash",
+          "type": "string"
+        },
+        "words": {
+          "items": {
+            "$ref": "#/$defs/SourceWordV2"
+          },
+          "minItems": 1,
+          "title": "Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "placement_id",
+        "media_hash",
+        "text",
+        "text_hash",
+        "evidence_ref",
+        "words"
+      ],
+      "title": "SpeechTimingV2",
+      "type": "object"
+    },
+    "TurnV2": {
+      "additionalProperties": false,
+      "properties": {
+        "end_frame": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Frame"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "speaker": {
+          "default": "",
+          "title": "Speaker",
+          "type": "string"
+        },
+        "speech_placement_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speech Placement Id"
+        },
+        "speech_timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpeechTimingV2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "start_frame": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Frame"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "timing_basis": {
+          "default": "estimated",
+          "enum": [
+            "estimated",
+            "manual",
+            "aligned"
+          ],
+          "title": "Timing Basis",
+          "type": "string"
+        },
+        "words": {
+          "items": {
+            "$ref": "#/$defs/WordV2"
+          },
+          "title": "Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "title": "TurnV2",
+      "type": "object"
+    },
+    "WordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "end_frame": {
+          "exclusiveMinimum": 0,
+          "title": "End Frame",
+          "type": "integer"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "start_frame": {
+          "minimum": 0,
+          "title": "Start Frame",
+          "type": "integer"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "start_frame",
+        "end_frame"
+      ],
+      "title": "WordV2",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "set_goal"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "goal": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "goal"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "insert_beat"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "beat": {
+              "additionalProperties": false,
+              "properties": {
+                "duration_frames": {
+                  "exclusiveMinimum": 0,
+                  "title": "Duration Frames",
+                  "type": "integer"
+                },
+                "duration_source_placement_id": {
+                  "anyOf": [
+                    {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Duration Source Placement Id"
+                },
+                "extra_pause_seconds": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Extra Pause Seconds"
+                },
+                "id": {
+                  "minLength": 1,
+                  "title": "Id",
+                  "type": "string"
+                },
+                "purpose": {
+                  "minLength": 1,
+                  "title": "Purpose",
+                  "type": "string"
+                },
+                "speech_pace": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "slow",
+                        "normal",
+                        "fast"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Speech Pace"
+                },
+                "timing_mode": {
+                  "default": "auto",
+                  "enum": [
+                    "auto",
+                    "fixed"
+                  ],
+                  "title": "Timing Mode",
+                  "type": "string"
+                },
+                "turns": {
+                  "items": {
+                    "$ref": "#/$defs/TurnV2"
+                  },
+                  "title": "Turns",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "id",
+                "purpose",
+                "duration_frames"
+              ],
+              "type": "object"
+            },
+            "index": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "beat",
+            "index"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "insert_turn"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "beat_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "index": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turn": {
+              "additionalProperties": false,
+              "properties": {
+                "end_frame": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "End Frame"
+                },
+                "id": {
+                  "minLength": 1,
+                  "title": "Id",
+                  "type": "string"
+                },
+                "speaker": {
+                  "default": "",
+                  "title": "Speaker",
+                  "type": "string"
+                },
+                "speech_placement_id": {
+                  "anyOf": [
+                    {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Speech Placement Id"
+                },
+                "speech_timing": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SpeechTimingV2"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "start_frame": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Start Frame"
+                },
+                "text": {
+                  "minLength": 1,
+                  "title": "Text",
+                  "type": "string"
+                },
+                "timing_basis": {
+                  "default": "estimated",
+                  "enum": [
+                    "estimated",
+                    "manual",
+                    "aligned"
+                  ],
+                  "title": "Timing Basis",
+                  "type": "string"
+                },
+                "words": {
+                  "items": {
+                    "$ref": "#/$defs/WordV2"
+                  },
+                  "title": "Words",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "id",
+                "text"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "beat_id",
+            "turn",
+            "index"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "reorder_beats"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "ids"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "reorder_turns"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "ids"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "edit_beat"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "duration_frames": {
+              "exclusiveMinimum": 0,
+              "title": "Duration Frames",
+              "type": "integer"
+            },
+            "duration_source_placement_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Duration Source Placement Id"
+            },
+            "extra_pause_seconds": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Extra Pause Seconds"
+            },
+            "purpose": {
+              "minLength": 1,
+              "title": "Purpose",
+              "type": "string"
+            },
+            "speech_pace": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "slow",
+                    "normal",
+                    "fast"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Speech Pace"
+            },
+            "timing_mode": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "fixed"
+              ],
+              "title": "Timing Mode",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "edit_speech_take"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "lead_in_frames": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Lead In Frames",
+              "type": "integer"
+            },
+            "source_in_us": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Source In Us",
+              "type": "integer"
+            },
+            "source_out_us": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Source Out Us"
+            },
+            "speed_den": {
+              "default": 1,
+              "exclusiveMinimum": 0,
+              "title": "Speed Den",
+              "type": "integer"
+            },
+            "speed_num": {
+              "default": 1,
+              "exclusiveMinimum": 0,
+              "title": "Speed Num",
+              "type": "integer"
+            },
+            "volume": {
+              "default": 1,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Volume",
+              "type": "number"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "edit_turn"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "invalidate_speech_timing": {
+              "const": true
+            },
+            "speaker": {
+              "default": "",
+              "title": "Speaker",
+              "type": "string"
+            },
+            "speech_placement_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Speech Placement Id"
+            },
+            "text": {
+              "minLength": 1,
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "bind_media"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "invalidate_speech_timing": {
+              "const": true
+            },
+            "resource": {
+              "additionalProperties": false,
+              "properties": {
+                "duration_us": {
+                  "minimum": 0,
+                  "title": "Duration Us",
+                  "type": "integer"
+                },
+                "has_audio": {
+                  "default": false,
+                  "title": "Has Audio",
+                  "type": "boolean"
+                },
+                "id": {
+                  "minLength": 1,
+                  "title": "Id",
+                  "type": "string"
+                },
+                "media_hash": {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "title": "Media Hash",
+                  "type": "string"
+                },
+                "media_kind": {
+                  "enum": [
+                    "image",
+                    "video",
+                    "audio"
+                  ],
+                  "title": "Media Kind",
+                  "type": "string"
+                },
+                "media_path": {
+                  "minLength": 1,
+                  "title": "Media Path",
+                  "type": "string"
+                },
+                "node_id": {
+                  "minLength": 1,
+                  "title": "Node Id",
+                  "type": "string"
+                },
+                "node_revision": {
+                  "anyOf": [
+                    {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Node Revision"
+                }
+              },
+              "required": [
+                "id",
+                "node_id",
+                "media_kind",
+                "media_path",
+                "media_hash",
+                "duration_us"
+              ],
+              "type": "object"
+            },
+            "resource_id": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "resource_id"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "bind_speech_source"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "placement_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "turn_ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "placement_id",
+            "turn_ids"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "reassign_speech_source"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "placement_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "turn_ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 2,
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "placement_id",
+            "turn_ids"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "upsert_placement"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "placement": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "kind": {
+                        "const": "graphic"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "graphic": {
+                        "type": "object"
+                      },
+                      "resource_id": {
+                        "type": "null"
+                      }
+                    },
+                    "required": [
+                      "graphic"
+                    ]
+                  }
+                }
+              ],
+              "properties": {
+                "description": {
+                  "default": "",
+                  "title": "Description",
+                  "type": "string"
+                },
+                "end": {
+                  "$ref": "#/$defs/AnchorV2"
+                },
+                "fit": {
+                  "default": "cover",
+                  "enum": [
+                    "stretch",
+                    "cover",
+                    "contain"
+                  ],
+                  "title": "Fit",
+                  "type": "string"
+                },
+                "font_size": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Font Size"
+                },
+                "graphic": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/GraphicEffect"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "height": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Height"
+                },
+                "id": {
+                  "minLength": 1,
+                  "title": "Id",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "visual",
+                    "audio",
+                    "subtitle",
+                    "graphic"
+                  ],
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "loop": {
+                  "default": false,
+                  "title": "Loop",
+                  "type": "boolean"
+                },
+                "opacity": {
+                  "default": 1,
+                  "maximum": 1,
+                  "minimum": 0,
+                  "title": "Opacity",
+                  "type": "number"
+                },
+                "resource_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Resource Id"
+                },
+                "role": {
+                  "enum": [
+                    "primary",
+                    "overlay",
+                    "speech",
+                    "narration",
+                    "bgm",
+                    "sfx",
+                    "dialogue",
+                    "effect"
+                  ],
+                  "title": "Role",
+                  "type": "string"
+                },
+                "source_audio": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Source Audio"
+                },
+                "source_in_us": {
+                  "default": 0,
+                  "minimum": 0,
+                  "title": "Source In Us",
+                  "type": "integer"
+                },
+                "source_out_us": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Source Out Us"
+                },
+                "speech_take_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Speech Take Id"
+                },
+                "speed_den": {
+                  "default": 1,
+                  "exclusiveMinimum": 0,
+                  "title": "Speed Den",
+                  "type": "integer"
+                },
+                "speed_num": {
+                  "default": 1,
+                  "exclusiveMinimum": 0,
+                  "title": "Speed Num",
+                  "type": "integer"
+                },
+                "start": {
+                  "$ref": "#/$defs/AnchorV2"
+                },
+                "subtitle_x": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Subtitle X"
+                },
+                "subtitle_y": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Subtitle Y"
+                },
+                "text": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Text"
+                },
+                "track_id": {
+                  "minLength": 1,
+                  "title": "Track Id",
+                  "type": "string"
+                },
+                "turn_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Turn Id"
+                },
+                "volume": {
+                  "default": 1,
+                  "maximum": 1,
+                  "minimum": 0,
+                  "title": "Volume",
+                  "type": "number"
+                },
+                "width": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Width"
+                },
+                "x": {
+                  "default": 0,
+                  "minimum": 0,
+                  "title": "X",
+                  "type": "integer"
+                },
+                "y": {
+                  "default": 0,
+                  "minimum": 0,
+                  "title": "Y",
+                  "type": "integer"
+                },
+                "z_order": {
+                  "default": 0,
+                  "title": "Z Order",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "role",
+                "track_id",
+                "start",
+                "end"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "placement"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "upsert_selection"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "selection": {
+              "additionalProperties": false,
+              "properties": {
+                "end": {
+                  "$ref": "#/$defs/AnchorV2"
+                },
+                "id": {
+                  "minLength": 1,
+                  "title": "Id",
+                  "type": "string"
+                },
+                "label": {
+                  "minLength": 1,
+                  "title": "Label",
+                  "type": "string"
+                },
+                "start": {
+                  "$ref": "#/$defs/AnchorV2"
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "start",
+                "end"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "selection"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "remove_entity"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "entity_kind": {
+              "enum": [
+                "placement",
+                "selection",
+                "beat",
+                "turn"
+              ]
+            }
+          },
+          "required": [
+            "entity_kind"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "set_output"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "output": {
+              "additionalProperties": false,
+              "properties": {
+                "background": {
+                  "default": "#000000",
+                  "pattern": "^#[0-9a-fA-F]{6}$",
+                  "title": "Background",
+                  "type": "string"
+                },
+                "fps_den": {
+                  "exclusiveMinimum": 0,
+                  "title": "Fps Den",
+                  "type": "integer"
+                },
+                "fps_num": {
+                  "exclusiveMinimum": 0,
+                  "title": "Fps Num",
+                  "type": "integer"
+                },
+                "height": {
+                  "exclusiveMinimum": 0,
+                  "title": "Height",
+                  "type": "integer"
+                },
+                "width": {
+                  "exclusiveMinimum": 0,
+                  "title": "Width",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "width",
+                "height",
+                "fps_num",
+                "fps_den"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "output"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "batch"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "commands": {
+              "items": {
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "set_goal"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "goal": {
+                            "maxLength": 2000,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "goal"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "insert_beat"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "beat": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "duration_frames": {
+                                "exclusiveMinimum": 0,
+                                "title": "Duration Frames",
+                                "type": "integer"
+                              },
+                              "duration_source_placement_id": {
+                                "anyOf": [
+                                  {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Duration Source Placement Id"
+                              },
+                              "extra_pause_seconds": {
+                                "anyOf": [
+                                  {
+                                    "minimum": 0,
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Extra Pause Seconds"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "title": "Id",
+                                "type": "string"
+                              },
+                              "purpose": {
+                                "minLength": 1,
+                                "title": "Purpose",
+                                "type": "string"
+                              },
+                              "speech_pace": {
+                                "anyOf": [
+                                  {
+                                    "enum": [
+                                      "slow",
+                                      "normal",
+                                      "fast"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Speech Pace"
+                              },
+                              "timing_mode": {
+                                "default": "auto",
+                                "enum": [
+                                  "auto",
+                                  "fixed"
+                                ],
+                                "title": "Timing Mode",
+                                "type": "string"
+                              },
+                              "turns": {
+                                "items": {
+                                  "$ref": "#/$defs/TurnV2"
+                                },
+                                "title": "Turns",
+                                "type": "array"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "purpose",
+                              "duration_frames"
+                            ],
+                            "type": "object"
+                          },
+                          "index": {
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "beat",
+                          "index"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "insert_turn"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "beat_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "index": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "turn": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "end_frame": {
+                                "anyOf": [
+                                  {
+                                    "exclusiveMinimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "End Frame"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "title": "Id",
+                                "type": "string"
+                              },
+                              "speaker": {
+                                "default": "",
+                                "title": "Speaker",
+                                "type": "string"
+                              },
+                              "speech_placement_id": {
+                                "anyOf": [
+                                  {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Speech Placement Id"
+                              },
+                              "speech_timing": {
+                                "anyOf": [
+                                  {
+                                    "$ref": "#/$defs/SpeechTimingV2"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              },
+                              "start_frame": {
+                                "anyOf": [
+                                  {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Start Frame"
+                              },
+                              "text": {
+                                "minLength": 1,
+                                "title": "Text",
+                                "type": "string"
+                              },
+                              "timing_basis": {
+                                "default": "estimated",
+                                "enum": [
+                                  "estimated",
+                                  "manual",
+                                  "aligned"
+                                ],
+                                "title": "Timing Basis",
+                                "type": "string"
+                              },
+                              "words": {
+                                "items": {
+                                  "$ref": "#/$defs/WordV2"
+                                },
+                                "title": "Words",
+                                "type": "array"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "text"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "beat_id",
+                          "turn",
+                          "index"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "reorder_beats"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "ids": {
+                            "items": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "ids"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "reorder_turns"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "ids": {
+                            "items": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "ids"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "edit_beat"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "duration_frames": {
+                            "exclusiveMinimum": 0,
+                            "title": "Duration Frames",
+                            "type": "integer"
+                          },
+                          "duration_source_placement_id": {
+                            "anyOf": [
+                              {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "title": "Duration Source Placement Id"
+                          },
+                          "extra_pause_seconds": {
+                            "anyOf": [
+                              {
+                                "minimum": 0,
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "title": "Extra Pause Seconds"
+                          },
+                          "purpose": {
+                            "minLength": 1,
+                            "title": "Purpose",
+                            "type": "string"
+                          },
+                          "speech_pace": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "slow",
+                                  "normal",
+                                  "fast"
+                                ],
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "title": "Speech Pace"
+                          },
+                          "timing_mode": {
+                            "default": "auto",
+                            "enum": [
+                              "auto",
+                              "fixed"
+                            ],
+                            "title": "Timing Mode",
+                            "type": "string"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "edit_speech_take"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "lead_in_frames": {
+                            "default": 0,
+                            "minimum": 0,
+                            "title": "Lead In Frames",
+                            "type": "integer"
+                          },
+                          "source_in_us": {
+                            "default": 0,
+                            "minimum": 0,
+                            "title": "Source In Us",
+                            "type": "integer"
+                          },
+                          "source_out_us": {
+                            "anyOf": [
+                              {
+                                "exclusiveMinimum": 0,
+                                "type": "integer"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "title": "Source Out Us"
+                          },
+                          "speed_den": {
+                            "default": 1,
+                            "exclusiveMinimum": 0,
+                            "title": "Speed Den",
+                            "type": "integer"
+                          },
+                          "speed_num": {
+                            "default": 1,
+                            "exclusiveMinimum": 0,
+                            "title": "Speed Num",
+                            "type": "integer"
+                          },
+                          "volume": {
+                            "default": 1,
+                            "maximum": 1,
+                            "minimum": 0,
+                            "title": "Volume",
+                            "type": "number"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "edit_turn"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "invalidate_speech_timing": {
+                            "const": true
+                          },
+                          "speaker": {
+                            "default": "",
+                            "title": "Speaker",
+                            "type": "string"
+                          },
+                          "speech_placement_id": {
+                            "anyOf": [
+                              {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "title": "Speech Placement Id"
+                          },
+                          "text": {
+                            "minLength": 1,
+                            "title": "Text",
+                            "type": "string"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "bind_media"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "invalidate_speech_timing": {
+                            "const": true
+                          },
+                          "resource": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "duration_us": {
+                                "minimum": 0,
+                                "title": "Duration Us",
+                                "type": "integer"
+                              },
+                              "has_audio": {
+                                "default": false,
+                                "title": "Has Audio",
+                                "type": "boolean"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "title": "Id",
+                                "type": "string"
+                              },
+                              "media_hash": {
+                                "pattern": "^[a-f0-9]{64}$",
+                                "title": "Media Hash",
+                                "type": "string"
+                              },
+                              "media_kind": {
+                                "enum": [
+                                  "image",
+                                  "video",
+                                  "audio"
+                                ],
+                                "title": "Media Kind",
+                                "type": "string"
+                              },
+                              "media_path": {
+                                "minLength": 1,
+                                "title": "Media Path",
+                                "type": "string"
+                              },
+                              "node_id": {
+                                "minLength": 1,
+                                "title": "Node Id",
+                                "type": "string"
+                              },
+                              "node_revision": {
+                                "anyOf": [
+                                  {
+                                    "minimum": 1,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Node Revision"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "node_id",
+                              "media_kind",
+                              "media_path",
+                              "media_hash",
+                              "duration_us"
+                            ],
+                            "type": "object"
+                          },
+                          "resource_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "resource_id"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "bind_speech_source"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "placement_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "turn_ids": {
+                            "items": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "minItems": 1,
+                            "type": "array",
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "placement_id",
+                          "turn_ids"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "reassign_speech_source"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "placement_id": {
+                            "anyOf": [
+                              {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "turn_ids": {
+                            "items": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "minItems": 2,
+                            "type": "array",
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "placement_id",
+                          "turn_ids"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "upsert_placement"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "placement": {
+                            "additionalProperties": false,
+                            "allOf": [
+                              {
+                                "if": {
+                                  "properties": {
+                                    "kind": {
+                                      "const": "graphic"
+                                    }
+                                  }
+                                },
+                                "then": {
+                                  "properties": {
+                                    "graphic": {
+                                      "type": "object"
+                                    },
+                                    "resource_id": {
+                                      "type": "null"
+                                    }
+                                  },
+                                  "required": [
+                                    "graphic"
+                                  ]
+                                }
+                              }
+                            ],
+                            "properties": {
+                              "description": {
+                                "default": "",
+                                "title": "Description",
+                                "type": "string"
+                              },
+                              "end": {
+                                "$ref": "#/$defs/AnchorV2"
+                              },
+                              "fit": {
+                                "default": "cover",
+                                "enum": [
+                                  "stretch",
+                                  "cover",
+                                  "contain"
+                                ],
+                                "title": "Fit",
+                                "type": "string"
+                              },
+                              "font_size": {
+                                "anyOf": [
+                                  {
+                                    "exclusiveMinimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Font Size"
+                              },
+                              "graphic": {
+                                "anyOf": [
+                                  {
+                                    "$ref": "#/$defs/GraphicEffect"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              },
+                              "height": {
+                                "anyOf": [
+                                  {
+                                    "exclusiveMinimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Height"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "title": "Id",
+                                "type": "string"
+                              },
+                              "kind": {
+                                "enum": [
+                                  "visual",
+                                  "audio",
+                                  "subtitle",
+                                  "graphic"
+                                ],
+                                "title": "Kind",
+                                "type": "string"
+                              },
+                              "loop": {
+                                "default": false,
+                                "title": "Loop",
+                                "type": "boolean"
+                              },
+                              "opacity": {
+                                "default": 1,
+                                "maximum": 1,
+                                "minimum": 0,
+                                "title": "Opacity",
+                                "type": "number"
+                              },
+                              "resource_id": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Resource Id"
+                              },
+                              "role": {
+                                "enum": [
+                                  "primary",
+                                  "overlay",
+                                  "speech",
+                                  "narration",
+                                  "bgm",
+                                  "sfx",
+                                  "dialogue",
+                                  "effect"
+                                ],
+                                "title": "Role",
+                                "type": "string"
+                              },
+                              "source_audio": {
+                                "anyOf": [
+                                  {
+                                    "type": "boolean"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Source Audio"
+                              },
+                              "source_in_us": {
+                                "default": 0,
+                                "minimum": 0,
+                                "title": "Source In Us",
+                                "type": "integer"
+                              },
+                              "source_out_us": {
+                                "anyOf": [
+                                  {
+                                    "exclusiveMinimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Source Out Us"
+                              },
+                              "speech_take_id": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Speech Take Id"
+                              },
+                              "speed_den": {
+                                "default": 1,
+                                "exclusiveMinimum": 0,
+                                "title": "Speed Den",
+                                "type": "integer"
+                              },
+                              "speed_num": {
+                                "default": 1,
+                                "exclusiveMinimum": 0,
+                                "title": "Speed Num",
+                                "type": "integer"
+                              },
+                              "start": {
+                                "$ref": "#/$defs/AnchorV2"
+                              },
+                              "subtitle_x": {
+                                "anyOf": [
+                                  {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Subtitle X"
+                              },
+                              "subtitle_y": {
+                                "anyOf": [
+                                  {
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Subtitle Y"
+                              },
+                              "text": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Text"
+                              },
+                              "track_id": {
+                                "minLength": 1,
+                                "title": "Track Id",
+                                "type": "string"
+                              },
+                              "turn_id": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Turn Id"
+                              },
+                              "volume": {
+                                "default": 1,
+                                "maximum": 1,
+                                "minimum": 0,
+                                "title": "Volume",
+                                "type": "number"
+                              },
+                              "width": {
+                                "anyOf": [
+                                  {
+                                    "exclusiveMinimum": 0,
+                                    "type": "integer"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "title": "Width"
+                              },
+                              "x": {
+                                "default": 0,
+                                "minimum": 0,
+                                "title": "X",
+                                "type": "integer"
+                              },
+                              "y": {
+                                "default": 0,
+                                "minimum": 0,
+                                "title": "Y",
+                                "type": "integer"
+                              },
+                              "z_order": {
+                                "default": 0,
+                                "title": "Z Order",
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "kind",
+                              "role",
+                              "track_id",
+                              "start",
+                              "end"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "placement"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "upsert_selection"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "selection": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "end": {
+                                "$ref": "#/$defs/AnchorV2"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "title": "Id",
+                                "type": "string"
+                              },
+                              "label": {
+                                "minLength": 1,
+                                "title": "Label",
+                                "type": "string"
+                              },
+                              "start": {
+                                "$ref": "#/$defs/AnchorV2"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "label",
+                              "start",
+                              "end"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "selection"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "remove_entity"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "entity_kind": {
+                            "enum": [
+                              "placement",
+                              "selection",
+                              "beat",
+                              "turn"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "entity_kind"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "kind": {
+                        "const": "set_output"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "properties": {
+                          "output": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "background": {
+                                "default": "#000000",
+                                "pattern": "^#[0-9a-fA-F]{6}$",
+                                "title": "Background",
+                                "type": "string"
+                              },
+                              "fps_den": {
+                                "exclusiveMinimum": 0,
+                                "title": "Fps Den",
+                                "type": "integer"
+                              },
+                              "fps_num": {
+                                "exclusiveMinimum": 0,
+                                "title": "Fps Num",
+                                "type": "integer"
+                              },
+                              "height": {
+                                "exclusiveMinimum": 0,
+                                "title": "Height",
+                                "type": "integer"
+                              },
+                              "width": {
+                                "exclusiveMinimum": 0,
+                                "title": "Width",
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "width",
+                              "height",
+                              "fps_num",
+                              "fps_den"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "output"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "payload"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object"
+                  },
+                  "target_id": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "target_id",
+                  "payload"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "commands"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "payload"
+      ]
+    }
+  ],
+  "properties": {
+    "command_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "set_goal",
+        "insert_beat",
+        "insert_turn",
+        "reorder_beats",
+        "reorder_turns",
+        "edit_beat",
+        "edit_speech_take",
+        "edit_turn",
+        "bind_media",
+        "bind_speech_source",
+        "reassign_speech_source",
+        "upsert_placement",
+        "upsert_selection",
+        "remove_entity",
+        "set_output",
+        "batch"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "plan_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "target_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "command_id",
+    "plan_ref",
+    "kind",
+    "target_id",
+    "payload"
+  ],
+  "type": "object"
+}

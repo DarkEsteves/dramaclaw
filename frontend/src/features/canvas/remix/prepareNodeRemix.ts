@@ -1,12 +1,13 @@
 import type { CanvasEdge, CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
-import { createRemixArtifact, fetchRemixArtifact, type RemixArtifact, type RemixArtifactRef, type RemixOperation } from '@/api/remix';
+import { compileProductionPlan, createRemixArtifact, fetchRemixArtifact, type RemixArtifact, type RemixArtifactRef, type RemixOperation } from '@/api/remix';
 import { buildNodeRemixManifest, type CompiledTiming } from './nodeRemixManifest';
 import type { UploadedRemixMedia } from './workbenchModel';
 import { boundBrollVisualMedia } from './brollCanvasBinding';
 import { selectedPerformanceTakes } from './takeCanvasBinding';
 import { buildTakeRemixManifest, type TakeTiming } from './takeRemixManifest';
 import { reapplyManifestOverrides, type ManifestOverride, type ManifestOverrideConflict, type ManifestPayload } from './manifestEditor';
+import { validateProductionPlanBindings, type ProductionPlan } from './productionPlanModel';
 
 function ancestors(nodes: CanvasNode[], edges: CanvasEdge[], targetId: string): CanvasNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -174,6 +175,62 @@ async function prepareTakeRemix(project: string, upstream: CanvasNode[], edges: 
 
 export async function prepareNodeRemix(project: string, nodes: CanvasNode[], edges: CanvasEdge[], composeId: string, previousManifestRef?: RemixArtifactRef | null): Promise<PreparedNodeRemix> {
   const upstream = ancestors(nodes, edges, composeId);
+  const arranged = upstream.find((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline
+    && node.data.productionPlanNodeId && edges.some((edge) => edge.source === node.id && edge.target === composeId));
+  if (arranged) {
+    const planNode = upstream.find((node) => node.id === arranged.data.productionPlanNodeId
+      && node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'production_plan');
+    const planRef = planNode?.data.productionPlanRef as RemixArtifactRef | undefined;
+    const compiledRef = arranged.data.compiledProductionPlanRef as RemixArtifactRef | undefined;
+    const manifestRef = arranged.data.artifactRef as RemixArtifactRef | undefined;
+    if (!planNode || !planRef || !compiledRef || !manifestRef || planNode.data.productionPlanDirty
+      || arranged.data.productionTimelineDirty || planRef.artifactId !== compiledRef.artifactId
+      || planRef.revision !== compiledRef.revision) throw new Error('作品方案已变化，请重新生成成片编排清单');
+    const plan = planNode.data.productionPlanDraft as ProductionPlan | undefined;
+    if (!plan) throw new Error('作品方案未加载，请稍后再试');
+    validateProductionPlanBindings(project, plan, upstream, edges, planNode.id);
+    const arrangedManifest = await fetchRemixArtifact(project, manifestRef);
+    if (arrangedManifest.schema !== 'composition_manifest.v1' || !arrangedManifest.upstream_refs?.some((ref) =>
+      ref.artifact_id === planRef.artifactId && ref.revision === planRef.revision)) {
+      throw new Error('成片编排清单与当前作品方案不匹配，请重新生成');
+    }
+    if (previousManifestRef && (previousManifestRef.artifactId !== manifestRef.artifactId
+      || previousManifestRef.revision !== manifestRef.revision)) {
+      const previous = await fetchRemixArtifact(project, previousManifestRef);
+      const overrides = previous.schema === 'composition_manifest.v1'
+        ? (previous.payload.manual_overrides as ManifestOverride[] | undefined) ?? [] : [];
+      if (overrides.length) {
+        const reapplied = reapplyManifestOverrides(arrangedManifest.payload as ManifestPayload, overrides);
+        const saved = await createRemixArtifact(project, 'composition_manifest.v1', reapplied.payload, [planRef]);
+        return { manifestRef: { artifactId: saved.id, revision: saved.revision }, events: [], selections: [],
+          unresolvedRequiredEvents: [], conflicts: reapplied.conflicts };
+      }
+    }
+    return { manifestRef, events: [], selections: [], unresolvedRequiredEvents: [] };
+  }
+  const planNodes = upstream.filter((node) => node.type === CANVAS_NODE_TYPES.script && node.data.remixRole === 'production_plan'
+    && edges.some((edge) => edge.source === node.id && edge.target === composeId));
+  if (planNodes.length) {
+    const planNode = one(planNodes, '作品方案');
+    const planRef = planNode.data.productionPlanRef as RemixArtifactRef | undefined;
+    if (!planRef?.artifactId) throw new Error('请先保存作品方案');
+    if (planNode.data.productionPlanDirty) throw new Error('作品方案有未保存的修改');
+    const planArtifact = await fetchRemixArtifact(project, planRef);
+    if (planArtifact.schema !== 'production_plan.v1') throw new Error('作品方案产物类型不匹配');
+    validateProductionPlanBindings(project, planArtifact.payload as unknown as ProductionPlan, upstream, edges, planNode.id);
+    let payload = await compileProductionPlan(project, planRef) as ManifestPayload;
+    let conflicts: ManifestOverrideConflict[] = [];
+    if (previousManifestRef) {
+      const previous = await fetchRemixArtifact(project, previousManifestRef);
+      if (previous.schema === 'composition_manifest.v1') {
+        const reapplied = reapplyManifestOverrides(payload, (previous.payload.manual_overrides as ManifestOverride[] | undefined) ?? []);
+        payload = reapplied.payload; conflicts = reapplied.conflicts;
+      }
+    }
+    const manifest = await createRemixArtifact(project, 'composition_manifest.v1', payload, [planRef]);
+    return { manifestRef: { artifactId: manifest.id, revision: manifest.revision }, events: [], selections: [],
+      unresolvedRequiredEvents: [], ...(conflicts.length ? { conflicts } : {}) };
+  }
   const takeTimingNode = upstream.find((node) => node.type === CANVAS_NODE_TYPES.semanticTimeline && node.data.remixTimingSchema === 'performance_timing.v2'
     && node.data.artifactRef && edges.some((edge) => edge.source === node.id && edge.target === composeId));
   if (takeTimingNode) {

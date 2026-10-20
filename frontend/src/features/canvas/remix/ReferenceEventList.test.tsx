@@ -69,12 +69,12 @@ describe('ReferenceEventList', () => {
     fireEvent.change(screen.getByLabelText('事件 1 画面描述'), { target: { value: '人物拿着杯子，并未展示' } });
     fireEvent.change(screen.getByLabelText('事件 1 画面字幕'), { target: { value: 'CREATINE' } });
     fireEvent.change(screen.getByLabelText('事件 1 叙事作用'), { target: { value: '明确产品价值' } });
-    fireEvent.change(screen.getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed_uncertain' } });
 
     expect(onOverrideChange).toHaveBeenNthCalledWith(1, 'event-1', { visualObservation: '人物拿着杯子，并未展示' });
     expect(onOverrideChange).toHaveBeenNthCalledWith(2, 'event-1', { visibleText: 'CREATINE' });
     expect(onOverrideChange).toHaveBeenNthCalledWith(3, 'event-1', { narrativeRole: '明确产品价值' });
-    expect(onOverrideChange).toHaveBeenNthCalledWith(4, 'event-1', { reviewState: 'reviewed_uncertain' });
+    expect(onOverrideChange).toHaveBeenCalledTimes(3);
+    expect(screen.queryByLabelText('事件 1 核对状态')).toBeNull();
   });
 
   it('shows the corrected narrative role in the event summary while retaining the model judgment as evidence', () => {
@@ -91,26 +91,24 @@ describe('ReferenceEventList', () => {
     expect(screen.getByText(/模型叙事判断：模型误判为产品展示/)).toBeTruthy();
   });
 
-  it('shows the remaining review count and confirms all pending events in one action', () => {
-    const onReviewAll = vi.fn();
-    render(<ReferenceEventList onReviewAll={onReviewAll} events={[
+  it('shows analysis content without a review count or bulk acknowledgement action', () => {
+    render(<ReferenceEventList events={[
       { event_id: 'pending-1', start_us: 0, end_us: 1_000_000, review_state: 'needs_review' },
       { event_id: 'uncertain-1', start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
       { event_id: 'pending-2', start_us: 2_000_000, end_us: 3_000_000 },
     ]} />);
 
-    expect(screen.getByText('还剩 2 项待核对')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '全部标记为已核对' }));
-    expect(onReviewAll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/项待核对/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '全部标记为已核对' })).toBeNull();
   });
 
   it('hides the bulk action after every event has been reviewed', () => {
-    render(<ReferenceEventList onReviewAll={vi.fn()} events={[
+    render(<ReferenceEventList events={[
       { start_us: 0, end_us: 1_000_000, review_state: 'reviewed' },
       { start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
     ]} />);
 
-    expect(screen.getByText('已全部核对')).toBeTruthy();
+    expect(screen.queryByText('已全部核对')).toBeNull();
     expect(screen.queryByRole('button', { name: '全部标记为已核对' })).toBeNull();
   });
 });

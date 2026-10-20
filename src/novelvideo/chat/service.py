@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import hashlib
 import importlib.util
 import json
@@ -28,19 +29,12 @@ from novelvideo.chat import display_fallback, media_presentation, message_reposi
 from novelvideo.chat.backend_sdk import (
     ClaudeSdkClient,
     CodexClient,
+    CODEX_INTERRUPT_GRACE_TIMEOUT,
     control_codex_runtime,
     interrupt_live_claude_client,
     interrupt_live_codex_turn,
 )
-from novelvideo.chat.canvas_outcome import (
-    CANVAS_FORMAT_REPAIR_PROMPT,
-    CANVAS_REPLY_SCHEMA,
-    CANVAS_FINAL_RESPONSE_INSTRUCTIONS,
-    finalize_canvas_reply,
-    recover_unstructured_canvas_message,
-    needs_canvas_format_repair,
-    receipt_reference,
-)
+from novelvideo.chat.canvas_outcome import receipt_reference
 from novelvideo.chat.display_fallback import (
     _limit_display_items as _limit_display_items,
     _requested_display_beats as _requested_display_beats,
@@ -157,6 +151,8 @@ from novelvideo.chat.runtime_event_evidence import (
     _codex_freezone_is_execution_policy_rejection,
     _codex_freezone_is_generation_preflight_rejection,
     _codex_freezone_is_write_event,
+    _codex_freezone_is_non_canvas_write_event,
+    _codex_freezone_non_canvas_receipt,
     _codex_freezone_ready_workflow_draft,
     _codex_freezone_tool_name,
     _codex_freezone_write_receipt,
@@ -164,9 +160,13 @@ from novelvideo.chat.runtime_event_evidence import (
     _codex_freezone_write_result_state,
     _codex_freezone_write_result_succeeded as _codex_freezone_write_result_succeeded,
     _json_objects_from_codex_tool_value,
+    plan_review_precondition_blocker,
+    production_edit_rejection,
+    production_edit_saved_receipt,
 )
 from novelvideo.chat.tool_policy import (
     AGENT_PRODUCT_RESULT_TOOLS as _AGENT_PRODUCT_RESULT_TOOLS,
+    AGENT_WORKFLOW_RESULT_TOOLS as _AGENT_WORKFLOW_RESULT_TOOLS,
     FREEZONE_WORKFLOW_DRAFT_TOOLS as _FREEZONE_WORKFLOW_DRAFT_TOOLS,
     allows_mainline_media_ui_specs as _allows_mainline_media_ui_specs,
     freezone_canvas_execution_mode_from_context as _freezone_canvas_execution_mode_from_context,
@@ -174,6 +174,7 @@ from novelvideo.chat.tool_policy import (
     tool_mode_for_surface as _tool_mode_for_surface,
 )
 from novelvideo.freezone.workflow_plan import MAX_WORKFLOW_PLANNING_TEXT_CHARS
+from novelvideo.freezone.remix.reference_analysis_identity import analysis_admission_key
 from novelvideo.ports import get_auth_session_port
 from novelvideo.utils.document_parsers import count_billable_text_chars
 from novelvideo.utils.error_redaction import redact_secrets
@@ -224,6 +225,13 @@ _CODEX_DEVELOPER_INSTRUCTIONS = (
 )
 _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "You are the DramaClaw creative assistant inside the Xi画/Freezone canvas. "
+    "For an active reference-video-remix commission, use its saved commission_ref and "
+    "native_plan_stage. After the human confirms the broad direction, pass the confirmed "
+    "creative goal to freezone_prepare_production_nodes with the authorized run_after_create "
+    "policy. The plan node's AI drafting action writes the detailed plan; review its saved "
+    "result and make bounded edits. Do not prewrite shot-by-shot scripts or dialogue in chat. "
+    "Generic workflow catalog search, workflow_result admission, generic Intent/Plan drafting "
+    "and generic draft confirmation do not apply to this native entry. "
     "A successful freezone_begin_agent_product_generation is admission, not delivery. "
     "For product_kind=workflow_result, continue authoring the complete intent or plan and "
     "submit it through the matching freezone_prepare_workflow_draft or "
@@ -239,7 +247,8 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "content mentions images, audio, or video. "
     "Inspect the available scope-filtered concrete operations on the required dramaclaw MCP "
     "server, then call the selected tool directly. "
-    "For any workflow, several connected nodes, grouped stages, storyboard, or media pipeline, "
+    "For generic workflows, connected nodes, grouped stages, storyboard, or media pipelines "
+    "outside an active reference-video-remix commission, "
     "load and follow the project Agent Skill named dramaclaw-workflows. Read that Skill only from "
     "the exact file URI advertised in the available Skills or dramaclaw resources; never invent a "
     "project:// Skill URI. "
@@ -266,7 +275,7 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "freezone_update_node_data, even if the requested content could be written directly. "
     "If the user asks only to edit fields on one existing standalone node without generating, "
     "use freezone_update_node_data; do not call freezone_run_node_action. "
-    "For a normal workflow request, follow that Skill's discovery, draft, preview, and confirmation "
+    "For a generic workflow request, follow that Skill's discovery, draft, preview, and confirmation "
     "sequence. A request for N standard video units chained 1→2→...→N is a compact standard "
     "planner request: set planner.item_count=N and planner.video_dependency=sequential, and let "
     "the tool create every node and dependency edge. For other exact nodes and dependencies, "
@@ -282,7 +291,7 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "Skill; use text-to-image for a pure image workflow and text-to-image-video only "
     "when the user requests a video stage. generation_answers supplements that Plan and "
     "never replaces it. "
-    "Before authoring or submitting any workflow result, call "
+    "Before authoring or submitting a generic workflow_result, call "
     "freezone_begin_agent_product_generation and copy its returned operation_id exactly. Never "
     "invent, abbreviate, or reconstruct an operation_id, and never call a workflow prepare tool "
     "before that admission succeeds. "
@@ -352,6 +361,13 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "Interactive-story video segments are different: the approved story production plan "
     "selects each segment's parameters, so do not call generic generation_media_types for "
     "video or ask for one shared video_duration_seconds. Keep each segment's own durationSec. "
+    "Apply the same stage rule to every production workflow: a plan or composition node "
+    "does not generate image/video media, so prepare it without a preliminary media-duration "
+    "choice. The program duration belongs to the authored timeline, while each generated "
+    "videoNode has its own durationSec chosen from its placement and the live model catalog. "
+    "production_node_duration_required means the Agent must plan the named material step "
+    "and retry with its own supported durationSec; never ask for a shared duration card or "
+    "reuse a generic five-second default for that production step. "
     "If preflight returns required_choices for other missing fields, pass exactly those "
     "choices as generation_required_choices without adding duration. Pass the returned "
     "answers object unchanged as generation_answers to the workflow prepare tool; "
@@ -465,7 +481,7 @@ _CODEX_FMV_INTERACTIVE_STORY_INSTRUCTIONS = (
 # Freezone browser-bridge contract changes so a turn cannot silently resume a
 # thread with incompatible tool definitions.
 _CODEX_THREAD_PROTOCOL_VERSION = "tool-discovery-v4"
-_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v33"
+_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v36"
 
 
 def _codex_developer_instructions(tool_mode: str | None) -> str:
@@ -474,24 +490,12 @@ def _codex_developer_instructions(tool_mode: str | None) -> str:
 
         return _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS + "\n" + _CODEX_FMV_INTERACTIVE_STORY_INSTRUCTIONS + (
             " " + WORKFLOW_PLANNING_INSTRUCTIONS +
-            " " + CANVAS_FINAL_RESPONSE_INSTRUCTIONS +
-            " Your final response MUST be a JSON object, not plain text or Markdown. "
-            "This applies even to greetings and ordinary conversation. "
-            'For a greeting, return {"message":"你好！有什么我可以帮你的吗？",'
-            '"mode":"read_only","canvas_receipts":[]}. '
-            "Use mode=read_only for explanations, checks, proposals, clarification answers, "
-            "and catalog-only Skill saves, with canvas_receipts=[]. Never claim a canvas "
-            "mutation in a read_only message. Use mode=blocked when no canvas operation was "
-            "performed because of a limitation, also with canvas_receipts=[]. Use mode=mutation "
-            "only after all attempted canvas writes returned successful persistence receipts; "
-            "list their exact bridge_key (browser apply) or revision (direct apply), using null "
-            "for the unused field. Never invent receipt identities, reuse historical receipts, "
-            "or claim nodes exist when only a workflow draft is ready for approval. "
-            "A canvas receipt proves apply/submission, not generated-media completion. "
-            "Put the user-facing answer in message, not raw JSON inside message. "
-            "The complete final-response schema is included here because compatibility "
-            "gateways may not expose the transport outputSchema to the model:\n"
-            + json.dumps(CANVAS_REPLY_SCHEMA, ensure_ascii=False)
+            " Reply to ordinary conversation in natural language. Your text streams to the user "
+            "as you speak. Tool execution and canvas persistence are independently verified by "
+            "the host. Describe a write as completed only after its actual tool result proves "
+            "that state. A prepared draft, an accepted canvas request, a running generation "
+            "task, and completed generated media are different states. Keep confirmations "
+            "and action execution on the existing canvas approval path."
         )
     return _CODEX_DEVELOPER_INSTRUCTIONS
 
@@ -721,9 +725,31 @@ Canvas write contract:
   call a Freezone write tool. For one standalone operation, the first assistant output MUST be that
   matching single-operation write tool call; do not emit prose first. Workflow requests may perform
   only the Skill/catalog reads required by the next rule before their single workflow write call.
+- Native reference-video-remix is staged. On a follow-up about an existing reference, read
+  freezone_get_production_progress first and continue that commission. A changed product or dialogue
+  is a direction change, not an analysis request. If the source has no completed analysis, call
+  freezone_start_reference_analysis with its actual node, user goal, inputs and stable idempotency
+  key, then END THE TURN. A reference_analysis_reused result means continue this same turn from its
+  saved commission; it is not a new submission. Discuss the direction in ordinary chat, including
+  what to preserve, replace and constrain. Do not save a direction proposal during discussion.
+  When the user asks to proceed, send one complete concise goal to freezone_prepare_production_nodes;
+  the host checks the real human turn at that submission boundary. Wait for the existing canvas
+  approval in manual mode. Let the plan node's AI action draft the details; read the saved editable
+  plan, audit it and make bounded edits through the same approval path; use the resulting real plan refs. Media,
+  speech and composition stages use saved results, never invented artifact refs.
+- Existing production plan edits are standalone typed operations. Read production_plan.plan_ref
+  from node context or freezone_get_node_detail. Copy plan_ref.artifact_id into
+  freezone_get_production_state.artifact_id, never the canvas node_id; preserve revision. An empty
+  generic script prompt does not mean the native plan is absent. Read saved state, then submit
+  freezone_prepare_production_edit with the exact plan_ref. No Workflow Skill or
+  topology-guide load is required. Do not replace it with ordinary node text/data updates, rebuild the
+  workflow, or run generation/render tasks unless the user requests them.
 - For any workflow, several connected nodes, grouped stages, storyboard, or media pipeline, load
-  and follow the dramaclaw-workflows Agent Skill. For an exact user-specified topology, read its
-  references/custom-topology.md and call freezone_prepare_workflow_plan_draft once with one complete
+  and follow the guide through the actual host locator. Hermes: skill_view(name="workflows",
+  file_path="SKILL.md"); portable project agents: the advertised dramaclaw-workflows Agent Skill.
+  Never load a portable package name as a Hermes Skill or guess a reference path.
+  For an exact user-specified topology, Hermes reads workflows references/spec.md; portable agents
+  read references/custom-topology.md. Call freezone_prepare_workflow_plan_draft once with one complete
   freezone_workflow_plan.v1. Exact means the user names the nodes and their dependency order; do not
   route it through the normal draft flow or compact Intent compiler merely because a production
   Skill matches. Exception: N standard video units chained 1→2→...→N use a compact Intent with
@@ -922,11 +948,21 @@ _FREEZONE_SKILL_RUNTIME_REQUEST_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _freezone_routing_user_text(prompt: str | None) -> str:
+    """Ignore transport context appended by legacy callers when routing intent."""
+    return re.split(
+        r"\[(?:SUPERTALE_|FREEZONE_AGENT_CATALOG_SUMMARY|DRAMACLAW_EXECUTION_CONTEXT)",
+        str(prompt or ""), maxsplit=1,
+    )[0].strip()
+
+
 def _freezone_canvas_write_requested(prompt: str | None) -> bool:
     """Legacy intent hint; never use this to enforce canvas receipt postconditions."""
 
     raw_prompt = str(prompt or "")
-    user_text = raw_prompt.split("[SUPERTALE_", 1)[0].strip()
+    user_text = _freezone_routing_user_text(raw_prompt)
     if not user_text:
         return False
     has_action = bool(_FREEZONE_CANVAS_WRITE_ACTION_RE.search(user_text))
@@ -941,7 +977,7 @@ def _freezone_canvas_write_requested(prompt: str | None) -> bool:
     # require a canvas mutation. Keep the canvas receipt guard only when the
     # same request explicitly asks to use/run the Skill, add it to canvas, or
     # perform another independent canvas mutation.
-    if _FREEZONE_SKILL_STUDIO_TRIGGER_RE.search(user_text):
+    if _freezone_skill_studio_requested(user_text):
         runtime_text = _FREEZONE_SKILL_RUNTIME_NEGATION_RE.sub("", user_text)
         intent_text = _FREEZONE_SKILL_CAPABILITY_RE.sub("", runtime_text)
         return bool(
@@ -973,6 +1009,7 @@ def _freezone_canvas_write_requested(prompt: str | None) -> bool:
         or has_direct_media_write
         or has_node_reference
         or standalone_clear
+        or bool(_FREEZONE_SKILL_RUNTIME_REQUEST_RE.search(user_text))
     )
 
 
@@ -1182,9 +1219,119 @@ async def _bind_server_observed_agent_product_execution(
     *,
     project_dir: str | Path | None,
     project_state_dir: str | Path | None,
+    business_turn_id: str,
+    expected_project_id: str = "",
+    expected_canvas_id: str = "",
+    requester_username: str = "",
+    agent_id: str = "main",
 ) -> None:
     """Bind an admitted product operation to the tool call carrying its result."""
     tool_name = _codex_freezone_tool_name(event)
+    if (tool_name == 'freezone_request_user_clarification'
+            and str(business_turn_id or '').startswith('reference-remix-')):
+        if (str(getattr(event, 'type', '') or '') not in {'tool_updated', 'tool_update'}
+                or str(getattr(event, 'status', '') or '').lower() not in {'completed', 'success', 'succeeded'}
+                or getattr(event, 'error', None) or not requester_username
+                or not expected_project_id or not expected_canvas_id
+                or not business_turn_id or not (project_state_dir or project_dir)):
+            return
+        import time
+        from novelvideo.api.routes.chat import _canvas_bridge_dir
+        from novelvideo.freezone.canvas_command_bridge import (
+            BRIDGE_PENDING_TTL_SECONDS, read_bridge_message,
+        )
+        from novelvideo.freezone.agent_product_operations import (
+            pending_agent_product_operations_for_turn, record_agent_product_turn_wait,
+        )
+        state_root = Path(project_state_dir or project_dir)
+        pending = await asyncio.to_thread(
+            pending_agent_product_operations_for_turn,
+            project_dir=state_root, turn_id=business_turn_id,
+            project_id=expected_project_id, canvas_id=expected_canvas_id,
+        )
+        if len(pending) != 1:
+            return
+        for value in (getattr(event, 'structured', None), getattr(event, 'output', None)):
+            for payload in _json_objects_from_codex_tool_value(value):
+                data = payload.get('data') if isinstance(payload.get('data'), dict) else payload
+                if data.get('ok') is not True or data.get('status') != 'waiting_user':
+                    continue
+                key = str(data.get('bridge_key') or '').strip()
+                clarification_id = str(data.get('clarification_id') or '').strip()
+                if not key or not clarification_id:
+                    continue
+                directory = _canvas_bridge_dir(
+                    requester_username, project_state_dir=state_root,
+                    profile=f'freezone:{agent_id or "main"}',
+                )
+                message = await asyncio.to_thread(read_bridge_message, key, bridge_dir=directory)
+                expected_binding = {
+                    'username': requester_username, 'project_id': expected_project_id,
+                    'canvas_id': expected_canvas_id, 'agent_id': agent_id or 'main',
+                    'turn_id': business_turn_id,
+                }
+                source_event = (message or {}).get('event') or {}
+                created = (message or {}).get('created_at')
+                if (not message or message.get('kind') != 'clarification_event'
+                        or message.get('transport_status') not in {'pending', 'delivered'}
+                        or message.get('producer_binding') != expected_binding
+                        or source_event.get('clarification_id') != clarification_id
+                        or message.get('project_id') != expected_project_id
+                        or message.get('canvas_id') != expected_canvas_id
+                        or type(created) not in {int, float}
+                        or created + BRIDGE_PENDING_TTL_SECONDS['clarification_event'] <= time.time()):
+                    continue
+                fingerprint = hashlib.sha256(json.dumps(
+                    source_event, sort_keys=True, ensure_ascii=False,
+                    separators=(',', ':'),
+                ).encode()).hexdigest()
+                await asyncio.to_thread(
+                    record_agent_product_turn_wait,
+                    project_dir=state_root, operation_id=pending[0]['operation_id'],
+                    expected_task_id=pending[0]['task_id'], turn_id=business_turn_id,
+                    waiting_reason='user_confirmation', receipt_ref={
+                        'kind': 'clarification_bridge', 'id': key,
+                        'clarification_id': clarification_id,
+                        'event_fingerprint': fingerprint,
+                        'expires_at': created + BRIDGE_PENDING_TTL_SECONDS['clarification_event'],
+                        'project_id': expected_project_id, 'canvas_id': expected_canvas_id,
+                    },
+                )
+                return
+        return
+    if tool_name == "freezone_begin_agent_product_generation":
+        if (str(getattr(event, "type", "") or "") not in {"tool_updated", "tool_update"}
+                or str(getattr(event, "status", "") or "").lower() not in {"completed", "success", "succeeded"}
+                or getattr(event, "error", None)):
+            return
+        state_root = project_state_dir or project_dir
+        turn = str(business_turn_id or "").strip()
+        call = str(getattr(event, "call_id", "") or "").strip()
+        if state_root is None or not turn or not call:
+            return
+        for value in (getattr(event, "structured", None), getattr(event, "output", None)):
+            for payload in _json_objects_from_codex_tool_value(value):
+                data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+                if (data.get("ok", payload.get("ok")) is not True
+                        or data.get("status", payload.get("status")) not in {
+                            "agent_product_generation_admitted", "reserved",
+                        }):
+                    continue
+                operation_id = str(data.get("operation_id") or "").strip()
+                task_id = str(data.get("task_id") or "").strip()
+                if not operation_id or not task_id:
+                    continue
+                from novelvideo.freezone.agent_product_operations import bind_agent_product_turn_admission
+
+                await asyncio.to_thread(
+                    bind_agent_product_turn_admission,
+                    project_dir=Path(state_root), operation_id=operation_id,
+                    expected_task_id=task_id, turn_id=turn, tool_call_id=call,
+                    expected_project_id=expected_project_id,
+                    expected_canvas_id=expected_canvas_id,
+                )
+                return
+        return
     if tool_name not in _AGENT_PRODUCT_RESULT_TOOLS:
         return
     event_type = str(getattr(event, "type", "") or "tool_updated")
@@ -1209,10 +1356,11 @@ async def _bind_server_observed_agent_product_execution(
     for payload in _json_objects_from_codex_tool_value(getattr(event, "input", None)):
         tool_args = payload
         break
-    turn_id = str(getattr(event, "turn_id", "") or "").strip()
+    runtime_turn_id = str(getattr(event, "turn_id", "") or "").strip()
+    turn_id = str(business_turn_id or "").strip()
     tool_call_id = str(getattr(event, "call_id", "") or "").strip()
     state_root = project_state_dir or project_dir
-    if not tool_args or not turn_id or not tool_call_id or state_root is None:
+    if not tool_args or not runtime_turn_id or not turn_id or not tool_call_id or state_root is None:
         return
     state_dir = Path(state_root)
     from novelvideo.freezone.agent_product_operations import (
@@ -1221,11 +1369,7 @@ async def _bind_server_observed_agent_product_execution(
     )
 
     operation_ids: set[str] = set()
-    if tool_name in {
-        "freezone_prepare_workflow",
-        "freezone_prepare_workflow_draft",
-        "freezone_prepare_workflow_plan_draft",
-    }:
+    if tool_name in _AGENT_WORKFLOW_RESULT_TOOLS:
         operation_id = str(tool_args.get("operation_id") or "").strip()
         if operation_id.startswith("agent_product_"):
             operation_ids.add(operation_id)
@@ -1273,7 +1417,7 @@ async def _bind_server_observed_agent_product_execution(
     if not operation_ids:
         return
 
-    model_call_id = f"agent-turn:{turn_id}:tool:{tool_call_id}"
+    model_call_id = f"agent-turn:{runtime_turn_id}:tool:{tool_call_id}"
     for operation_id in sorted(operation_ids):
         try:
             await asyncio.to_thread(
@@ -1297,17 +1441,69 @@ async def _bind_server_observed_agent_product_execution(
             )
 
 
-_FREEZONE_SKILL_STUDIO_TRIGGER_RE = re.compile(
-    r"(?:"
+async def _settle_server_observed_agent_product_turn(
+    *, project_dir: str | Path | None, project_state_dir: str | Path | None,
+    turn_id: str | None, disposition: str,
+) -> None:
+    state_root = project_state_dir or project_dir
+    if state_root is None or not str(turn_id or "").strip():
+        return
+    outcome = (
+        "completed" if disposition == "completed" else
+        "cancelled" if disposition == "cancelled" else
+        "interrupted" if disposition in {"timeout", "interrupted"} else "failed"
+    )
+    from novelvideo.freezone.agent_product_operations import settle_agent_product_turn
+
+    try:
+        settled = await asyncio.to_thread(
+            settle_agent_product_turn, project_dir=Path(state_root),
+            turn_id=str(turn_id), outcome=outcome,
+        )
+    except Exception:
+        logger.exception("agent product turn settlement failed turn=%s", turn_id)
+        return
+    if settled:
+        logger.info("agent product turn settled turn=%s outcome=%s count=%d",
+                    turn_id, outcome, len(settled))
+
+
+_FREEZONE_SKILL_AUTHORING_ACTION = (
     r"(?:创建|新建|新增|生成|做|制作|编辑|修改|更新|保存|沉淀|整理|总结|抽成|转成|变成|"
     r"\b(?:create|add|generate|make|edit|modify|update|save|distill|summarize|turn)\b)"
-    r"[\s\S]{0,24}(?:Skill|Skills|Recipe|Recipes|skill|skills|recipe|recipes|技能|配方)"
-    r"|(?:Skill|Skills|Recipe|Recipes|skill|skills|recipe|recipes|技能|配方)"
-    r"[\s\S]{0,24}(?:创建|新建|新增|生成|编辑|修改|更新|保存|沉淀|整理|总结|"
-    r"\b(?:create|add|generate|make|edit|modify|update|save|distill|summarize|turn)\b)"
-    r"|(?:保存|沉淀|整理|总结|抽成|转成|变成)[\s\S]{0,18}(?:模板|可复用能力|复用能力)"
-    r")",
+)
+_FREEZONE_SKILL_CATALOG_OBJECT = r"(?:(?<![A-Za-z_])(?:skills?|recipes?)(?![A-Za-z_])|技能|配方)"
+_FREEZONE_SKILL_AUTHORING_GAP = r"[^。！？!?，,；;\n]{0,64}?"
+_FREEZONE_SKILL_STUDIO_TRIGGER_RE = re.compile(
+    # Lookahead keeps both directions visible in mixed requests such as
+    # "use existing Recipes to create a new Skill".
+    rf"(?=(?:(?P<before>{_FREEZONE_SKILL_AUTHORING_ACTION})"
+    rf"(?P<before_gap>{_FREEZONE_SKILL_AUTHORING_GAP})(?P<target_after>{_FREEZONE_SKILL_CATALOG_OBJECT})"
+    rf"|(?P<target_before>{_FREEZONE_SKILL_CATALOG_OBJECT})"
+    rf"{_FREEZONE_SKILL_AUTHORING_GAP}(?P<after>{_FREEZONE_SKILL_AUTHORING_ACTION})"
+    r"|(?P<template>保存|沉淀|整理|总结|抽成|转成|变成)"
+    r"[^。！？!?，,；;\n]{0,32}(?:模板|可复用能力|复用能力)))",
     re.IGNORECASE,
+)
+_FREEZONE_SKILL_AUTHORING_NEGATION = (
+    r"(?:(?:暂时不|暂不|先不|不要|无需|不用|不再|不会|不是|别|不)"
+    r"\s*(?:(?:直接|立即|马上|继续|再|要|帮我|给我|替我|去|来)\s*)*"
+    r"|(?:do\s+not|don['’]t|not|without)\s+(?:(?:directly|immediately|then|to|please)\s+)*)"
+)
+_FREEZONE_SKILL_NEGATED_AUTHORING_RE = re.compile(
+    rf"{_FREEZONE_SKILL_AUTHORING_NEGATION}{_FREEZONE_SKILL_AUTHORING_ACTION}"
+    rf"{_FREEZONE_SKILL_AUTHORING_GAP}{_FREEZONE_SKILL_CATALOG_OBJECT}", re.IGNORECASE,
+)
+_FREEZONE_SKILL_AUTHORING_NEGATED_PREFIX_RE = re.compile(
+    rf"{_FREEZONE_SKILL_AUTHORING_NEGATION}$", re.IGNORECASE,
+)
+_FREEZONE_SKILL_USED_AS_INPUT_RE = re.compile(
+    r"(?:用(?!于|来)|使用|应用|运行|执行|根据|按照|基于|"
+    r"\b(?:use|using|apply|run|execute|with)\b)[^。！？!?，,；;\n]{0,64}$", re.IGNORECASE,
+)
+_FREEZONE_SKILL_RUNTIME_OUTPUT_RE = re.compile(
+    r"(?:作品方案|方案|节点|画布|图片|视频|音频|成片|"
+    r"\b(?:plans?|nodes?|canvas|images?|videos?|audio|content|outputs?)\b)", re.IGNORECASE,
 )
 
 _FREEZONE_SKILL_STUDIO_INSTRUCTIONS = """[FREEZONE_SKILL_STUDIO]
@@ -1464,10 +1660,35 @@ Draft rules:
 
 
 def _freezone_skill_studio_requested(prompt: str | None) -> bool:
-    text = str(prompt or "").strip()
+    # Route only the user's words; legacy callers may append transport context.
+    text = _freezone_routing_user_text(prompt)
     if not text:
         return False
-    return bool(_FREEZONE_SKILL_STUDIO_TRIGGER_RE.search(text))
+    text = _FREEZONE_SKILL_NEGATED_AUTHORING_RE.sub("", text)
+    for match in _FREEZONE_SKILL_STUDIO_TRIGGER_RE.finditer(text):
+        direction = "before" if match.group("before") else "after" if match.group("after") else "template"
+        prefix = text[:match.start(direction)]
+        if _FREEZONE_SKILL_AUTHORING_NEGATED_PREFIX_RE.search(prefix):
+            continue
+        if direction == "before":
+            gap = match.group("before_gap")
+            nested_catalog_target = re.match(
+                rf"\s*的\s*{_FREEZONE_SKILL_CATALOG_OBJECT}", text[match.end("target_after"):], re.IGNORECASE,
+            )
+            if (_FREEZONE_SKILL_USED_AS_INPUT_RE.search(gap)
+                    and not re.search(r"用于|用来|设计为|会|能够|可以", gap)
+                    and not nested_catalog_target):
+                continue
+        elif direction == "after":
+            # "use this Skill to create a video" targets the video, whereas
+            # "edit this Skill" targets the catalog definition itself.
+            if _FREEZONE_SKILL_USED_AS_INPUT_RE.search(text[:match.start("target_before")]):
+                continue
+            tail = re.split(r"[。！？!?，,；;\n]", text[match.end("after"):], maxsplit=1)[0]
+            if re.fullmatch(r"创建|新建|新增|生成|做|制作|create|add|generate|make", match.group("after"), re.IGNORECASE) and _FREEZONE_SKILL_RUNTIME_OUTPUT_RE.search(tail):
+                continue
+        return True
+    return False
 
 
 def _freezone_agent_catalog_summary(username: str, *, limit: int = 40) -> str:
@@ -1605,6 +1826,7 @@ def _prompt_with_user_context(
     route_prompt: str | None = None,
     turn_id: str | None = None,
     require_generation_parameter_preflight: bool = False,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
 ) -> str:
     user_message, execution_context = _route_prompt_with_execution_context(
         prompt,
@@ -1616,27 +1838,20 @@ def _prompt_with_user_context(
         surface_context
     )
     generation_parameter_round = str(turn_id or "current_request").strip()
-    if require_generation_parameter_preflight:
+    if require_generation_parameter_preflight and trusted_reference_parameter_answers:
         generation_parameter_policy = (
             f"generation_parameter_round: {generation_parameter_round}\n"
-            "For every new request in this round that will actually generate image or video media, "
-            "show one preliminary structured generation-parameter clarification before any canvas "
-            "write in both manual_confirm and auto_execute. Historical clarification answers, "
-            "existing node data, Recipe defaults, and parameters from an earlier turn may only "
-            "prefill recommended choices; they never count as confirmation for this round. Do not "
-            "ask again after the clarification tool returns answers for this same round. This card "
-            "covers image/video parameters only; never add a system-voice/custom-voice choice and "
-            "do not ask the user to choose system voice versus custom voice.\n"
-            "manual_confirm: After the preliminary parameter answers return, put them into the plan "
-            "and submit the protected write. The normal approval card is still shown and remains the "
-            "final parameter editor before execution.\n"
-            "auto_execute: After the preliminary parameter answers return, submit the protected canvas "
-            "write immediately without asking for another create/run confirmation. A normal approval "
-            "event is still emitted and the frontend auto-applies it; explicit human-review requirements "
-            "may pause. Use the MCP clarification tool, never built-in request_user_input.\n"
+            "The host verified submitted parameter answers for this reference task against the "
+            "current generation requirements. Reuse these exact answers in generation_answers "
+            "and do not ask the same parameter questions again: "
+            + json.dumps(trusted_reference_parameter_answers, ensure_ascii=False, sort_keys=True)
+            + ". If a newly requested media requirement conflicts with them, ask only for the "
+            "changed or missing fields. This receipt does not authorize a canvas action. In "
+            "manual_confirm, the normal approval card is still required before execution.\n"
         )
     else:
         generation_parameter_policy = (
+            f"generation_parameter_round: {generation_parameter_round}\n"
             "manual_confirm: Do not ask a preliminary image/video parameter clarification. Read the "
             "live schema and put supported defaults or symbolic recommended values into the plan; the "
             "approval card is where the user reviews and adjusts final generation parameters.\n"
@@ -2287,12 +2502,25 @@ def _evidence_identity(
 
 
 async def _chat_run_lock_heartbeat_loop(
-    username: str, project: str, lock_id: str
+    username: str, project: str, lock_id: str, reference_ownership=None, parent_task=None,
 ) -> None:
     while True:
         await asyncio.sleep(_CHAT_RUN_LOCK_HEARTBEAT_SECONDS)
         if not _heartbeat_chat_run_lock(username, project, lock_id):
             return
+        if reference_ownership:
+            from novelvideo.chat.reference_remix_continuation import coordinator
+            owner = reference_ownership['owner']
+            try:
+                renewed = await asyncio.to_thread(coordinator.store.finish_ordinary_turn,
+                    owner['run_id'], owner['token'], state='active')
+                if not renewed:
+                    raise RuntimeError('ordinary production turn lease was lost')
+            except Exception:
+                logger.exception('ordinary production ownership renewal failed turn_id=%s', owner['turn_id'])
+                if parent_task is not None:
+                    parent_task.cancel()
+                raise
 
 
 def _append_message(
@@ -2734,12 +2962,13 @@ def _codex_scope_key(
     agent_profile: str = "main",
     canvas_id: str | None = None,
 ) -> str:
+    from novelvideo.freezone.canvas_context_reader import canvas_read_mode
     return session_registry.codex_scope_key(
         project,
         agent_profile=agent_profile,
         canvas_id=canvas_id,
         main_protocol=_CODEX_THREAD_PROTOCOL_VERSION,
-        freezone_protocol=_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION,
+        freezone_protocol=_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION + ":" + canvas_read_mode(),
     )
 
 
@@ -3283,10 +3512,22 @@ def _build_codex_env(
     turn_id: str | None = None,
     project_state_dir: str | Path | None = None,
     agent_token_file: str | Path | None = None,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
+    trusted_reference_commission_id: str | None = None,
 ) -> dict[str, str]:
     from novelvideo import config
 
     env = os.environ.copy()
+    env.pop("DRAMACLAW_REFERENCE_PARAMETER_ANSWERS", None)
+    if (tool_mode == "freezone_canvas" and project and canvas_id and turn_id
+            and trusted_reference_commission_id and trusted_reference_parameter_answers):
+        env["DRAMACLAW_REFERENCE_PARAMETER_ANSWERS"] = json.dumps({
+            "project_id": project, "canvas_id": canvas_id, "turn_id": turn_id,
+            "commission_id": trusted_reference_commission_id,
+            "answers": trusted_reference_parameter_answers,
+        }, ensure_ascii=False, separators=(",", ":"))
+    from novelvideo.freezone.canvas_context_reader import canvas_read_mode
+    env["DRAMACLAW_CANVAS_READ_MODE"] = canvas_read_mode()
     # MCP subprocesses run from project workspaces, not the API data root.
     env["NOVELVIDEO_OUTPUT_DIR"] = str(Path(config.OUTPUT_DIR).resolve())
     agent_scope = "project" if project else "user"
@@ -3446,6 +3687,8 @@ def _dramaclaw_mcp_servers(
                 "DRAMACLAW_SKILLS_DIR",
                 "DRAMACLAW_TOOL_MODE",
                 "DRAMACLAW_TURN_ID",
+                "DRAMACLAW_REFERENCE_PARAMETER_ANSWERS",
+                "DRAMACLAW_CANVAS_READ_MODE",
                 "DRAMACLAW_USERNAME",
                 "NOVELVIDEO_OUTPUT_DIR",
                 "PYTHONPATH",
@@ -3624,6 +3867,8 @@ def _build_codex_thread(
     turn_id: str | None = None,
     project_state_dir: str | Path | None = None,
     agent_token_file: str | Path | None = None,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
+    trusted_reference_commission_id: str | None = None,
 ) -> AgentRuntimeThreadPort:
     workspace, _codex_home = ensure_user_codex_workspace(
         username,
@@ -3644,6 +3889,8 @@ def _build_codex_thread(
         turn_id=turn_id,
         project_state_dir=project_state_dir,
         agent_token_file=agent_token_file,
+        trusted_reference_parameter_answers=trusted_reference_parameter_answers,
+        trusted_reference_commission_id=trusted_reference_commission_id,
     )
     gateway_api_key, gateway_base_url = _codex_turn_gateway_credentials(authorization)
     node_config_overrides = _codex_gateway_config_overrides(gateway_base_url)
@@ -3663,7 +3910,7 @@ def _build_codex_thread(
         config_overrides=node_config_overrides,
         thread_config_overrides=thread_config_overrides,
         turn_metadata=turn_metadata,
-        output_schema=CANVAS_REPLY_SCHEMA if tool_mode == "freezone_canvas" else None,
+        output_schema=None,
     )
     thread_id = _get_codex_thread_id(
         username,
@@ -3751,6 +3998,8 @@ async def interrupt_active_codex_turn(
     username: str,
     scope_key: str,
     business_turn_id: str,
+    *,
+    before_interrupt=None,
 ) -> bool:
     """Interrupt one active Codex turn only when its public turn identity matches."""
 
@@ -3759,6 +4008,45 @@ async def interrupt_active_codex_turn(
     normalized_business_turn = str(business_turn_id or "").strip()
     if not normalized_user or not normalized_scope or not normalized_business_turn:
         return False
+
+    # HTTP Stop has no saved-context binding. Resolve only server-owned read
+    # modes, keeping the actor, project, profile, canvas and protocol exact.
+    candidate_scopes = {normalized_scope}
+    try:
+        scope_parts = json.loads(normalized_scope)
+    except (ValueError, TypeError):
+        scope_parts = None
+    if (
+        isinstance(scope_parts, list)
+        and len(scope_parts) == 5
+        and isinstance(scope_parts[0], str)
+        and scope_parts[0].startswith("freezone")
+    ):
+        protocols = {
+            _CODEX_FREEZONE_THREAD_PROTOCOL_VERSION + ":" + mode
+            for mode in ("current_browser", "saved")
+        }
+        if scope_parts[-1] not in protocols:
+            return False
+        candidate_scopes = {
+            json.dumps(scope_parts[:-1] + [protocol], ensure_ascii=False, separators=(",", ":"))
+            for protocol in protocols
+        }
+    persisted_turns = _load_active_codex_turns(normalized_user)
+    matches = []
+    with _ACTIVE_CODEX_TURNS_LOCK:
+        for candidate in candidate_scopes:
+            local = _ACTIVE_CODEX_TURNS.get((normalized_user, candidate))
+            if local is not None:
+                if len(local) >= 3 and str(local[2] or "").strip() == normalized_business_turn:
+                    matches.append(candidate)
+            else:
+                entry = persisted_turns.get(candidate)
+                if entry and str(entry.get("business_turn_id") or "").strip() == normalized_business_turn:
+                    matches.append(candidate)
+    if len(matches) != 1:
+        return False
+    normalized_scope = matches[0]
 
     with _ACTIVE_CODEX_TURNS_LOCK:
         local = _ACTIVE_CODEX_TURNS.get((normalized_user, normalized_scope))
@@ -3778,6 +4066,8 @@ async def interrupt_active_codex_turn(
         runtime_turn_id = str(persisted.get("turn_id") or "").strip()
     if not thread_id or not runtime_turn_id:
         return False
+    if before_interrupt is not None:
+        await before_interrupt()
     interrupted = await asyncio.to_thread(
         interrupt_live_codex_turn, thread_id, runtime_turn_id
     )
@@ -3806,6 +4096,10 @@ async def stream_assistant_reply(
     egress_project_id: str | None = None,
     backend: str | None = None,
     execution_context: AgentExecutionContext | None = None,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
+    trusted_reference_commission_id: str | None = None,
+    trusted_plan_presentation_target: dict[str, Any] | None = None,
+    trusted_reference_turn_owner: dict | None = None,
 ) -> dict[str, Any]:
     if execution_context is not None:
         if project != execution_context.project_id:
@@ -3825,6 +4119,23 @@ async def stream_assistant_reply(
             surface,
             surface_context=surface_context,
         )
+    if trusted_plan_presentation_target and (
+        execution_context is None
+        or trusted_plan_presentation_target.get('project_id') != project
+        or trusted_plan_presentation_target.get('requester_user_id') != requester_user_id
+        or trusted_plan_presentation_target.get('canvas_id') != execution_context.canvas_id
+        or trusted_plan_presentation_target.get('agent_id') != execution_context.agent_id
+    ):
+        raise ValueError('plan presentation target differs from the authenticated agent scope')
+    if trusted_reference_turn_owner:
+        owner_ctx = trusted_reference_turn_owner['ctx']
+        owner = trusted_reference_turn_owner['owner']
+        if (execution_context is None or owner.get('turn_id') != turn_id
+                or owner_ctx.project_id != execution_context.project_id
+                or owner_ctx.requester_user_id != execution_context.requester_user_id
+                or owner.get('canvas_id') != execution_context.canvas_id
+                or owner.get('agent_id') != execution_context.agent_id):
+            raise ValueError('ordinary production owner differs from authenticated turn')
     lock_project = _chat_run_lock_project_for_turn(
         project,
         tool_mode=tool_mode,
@@ -3832,7 +4143,7 @@ async def stream_assistant_reply(
     )
     run_lock_id = _acquire_chat_run_lock(username, lock_project)
     heartbeat_task = asyncio.create_task(
-        _chat_run_lock_heartbeat_loop(username, lock_project, run_lock_id)
+        _chat_run_lock_heartbeat_loop(username, lock_project, run_lock_id, trusted_reference_turn_owner, asyncio.current_task())
     )
     try:
         deterministic = _frontend_context_reply(prompt)
@@ -3865,6 +4176,9 @@ async def stream_assistant_reply(
                 store_scope=store_scope,
                 turn_id=turn_id,
                 route_prompt=route_prompt,
+                trusted_reference_parameter_answers=trusted_reference_parameter_answers,
+                trusted_reference_commission_id=trusted_reference_commission_id,
+                trusted_plan_presentation_target=trusted_plan_presentation_target,
                 agent_profile=(
                     execution_context.agent_profile
                     if execution_context is not None
@@ -3889,6 +4203,8 @@ async def stream_assistant_reply(
                 store_scope=store_scope,
                 turn_id=turn_id,
                 route_prompt=route_prompt,
+                trusted_reference_parameter_answers=trusted_reference_parameter_answers,
+                trusted_plan_presentation_target=trusted_plan_presentation_target,
                 egress_context=egress_context,
                 requester_user_id=requester_user_id,
                 agent_profile=(
@@ -3914,12 +4230,22 @@ async def stream_assistant_reply(
             egress_context=egress_context,
         )
     finally:
-        heartbeat_task.cancel()
         try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        _release_chat_run_lock(username, lock_project, run_lock_id)
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception('chat turn heartbeat failed turn_id=%s', turn_id)
+            if trusted_reference_turn_owner:
+                from novelvideo.chat.reference_remix_continuation import finish_ordinary_production_turn
+                try:
+                    await asyncio.to_thread(finish_ordinary_production_turn, trusted_reference_turn_owner)
+                except Exception:
+                    logger.exception('ordinary production turn receipt settlement failed turn_id=%s', turn_id)
+        finally:
+            _release_chat_run_lock(username, lock_project, run_lock_id)
 
 
 def _frontend_context_reply(prompt: str) -> str | None:
@@ -4001,6 +4327,7 @@ async def prewarm_chat_backend(
     project: str | None = None,
     surface: str | None = None,
     agent_id: str | None = None,
+    canvas_id: str | None = None,
 ) -> None:
     """Best-effort pre-warm of the per-user agent worker.
 
@@ -4027,7 +4354,8 @@ async def prewarm_chat_backend(
             scope_kind="project" if project else "home",
             project_id=project or None,
             surface="freezone" if tool_mode == "freezone_canvas" else None,
-            canvas_id="default" if tool_mode == "freezone_canvas" else None,
+            canvas_id=(str(canvas_id or "").strip() or "default")
+            if tool_mode == "freezone_canvas" else None,
         )
     except Exception:
         return
@@ -4129,6 +4457,8 @@ async def _stream_assistant_reply_hermes(
     requester_user_id: str | None = None,
     agent_profile: str | None = None,
     canvas_id: str | None = None,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
+    trusted_plan_presentation_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Stream via Hermes ACP subprocess (per-user, sandboxed).
 
@@ -4165,6 +4495,8 @@ async def _stream_assistant_reply_hermes(
         tool_mode=tool_mode,
         surface_context=surface_context,
         route_prompt=route_prompt,
+        trusted_reference_parameter_answers=trusted_reference_parameter_answers,
+        require_generation_parameter_preflight=bool(trusted_reference_parameter_answers),
     )
     thread = await _hermes_pool.get_for_user(
         username,
@@ -4226,6 +4558,8 @@ async def _stream_assistant_reply_hermes(
     persisted_message: dict[str, Any] | None = None
     seen_display_calls: set[str] = set()
     seen_tool_chat_errors: set[str] = set()
+    pending_plan_precondition_errors: dict[str, dict[str, Any]] = {}
+    plan_presentation_target = trusted_plan_presentation_target
 
     # One claim per business turn, settled exactly once at this boundary. The
     # retries below re-send the prompt but are still this turn, so they share
@@ -4241,9 +4575,12 @@ async def _stream_assistant_reply_hermes(
         path: an aclose() during streaming means the turn stopped after the
         prompt had reached the agent, which is unknown rather than rejected.
         """
-        if turn_operation is None:
-            return
-        await turn_operation.finish(turn_disposition)
+        await _settle_server_observed_agent_product_turn(
+            project_dir=project_dir, project_state_dir=project_state_dir,
+            turn_id=turn_id, disposition=turn_disposition,
+        )
+        if turn_operation is not None:
+            await turn_operation.finish(turn_disposition)
 
     async def hermes_events_with_session_retry():
         nonlocal thread, assistant_text, tool_text, current_tool_name, current_tool_hidden
@@ -4472,6 +4809,16 @@ async def _stream_assistant_reply_hermes(
         media = _extract_media(final_text, username, project, project_dir=project_dir)
         if store_scope is not None:
             from novelvideo.chat.store import chat_store
+            metadata = {}
+            if plan_presentation_target and project_dir and requester_user_id:
+                from novelvideo.chat.plan_confirmation_delivery import metadata_for_delivered_plan
+                from novelvideo.freezone.remix.store import RemixArtifactStore
+                metadata = metadata_for_delivered_plan(
+                    RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                    plan_presentation_target,
+                    assistant_delivered=turn_disposition == 'completed' and not seen_tool_chat_errors,
+                    message=final_text,
+                )
 
             persisted_message = await chat_store.append_message_async(
                 username,
@@ -4479,6 +4826,7 @@ async def _stream_assistant_reply_hermes(
                 "assistant",
                 final_text,
                 media=media,
+                metadata=metadata,
                 turn_id=turn_id,
                 idempotency_key=f"assistant:{turn_id}" if turn_id else None,
             )
@@ -4572,7 +4920,42 @@ async def _stream_assistant_reply_hermes(
                     event,
                     project_dir=project_dir,
                     project_state_dir=project_state_dir,
+                    business_turn_id=str(turn_id or ""),
+                    expected_project_id=str(project or ""),
+                    expected_canvas_id=str(canvas_id or ""),
+                    requester_username=username,
+                    agent_id=str(store_scope.agent_id or 'main') if store_scope else 'main',
                 )
+                if (event.type != 'tool_started' and project_dir and requester_user_id
+                        and _codex_freezone_tool_name(event) == 'freezone_review_production_plan'):
+                    receipt = _codex_freezone_non_canvas_receipt(
+                        event, expected_project=project, expected_canvas=canvas_id,
+                        expected_agent=str((store_scope.agent_id if store_scope else None) or 'main'),
+                        admission_key_for_request=analysis_admission_key,
+                    )
+                    if receipt and isinstance(receipt.get('decision_ref'), dict):
+                        from novelvideo.chat.operation_outcome import recovered_plan_precondition_attempts
+                        from novelvideo.freezone.remix.plan_review_settlement import verified_plan_review_settlement
+                        from novelvideo.freezone.remix.store import RemixArtifactStore
+
+                        verified = verified_plan_review_settlement(
+                            RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                            receipt,
+                        )
+                        if verified:
+                            from novelvideo.chat.plan_confirmation_delivery import prepare_plan_presentation_target
+                            plan_presentation_target = prepare_plan_presentation_target(
+                                RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                                receipt['commission']['commission_ref'],
+                                agent_id=str((store_scope.agent_id if store_scope else None) or 'main'),
+                            )
+                            for recovered_id in recovered_plan_precondition_attempts(
+                                    list(pending_plan_precondition_errors.values()), verified):
+                                logger.info('settled Hermes early plan proposal after saved review '
+                                            'project=%s canvas=%s commission=%s call=%s review=%s',
+                                            project, canvas_id, verified['commission_id'],
+                                            recovered_id, receipt['review_ref']['artifact_id'])
+                                pending_plan_precondition_errors.pop(recovered_id, None)
                 if event.raw is not None:
                     tool_chat_error = None
                     raw = event.raw
@@ -4587,7 +4970,18 @@ async def _stream_assistant_reply_hermes(
                         tool_chat_error,
                         tool_mode=tool_mode,
                     )
-                    if tool_chat_error and tool_chat_error not in seen_tool_chat_errors:
+                    blocker = (plan_review_precondition_blocker(event)
+                               if event.type != 'tool_started' else None)
+                    if tool_chat_error and blocker and event.call_id:
+                        arguments = event.input if isinstance(event.input, dict) else {}
+                        pending_plan_precondition_errors[event.call_id] = {
+                            'call_id': event.call_id,
+                            'tool': _codex_freezone_tool_name(event),
+                            'status': 'failed', 'blocker': blocker,
+                            'proposal': arguments.get('proposal') or {},
+                            'error': tool_chat_error,
+                        }
+                    elif tool_chat_error and tool_chat_error not in seen_tool_chat_errors:
                         seen_tool_chat_errors.add(tool_chat_error)
                         assistant_text = _merge_stream_text(
                             assistant_text,
@@ -4694,6 +5088,13 @@ async def _stream_assistant_reply_hermes(
                     event.text, assistant_text
                 )
 
+        for pending in pending_plan_precondition_errors.values():
+            error = pending['error']
+            if error not in seen_tool_chat_errors:
+                seen_tool_chat_errors.add(error)
+                assistant_text = _merge_stream_text(
+                    assistant_text, ('\n\n' if assistant_text.strip() else '') + error,
+                )
         assistant_text = _strip_freezone_tool_lifecycle_failure_text(
             assistant_text,
             tool_mode=tool_mode,
@@ -4991,11 +5392,19 @@ async def _stream_assistant_reply_codex(
     route_prompt: str | None = None,
     agent_profile: str | None = None,
     canvas_id: str | None = None,
+    trusted_reference_parameter_answers: dict[str, Any] | None = None,
+    trusted_reference_commission_id: str | None = None,
+    trusted_plan_presentation_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     assistant_text = ""
+    last_streamed_text = ""
+    first_model_text_logged = False
+    first_emitted_text_logged = False
     tool_text = ""
-    structured_canvas_reply = str(tool_mode or "").strip() == "freezone_canvas"
+    canvas_reply = str(tool_mode or "").strip() == "freezone_canvas"
     canvas_write_attempts: dict[str, str] = {}
+    canvas_write_tools: dict[str, str] = {}
+    canvas_call_receipts: dict[str, dict[str, Any]] = {}
     preflight_rejections: dict[str, tuple[str, str | None]] = {}
     story_conflicts: dict[str, tuple[tuple[str, str, int, str], str]] = {}
     canvas_receipts: set[tuple[str, int | None]] = set()
@@ -5004,6 +5413,17 @@ async def _stream_assistant_reply_codex(
         tuple[str, int | None], tuple[str, int | None]
     ] = {}
     canvas_write_failures: dict[str, str] = {}
+    non_canvas_attempts: dict[str, str] = {}
+    non_canvas_call_receipts: dict[str, dict[str, Any]] = {}
+    production_receipts: dict[str, dict[str, Any]] = {}
+    production_attempted = False
+    non_canvas_failures: dict[str, str] = {}
+    non_canvas_tools: dict[str, str] = {}
+    non_canvas_operation_keys: dict[str, str | None] = {}
+    non_canvas_input_revisions: dict[str, int | None] = {}
+    plan_precondition_attempts: dict[str, dict[str, Any]] = {}
+    plan_presentation_target = trusted_plan_presentation_target
+    rejected_analysis_requests: dict[str, dict[str, Any]] = {}
     canvas_generation_preflights: dict[str, str] = {}
     stage_confirmation_expected = False
     stage_confirmation_attempted = False
@@ -5014,6 +5434,9 @@ async def _stream_assistant_reply_codex(
     # call_id -> the exact corrected arguments that would prove a write the MCP
     # input schema rejected was only a slip; a receipt for them supersedes it.
     canvas_argument_rejections: dict[str, str] = {}
+    # Opaque plugin tokens are meaningful only in this scoped user turn. Keep
+    # the raw tool events intact; this table is a final-outcome projection.
+    production_edit_rejections: dict[str, tuple[str, dict[str, Any], dict[str, Any], tuple[str, ...]]] = {}
     ready_workflow_draft: dict[str, Any] | None = None
     authorization = await authorize_hermes_launch(
         egress_context=egress_context,
@@ -5024,6 +5447,9 @@ async def _stream_assistant_reply_codex(
     )
     turn_operation = _turn_operation_finalizer(authorization)
     turn_disposition = _DEFAULT_TURN_DISPOSITION
+    runtime_failed = False
+    auth_failed = False
+    event_stream = None
     store_agent_id = str(getattr(store_scope, "agent_id", "") or "").strip()
     agent_profile = str(agent_profile or "").strip() or (
         f"freezone:{store_agent_id or 'main'}"
@@ -5064,7 +5490,7 @@ async def _stream_assistant_reply_codex(
     )
     try:
         if (
-            structured_canvas_reply
+            canvas_reply
             and project
             and _interactive_story_stage_confirmation_requested(prompt)
         ):
@@ -5104,6 +5530,8 @@ async def _stream_assistant_reply_codex(
             turn_id=business_turn_id,
             project_state_dir=project_state_dir,
             agent_token_file=token_file,
+            trusted_reference_parameter_answers=trusted_reference_parameter_answers,
+            trusted_reference_commission_id=trusted_reference_commission_id,
         )
         agent_prompt = _prompt_with_user_context(
             username,
@@ -5114,6 +5542,7 @@ async def _stream_assistant_reply_codex(
             route_prompt=route_prompt,
             turn_id=business_turn_id,
             require_generation_parameter_preflight=tool_mode == "freezone_canvas",
+            trusted_reference_parameter_answers=trusted_reference_parameter_answers,
         )
         if tool_mode == "freezone_canvas":
             agent_prompt += await _canvas_background_result_context_for_scope(
@@ -5121,43 +5550,12 @@ async def _stream_assistant_reply_codex(
             )
 
         async def turn_events():
-            nonlocal assistant_text, turn_disposition
-            async for event in thread.stream(agent_prompt):
-                yield event
-            if not (
-                structured_canvas_reply
-                and turn_disposition == "completed"
-                and needs_canvas_format_repair(
-                    assistant_text,
-                    attempts=canvas_write_attempts,
-                    receipts=canvas_receipts,
-                    draft_ready=ready_workflow_draft is not None,
-                )
-            ):
-                return
-            # A no-write turn answered outside the envelope (#680). Ask once,
-            # on the same thread, for the same answer in the required format;
-            # its events go through the same write tracking as the first turn.
-            logger.info(
-                "codex canvas reply format repair user=%s project=%s turn=%s",
-                username,
-                project or "<home>",
-                business_turn_id,
-            )
-            original_text, original_disposition = assistant_text, turn_disposition
-            assistant_text, turn_disposition = "", _DEFAULT_TURN_DISPOSITION
-            try:
-                async for event in thread.stream(CANVAS_FORMAT_REPAIR_PROMPT):
+            async with aclosing(thread.stream(agent_prompt)) as runtime_stream:
+                async for event in runtime_stream:
                     yield event
-            except Exception:
-                logger.warning("codex canvas reply format repair failed", exc_info=True)
-                turn_disposition = "failed"
-            if turn_disposition not in {"completed", "cancelled"}:
-                # A failed repair must not surface a transport error in place
-                # of the original contract failure.
-                assistant_text, turn_disposition = original_text, original_disposition
 
-        async for event in turn_events():
+        event_stream = turn_events()
+        async for event in event_stream:
             logger.debug(
                 "codex event user=%s project=%s profile=%s type=%s thread=%s turn=%s",
                 username,
@@ -5173,6 +5571,7 @@ async def _stream_assistant_reply_codex(
                 continue
             if event.type == "egress_disposition":
                 turn_disposition = str(event.disposition or _DEFAULT_TURN_DISPOSITION)
+                runtime_failed = runtime_failed or turn_disposition in {"failed", "timeout", "cancelled"}
                 continue
             if event.type == "thread_started":
                 codex_thread_id = str(event.thread_id or "").strip() or None
@@ -5205,6 +5604,7 @@ async def _stream_assistant_reply_codex(
                 )
                 continue
             if event.type == "turn_completed":
+                runtime_failed = runtime_failed or bool(event.error) or str(event.disposition or event.status or "") in {"failed", "timeout", "cancelled"}
                 turn_disposition = str(
                     event.disposition or event.status or turn_disposition
                 )
@@ -5213,15 +5613,19 @@ async def _stream_assistant_reply_codex(
                 )
                 continue
             if event.type == "assistant_delta":
+                if canvas_reply and event.text and not first_model_text_logged:
+                    logger.info("reference_flow.first_model_text_delta project_id=%s canvas_id=%s turn_id=%s",
+                                project, canvas_id, turn_id)
+                    first_model_text_logged = True
                 assistant_text = _merge_stream_text(assistant_text, event.text)
-                if not structured_canvas_reply:
-                    streamed_text = _redact_local_filesystem_paths(assistant_text)
-                    await on_event(
-                        {
-                            "type": "assistant_delta",
-                            "text": streamed_text,
-                        }
-                    )
+                streamed_text = _redact_local_filesystem_paths(assistant_text)
+                if streamed_text and streamed_text != last_streamed_text:
+                    await on_event({"type": "assistant_delta", "text": streamed_text})
+                    if canvas_reply and not first_emitted_text_logged:
+                        logger.info("reference_flow.first_emitted_text_delta project_id=%s canvas_id=%s turn_id=%s",
+                                    project, canvas_id, turn_id)
+                        first_emitted_text_logged = True
+                    last_streamed_text = streamed_text
                 continue
             if event.type == "thought_delta":
                 await on_event(
@@ -5237,10 +5641,34 @@ async def _stream_assistant_reply_codex(
                 await on_event(runtime_event_mapper.progress_event(event))
                 continue
             if event.type in {"tool_started", "tool_updated"}:
+                native_arguments = getattr(event, "input", None)
+                native_execution = (
+                    _codex_freezone_tool_name(event) == "freezone_prepare_production_nodes"
+                    or (_codex_freezone_tool_name(event) == "freezone_run_node_action"
+                        and isinstance(native_arguments, dict)
+                        and native_arguments.get("action") in {"generate_production_plan_draft", "generate_production_plan_arrangement"})
+                )
+                production_attempted = production_attempted or native_execution
+                if native_execution and event.type == "tool_updated":
+                    native_receipt = (
+                        _codex_freezone_non_canvas_receipt(
+                            event, expected_project=project, expected_canvas=canvas_id,
+                        ) if _codex_freezone_tool_name(event) == "freezone_prepare_production_nodes"
+                        else _codex_freezone_write_receipt(
+                            event, expected_project=project, expected_canvas=canvas_id,
+                        )
+                    )
+                    if native_receipt is not None:
+                        production_receipts[str(getattr(event, "call_id", "") or "")] = native_receipt
                 await _bind_server_observed_agent_product_execution(
                     event,
                     project_dir=project_dir,
                     project_state_dir=project_state_dir,
+                    business_turn_id=business_turn_id,
+                    expected_project_id=str(project or ""),
+                    expected_canvas_id=str(canvas_id or ""),
+                    requester_username=username,
+                    agent_id=str(store_scope.agent_id or 'main') if store_scope else 'main',
                 )
                 if event.type == "tool_updated":
                     prepared_draft = _codex_freezone_ready_workflow_draft(event)
@@ -5254,6 +5682,110 @@ async def _stream_assistant_reply_codex(
                     if validation_alias is not None:
                         alias, canonical = validation_alias
                         canvas_receipt_aliases[alias] = canonical
+                if _codex_freezone_is_non_canvas_write_event(event):
+                    from novelvideo.chat.operation_outcome import (
+                        logical_operation_key, operation_input_revision,
+                        recovered_attempt_ids,
+                    )
+                    call_id = str(getattr(event, "call_id", "") or "")
+                    identifiable_call = bool(call_id)
+                    call_id = call_id or f"unidentified:{len(non_canvas_attempts)}"
+                    non_canvas_attempts.setdefault(call_id, "in_progress")
+                    non_canvas_tools[call_id] = _codex_freezone_tool_name(event)
+                    observed_key = logical_operation_key(
+                        non_canvas_tools[call_id], getattr(event, "input", None),
+                        project=project, canvas=canvas_id,
+                        agent=str((store_scope.agent_id if store_scope else None) or "main"),
+                    )
+                    if observed_key is not None or call_id not in non_canvas_operation_keys:
+                        non_canvas_operation_keys[call_id] = observed_key
+                    observed_revision = operation_input_revision(getattr(event, "input", None))
+                    if observed_revision is not None or call_id not in non_canvas_input_revisions:
+                        non_canvas_input_revisions[call_id] = observed_revision
+                    if event.type == "tool_updated":
+                        receipt = _codex_freezone_non_canvas_receipt(
+                            event, expected_project=project, expected_canvas=canvas_id,
+                            expected_agent=str((store_scope.agent_id if store_scope else None) or "main"),
+                            admission_key_for_request=analysis_admission_key,
+                        )
+                        non_canvas_attempts[call_id] = (
+                            "succeeded" if receipt is not None and identifiable_call
+                            else _codex_freezone_write_result_state(event)
+                        )
+                        if receipt is not None and identifiable_call:
+                            non_canvas_call_receipts[call_id] = receipt
+                            for recovered_id in recovered_attempt_ids(
+                                successful_call_id=call_id,
+                                successful_key=non_canvas_operation_keys[call_id],
+                                attempt_states=non_canvas_attempts,
+                                attempt_keys=non_canvas_operation_keys,
+                                successful_revision=non_canvas_input_revisions[call_id],
+                                attempt_revisions=non_canvas_input_revisions,
+                            ):
+                                non_canvas_attempts.pop(recovered_id, None)
+                                non_canvas_failures.pop(recovered_id, None)
+                                non_canvas_tools.pop(recovered_id, None)
+                                non_canvas_operation_keys.pop(recovered_id, None)
+                                non_canvas_input_revisions.pop(recovered_id, None)
+                            if (_codex_freezone_tool_name(event) == 'freezone_review_production_plan'
+                                    and project_dir and requester_user_id
+                                    and isinstance(receipt.get('decision_ref'), dict)):
+                                from novelvideo.chat.operation_outcome import recovered_plan_precondition_attempts
+                                from novelvideo.freezone.remix.plan_review_settlement import verified_plan_review_settlement
+                                from novelvideo.freezone.remix.store import RemixArtifactStore
+
+                                verified = verified_plan_review_settlement(
+                                    RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                                    receipt,
+                                )
+                                if verified:
+                                    from novelvideo.chat.plan_confirmation_delivery import prepare_plan_presentation_target
+                                    plan_presentation_target = prepare_plan_presentation_target(
+                                        RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                                        receipt['commission']['commission_ref'],
+                                        agent_id=str((store_scope.agent_id if store_scope else None) or 'main'),
+                                    )
+                                    for recovered_id in recovered_plan_precondition_attempts(
+                                        list(plan_precondition_attempts.values()), verified,
+                                    ):
+                                        logger.info('settled early plan proposal after saved review '
+                                                    'project=%s canvas=%s commission=%s call=%s review=%s',
+                                                    project, canvas_id, verified['commission_id'],
+                                                    recovered_id, receipt['review_ref']['artifact_id'])
+                                        non_canvas_attempts.pop(recovered_id, None)
+                                        non_canvas_failures.pop(recovered_id, None)
+                                        plan_precondition_attempts.pop(recovered_id, None)
+                                        non_canvas_tools.pop(recovered_id, None)
+                                        non_canvas_operation_keys.pop(recovered_id, None)
+                                        non_canvas_input_revisions.pop(recovered_id, None)
+                            if (_codex_freezone_tool_name(event) == "freezone_start_reference_analysis"
+                                    and receipt.get("status") == "reference_analysis_submitted"):
+                                current_request = getattr(event, "input", None)
+                                if isinstance(current_request, dict):
+                                    for rejected_id, rejected_request in list(rejected_analysis_requests.items()):
+                                        if (non_canvas_attempts.get(rejected_id) == "failed"
+                                                and non_canvas_failures.get(rejected_id) == "原片分析请求已变化，请重新确认"
+                                                and all(rejected_request.get(key) == current_request.get(key)
+                                                        for key in ("project_id", "canvas_id", "source_node_id", "user_goal", "inputs"))
+                                                and rejected_request.get("source_node_id")
+                                                and rejected_request.get("user_goal")):
+                                            non_canvas_attempts.pop(rejected_id, None)
+                                            non_canvas_failures.pop(rejected_id, None)
+                                            rejected_analysis_requests.pop(rejected_id, None)
+                        failure = _codex_freezone_write_result_error(event)
+                        if failure:
+                            non_canvas_failures[call_id] = failure
+                            blocker = plan_review_precondition_blocker(event)
+                            if blocker and identifiable_call:
+                                arguments = getattr(event, 'input', None) or {}
+                                plan_precondition_attempts[call_id] = {
+                                    'call_id': call_id, 'tool': non_canvas_tools[call_id],
+                                    'status': 'failed', 'blocker': blocker,
+                                    'proposal': arguments.get('proposal') or {},
+                                }
+                            if (_codex_freezone_tool_name(event) == "freezone_start_reference_analysis"
+                                    and isinstance(getattr(event, "input", None), dict)):
+                                rejected_analysis_requests[call_id] = event.input
                 if _codex_freezone_is_write_event(event):
                     is_stage_confirmation = (
                         _codex_freezone_tool_name(event)
@@ -5267,6 +5799,7 @@ async def _stream_assistant_reply_codex(
                     # claim. Keep it failed rather than merging unrelated calls.
                     call_id = call_id or f"unidentified:{len(canvas_write_attempts)}"
                     canvas_write_attempts.setdefault(call_id, "in_progress")
+                    canvas_write_tools[call_id] = _codex_freezone_tool_name(event)
                     if event.type == "tool_updated":
                         preflight_target = _codex_story_preflight_rejection(event)
                         if preflight_target is not None:
@@ -5278,9 +5811,16 @@ async def _stream_assistant_reply_codex(
                             if failure:
                                 canvas_write_failures[call_id] = failure
                         else:
+                            is_production_edit = (
+                                _codex_freezone_tool_name(event) == "freezone_prepare_production_edit"
+                            )
                             receipt = _codex_freezone_write_receipt(
                                 event, expected_project=project, expected_canvas=canvas_id
                             )
+                            if is_production_edit:
+                                receipt = production_edit_saved_receipt(
+                                    event, expected_project=project, expected_canvas=canvas_id
+                                )
                             retry_key = _codex_freezone_generation_retry_key(event)
                             if receipt is not None and identifiable_call:
                                 intent = _codex_story_write_intent(
@@ -5324,10 +5864,58 @@ async def _stream_assistant_reply_codex(
                                 else _codex_freezone_write_result_state(event)
                             )
                             if receipt is not None and identifiable_call:
+                                canvas_call_receipts[call_id] = receipt
                                 if is_stage_confirmation:
                                     stage_confirmation_succeeded = True
                                 reference = receipt_reference(receipt)
                                 canvas_receipts.add(reference)
+                                if is_production_edit and isinstance(getattr(event, "input", None), dict):
+                                    from novelvideo.chat.operation_outcome import (
+                                        production_edit_retry_matches,
+                                        reduce_operation_outcomes,
+                                    )
+
+                                    retry_token = event.input.get("retry_of")
+                                    prior = (
+                                        production_edit_rejections.get(retry_token)
+                                        if isinstance(retry_token, str) else None
+                                    )
+                                    if prior and production_edit_retry_matches(
+                                        prior[1], event.input, prior[2]
+                                    ):
+                                        linked = (retry_token, *prior[3])
+                                        if all(token in production_edit_rejections for token in linked):
+                                            command = event.input["command"]
+                                            plan_ref = command["plan_ref"]
+                                            scope_key = "/".join((
+                                                project, str(canvas_id),
+                                                str(requester_user_id or username), str(turn_id or ""),
+                                                str((store_scope.agent_id if store_scope else None) or "main"),
+                                                "freezone_prepare_production_edit",
+                                            ))
+                                            identity = {
+                                                "scope_key": scope_key,
+                                                "logical_operation_id": linked[-1],
+                                                "target_key": f"{plan_ref['artifact_id']}/{event.input['node_id']}",
+                                                "input_revision": plan_ref["revision"],
+                                            }
+                                            outcome = reduce_operation_outcomes([
+                                                {
+                                                    **identity,
+                                                    "attempt_id": production_edit_rejections[token][0],
+                                                    "status": "failed",
+                                                    "side_effects": production_edit_rejections[token][2]["side_effects"],
+                                                }
+                                                for token in linked
+                                            ] + [{
+                                                **identity, "attempt_id": call_id,
+                                                "status": "completed",
+                                                "retry_of": [production_edit_rejections[token][0] for token in linked],
+                                                "verified_receipt": True,
+                                            }])
+                                            for recovered_call in outcome["recovered_attempt_ids"]:
+                                                canvas_write_attempts.pop(recovered_call, None)
+                                                canvas_write_failures.pop(recovered_call, None)
                                 receipt_story_id = receipt.get("story_id")
                                 if isinstance(receipt_story_id, str) and receipt_story_id.strip():
                                     story_receipts[receipt_story_id.strip()] = reference
@@ -5403,9 +5991,35 @@ async def _stream_assistant_reply_codex(
                                 # Rejected before the handler ran, so nothing was
                                 # written; only the provably corrected call may
                                 # supersede it.
-                                expected = _codex_freezone_argument_retry_expectation(event)
+                                expected = (
+                                    None if is_production_edit else
+                                    _codex_freezone_argument_retry_expectation(event)
+                                )
                                 if expected is not None:
                                     canvas_argument_rejections[call_id] = expected
+                                if is_production_edit and identifiable_call and isinstance(getattr(event, "input", None), dict):
+                                    rejection = production_edit_rejection(
+                                        event, expected_project=project, expected_canvas=canvas_id
+                                    )
+                                    if rejection is not None:
+                                        from novelvideo.chat.operation_outcome import production_edit_retry_matches
+
+                                        token = rejection["retry_token"]
+                                        if token not in production_edit_rejections:
+                                            previous_token = event.input.get("retry_of")
+                                            previous = (
+                                                production_edit_rejections.get(previous_token)
+                                                if isinstance(previous_token, str) else None
+                                            )
+                                            ancestry = (
+                                                (previous_token, *previous[3])
+                                                if previous and production_edit_retry_matches(
+                                                    previous[1], event.input, previous[2]
+                                                ) else ()
+                                            )
+                                            production_edit_rejections[token] = (
+                                                call_id, event.input, rejection, ancestry
+                                            )
                             failure = _codex_freezone_write_result_error(event)
                             if failure:
                                 canvas_write_failures[call_id] = failure
@@ -5415,6 +6029,29 @@ async def _stream_assistant_reply_codex(
                 await on_event(
                     runtime_event_mapper.sdk_tool_event(event, text=event_tool_text)
                 )
+                from novelvideo.chat.tool_auth import codex_tool_agent_session_invalid
+
+                if codex_tool_agent_session_invalid(event):
+                    auth_failed = runtime_failed = True
+                    turn_disposition = "failed"
+                    # Interrupt this exact live runtime turn before closing the
+                    # iterator, whose SDK finally must join the worker safely.
+                    if active_turn_value is not None:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(
+                                interrupt_live_codex_turn,
+                                active_turn_value[0], active_turn_value[1],
+                            ), timeout=CODEX_INTERRUPT_GRACE_TIMEOUT)
+                        except Exception:
+                            logger.warning("failed to interrupt invalid-auth Codex turn", exc_info=True)
+                    await on_event({
+                        "type": "turn_completed",
+                        "thread_id": active_turn_value[0] if active_turn_value else event.thread_id,
+                        "turn_id": active_turn_value[1] if active_turn_value else event.turn_id,
+                        "status": "failed", "disposition": "failed",
+                        "error": {"code": "agent_session_invalid", "next_action": "restore_agent_session"},
+                    })
+                    break
                 continue
             if event.type == "tool_update":
                 tool_text += str(event.text or "")
@@ -5422,6 +6059,10 @@ async def _stream_assistant_reply_codex(
                 continue
             if event.type == "complete":
                 codex_thread_id = str(event.thread_id or "").strip() or None
+                if canvas_reply and event.text and not first_model_text_logged:
+                    logger.info("reference_flow.first_model_text_delta project_id=%s canvas_id=%s turn_id=%s",
+                                project, canvas_id, turn_id)
+                    first_model_text_logged = True
                 if codex_thread_id:
                     _set_codex_thread_id(
                         username,
@@ -5434,6 +6075,14 @@ async def _stream_assistant_reply_codex(
                 assistant_text = _completion_text_or_existing(
                     event.text, assistant_text
                 )
+                final_streamed_text = _redact_local_filesystem_paths(assistant_text)
+                if final_streamed_text and final_streamed_text != last_streamed_text:
+                    await on_event({"type": "assistant_delta", "text": final_streamed_text})
+                    if canvas_reply and not first_emitted_text_logged:
+                        logger.info("reference_flow.first_emitted_text_delta project_id=%s canvas_id=%s turn_id=%s",
+                                    project, canvas_id, turn_id)
+                        first_emitted_text_logged = True
+                    last_streamed_text = final_streamed_text
                 if turn_disposition == _DEFAULT_TURN_DISPOSITION:
                     turn_disposition = "completed"
                 if not str(event.text or assistant_text or "").strip():
@@ -5444,6 +6093,11 @@ async def _stream_assistant_reply_codex(
                         agent_profile,
                     )
     finally:
+        if event_stream is not None:
+            try:
+                await event_stream.aclose()
+            except Exception:
+                logger.warning("failed to close Codex event stream", exc_info=True)
         logger.info(
             "codex turn cleanup user=%s project=%s profile=%s disposition=%s had_text=%s had_tool=%s",
             username,
@@ -5474,122 +6128,87 @@ async def _stream_assistant_reply_codex(
                 await get_auth_session_port().revoke_agent_session(agent_token)
             except Exception:
                 logger.warning("failed to revoke Codex turn token", exc_info=True)
+        await _settle_server_observed_agent_product_turn(
+            project_dir=project_dir, project_state_dir=project_state_dir,
+            turn_id=turn_id, disposition=turn_disposition,
+        )
         if turn_operation is not None:
             await turn_operation.finish(turn_disposition)
 
     for rejected_call in preflight_rejections:
         canvas_write_attempts[rejected_call] = "failed"
+    if (canvas_reply and stage_confirmation_expected
+            and not stage_confirmation_attempted and not stage_confirmation_succeeded
+            and turn_disposition == "completed"):
+        missing_call = f"stage-confirmation:{business_turn_id}"
+        canvas_write_attempts[missing_call] = "failed"
+        canvas_write_tools[missing_call] = "dramaclaw_confirm_interactive_story_stages"
+        canvas_write_failures[missing_call] = "stage_confirmation_not_submitted"
+    operation_outcome: dict[str, Any] | None = None
+    if canvas_reply:
+        from novelvideo.chat.canvas_outcome import summarize_canvas_operations
 
-    # A transport timeout/cancellation is not a canvas receipt failure. Keep
-    # the runtime's actionable reason instead of replacing it with the
-    # misleading "no canvas write" postcondition message.
-    canvas_postcondition_applies = turn_disposition not in {"timeout", "cancelled"}
-    if structured_canvas_reply and turn_disposition == "cancelled":
-        # Interrupted turns can complete with partial structured JSON. None of
-        # that unvalidated payload may reach presentation or persisted history.
-        assistant_text = "已取消本轮请求。"
-        if store_scope is not None:
-            try:
-                await _cancel_pending_clarifications_for_turn(
-                    username=username,
-                    store_scope=store_scope,
-                    turn_id=business_turn_id,
-                    project_state_dir=project_state_dir,
-                    agent_profile=agent_profile,
-                )
-            except Exception:
-                logger.exception(
-                    "failed to settle clarification cards for cancelled turn %s",
-                    business_turn_id,
-                )
-    elif structured_canvas_reply and canvas_postcondition_applies:
-        if (
-            stage_confirmation_expected
-            and not stage_confirmation_attempted
-            and not stage_confirmation_succeeded
+        attempts = []
+        for category, states, names, saved, errors in (
+            ("canvas", canvas_write_attempts, canvas_write_tools, canvas_call_receipts, canvas_write_failures),
+            ("artifact", non_canvas_attempts, non_canvas_tools, non_canvas_call_receipts, non_canvas_failures),
         ):
-            reset_codex_scope_thread(
-                username,
-                project,
+            for call_id, state in states.items():
+                receipt = saved.get(call_id)
+                operation_status = "completed" if state == "succeeded" else state
+                if operation_status == "completed" and isinstance(receipt, dict):
+                    if receipt.get("canvas_apply_status") in {"accepted", "pending", "awaiting_approval", "waiting_approval"}:
+                        operation_status = "accepted" if receipt["canvas_apply_status"] == "accepted" else "awaiting_approval"
+                    elif receipt.get("status") in {"submitted", "running", "reference_analysis_submitted"}:
+                        operation_status = "accepted" if receipt["status"] != "running" else "running"
+                attempts.append({
+                    "call_id": call_id, "name": names.get(call_id, ""), "category": category,
+                    "status": operation_status, "verified": state == "succeeded",
+                    "receipt": {"saved": True} if receipt is not None else None,
+                    "error_code": errors.get(call_id),
+                })
+        operation_outcome = summarize_canvas_operations(operations=attempts, disposition=turn_disposition)
+        for operation in operation_outcome["operations"]:
+            await on_event({
+                "type": "tool_updated", "call_id": operation["call_id"],
+                "name": operation["name"], "status": operation["status"],
+                "error": operation["error_code"], "text": operation["error_code"] or "",
+            })
+    # Capture validated model content before any host-generated diagnostic or
+    # fallback replaces it. Only the post-persistence done event can attest delivery.
+    delivered_content = assistant_text.strip()
+
+    if auth_failed:
+        from novelvideo.chat.tool_auth import AGENT_SESSION_INVALID_MESSAGE
+        assistant_text = AGENT_SESSION_INVALID_MESSAGE
+    if canvas_reply and turn_disposition == "cancelled" and store_scope is not None:
+        try:
+            await _cancel_pending_clarifications_for_turn(
+                username=username, store_scope=store_scope,
+                turn_id=business_turn_id, project_state_dir=project_state_dir,
                 agent_profile=agent_profile,
-                canvas_id=canvas_id,
-                project_state_dir=project_state_dir,
             )
-            assistant_text = json.dumps(
-                {
-                    "message": _stage_confirmation_not_written_message(prompt),
-                    "mode": "blocked",
-                    "canvas_receipts": [],
-                },
-                ensure_ascii=False,
-            )
-        raw_assistant_text = assistant_text.strip()
-        assistant_text = finalize_canvas_reply(
-            assistant_text,
-            attempts=canvas_write_attempts,
-            receipts=canvas_receipts,
-            receipt_aliases=canvas_receipt_aliases,
-            failure=next(
-                (
-                    canvas_write_failures.get(call_id, "")
-                    for call_id, state in canvas_write_attempts.items()
-                    if state == "failed" and canvas_write_failures.get(call_id)
-                ),
-                "",
-            ),
-            draft_ready=ready_workflow_draft is not None,
-        )
-        if not canvas_write_attempts and assistant_text.startswith(
-            "回复未通过操作结果校验："
-        ):
-            # A hidden unstructured proposal must not be resumed as approval.
-            logger.warning(
-                "freezone canvas reply format rejected turn_id=%s chars=%d json_like=%s reason=%s",
-                turn_id,
-                len(raw_assistant_text),
-                raw_assistant_text.startswith(("{", "[")),
-                assistant_text,
-            )
-            reset_codex_scope_thread(
-                username,
-                project,
-                agent_profile=agent_profile,
-                canvas_id=canvas_id,
-                project_state_dir=project_state_dir,
-            )
-            # Preserve an unstructured proposal only when there were no tool
-            # results to ground a format repair. Contradictory receipt claims
-            # and failed repairs of a tool-backed answer stay contract errors.
-            if (
-                raw_assistant_text
-                and not tool_text.strip()
-                and needs_canvas_format_repair(
-                    raw_assistant_text,
-                    attempts=canvas_write_attempts,
-                    receipts=canvas_receipts,
-                )
-            ):
-                recovered_message = recover_unstructured_canvas_message(
-                    raw_assistant_text
-                )
-                assistant_text = (
-                    "本轮未执行画布写入。以下是未通过格式校验的回复内容，"
-                    "供你审核；其中的完成表述不代表实际操作结果：\n\n"
-                    + (recovered_message or raw_assistant_text)[:12000]
-                )
-    assistant_text = assistant_text.strip() or "已执行，但没有返回正文。"
-    assistant_text = _bounded_workflow_planning_reply(
-        assistant_text,
-        draft_ready=ready_workflow_draft is not None,
+        except Exception:
+            logger.exception("failed to settle cancelled turn %s", business_turn_id)
+    assistant_delivered = (
+        turn_disposition == "completed"
+        and not runtime_failed
+        and bool(delivered_content)
+        and assistant_text.strip() == delivered_content
     )
-    assistant_text = _normalize_json_render_reply(assistant_text)
-    if structured_canvas_reply:
-        await on_event(
-            {
-                "type": "assistant_delta",
-                "text": _redact_local_filesystem_paths(assistant_text),
-            }
+    assistant_text = assistant_text.strip() or (
+        "已取消本轮请求。" if turn_disposition == "cancelled"
+        else "Codex App Server 响应超时，请重试。" if turn_disposition == "timeout"
+        else "已执行，但没有返回正文。"
+    )
+    if not canvas_reply:
+        assistant_text = _bounded_workflow_planning_reply(
+            assistant_text, draft_ready=ready_workflow_draft is not None,
         )
+        assistant_text = _normalize_json_render_reply(assistant_text)
+    final_visible_text = _redact_local_filesystem_paths(assistant_text)
+    if final_visible_text != last_streamed_text:
+        await on_event({"type": "assistant_delta", "text": final_visible_text})
     if tool_text.strip():
         if store_scope is not None:
             from novelvideo.chat.store import chat_store
@@ -5619,6 +6238,16 @@ async def _stream_assistant_reply_codex(
     media = _extract_media(assistant_text, username, project, project_dir=project_dir)
     if store_scope is not None:
         from novelvideo.chat.store import chat_store
+        metadata = {"operation_outcome": operation_outcome} if operation_outcome and operation_outcome["operations"] else {}
+        if plan_presentation_target and project_dir and requester_user_id:
+            from novelvideo.chat.plan_confirmation_delivery import metadata_for_delivered_plan
+            from novelvideo.freezone.remix.store import RemixArtifactStore
+            metadata.update(metadata_for_delivered_plan(
+                RemixArtifactStore(Path(project_dir), project, created_by=requester_user_id),
+                plan_presentation_target,
+                assistant_delivered=assistant_delivered and not (operation_outcome or {}).get("blocking_call_ids"),
+                message=assistant_text,
+            ))
 
         result_message = await chat_store.append_message_async(
             username,
@@ -5626,6 +6255,7 @@ async def _stream_assistant_reply_codex(
             "assistant",
             assistant_text,
             media=media,
+            metadata=metadata,
             turn_id=turn_id,
             idempotency_key=f"assistant:{turn_id}" if turn_id else None,
         )
@@ -5639,7 +6269,7 @@ async def _stream_assistant_reply_codex(
             project_dir=project_dir,
             project_state_dir=project_state_dir,
         )
-    await on_event({"type": "done", "message": result_message})
+    await on_event({"type": "done", "message": result_message, "assistant_delivered": assistant_delivered})
     return result_message
 
 

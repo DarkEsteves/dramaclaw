@@ -6,6 +6,20 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from .speech_cues import SpeechCueEvidenceV1
+from .source_speech import SourceSpeechObservationV1
+from .candidate_speech_correction import CandidateSpeechCorrectionV1
+from .production_plan import ProductionPlan
+from .production_plan_v2 import ProductionPlanV2
+from .reference_commission import ReferenceCommission
+from .reference_analysis_service import ReferenceAnalysisV1
+from .production_review import ProductionReviewV1
+from .material_work import MaterialWorkPackageV1
+from .material_review import MaterialReviewV1
+from .reference_director import ReferenceDecisionV1
+from .agent_speech_review import SpeechCorrectionPreviewV1, SpeechCorrectionReviewV1
+from .production_output_review import ProductionOutputReview
+
 
 class _Contract(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True, populate_by_name=True)
@@ -145,7 +159,7 @@ class MatchReport(_Contract):
     substitutions: list[SpeechDifference]
     insertions: list[SpeechDifference]
     omissions: list[SpeechDifference]
-    provenance: Literal["whisperx_asr_comparison"] = "whisperx_asr_comparison"
+    provenance: str = "newapi_asr_comparison"
     asr_is_ground_truth: Literal[False] = False
 
 
@@ -162,6 +176,8 @@ class WordTimeline(_Contract):
     transcript: str | None = None
     confidence_available: bool | None = None
     words: list[WordSpan]
+    recognized_transcript: str | None = None
+    recognized_words: list[WordSpan] | None = None
     mismatch: dict[str, Any] | None = None
     match_report: MatchReport | None = None
 
@@ -175,6 +191,8 @@ class WordTimeline(_Contract):
             raise ValueError(
                 "non-completed word timeline must not publish aligned words"
             )
+        if self.recognized_words and (self.status != "script_mismatch" or self.recognized_transcript is None):
+            raise ValueError("raw recognition is only published with a mismatch and transcript")
         return self
 
 
@@ -379,6 +397,20 @@ class CompositionManifest(_Contract):
         return self
 
 
+class CompositionManifestV2(_Contract):
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+    manifest_version: Literal[4]
+    output_spec: dict[str, Any]
+    media_bindings: list[dict[str, Any]]
+    layers: list[dict[str, Any]]
+    subtitle_events: list[dict[str, Any]]
+    # Optional for manifests saved before native graphic effects were introduced.
+    graphic_events: list[dict[str, Any]] | None = None
+    audio_events: list[dict[str, Any]]
+    manual_overrides: list[dict[str, Any]]
+    source_versions: list[dict[str, Any]]
+
+
 PayloadModel = (
     ReferenceEvidence
     | WordTimeline
@@ -387,18 +419,36 @@ PayloadModel = (
     | PerformanceTiming
     | TakePerformanceTiming
     | CompositionManifest
+    | CompositionManifestV2
+    | ProductionPlan
+    | ProductionPlanV2
 )
 
 SCHEMA_MODELS: dict[str, type[PayloadModel]] = {
+    "reference_commission.v1": ReferenceCommission,
+    "reference_analysis.v1": ReferenceAnalysisV1,
+    "production_review.v1": ProductionReviewV1,
+    "material_work_package.v1": MaterialWorkPackageV1,
+    "material_review.v1": MaterialReviewV1,
+    "reference_decision.v1": ReferenceDecisionV1,
+    "speech_correction_preview.v1": SpeechCorrectionPreviewV1,
+    "speech_correction_review.v1": SpeechCorrectionReviewV1,
+    "production_output_review.v1": ProductionOutputReview,
     "reference_evidence.v1": ReferenceEvidence,
+    "source_speech_observation.v1": SourceSpeechObservationV1,
+    "candidate_speech_correction.v1": CandidateSpeechCorrectionV1,
     "word_timeline.v1": WordTimeline,
     "reference_blueprint.v1": ReferenceBlueprint,
     "remix_script.v1": RemixScript,
     "performance_timing.v1": PerformanceTiming,
     "performance_timing.v2": TakePerformanceTiming,
     "composition_manifest.v1": CompositionManifest,
+    "composition_manifest.v2": CompositionManifestV2,
+    "production_plan.v1": ProductionPlan,
+    "production_plan.v2": ProductionPlanV2,
+    "speech_cue_evidence.v1": SpeechCueEvidenceV1,
 }
-V1_SCHEMAS = frozenset(SCHEMA_MODELS)
+SUPPORTED_SCHEMAS = frozenset(SCHEMA_MODELS)
 
 
 def _same_artifact_reference(left: object, right: object) -> bool:
@@ -455,8 +505,6 @@ def reference_blueprint_readiness_errors(
             spoken_ref = event.spoken_range.transcript_ref.model_dump(mode="json")
             if not _same_artifact_reference(spoken_ref, transcript_ref):
                 errors.append(f"event {index} has a broken transcript reference")
-        if event.user_override.review_state not in {"reviewed", "reviewed_uncertain"}:
-            errors.append(f"event {index} has not been reviewed")
     return errors
 
 
@@ -473,7 +521,14 @@ def validate_payload(schema: str, payload: dict[str, Any]) -> dict[str, Any]:
         )
     except ValidationError as exc:
         raise ValueError(f"{schema} payload is invalid: {exc}") from exc
-    if schema == "composition_manifest.v1":
+    if schema == "production_plan.v2":
+        # Preserve an author's deliberate no-speech selection. Absence means
+        # the dialogue source is unresolved; explicit null is different.
+        for source_beat, saved_beat in zip(payload.get("beats", []), validated["beats"]):
+            for source_turn, saved_turn in zip(source_beat.get("turns", []), saved_beat["turns"]):
+                if "speech_placement_id" in source_turn and source_turn["speech_placement_id"] is None:
+                    saved_turn["speech_placement_id"] = None
+    if schema in {"composition_manifest.v1", "composition_manifest.v2"}:
         from .render import validate_manifest
 
         validate_manifest(validated)
@@ -483,13 +538,28 @@ def validate_payload(schema: str, payload: dict[str, Any]) -> dict[str, Any]:
 class RemixArtifactEnvelope(_Contract):
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     schema_name: Literal[
+        "reference_commission.v1",
+        "reference_analysis.v1",
+        "production_review.v1",
+        "material_work_package.v1",
+        "material_review.v1",
+        "reference_decision.v1",
+        "speech_correction_preview.v1",
+        "speech_correction_review.v1",
+        "production_output_review.v1",
         "reference_evidence.v1",
+        "source_speech_observation.v1",
+        "candidate_speech_correction.v1",
         "word_timeline.v1",
         "reference_blueprint.v1",
         "remix_script.v1",
         "performance_timing.v1",
         "performance_timing.v2",
         "composition_manifest.v1",
+        "composition_manifest.v2",
+        "production_plan.v1",
+        "production_plan.v2",
+        "speech_cue_evidence.v1",
     ] = Field(alias="schema")
     revision: int = Field(ge=1)
     project_id: str = Field(min_length=1)

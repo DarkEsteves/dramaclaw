@@ -184,6 +184,10 @@ class GatewayOriginMismatch(RuntimeError):
     """
 
 
+class _PrewarmSkipped(RuntimeError):
+    """A speculative warm-up must leave an active turn's worker alone."""
+
+
 def _resolve_turn_gateway_api_key(
     authorization: HermesTurnAuthorization | None,
 ) -> str | None:
@@ -342,6 +346,7 @@ class HermesPool:
         egress_project_id: str | None = None,
         requester_user_id: str | None = None,
         authorization: HermesTurnAuthorization | None = None,
+        prewarm_only: bool = False,
     ) -> HermesSdkThread:
         """Lazily create / return the per-user hermes thread.
 
@@ -368,6 +373,11 @@ class HermesPool:
         authz_generation = await self._authz_generation(username)
         async with self._lock:
             slot = self._slots.get(slot_key)
+            if prewarm_only and slot is not None and slot.active_turns > 0:
+                # A reconnect or another tab may request a different canvas.
+                # Check under the same lock as _begin_turn so warm-up cannot
+                # close the worker or read its ACP stream during that turn.
+                raise _PrewarmSkipped()
             # An organisation credential used to drain the worker here, because
             # the key could only reach the child through its environment. It now
             # travels with the turn, so the same worker serves platform and
@@ -464,7 +474,7 @@ class HermesPool:
                 slot.last_used = time.time()
                 return _ManagedHermesThread(self, slot, turn_gateway_api_key)  # type: ignore[return-value]
 
-            await self._evict_lru_if_full()
+            await self._evict_lru_if_full(idle_only=prewarm_only)
             self._dirty_profiles.discard(slot_key)
             slot = await self._spawn_locked(
                 username,
@@ -1084,6 +1094,8 @@ class HermesPool:
         if surface:
             env["DRAMACLAW_CHAT_SURFACE"] = surface
             env["SUPERTALE_CHAT_SURFACE"] = surface
+        if agent_profile.startswith("freezone:"):
+            env["DRAMACLAW_AGENT_ID"] = agent_profile.split(":", 1)[1]
         if canvas_id:
             env["DRAMACLAW_CANVAS_ID"] = canvas_id
             env["SUPERTALE_CANVAS_ID"] = canvas_id
@@ -1125,11 +1137,18 @@ class HermesPool:
             env["NEWAPI_BASE_URL"] = base_url
         return env
 
-    async def _evict_lru_if_full(self) -> None:
+    async def _evict_lru_if_full(self, *, idle_only: bool = False) -> None:
         if len(self._slots) < self._max_workers:
             return
+        candidates = list(self._slots.values())
+        if idle_only:
+            # Called under the pool lock. Speculative prewarm for a new user
+            # or profile cannot evict another user's in-flight worker.
+            candidates = [slot for slot in candidates if slot.active_turns == 0]
+            if not candidates:
+                raise _PrewarmSkipped()
         # Evict least-recently-used
-        victim = min(self._slots.values(), key=lambda s: s.last_used)
+        victim = min(candidates, key=lambda s: s.last_used)
         _log.info(
             "hermes pool full (%d); evicting LRU user=%s",
             self._max_workers,
@@ -1296,6 +1315,7 @@ class HermesPool:
                 project_id=project_id,
                 surface=surface,
                 canvas_id=canvas_id,
+                prewarm_only=True,
             )
         except Exception as e:  # noqa: BLE001 - prewarm must never break chat
             _log.debug("prewarm get_for_user failed for user=%s: %s", username, e)

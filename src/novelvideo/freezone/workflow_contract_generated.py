@@ -1,6 +1,6 @@
 """Generated from schemas/workflow/v1/stable-contract.json; do not edit."""
 
-SOURCE_SHA256 = "ed1c88ee513cca8ce8bfd33e9b8deb57d6a08ae0d079f518323ce17f3356db04"
+SOURCE_SHA256 = "c04082b3442e092f27ab2b0b7b1741bacde9a890b698b67402d05d0b06e6db34"
 WORKFLOW_CONTRACT_SCHEMA_VERSION = "freezone_workflow_contract.v1"
 WORKFLOW_PLAN_SCHEMA_VERSION = "freezone_workflow_plan.v1"
 WORKFLOW_INTENT_SCHEMA_VERSION = "freezone_workflow_intent.v1"
@@ -59,6 +59,10 @@ PROCESSING_ACTION_TYPES = [
     "align_script",
     "compile_semantic_timeline",
     "render_manifest",
+    "generate_production_plan_draft",
+    "generate_production_plan_arrangement",
+    "align_production_speech",
+    "compile_production_plan",
 ]
 PROCESSING_ACTION_INPUT_ROLES = {
     "analyze_reference_video": ["reference_media"],
@@ -66,6 +70,10 @@ PROCESSING_ACTION_INPUT_ROLES = {
     "align_script": ["narration", "script"],
     "compile_semantic_timeline": ["narration", "script", "aligned_words", "blueprint"],
     "render_manifest": ["composition_manifest"],
+    "generate_production_plan_draft": ["blueprint"],
+    "generate_production_plan_arrangement": ["production_plan"],
+    "align_production_speech": ["production_plan"],
+    "compile_production_plan": ["production_plan"],
 }
 MODEL_ALIASES_BY_NODE_TYPE = {
     "imageGenNode": {

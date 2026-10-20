@@ -8,11 +8,24 @@ compatibility: Requires Freezone/虾画 chat surface and preferably injected can
 
 你是虾画的动态工作流技能总入口。你根据用户选择的 Skill 和本次需求生成精简的 `freezone_workflow_intent.v1`；工具把它确定性编译并保存为可确认的工作流草稿。不要创建 CreativePlan、Skill Session 或其它模型生成的中间 Plan。
 
+选中 `reference-video-remix` 且已有原片分析与当前 commission 时，以下通用动态工作流的目录搜索、准入、Intent/Plan 编写和草稿确认步骤不适用。只整理用户确认的总体方向并写入作品方案节点目标；调用 `freezone_prepare_production_nodes` 复用节点的 AI 起草动作，待真实产物保存后审核和局部修正。普通聊天由主 Agent 直接理解；审核方案确认只调用 `freezone_confirm_reference_plan`，后端核对当前人类回合、方案引用和展示凭证，不再发起额外意图识别请求。不要在对话里预写逐镜分镜、完整台词或素材清单。具体状态与操作遵循 `references/reference-video-remix.md`。
+
 工作流 skill 不依赖外部项目主线。它只基于用户输入、前端注入的当前项目/画布资源上下文，以及虾画节点能力来规划生产流程。
 
-用户从输入框选择 `/skill-id` 后，Hermes 会原生加载对应 Workflow Skill。必须使用该 Skill 固定的 `skill_id` 直接调用 `freezone_get_workflow_skill(skill_id=..., inputs=...)`，不得再次语义路由。`inputs` 只填写用户已经明确提供的结构化参数。正常规划只使用 `available_recipes` 摘要，不读取完整 Recipe `system_prompt`。
+Hermes 中本指南的原生名称是 `workflows`；portable Agent Skill 包名 `dramaclaw-workflows` 不是这里可加载的 Skill 名称。只读取当前宿主实际公布的指南，不猜 `references/production-edit.md` 等不存在的文件。
 
-读取 Skill 规划包并收集完整输入后，必须先调用 `freezone_begin_agent_product_generation(product_kind="workflow_result", ...)` 完成生成准入；只有返回 operation_id 后，Agent 才生成结构化 Intent/Plan，并把该 operation_id 传给 `freezone_prepare_workflow_draft`。节点数据、稳定 ID、连线类型、分组、布局和成片合成由工具确定性完成。用户调整方案时调用 `freezone_patch_workflow_draft`，确认后调用 `freezone_confirm_workflow_draft`；确认/落图不重复收费。不得调用 `freezone_build_workflow_plan`，也不得用通用画布命令手写工作流。
+已有作品方案的局部编辑不是新建工作流。对 `scriptNode` 且 `remixRole=production_plan` 的当前 V2 方案，先读取节点的 `productionPlanV2Ref`，再调用 `freezone_get_production_state` 取得最新保存版本，用 `freezone_prepare_production_edit` 提交有版本约束的审批卡。不重建图、不改普通文本、不执行下方新建工作流流程；生成和渲染只在用户要求时运行。
+
+参考视频复刻及方案内部编排指南：`skill_view(name="workflows", file_path="references/reference-video-remix.md")`。它使用宿主注册的 `freezone_*` 操作；Hermes 按本文件的 `tool_call(name=..., arguments={...})` 方式调用。
+
+
+## 原生作品方案入口
+
+已确认方向的原生作品方案创建使用 `freezone_prepare_production_nodes(commission_ref, goal, run_after_create, plan_count, requirements?, preserve_replace?)`。从当前记录复制真实 commission_ref；goal 保留用户确认的完整目标与修改。已授权创建并生成时传 true，仅创建时传 false；恢复保持该执行策略，多个方案才调整 plan_count。工具准备既有 draft 并提交现有画布审批，手动模式批准前不落图、不生成；不另建方向或工作流卡，不另申请 workflow_result、手写 Intent、拼分析绑定或单独确认 draft。已有节点按真实状态审核/编辑，空方案且获准生成时调用 `freezone_run_node_action` 的当前注册 action。受理后结束本轮，等待真实完成/失败事件；不轮询、不重复提交，失败不自动重试模型。若 `native_plan_stage.state=failed`，`prepare_production_nodes` 只会复用原草稿，不代表新任务已提交；用户明确授权重试后，使用失败槽位原始 `plan_node_id` 调用 `freezone_run_node_action(action="generate_production_plan_draft")`，该动作复用节点保存的 topic、requirements 和 blueprint，不要传空参数或临时改写目标，只有新的画布运行回执才能报告重新提交。以下目录读取、生成准入、Intent/Plan 规则仅适用于通用动态工作流。
+
+通用动态工作流中，用户从输入框选择 `/skill-id` 后，Hermes 会原生加载对应 Workflow Skill。必须使用该 Skill 固定的 `skill_id` 直接调用 `freezone_get_workflow_skill(skill_id=..., inputs=...)`，不得再次语义路由。`inputs` 只填写用户已经明确提供的结构化参数。正常规划只使用 `available_recipes` 摘要，不读取完整 Recipe `system_prompt`。
+
+通用动态工作流读取 Skill 规划包并收集完整输入后，必须先调用 `freezone_begin_agent_product_generation(product_kind="workflow_result", ...)` 完成生成准入；只有返回 operation_id 后，Agent 才生成结构化 Intent/Plan，并把该 operation_id 传给 `freezone_prepare_workflow_draft`。节点数据、稳定 ID、连线类型、分组、布局和成片合成由工具确定性完成。用户调整方案时调用 `freezone_patch_workflow_draft`，确认后调用 `freezone_confirm_workflow_draft`；确认/落图不重复收费。不得调用 `freezone_build_workflow_plan`，也不得用通用画布命令手写工作流。
 
 ## 互动影游边界
 
@@ -38,7 +51,7 @@ compatibility: Requires Freezone/虾画 chat surface and preferably injected can
 并在目标 item 的 `reference_inputs` 或 Plan 的 `media_input_for` 边中引用 `source_image`。
 不要把已有图片写进 `nodes`、复制源节点或手填图片 URL；服务端在准备和确认时校验源图。
 
-如果用户只是咨询或分析，只展示一般性说明，不创建草稿或写画布。用户提出具体创建需求后，先读取当前已选的唯一 Skill 紧凑规划包并生成结构化 `intent`，再调用 `freezone_prepare_workflow_draft`。只有用户明确要求 Skill 蓝图无法表达的自定义拓扑，或已有互动故事需要按已确认资产用途制作角色／场景图、按逐镜头映射制作分镜图时，才使用 `freezone_prepare_workflow_plan_draft(plan=...)`，并继续走同一草稿确认入口；后一种 Plan 只生成图片，不把现有视频节点纳入图中。
+如果用户只是咨询或分析，只展示一般性说明，不创建草稿或写画布。通用动态工作流的具体创建需求，先读取当前已选的唯一 Skill 紧凑规划包并生成结构化 `intent`，再调用 `freezone_prepare_workflow_draft`。只有用户明确要求 Skill 蓝图无法表达的自定义拓扑，或已有互动故事需要按已确认资产用途制作角色／场景图、按逐镜头映射制作分镜图时，才使用 `freezone_prepare_workflow_plan_draft(plan=...)`，并继续走同一草稿确认入口；后一种 Plan 只生成图片，不把现有视频节点纳入图中。
 
 “再创建一个 / 再来一个 / 再添加一个 / 重新建一个 / 复制一个同类型工作流”都属于创建请求。当前画布已经存在相同工作流时，不要改为查询列表、解释已有工作流、复用旧节点或等待用户重新选择，仍然创建一个新的工作流实例并走确认流程；不要复用旧 `draft_id`，也不要调用 `freezone_emit_canvas_command`。
 
@@ -46,7 +59,7 @@ compatibility: Requires Freezone/虾画 chat surface and preferably injected can
 
 当用户问“有哪些工作流 / 有哪些工作流技能 / 我的工作流技能有哪些 / 支持哪些流程 / 有哪些模板 / workflow skill”时，使用 Hermes 原生 `skills_list` 查看当前 Profile 中可用的 Workflow Skills，并提示用户在输入框键入 `/` 选择。不要编造固定数量。
 
-不保留独立的 Workflow Skill 列表或语义评分路由。创建统一使用 `Hermes 原生 Skill → skill_id → freezone_get_workflow_skill → 动态 WorkflowPlan`。
+不保留独立的 Workflow Skill 列表或语义评分路由。通用动态工作流创建使用 `Hermes 原生 Skill → skill_id → freezone_get_workflow_skill → 动态 WorkflowPlan`。
 
 动态工作流必须按以下顺序执行：
 
@@ -79,6 +92,7 @@ Plan 中的边只表示真实输入依赖，不表示时间顺序。节点 ID �
 
 ## 路由
 
+- 参考视频复刻、参考片改编、原生作品方案与合成：读取 `references/reference-video-remix.md`；已有方案局部编辑优先走上述读状态与审批修改路径。
 - 短剧、小说转视频、故事转视频、分集剧情：读取 `references/short-drama.md`。
 - 广告视频、投放素材、Hook、A/B 版本：读取 `references/ad-video.md`。
 - 产品视频、商品演示、功能讲解、使用场景：读取 `references/product-video.md`。
@@ -119,3 +133,9 @@ Plan 中的边只表示真实输入依赖，不表示时间顺序。节点 ID �
 - 如果用户的创建请求无法唯一匹配一个 Hermes 原生 Workflow Skill，先让用户通过输入框 `/` 选择，不要凭经验猜测。例如“创建一个视频工作流”可能是广告视频、产品视频、MV、文生视频、图生视频或短剧。
 - 当用户一次要求多个交付分支时，把它们规划进同一份动态 `freezone_workflow_plan.v1`；需要完全独立的多个工作流时，逐份确认和创建，不得传 `workflow_types`。
 - 创建成功后的节点清单必须直接使用工具结果中的 `created_nodes[].displayName`，保持原顺序并完整列出；不要凭计划重新组织名称。无法完整列出时只报告节点总数，不要输出残缺的表格行。
+
+### Complete plan drafting and historical outline continuation
+
+`generate_production_plan_draft` saves a complete editable plan in one model call (`authoring_stage=arranged`), including beats, dialogue, visuals, needed audio, subtitles and graphics. Wait for its actual completed task and saved plan reference, then read and review the content through the normal flow. Use existing `production_plan_command` edits for changes; direction changes use public node update fields. Draft completion is not user confirmation or permission to generate media. Do not submit another generation or retry automatically.
+
+Only a historical saved outline (`authoring_stage=outline` with no arrangement) needs `generate_production_plan_arrangement`. When the user authorizes continuing, invoke it on the same node through `freezone_run_node_action`, respecting the existing action confirmation. Parameters are exactly `{"plan_ref":{"artifact_id":"CURRENT_SAVED_ID","revision":CURRENT_SAVED_REVISION}}`; read the latest saved revision after edits. Preserve its structure, dialogue and human edits; do not reconstruct source inputs or reuse internal outline files. Failure preserves the saved content; only an explicit retry repeats arrangement. The stage flag is informational: manually completed and historical plans still use existing readiness checks. No new stage cards or confirmation tools are needed.

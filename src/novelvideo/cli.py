@@ -455,11 +455,14 @@ def api(
     api_host = host or os.environ.get("NOVELVIDEO_API_HOST", "0.0.0.0")
     api_port = port or int(os.environ.get("NOVELVIDEO_API_PORT", "8780"))
     console.print(f"[green]访问: http://{api_host}:{api_port}/api/v1[/green]")
+    from novelvideo.api.graceful_shutdown import backstop_timeout_from_env
+
     uvicorn.run(
         "novelvideo.api.app:app",
         host=api_host,
         port=api_port,
         reload=reload,
+        timeout_graceful_shutdown=backstop_timeout_from_env(),
     )
 
 

@@ -16,6 +16,13 @@ import {
 import { enT, zhT } from "../helpers/i18n-fixtures";
 
 describe("isTerminal", () => {
+  it('names new outline tasks by stage while preserving historical draft names', () => {
+    const translate = ((key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key) as never;
+    const task = sampleTask({ task_type: 'remix_generate_production_plan_draft', task_type_label: 'AI 起草作品方案', metadata: { authoring_stage: 'outline' } });
+    expect(displayLabel(task, translate)).toBe('AI 生成结构与台词');
+    expect(displayLabel({ ...task, metadata: {} }, translate)).toBe('AI 起草作品方案');
+  });
+
   it("returns true for completed", () => expect(isTerminal(sampleTask({ status: "completed" }))).toBe(true));
   it("returns true for failed", () => expect(isTerminal(sampleTask({ status: "failed" }))).toBe(true));
   it("returns false for running", () => expect(isTerminal(sampleTask({ status: "running" }))).toBe(false));
@@ -47,6 +54,11 @@ describe("ageMs", () => {
 });
 
 describe("displayLabel", () => {
+  it("shows the production plan task without its internal operation id", () => {
+    const task = sampleTask({ task_type: "remix_generate_production_plan_draft", episode: 0, scope: "operation-123" });
+    expect(displayLabel(task, zhT)).toBe("AI 起草作品方案");
+    expect(displayLabel(task, enT)).toBe("Draft production plan");
+  });
   it.each([
     ["freezone_agent_workflow_result", "创建工作流", "Create workflow"],
     ["freezone_agent_recipe_result", "生成 Recipe", "Generate Recipe"],

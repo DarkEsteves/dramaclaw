@@ -7,10 +7,13 @@ import {
   compileFreezoneRecipePrompt,
   generateFreezoneRecipeText,
   listFreezoneStyleTemplates,
+  submitFreezoneAudioMusic,
   submitFreezoneAudioSpeech,
   submitFreezoneGen,
 } from "@/api/ops";
 import {
+  bindWorkflowGenerationContext,
+  clearWorkflowGenerationContext,
   bindWorkflowProductOperation,
   clearWorkflowProductOperation,
 } from "@/features/canvas/application/workflowExecutionActivity";
@@ -25,6 +28,7 @@ describe("workflow media task association", () => {
     vi.mocked(apiCall).mockReset();
     clearWorkflowProductOperation("image-1");
     clearWorkflowProductOperation("audio-1");
+    clearWorkflowGenerationContext("audio-1");
   });
 
   it("sends the admitted attempt with image and audio submissions", async () => {
@@ -55,6 +59,28 @@ describe("workflow media task association", () => {
       json: expect.objectContaining({
         product_operation_id: "operation-audio",
         generation_attempt_id: "attempt-audio",
+      }),
+    }));
+  });
+
+  it("sends ordinary workflow context when no Recipe operation exists", async () => {
+    vi.mocked(apiCall).mockResolvedValue({ task_key: "task-bgm", job_id: "bgm" });
+    bindWorkflowGenerationContext("audio-1", {
+      projectId: "project-1",
+      workflowRunId: "run-bgm",
+      generationAttemptId: "attempt-bgm",
+    });
+
+    await submitFreezoneAudioMusic("project-1", {
+      prompt: "light instrumental music",
+      canvasId: "default",
+      nodeId: "audio-1",
+    });
+
+    expect(vi.mocked(apiCall).mock.calls[0][1]).toEqual(expect.objectContaining({
+      json: expect.objectContaining({
+        workflow_run_id: "run-bgm",
+        generation_attempt_id: "attempt-bgm",
       }),
     }));
   });

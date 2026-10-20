@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from novelvideo.api.routes import chat as chat_routes
+from novelvideo.chat.hermes_fork_requirement import HermesForkMissing
 from novelvideo.chat.store import ChatScope, chat_store
 
 
@@ -17,6 +18,29 @@ def test_reasoning_required_error_has_actionable_chinese_message() -> None:
     assert "上游模型要求启用推理" in message
     assert "NewAPI" in message
     assert "provider_name" not in message
+
+
+def test_hermes_fork_mismatch_is_not_reported_as_a_network_error() -> None:
+    exc = HermesForkMissing(
+        "the installed Hermes cannot carry a per-turn credential: "
+        "/private/runtime/hermes. Every turn would report a connection error. "
+        "API_KEY=secret-placeholder"
+    )
+
+    message = chat_routes._user_facing_chat_error(exc)
+
+    assert "Hermes 运行环境不匹配" in message
+    assert "配套版本" in message
+    assert "模型连接失败" not in message
+    assert "/private/runtime/hermes" not in message
+    assert "secret-placeholder" not in message
+
+
+@pytest.mark.parametrize("reason", ["connection error", "Connection refused"])
+def test_real_connection_errors_keep_the_network_message(reason: str) -> None:
+    message = chat_routes._user_facing_chat_error(RuntimeError(reason))
+
+    assert message == "模型连接失败：当前无法连接上游模型服务，请检查服务状态后重试。"
 
 
 @pytest.mark.asyncio

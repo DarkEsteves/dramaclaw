@@ -332,6 +332,7 @@ async def test_admission_tool_call_is_not_model_generation_evidence(tmp_path):
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-a",
     )
 
     stored = read_agent_product_operation(
@@ -339,6 +340,29 @@ async def test_admission_tool_call_is_not_model_generation_evidence(tmp_path):
         operation_id=operation["operation_id"],
     )
     assert not stored["model_evidence"]
+
+
+@pytest.mark.asyncio
+async def test_verified_admission_response_binds_its_task_to_the_server_turn(tmp_path):
+    from novelvideo.chat import service
+    from novelvideo.freezone.agent_product_operations import settle_agent_product_turn
+
+    operation = _create(tmp_path, key="bound-admission")
+    bind_agent_product_task(project_dir=tmp_path, operation_id=operation["operation_id"],
+                            task_id="task-a", root_task_id="task-a")
+    await service._bind_server_observed_agent_product_execution(
+        SimpleNamespace(type="tool_updated", name="freezone_begin_agent_product_generation",
+                        status="completed", error=None, turn_id="turn-a", call_id="call-a",
+                        input={"operation_id": "model-invented-id"},
+                        structured={"ok": True, "status": "agent_product_generation_admitted",
+                                    "operation_id": operation["operation_id"], "task_id": "task-a"},
+                        output=None),
+        project_dir=tmp_path, project_state_dir=tmp_path,
+        business_turn_id="turn-a",
+    )
+    settled = settle_agent_product_turn(project_dir=tmp_path, turn_id="turn-a", outcome="failed")
+    assert len(settled) == 1
+    assert settled[0]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -367,6 +391,7 @@ async def test_admission_cannot_deliver_until_result_tool_binds_evidence(tmp_pat
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-admission",
     )
 
     with pytest.raises(ValueError, match="execution evidence"):
@@ -392,6 +417,7 @@ async def test_admission_cannot_deliver_until_result_tool_binds_evidence(tmp_pat
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-result",
     )
 
     delivered = finish_agent_product_operation(
@@ -443,6 +469,7 @@ async def test_unsuccessful_result_update_does_not_bind_model_evidence(
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-result",
     )
 
     stored = read_agent_product_operation(
@@ -475,6 +502,7 @@ async def test_workflow_result_tool_binds_server_observed_model_execution(tmp_pa
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-a",
     )
 
     stored = read_agent_product_operation(
@@ -519,6 +547,7 @@ async def test_conflicting_model_evidence_binding_is_counted(tmp_path, monkeypat
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-second",
     )
 
     assert observed_metrics == ["agent_product_binding_failed"]
@@ -583,6 +612,7 @@ async def test_catalog_result_tool_binds_its_generation_operation(
         ),
         project_dir=tmp_path,
         project_state_dir=tmp_path,
+        business_turn_id="turn-catalog",
     )
 
     stored = read_agent_product_operation(

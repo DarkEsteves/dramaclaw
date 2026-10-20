@@ -90,6 +90,26 @@ async def test_workflow_confirmation_task_accepts_late_canvas_success(
 
 
 @pytest.mark.asyncio
+async def test_worker_failure_without_rejection_keeps_delivery_attempt(tmp_path, monkeypatch):
+    draft, envelope = _claimed_task(tmp_path, started_at=1_000)
+    envelope["payload"]["confirmation_started_at"] = 1_000
+
+    async def interrupted(_seconds: float) -> None:
+        raise RuntimeError("worker interrupted before canvas receipt")
+
+    monkeypatch.setattr(freezone_runner.asyncio, "sleep", interrupted)
+    with pytest.raises(RuntimeError, match="worker interrupted"):
+        await freezone_runner._run_freezone_workflow_confirm_async(
+            envelope, SimpleNamespace(state_dir=tmp_path),
+        )
+    stored, _ = read_workflow_draft(
+        project_dir=tmp_path, canvas_id="default", draft_id=draft["draft_id"],
+    )
+    assert stored["status"] == "submitted"
+    assert stored["confirmation_started_at"] == 1_000
+
+
+@pytest.mark.asyncio
 async def test_workflow_confirmation_task_fails_only_from_canvas_outcome(
     tmp_path,
 ) -> None:

@@ -1,7 +1,9 @@
+import { ComposerPromptStop } from "./ComposerPromptStop";
+import { canonicalBridgeRequestId } from "./backgroundBridgeRecovery";
+import { clarificationPresentationKey, mergeClarificationPresentation } from "./message";
 import { RECIPE_OUTPUT_CHOICES, recipeOutputChoice, recipeOutputFields, type RecipeOutputChoice } from "@/lib/recipe-output";
 import { type HtmlArtifactReference, parseHtmlArtifactReference, appendHtmlArtifactTransportContext } from '@/features/html-artifacts/chatReference';
 import { HtmlArtifactResultCard } from '@/features/html-artifacts/HtmlArtifactResultCard';
-import { WorkflowDraftContinuation, insertWorkflowDraftCancellationMessages, workflowDraftIds, type CancelledWorkflowDraft } from './WorkflowDraftContinuation';
 import { activeHtmlArtifactContext, HTML_ARTIFACT_REFERENCE_EVENT } from '@/features/html-artifacts/api';
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
@@ -52,11 +54,13 @@ import {
 } from "react";
 import type {
   CSSProperties,
+  Dispatch,
   DragEvent as ReactDragEvent,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   ReactElement,
   ReactNode,
+  SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
@@ -141,6 +145,9 @@ import {
 } from "@/features/superchat/director-run-mode";
 import { ComposerWaitingStatus } from "@/features/superchat/composer-waiting-status";
 import { ChatTaskStatusBar } from "@/features/superchat/chat-task-status-bar";
+import { ReferenceAnalysisStatus } from '@/features/superchat/ReferenceAnalysisStatus';
+import { ReferenceProductionPanel } from '@/features/superchat/ReferenceProductionPanel';
+import type { ReferenceProductionState } from '@/api/referenceDirector';
 import { calculateTimelineContextDelta } from "@/features/superchat/timeline-scroll";
 import { useEventBus } from "@/task-center/event-bus-context";
 import { useTaskCenterStore } from "@/task-center/store";
@@ -182,6 +189,7 @@ import type {
   CanvasChatCommand,
   CanvasChatCommandApplyStep,
   CanvasChatCommandApplyResult,
+  GraphDeliveryCheckpoint,
   CanvasCommandApprovalEventDetail,
   CanvasCommandResultEventDetail,
   CanvasChatCommandEnvelope,
@@ -189,6 +197,8 @@ import type {
 import {
   applyCanvasChatCommandsAsync,
   canvasCommandEnvelopesRunInBackground,
+  canvasGraphNeedsDurableFlush,
+  nativeProductionAcceptanceFromResult,
   directGenerationTargetsForPreflight,
   FREEZONE_CANVAS_COMMAND_APPROVAL_EVENT,
   FREEZONE_CANVAS_COMMAND_RESULT_EVENT,
@@ -493,6 +503,17 @@ const AGENT_TOOL_TITLE_OVERRIDES: Record<string, string> = {
   "get workflow skill": "加载 Workflow Skill",
   freezone_prepare_workflow_draft: "生成工作流草稿",
   freezone_prepare_workflow_plan_draft: "生成工作流草稿",
+  freezone_prepare_material_work: "规划素材制作",
+  freezone_prepare_material_stage: "准备下一阶段素材",
+  freezone_start_reference_analysis: "分析原片",
+  freezone_get_reference_evidence: "读取原片证据",
+  freezone_get_reference_director_state: "读取复刻状态",
+  freezone_get_production_progress: "读取制作进度",
+  freezone_advance_reference_production: "推进复刻流程",
+  freezone_create_production_plan: "创建作品方案",
+  freezone_get_production_state: "读取制作状态",
+  freezone_prepare_production_edit: "修改作品方案",
+  freezone_review_production_plan: "审核作品方案",
   freezone_confirm_workflow_draft: "提交到画布",
   freezone_request_user_clarification: "确认生成参数",
   freezone_list_agent_catalog: "读取 Skill / Recipe 列表",
@@ -595,18 +616,19 @@ function freezoneToolStatus(message: ChatMessage): "running" | "done" | "failed"
   const raw = toolRawRecord(message);
   if (isRecoverableWorkflowInteraction(message)) return "done";
   const status = typeof raw?.status === "string" ? raw.status.toLowerCase() : "";
+  if (["failed", "error", "cancelled", "canceled", "timeout", "unverified"].includes(status)) return "failed";
+  if (["pending", "in_progress", "accepted", "submitted", "running", "awaiting_approval", "waiting_approval"].includes(status)) return "running";
   if (
     raw?.type === "tool.call"
     || raw?.type === "agent.tool.started"
-    || status === "pending"
-    || status === "in_progress"
   ) return "running";
-  if (["failed", "error", "cancelled", "canceled"].includes(status)) return "failed";
   if (raw?.success === false || raw?.error) return "failed";
   const result = raw?.result ?? raw?.output;
   if (result && typeof result === "object" && (result as Record<string, unknown>).ok === false) return "failed";
   return "done";
 }
+
+export const freezoneToolStatusForTest = freezoneToolStatus;
 
 function freezoneToolMeta(message: ChatMessage): string[] {
   const raw = toolRawRecord(message);
@@ -830,6 +852,7 @@ function FreezoneUserMessageText({
 }
 
 const ASSISTANT_ERROR_TEXT_PATTERNS: RegExp[] = [
+  /^(?:画布)?操作未完成[:：]/u,
   /模型内容安全过滤拦截/u,
   /Render 任务没有生成可用图片/u,
   /错误原因：.+/u,
@@ -849,6 +872,16 @@ function isAssistantErrorReply(message: ChatMessage): boolean {
   const text = message.text.trim();
   if (!text) return false;
   return ASSISTANT_ERROR_TEXT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function assistantHasFailedToolPart(message: ChatMessage): boolean {
+  if (message.role !== "assistant") return false;
+  return Boolean(message.parts?.some((part) => {
+    if (part.type !== "tool_status") return false;
+    const toolMessage = part.event;
+    if (!toolMessage || typeof toolMessage !== "object" || Array.isArray(toolMessage)) return false;
+    return freezoneToolStatus(toolMessage as ChatMessage) === "failed";
+  }));
 }
 
 export function assistantCompletionPrefix(text: string): string | null {
@@ -1788,6 +1821,16 @@ function genericToolTitle(message: ChatMessage): string {
   const raw = toolRawRecord(message);
   const name = typeof raw?.name === "string" ? raw.name.trim() : "";
   const normalizedName = name.toLowerCase().split(".").pop() ?? "";
+  if (normalizedName === "freezone_prepare_reference_decision") {
+    const input = raw?.input;
+    const kind = input && typeof input === "object" && "kind" in input
+      ? String(input.kind) : "";
+    const titles: Record<string, string> = {
+      direction: "准备复刻方向", plan: "登记待确认作品方案",
+      material: "准备素材选择", composition: "准备合成确认",
+    };
+    return titles[kind] ?? "准备制作确认";
+  }
   const override = AGENT_TOOL_TITLE_OVERRIDES[normalizedName];
   if (override) return override;
   if (!name) return "执行工具";
@@ -1822,12 +1865,7 @@ function shouldHideInternalToolMessage(message: ChatMessage): boolean {
 
 function AgentToolActivityCard({ message }: { message: ChatMessage }) {
   if (freezoneToolDisplay(message)) return <FreezoneToolActivityCard message={message} />;
-  const raw = toolRawRecord(message);
   const status = freezoneToolStatus(message);
-  const error = typeof raw?.error === "string"
-    ? raw.error.trim()
-    : raw?.error ? JSON.stringify(raw.error) : "";
-  const detail = error || (typeof raw?.text === "string" ? raw.text.trim() : "");
   return (
     <div
       className={cn(
@@ -1850,7 +1888,6 @@ function AgentToolActivityCard({ message }: { message: ChatMessage }) {
           {status === "running" ? "进行中" : status === "failed" ? "失败" : "完成"}
         </span>
       </div>
-      {detail && <div className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</div>}
     </div>
   );
 }
@@ -1867,9 +1904,14 @@ function messageHasAgentRuntimeActivity(message: ChatMessage): boolean {
 }
 
 function isVisibleAgentProgressPart(part: ChatMessagePart): boolean {
-  return part.type === "tool_status"
-    || part.type === "agent_plan"
-    || part.type === "agent_thought";
+  if (part.type === "agent_plan") {
+    const event = part.event && typeof part.event === "object" && !Array.isArray(part.event)
+      ? part.event as Record<string, unknown>
+      : {};
+    return Array.isArray(event.entries) && event.entries.some((entry) =>
+      Boolean(entry && typeof entry === "object" && !Array.isArray(entry)));
+  }
+  return part.type === "tool_status" || part.type === "agent_thought";
 }
 
 function messageHasVisibleAgentProgressActivity(message: ChatMessage): boolean {
@@ -1878,7 +1920,9 @@ function messageHasVisibleAgentProgressActivity(message: ChatMessage): boolean {
 
 function assistantOrderedPartHasVisibleContent(part: ChatMessagePart): boolean {
   if (part.type === "agent_usage") return false;
+  if (part.type === "reference_production") return false;
   if (part.type === "text") return Boolean(part.text.trim());
+  if (part.type === "agent_plan") return isVisibleAgentProgressPart(part);
   return true;
 }
 
@@ -2060,6 +2104,8 @@ const PERSISTENT_SETTLED_TOOL_STATUS_NAMES = new Set<string>([
   "freezone_get_workflow_skill",
   "freezone_prepare_workflow_draft",
   "freezone_prepare_workflow_plan_draft",
+  "freezone_prepare_material_work",
+  "freezone_prepare_material_stage",
   "freezone_confirm_workflow_draft",
   "freezone_list_agent_catalog",
   "freezone_get_saved_skill",
@@ -2092,6 +2138,8 @@ function workflowDraftOperationId(toolMessage: ChatMessage): string {
     "freezone_prepare_workflow",
     "freezone_prepare_workflow_draft",
     "freezone_prepare_workflow_plan_draft",
+    "freezone_prepare_material_work",
+    "freezone_prepare_material_stage",
   ].includes(name)) return "";
   const input = raw?.input && typeof raw.input === "object"
     ? raw.input as Record<string, unknown>
@@ -2118,6 +2166,9 @@ function toolStatusRuntimeText(params: {
   ) {
     return "待重新整理 Skill 方案";
   }
+  if (status === "failed" && [raw?.name, raw?.tool_name, raw?.toolName].some((name) =>
+    typeof name === "string" && ["freezone_prepare_material_work", "freezone_prepare_material_stage"].includes(name.toLowerCase().split(".").pop() ?? ""),
+  )) return "待重新准备素材制作草稿";
   if (
     status === "failed" &&
     (raw?.name === "freezone_prepare_workflow_draft" ||
@@ -2303,11 +2354,6 @@ function AgentRuntimeTimeline({
           const toolMessage = toolPart.event as ChatMessage;
           const display = freezoneToolDisplay(toolMessage);
           const status = freezoneToolStatus(toolMessage);
-          const raw = toolRawRecord(toolMessage);
-          const error = typeof raw?.error === "string"
-            ? raw.error.trim()
-            : raw?.error ? JSON.stringify(raw.error) : "";
-          const detail = status === "failed" && error ? error : "";
           const title = display?.title ?? genericToolTitle(toolMessage);
           const repeatText = toolPart.repeatCount && toolPart.repeatCount > 1 ? ` × ${toolPart.repeatCount}` : "";
           const statusText = toolStatusRuntimeText({ status, title, toolMessage, t });
@@ -2329,7 +2375,6 @@ function AgentRuntimeTimeline({
               <span className="min-w-0 flex-1 break-words font-medium">
                 {statusText}{repeatText}
               </span>
-              {detail && <span className="min-w-0 flex-1 break-words text-[11px] text-red-200/80">{detail}</span>}
             </div>
           );
         }
@@ -2646,8 +2691,9 @@ function normalizeVideoQualityForApproval(
   options: readonly VideoGenQuality[],
 ): VideoGenQuality {
   const fallback = options.includes("720P") ? "720P" : options[0] ?? "720P";
-  return typeof value === "string" && options.includes(value as VideoGenQuality)
-    ? (value as VideoGenQuality)
+  const normalized = typeof value === "string" ? resolutionToVideoQuality(value) : null;
+  return normalized && options.includes(normalized)
+    ? normalized
     : fallback;
 }
 
@@ -3511,6 +3557,26 @@ function CanvasApprovalVideoConfigChip({
   );
 }
 
+function useApprovalParameters<T>(
+  initialParams: T,
+  requestKey: string,
+  isExecuting: boolean,
+): [T, Dispatch<SetStateAction<T>>] {
+  const [params, setParams] = useState(initialParams);
+  const initialKey = JSON.stringify(initialParams);
+  const initialized = useRef({ requestKey, initialKey });
+  const needsInitialization = initialized.current.requestKey !== requestKey
+    || (!isExecuting && initialized.current.initialKey !== initialKey);
+  useEffect(() => {
+    if (!needsInitialization) return;
+    initialized.current = { requestKey, initialKey };
+    setParams(initialParams);
+  }, [initialParams, initialKey, requestKey, needsInitialization]);
+  // A new request sees its own defaults immediately, including before effects
+  // flush. Same-request execution keeps reviewed groups while targets finish.
+  return [needsInitialization ? initialParams : params, setParams];
+}
+
 function CanvasCommandApprovalCard({
   approval,
   isExecuting = false,
@@ -3561,12 +3627,15 @@ function CanvasCommandApprovalCard({
     () => audioApprovalInitialParams(approval, canvasNodes),
     [approval, canvasNodes],
   );
-  const [imageParams, setImageParams] = useState<CanvasApprovalImageParams[]>(() => initialImageParams);
-  const [videoParams, setVideoParams] = useState<CanvasApprovalVideoParams[]>(() => initialVideoParams);
-  const [videoUpscaleParams, setVideoUpscaleParams] = useState<CanvasApprovalVideoUpscaleParams | null>(
-    () => initialVideoUpscaleParams,
-  );
-  const [audioParams, setAudioParams] = useState<CanvasApprovalAudioParams[]>(() => initialAudioParams);
+  const parameterRequestKey = JSON.stringify([
+    params.project ?? null, approval.id, approval.key, approval.bridgeKey ?? null,
+    approval.turnId ?? null, approval.agentId ?? null,
+    approval.envelopes.map((envelope) => [envelope.project_id ?? null, envelope.canvas_id ?? null]),
+  ]);
+  const [imageParams, setImageParams] = useApprovalParameters(initialImageParams, parameterRequestKey, isExecuting);
+  const [videoParams, setVideoParams] = useApprovalParameters(initialVideoParams, parameterRequestKey, isExecuting);
+  const [videoUpscaleParams, setVideoUpscaleParams] = useApprovalParameters(initialVideoUpscaleParams, parameterRequestKey, isExecuting);
+  const [audioParams, setAudioParams] = useApprovalParameters(initialAudioParams, parameterRequestKey, isExecuting);
   const [voicePickerAudioIndex, setVoicePickerAudioIndex] = useState<number | null>(null);
   const humanReviewNodeIds = useMemo(
     () => canvasApprovalHumanReviewNodeIds(approval, canvasNodes, canvasEdges),
@@ -3577,25 +3646,6 @@ function CanvasCommandApprovalCard({
   const remaining = approval.expiresAt
     ? Math.max(0, Math.ceil((approval.expiresAt - now) / 1000))
     : null;
-
-  useEffect(() => {
-    // Keep the confirmed groups visible while dependencies finish. Recomputing
-    // pending targets would remove completed images/audio and leave a misleading
-    // video-only approval card for a mixed workflow.
-    if (!isExecuting) setImageParams(initialImageParams);
-  }, [initialImageParams, isExecuting]);
-
-  useEffect(() => {
-    if (!isExecuting) setVideoParams(initialVideoParams);
-  }, [initialVideoParams, isExecuting]);
-
-  useEffect(() => {
-    if (!isExecuting) setVideoUpscaleParams(initialVideoUpscaleParams);
-  }, [initialVideoUpscaleParams, isExecuting]);
-
-  useEffect(() => {
-    if (!isExecuting) setAudioParams(initialAudioParams);
-  }, [initialAudioParams, isExecuting]);
 
   useEffect(() => {
     setHumanReviewEnabled(true);
@@ -4059,8 +4109,25 @@ function canvasCommandFeedbackReconciliationPending(feedback: CanvasCommandFeedb
 
 function canvasCommandFeedbackBackgroundRunning(feedback: CanvasCommandFeedback): boolean {
   return (feedback.commandResults ?? []).some((step) =>
-    step.status === "pending" && step.output?.reason === "background_generation_running");
+    step.status === "pending" && (step.output?.reason === "background_generation_running"
+      || step.output?.reason === "native_action_accepted"));
 }
+
+function resolveFeedbackWorkflowRunId(feedback: {
+  workflowRunId?: string;
+  commandResults?: Array<{ status: string; output?: Record<string, unknown> }>;
+}): string | null {
+  const ids = new Set((feedback.commandResults ?? [])
+    .filter((step) => step.status === "pending")
+    .map((step) => step.output?.workflow_run_id)
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0));
+  if (ids.size > 1) return null;
+  const stepId = ids.values().next().value as string | undefined;
+  if (feedback.workflowRunId && stepId && feedback.workflowRunId !== stepId) return null;
+  return feedback.workflowRunId || stepId || null;
+}
+
+export const resolveFeedbackWorkflowRunIdForTest = resolveFeedbackWorkflowRunId;
 
 function canvasCommandFeedbackIsInvalidCommand(feedback: CanvasCommandFeedback): boolean {
   return (feedback.commandResults ?? []).some((step) => step.label === "画布命令无效");
@@ -4795,7 +4862,8 @@ function uiEventStableKey(event: unknown): string | null {
     uiEventRecordString(value, "bridge_key")
     ?? uiEventRecordString(value, "skill_studio_session_id")
     ?? uiEventRecordString(value, "clarification_id");
-  return stableId ? `${type}:${stableId}` : null;
+  const clarificationKey = clarificationPresentationKey(event);
+  return stableId ? `${type}:${clarificationKey ?? stableId}` : null;
 }
 
 function uiEventReceivedAt(event: unknown): number | null {
@@ -4870,8 +4938,9 @@ function mergeUiEventsByStableKey<T>(events: T[]): T[] {
             ? existingReceivedAt
             : Math.min(existingReceivedAt, nextReceivedAt);
       merged[existingIndex] = {
-        ...(merged[existingIndex] as Record<string, unknown>),
-        ...(event as Record<string, unknown>),
+        ...((clarificationPresentationKey(event))
+          ? mergeClarificationPresentation(merged[existingIndex] as Record<string, unknown>, event as Record<string, unknown>)
+          : { ...(merged[existingIndex] as Record<string, unknown>), ...(event as Record<string, unknown>) }),
         ...(firstReceivedAt == null ? {} : { received_at: firstReceivedAt }),
       } as T;
     } else {
@@ -4899,7 +4968,9 @@ function hydrateOrderedPartsWithUiEvents(
     const latestEvent = key ? eventByKey.get(key) : undefined;
     if (!latestEvent || latestEvent === part.event) return part;
     changed = true;
-    return { ...part, event: latestEvent };
+    return { ...part, event: clarificationPresentationKey(part.event)
+      ? mergeClarificationPresentation(part.event as Record<string, unknown>, latestEvent as Record<string, unknown>)
+      : latestEvent };
   });
   return changed ? nextParts : parts;
 }
@@ -4946,7 +5017,61 @@ export const visibleSkillStudioEventsForMessageForTest = visibleSkillStudioEvent
 
 function visibleAssistantOrderedPartsForMessage(message: ChatMessage): ChatMessagePart[] {
   if (!message.parts?.some((part) => part.type !== "text")) return [];
-  const parts = hydrateOrderedPartsWithUiEvents(message.parts, messageUiEvents(message)) ?? [];
+  const uiEvents = messageUiEvents(message);
+  const hydratedParts = hydrateOrderedPartsWithUiEvents(message.parts, uiEvents) ?? [];
+  // A confirmation and its result occupy one timeline position. Also collapse
+  // saved snapshots from the version that rendered them as separate cards.
+  const feedbacks = dedupeCanvasCommandFeedbacks([
+    ...canvasCommandFeedbacksFromUiEvents(uiEvents),
+    ...hydratedParts.flatMap((part) => part.type === "canvas_feedback"
+      ? [part.event as CanvasCommandFeedback] : []),
+  ]);
+  const feedbackIndex = (feedback: CanvasCommandFeedback) => feedbacks.findIndex((item) =>
+    canvasCommandFeedbackSameExecution(item, feedback.key, feedback));
+  const placedFeedbackIndexes = new Set<number>();
+  const resolvedParts: ChatMessagePart[] = [];
+  for (const part of hydratedParts) {
+    if (part.type === "canvas_approval") {
+      const approval = part.event as PendingCanvasCommandApproval;
+      const index = feedbacks.findIndex((feedback) => {
+        const feedbackBridge = feedback.bridgeKey ?? (feedback.key.startsWith("bridge:") ? feedback.key.slice(7) : null);
+        const sameIdentity = approval.bridgeKey && feedbackBridge
+          ? canonicalBridgeRequestId(approval.bridgeKey) === canonicalBridgeRequestId(feedbackBridge)
+          : feedback.key === approval.key;
+        return sameIdentity && (!approval.turnId || !feedback.turnId || approval.turnId === feedback.turnId);
+      });
+      if (index >= 0) {
+        if (!placedFeedbackIndexes.has(index)) resolvedParts.push({ id: canvasFeedbackPartId(feedbacks[index]), type: "canvas_feedback", event: feedbacks[index], seq: part.seq });
+        placedFeedbackIndexes.add(index);
+        continue;
+      }
+      if (approval.resolution) continue;
+    }
+    if (part.type === "canvas_feedback") {
+      const index = feedbackIndex(part.event as CanvasCommandFeedback);
+      if (index >= 0) {
+        if (!placedFeedbackIndexes.has(index)) resolvedParts.push({ ...part, id: canvasFeedbackPartId(feedbacks[index]), event: feedbacks[index] });
+        placedFeedbackIndexes.add(index);
+        continue;
+      }
+    }
+    resolvedParts.push(part);
+  }
+  const clarificationIndexes = new Map<string, number>();
+  const parts: ChatMessagePart[] = [];
+  for (const part of resolvedParts) {
+    const key = part.type === "clarification" ? clarificationPresentationKey(part.event) : null;
+    const existingIndex = key ? clarificationIndexes.get(key) : undefined;
+    if (existingIndex !== undefined) {
+      const existing = parts[existingIndex];
+      if (existing.type === "clarification" && part.type === "clarification") {
+        parts[existingIndex] = { ...existing, event: mergeClarificationPresentation(existing.event as Record<string, unknown>, part.event as Record<string, unknown>) };
+      }
+    } else {
+      if (key) clarificationIndexes.set(key, parts.length);
+      parts.push(part);
+    }
+  }
   const hasInteractiveSkillStudioPart = parts.some((part) => {
     if (part.type !== "skill_studio") return false;
     const event = part.event as SkillStudioUiEvent;
@@ -5180,6 +5305,19 @@ function isUsageOnlyRuntimeMetadataMessage(message: ChatMessage): boolean {
   );
 }
 
+function isReferenceProductionOnlyMessage(message: ChatMessage): boolean {
+  if (message.role !== "assistant" || message.text.trim()) return false;
+  if (message.attachments?.some(shouldRenderAttachmentChip)) return false;
+  if (message.uiEvents?.some((event) => !event || typeof event !== "object"
+    || !("type" in event) || event.type !== "reference.production.card")) return false;
+  const parts = message.parts ?? [];
+  return parts.some((part) => part.type === "reference_production") && parts.every((part) =>
+    part.type === "reference_production"
+    || part.type === "agent_usage"
+    || (part.type === "text" && !part.text.trim()),
+  );
+}
+
 function visibleCanvasContextActivitiesForMessage(
   message: ChatMessage,
   activities: CanvasContextActivity[],
@@ -5292,6 +5430,31 @@ function latestPendingAssistantClarificationEventForActiveTurn(
 }
 
 export const latestPendingAssistantClarificationEventForActiveTurnForTest = latestPendingAssistantClarificationEventForActiveTurn;
+
+/**
+ * Generation parameter cards own their wait even after the model turn sends
+ * chat.done. Keep that card in the composer until the user answers it instead
+ * of dropping it with the ended turn. Other clarification cards remain tied to
+ * the active turn so an old question from history cannot hijack the composer.
+ */
+function latestPendingAssistantClarificationEventForComposer(
+  messages: ChatMessage[],
+  scope: ActiveComposerPromptScope,
+): AssistantClarificationUiEvent | null {
+  const active = latestPendingAssistantClarificationEventForActiveTurn(messages, scope);
+  if (active) return active;
+  for (const message of [...messages].reverse()) {
+    if (message.role !== "assistant") continue;
+    const pendingEvents = pendingAssistantClarificationEventsForMessage(message);
+    for (const event of [...pendingEvents].reverse()) {
+      if (assistantClarificationIsGenerationCard(event.questions ?? [])) return event;
+    }
+  }
+  return null;
+}
+
+export const latestPendingAssistantClarificationEventForComposerForTest =
+  latestPendingAssistantClarificationEventForComposer;
 
 function messageIsWaitingForUserReply(message: ChatMessage): boolean {
   if (message.role !== "assistant") return false;
@@ -6991,23 +7154,35 @@ function AssistantClarificationSummaryCard({ event }: { event: AssistantClarific
     || event.action === "cancel"
     || event.clarification_status === "cancelled";
   const skipped = event.skipped === true || event.action === "skip";
+  const pending = !cancelled
+    && !skipped
+    && event.submitted !== true
+    && event.clarification_status !== "answered"
+    && event.clarification_status !== "recommended";
   const statusLabel = cancelled
     ? t("freezone.chat.clarification.cancelled")
     : skipped
       ? t("freezone.chat.clarification.skipped")
-      : t("freezone.chat.clarification.submitted");
+      : pending
+        ? t("freezone.chat.clarification.pending", { defaultValue: "等待填写" })
+        : t("freezone.chat.clarification.submitted");
   const countLabel = cancelled
     ? t("freezone.chat.clarification.cancelledQuestions")
     : skipped
       ? t("freezone.chat.clarification.skippedQuestions")
-      : t("freezone.chat.clarification.submittedAnswers", { count: answeredCount });
+      : pending
+        ? t("freezone.chat.clarification.pendingQuestions", { defaultValue: "等待你选择后继续" })
+        : t("freezone.chat.clarification.submittedAnswers", { count: answeredCount });
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-white/[0.025] px-3 py-3 text-sm shadow-[0_14px_40px_rgba(0,0,0,0.16)] backdrop-blur-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-foreground/90">
-            <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-emerald-400/10 text-emerald-100/85">
-              {cancelled ? <X className="size-3.5" /> : <CheckCircle2 className="size-3.5" />}
+            <span className={cn(
+              "flex size-5 shrink-0 items-center justify-center rounded-md",
+              pending ? "bg-amber-400/10 text-amber-100/85" : "bg-emerald-400/10 text-emerald-100/85",
+            )}>
+              {cancelled ? <X className="size-3.5" /> : pending ? <AlertCircle className="size-3.5" /> : <CheckCircle2 className="size-3.5" />}
             </span>
             <span className="truncate font-medium tracking-normal">{event.title || "问题回答"}</span>
           </div>
@@ -7015,7 +7190,12 @@ function AssistantClarificationSummaryCard({ event }: { event: AssistantClarific
             {countLabel}
           </div>
         </div>
-        <span className="shrink-0 rounded-full border border-emerald-300/15 bg-emerald-400/[0.08] px-2 py-0.5 text-[11px] text-emerald-100/75">
+        <span className={cn(
+          "shrink-0 rounded-full border px-2 py-0.5 text-[11px]",
+          pending
+            ? "border-amber-300/15 bg-amber-400/[0.08] text-amber-100/80"
+            : "border-emerald-300/15 bg-emerald-400/[0.08] text-emerald-100/75",
+        )}>
           {statusLabel}
         </span>
       </div>
@@ -8332,15 +8512,42 @@ export const MessageBubble = memo(function MessageBubble({
   freezoneRecipeCatalog?: FreezoneAgentConfigPayload[];
 }) {
   const isUser = message.role === "user";
+  const messageRaw = message.raw && typeof message.raw === "object" && !Array.isArray(message.raw)
+    ? message.raw as Record<string, unknown> : null;
+  const messageMetadata = messageRaw?.metadata && typeof messageRaw.metadata === "object" && !Array.isArray(messageRaw.metadata)
+    ? messageRaw.metadata as Record<string, unknown> : null;
+  const messageKind = messageRaw?.message_kind ?? messageMetadata?.message_kind;
+  const isReferenceRemixAgentDirective = message.role === "system"
+    && (messageKind === "reference_remix_agent_directive"
+      || (!messageKind
+        && message.turnId?.startsWith("reference-remix-")
+        && message.turnId.includes("-directive")));
+  const isReferenceRemixUserStatus = message.role === "system"
+    && (messageKind === "reference_remix_status"
+      || (!messageKind
+        && message.turnId?.startsWith("reference-remix-")
+        && message.turnId.includes("-notice")));
   const isTool = isToolMessage(message);
   if (isTool && shouldHideInternalToolMessage(message)) {
+    return null;
+  }
+
+  // Status notices are persisted for task/user notifications. The chat view
+  // is the agent conversation, so only the agent-directed continuation message
+  // belongs here; keeping this filter at the rendering boundary preserves the
+  // stored status and the agent context.
+  if (isReferenceRemixUserStatus) {
     return null;
   }
   const isHistoricalTool = isTool && isHistoricalToolMessage(message);
   const isFreezoneLayout = variant === "freezone";
   const isWorkflowDraftCancelledNotice = message.id.startsWith("workflow-draft-cancelled:");
   const freezoneToolActivity = isTool ? freezoneToolDisplay(message) : null;
-  const isErrorReply = isAssistantErrorReply(message);
+  // Keep the complete tool event in message.raw/parts for agent context and
+  // diagnostics; only the user-facing bubble is summarized below.
+  const isFailedToolMessage = isTool && freezoneToolStatus(message) === "failed";
+  const isErrorReply = isAssistantErrorReply(message)
+    && !(isFreezoneLayout && assistantHasFailedToolPart(message));
   const isCompletionNotice = isAssistantCompletionNotice(message);
   const presentation = resolveMessagePresentation({
     role: message.role,
@@ -8352,11 +8559,13 @@ export const MessageBubble = memo(function MessageBubble({
   const shouldWaitForStructuredRender =
     deferStructuredRender && !isUser && !isTool && looksLikeStructuredRenderText(message.text);
   const { displayText, blocks } = extractStructuredBlocks(message);
-  const visibleBlocks = visibleStructuredBlocksForMessage(blocks, {
-    isFreezoneLayout,
-    isUser,
-    isTool,
-  });
+  const visibleBlocks = isFailedToolMessage
+    ? []
+    : visibleStructuredBlocksForMessage(blocks, {
+        isFreezoneLayout,
+        isUser,
+        isTool,
+      });
   const skillStudioEvents = !isUser && !isTool
     ? visibleSkillStudioEventsForMessage(message)
     : [];
@@ -8630,12 +8839,25 @@ export const MessageBubble = memo(function MessageBubble({
     </div>
   );
 
-  if (freezoneToolActivity && !hasCanvasCommandSurface) {
+  if ((freezoneToolActivity || isFailedToolMessage) && !hasCanvasCommandSurface) {
     return (
       <div className="flex items-start gap-3 justify-start">
         <div className="flex min-w-0 flex-1 justify-start">
           <AgentToolActivityCard message={message} />
         </div>
+      </div>
+    );
+  }
+
+  if (isReferenceRemixAgentDirective) {
+    return (
+      <div className="flex justify-end">
+        <article className={cn("max-w-[72%]", isFreezoneLayout && "max-w-[82%]")}>
+          <div className="rounded-[14px] border-0 bg-white/[0.07] px-4 py-2.5 text-sm leading-6 text-foreground shadow-none">
+            <div className="mb-1 text-xs font-medium text-muted-foreground">{t("aiAssistant.systemNotice")}</div>
+            <div className="whitespace-pre-wrap break-words">{displayText}</div>
+          </div>
+        </article>
       </div>
     );
   }
@@ -8689,8 +8911,8 @@ export const MessageBubble = memo(function MessageBubble({
   }
 
   return (
-    <div className={cn("flex items-start gap-3", isUser ? "justify-end" : "justify-start")}>
-      <div className={cn("flex min-w-0 flex-1", isUser ? "justify-end" : "justify-start")}>
+    <div className="flex items-start gap-3 justify-start">
+      <div className="flex min-w-0 flex-1 justify-start">
         <div
           className={cn(
             "group/message-actions relative z-0 hover:z-30 focus-within:z-30",
@@ -8738,7 +8960,7 @@ export const MessageBubble = memo(function MessageBubble({
           </div>
         ) : (
           <>
-            {assistantOrderedParts.length > 0 ? (
+            {assistantOrderedParts.some(assistantOrderedPartHasVisibleContent) ? (
               <div className="space-y-1.5">
                 {assistantPartGroups.map((group) => {
                   if (group.kind === "runtime") {
@@ -8905,7 +9127,7 @@ export const MessageBubble = memo(function MessageBubble({
                         ? <HighlightedCompletionText key={item.key} text={item.text} />
                         : <MessageText key={item.key} text={item.text} markdown={!isUser && !isTool} />;
                   })
-                ) : !suppressCanvasExecutionNarration && displayText ? (
+                ) : !suppressCanvasExecutionNarration && !isFailedToolMessage && displayText ? (
                   isErrorReply && !isUser && !isTool
                     ? <HighlightedErrorText text={displayText} />
                     : isCompletionNotice && !isUser && !isTool
@@ -11089,6 +11311,7 @@ type PendingCanvasCommandApproval = {
   plans: CanvasCommandPlan[];
   externalMcpCommand?: boolean;
   requiresUserChoice?: boolean;
+  resolution?: "confirmed" | "cancelled" | "timeout";
 };
 
 type CanvasApprovalImageParams = {
@@ -11539,13 +11762,25 @@ function canvasCommandResultFromWorkflowRun(
           })
         : null;
   const commandResults = (feedback.commandResults ?? []).map((step, index): CanvasChatCommandApplyStep => {
-    const action = run.actions[index];
-    const actionSucceeded = action?.status === "completed" || action?.status === "skipped";
-    const actionError = action?.user_error || action?.error || terminalError || undefined;
+    if (step.status !== "pending") return step as CanvasChatCommandApplyStep;
+    const action = step.nodeId && step.action
+      ? run.actions.find((candidate) => candidate.node_id === step.nodeId && candidate.action === step.action)
+      : run.actions[index] ?? (run.actions.length === 1 ? run.actions[0] : undefined);
+    const workflowStep = step.type === "run_workflow";
+    const actionSucceeded = workflowStep
+      ? run.status === "completed" && run.actions.every((item) =>
+          item.status === "completed" || item.status === "skipped")
+      : action?.status === "completed" || (run.status === "completed" && action?.status === "skipped");
+    const failedAction = workflowStep
+      ? run.actions.find((item) => item.status === "failed" || item.status === "blocked")
+      : action;
+    const actionError = failedAction?.user_error || failedAction?.error || terminalError || undefined;
+    const pendingSuffix = `（${t("freezone.chat.workflowOutputSyncPendingLabel", { defaultValue: "产物待同步" })}）`;
     return {
       ...step,
       type: step.type as CanvasChatCommandApplyStep["type"],
-      status: actionSucceeded || run.status === "completed" ? "success" : "error",
+      status: actionSucceeded ? "success" : "error",
+      label: step.label.endsWith(pendingSuffix) ? step.label.slice(0, -pendingSuffix.length) : step.label,
       ...(action?.node_id ? { nodeId: action.node_id } : {}),
       ...(action?.action ? { action: action.action } : {}),
       ...(actionError ? { error: actionError } : {}),
@@ -11559,9 +11794,7 @@ function canvasCommandResultFromWorkflowRun(
     .map((step) => step.error)
     .filter((error): error is string => Boolean(error));
   return {
-    applied: run.status === "completed"
-      ? run.actions.filter((action) => action.status === "completed").length
-      : 0,
+    applied: feedback.applied + run.actions.filter((action) => action.status === "completed").length,
     openedUiActions: 0,
     createdNodeIds: [],
     errors: dedupeGenerationErrors(errors),
@@ -11854,20 +12087,60 @@ function canvasCommandFeedbackDedupeKey(feedback: CanvasCommandFeedback): string
   });
 }
 
+function canvasCommandFeedbackTerminal(feedback: CanvasCommandFeedback): boolean {
+  if (feedback.cancelled === true) return true;
+  const actions = (feedback.commandResults ?? []).filter((step) =>
+    step.type === "run_workflow" || step.type === "run_node_action");
+  return actions.length > 0 && actions.every((step) =>
+    (step.status === "success" || step.status === "error")
+    && step.output?.reason !== "native_action_accepted"
+    && step.output?.reason !== "background_generation_running");
+}
+
+function canvasCommandFeedbackRunIdentity(feedback: Partial<CanvasCommandFeedback>): { runId: string | null; conflict: boolean } {
+  const stepIds = new Set((feedback.commandResults ?? [])
+    .map((step) => step.output?.workflow_run_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0));
+  const conflict = stepIds.size > 1 || Boolean(feedback.workflowRunId && stepIds.size === 1 && !stepIds.has(feedback.workflowRunId));
+  return { runId: feedback.workflowRunId ?? (stepIds.size === 1 ? [...stepIds][0] : null), conflict };
+}
+
+function preferredCanvasBridgeKey(first?: string, second?: string): string | undefined {
+  if (first && canonicalBridgeRequestId(first) !== first) return first;
+  if (second && canonicalBridgeRequestId(second) !== second) return second;
+  return second ?? first;
+}
+
 function dedupeCanvasCommandFeedbacks(feedbacks: CanvasCommandFeedback[]): CanvasCommandFeedback[] {
   if (feedbacks.length < 2) return feedbacks;
-  const indexByKey = new Map<string, number>();
   const deduped: CanvasCommandFeedback[] = [];
   for (const feedback of feedbacks) {
-    const key = canvasCommandFeedbackDedupeKey(feedback);
-    const existingIndex = indexByKey.get(key);
-    if (existingIndex !== undefined) {
+    const bridge = feedback.bridgeKey ?? (feedback.key.startsWith("bridge:") ? feedback.key.slice(7) : null);
+    const run = canvasCommandFeedbackRunIdentity(feedback);
+    const existingIndex = deduped.findIndex((item) => {
+      const itemBridge = item.bridgeKey ?? (item.key.startsWith("bridge:") ? item.key.slice(7) : null);
+      const itemRun = canvasCommandFeedbackRunIdentity(item);
+      if (run.conflict || itemRun.conflict) return false;
+      if (bridge && itemBridge) return canonicalBridgeRequestId(bridge) === canonicalBridgeRequestId(itemBridge)
+        && (!feedback.turnId || !item.turnId || feedback.turnId === item.turnId)
+        && (!run.runId || !itemRun.runId || run.runId === itemRun.runId);
+      return !bridge && !itemBridge && canvasCommandFeedbackDedupeKey(item) === canvasCommandFeedbackDedupeKey(feedback);
+    });
+    if (existingIndex >= 0) {
       const existing = deduped[existingIndex];
+      const chosen = canvasCommandFeedbackTerminal(existing) && !canvasCommandFeedbackTerminal(feedback) ? existing : feedback;
+      const bridgeKey = preferredCanvasBridgeKey(
+        existing.bridgeKey ?? (existing.key.startsWith("bridge:") ? existing.key.slice(7) : undefined),
+        feedback.bridgeKey ?? bridge ?? undefined,
+      );
       deduped[existingIndex] = {
-        ...existing,
-        envelopes: existing.envelopes ?? feedback.envelopes,
-        cancelled: existing.cancelled ?? feedback.cancelled,
-        cancelReason: existing.cancelReason ?? feedback.cancelReason,
+        ...chosen,
+        ...(bridgeKey ? { bridgeKey, key: `bridge:${bridgeKey}` } : {}),
+        turnId: feedback.turnId ?? existing.turnId,
+        workflowRunId: feedback.workflowRunId ?? existing.workflowRunId,
+        envelopes: feedback.envelopes ?? existing.envelopes,
+        cancelled: chosen.cancelled ?? existing.cancelled ?? feedback.cancelled,
+        cancelReason: chosen.cancelReason ?? existing.cancelReason ?? feedback.cancelReason,
         anchorTextPrefix: existing.anchorTextPrefix ?? feedback.anchorTextPrefix,
         surfaceOrder:
           existing.surfaceOrder == null
@@ -11878,7 +12151,6 @@ function dedupeCanvasCommandFeedbacks(feedbacks: CanvasCommandFeedback[]): Canva
       };
       continue;
     }
-    indexByKey.set(key, deduped.length);
     deduped.push(feedback);
   }
   return deduped;
@@ -11998,11 +12270,10 @@ function mergeCanvasCommandResults(
         item.commandIndex === step.commandIndex &&
         item.type === step.type &&
         item.nodeId === step.nodeId &&
-        item.action === step.action &&
-        item.label === step.label,
+        item.action === step.action,
     );
     if (existingIndex >= 0) {
-      merged[existingIndex] = step;
+      if (merged[existingIndex].status === "pending" || step.status !== "pending") merged[existingIndex] = step;
     } else {
       merged.push(step);
     }
@@ -12013,7 +12284,7 @@ function mergeCanvasCommandResults(
 function mergeCanvasCommandFeedbackValue(
   previous: CanvasCommandFeedback | undefined,
   key: string,
-  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & {
+  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & Partial<Pick<CanvasCommandFeedback, "turnId" | "bridgeKey" | "workflowRunId" | "envelopes" | "cancelled" | "cancelReason">> & {
     warnings?: string[];
     commandResults: CanvasCommandFeedbackStep[];
   },
@@ -12022,14 +12293,30 @@ function mergeCanvasCommandFeedbackValue(
   surfaceOrder?: number,
 ): CanvasCommandFeedback {
   const nextAnchorTextPrefix = anchorTextPrefix == null ? undefined : anchorTextPrefix;
+  const previousTerminal = previous && canvasCommandFeedbackTerminal(previous);
+  const nextTerminal = canvasCommandFeedbackTerminal({ ...result, key });
+  const bridgeKey = preferredCanvasBridgeKey(
+    previous?.bridgeKey ?? (previous?.key.startsWith("bridge:") ? previous.key.slice(7) : undefined),
+    result.bridgeKey ?? (key.startsWith("bridge:") ? key.slice(7) : undefined),
+  );
   return {
-    key,
-    applied: (previous?.applied ?? 0) + result.applied,
-    openedUiActions: (previous?.openedUiActions ?? 0) + result.openedUiActions,
+    key: bridgeKey ? `bridge:${bridgeKey}` : key,
+    applied: Math.max(previous?.applied ?? 0, result.applied),
+    openedUiActions: Math.max(previous?.openedUiActions ?? 0, result.openedUiActions),
     errors: dedupeGenerationErrors([...(previous?.errors ?? []), ...result.errors]),
     warnings: dedupeGenerationErrors([...(previous?.warnings ?? []), ...(result.warnings ?? [])]),
-    commandResults: mergeCanvasCommandResults(previous?.commandResults, result.commandResults),
-    plans: [...(previous?.plans ?? []), ...plans],
+    commandResults: previousTerminal && !nextTerminal
+      ? previous.commandResults
+      : result.cancelled
+        ? result.commandResults
+        : mergeCanvasCommandResults(previous?.commandResults, result.commandResults),
+    plans: plans.length ? plans : previous?.plans,
+    turnId: result.turnId ?? previous?.turnId,
+    bridgeKey,
+    workflowRunId: result.workflowRunId ?? previous?.workflowRunId,
+    envelopes: result.envelopes ?? previous?.envelopes,
+    cancelled: previous?.cancelled === true || result.cancelled === true,
+    cancelReason: result.cancelReason ?? previous?.cancelReason,
     anchorTextPrefix: previous?.anchorTextPrefix ?? nextAnchorTextPrefix,
     surfaceOrder: previous?.surfaceOrder ?? surfaceOrder,
   };
@@ -12038,23 +12325,16 @@ function mergeCanvasCommandFeedbackValue(
 function replaceCanvasCommandFeedbackCard(
   current: CanvasCommandFeedback[] | undefined,
   key: string,
-  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & {
+  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & Partial<Pick<CanvasCommandFeedback, "turnId" | "bridgeKey" | "workflowRunId" | "envelopes" | "cancelled" | "cancelReason">> & {
     commandResults: CanvasCommandFeedbackStep[];
   },
   plans: CanvasCommandPlan[] = [],
   anchorTextPrefix?: string | null,
   surfaceOrder?: number,
 ): CanvasCommandFeedback[] {
-  const replacement = mergeCanvasCommandFeedbackValue(
-    undefined,
-    key,
-    result,
-    plans,
-    anchorTextPrefix,
-    surfaceOrder,
-  );
   const items = current ?? [];
-  const index = items.findIndex((item) => item.key === key);
+  const index = items.findIndex((item) => canvasCommandFeedbackSameExecution(item, key, result));
+  const replacement = mergeCanvasCommandFeedbackValue(index < 0 ? undefined : items[index], key, result, plans, anchorTextPrefix, surfaceOrder);
   if (index < 0) return [...items, replacement];
   const next = [...items];
   next[index] = replacement;
@@ -12064,7 +12344,7 @@ function replaceCanvasCommandFeedbackCard(
 function appendCanvasCommandFeedbackCard(
   current: CanvasCommandFeedback[] | undefined,
   key: string,
-  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & {
+  result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors"> & Partial<Pick<CanvasCommandFeedback, "turnId" | "bridgeKey" | "workflowRunId" | "envelopes" | "cancelled" | "cancelReason">> & {
     warnings?: string[];
     commandResults: CanvasCommandFeedbackStep[];
   },
@@ -12073,12 +12353,31 @@ function appendCanvasCommandFeedbackCard(
   surfaceOrder?: number,
 ): CanvasCommandFeedback[] {
   const items = current ?? [];
-  const index = items.findIndex((item) => item.key === key);
+  const index = items.findIndex((item) => canvasCommandFeedbackSameExecution(item, key, result));
   if (index < 0) return [...items, mergeCanvasCommandFeedbackValue(undefined, key, result, plans, anchorTextPrefix, surfaceOrder)];
   const next = [...items];
   next[index] = mergeCanvasCommandFeedbackValue(next[index], key, result, plans, anchorTextPrefix, surfaceOrder);
   return next;
 }
+
+function canvasCommandFeedbackSameExecution(
+  item: CanvasCommandFeedback,
+  key: string,
+  result: Partial<CanvasCommandFeedback>,
+): boolean {
+  const left = item.bridgeKey ?? (item.key.startsWith("bridge:") ? item.key.slice(7) : null);
+  const right = result.bridgeKey ?? (key.startsWith("bridge:") ? key.slice(7) : null);
+  if (left && right && canonicalBridgeRequestId(left) !== canonicalBridgeRequestId(right)) return false;
+  if (!left || !right) return item.key === key;
+  if (item.turnId && result.turnId && item.turnId !== result.turnId) return false;
+  const leftRun = canvasCommandFeedbackRunIdentity(item);
+  const rightRun = canvasCommandFeedbackRunIdentity(result);
+  return !leftRun.conflict && !rightRun.conflict
+    && (!leftRun.runId || !rightRun.runId || leftRun.runId === rightRun.runId);
+}
+
+export const appendCanvasCommandFeedbackCardForTest = appendCanvasCommandFeedbackCard;
+export const replaceCanvasCommandFeedbackCardForTest = replaceCanvasCommandFeedbackCard;
 
 function canvasCommandApplyResultFromUnknown(value: unknown): CanvasChatCommandApplyResult | null {
   if (!value || typeof value !== "object") return null;
@@ -12130,28 +12429,25 @@ function canvasCommandFeedbacksFromUiEvents(events: unknown[] | undefined): Canv
     const key = typeof value.bridge_key === "string" && value.bridge_key.trim()
       ? `bridge:${value.bridge_key.trim()}`
       : `event:${String(value.id ?? value.received_at ?? value.receivedAt ?? feedbacks.length)}`;
-    const feedback = mergeCanvasCommandFeedbackValue(
-        undefined,
-        key,
-        result,
-        canvasCommandPlansFromEnvelopes(envelopes),
-        anchorTextPrefix,
-        canvasSurfaceEventOrder(value, feedbacks.length),
-      );
-    feedback.envelopes = envelopes;
-    feedback.cancelled = value.cancelled === true;
-    feedback.cancelReason = value.cancel_reason === "timeout" ? "timeout" : value.cancelled === true ? "user" : undefined;
-    feedback.workflowRunId = typeof value.workflow_run_id === "string"
-      ? value.workflow_run_id
-      : undefined;
-    feedback.turnId = typeof value.turn_id === "string" ? value.turn_id : undefined;
-    feedback.bridgeKey = typeof value.bridge_key === "string" ? value.bridge_key : undefined;
-    const existingIndex = feedbacks.findIndex((item) => item.key === key);
-    if (existingIndex >= 0) feedbacks[existingIndex] = feedback;
-    else feedbacks.push(feedback);
+    const workflowRunId = resolveFeedbackWorkflowRunId({
+      workflowRunId: typeof value.workflow_run_id === "string" ? value.workflow_run_id : undefined,
+      commandResults: result.commandResults,
+    }) ?? undefined;
+    const next = appendCanvasCommandFeedbackCard(feedbacks, key, {
+      ...result,
+      envelopes,
+      cancelled: value.cancelled === true,
+      cancelReason: value.cancel_reason === "timeout" ? "timeout" : value.cancelled === true ? "user" : undefined,
+      workflowRunId,
+      turnId: typeof value.turn_id === "string" ? value.turn_id : typeof value.turnId === "string" ? value.turnId : undefined,
+      bridgeKey: typeof value.bridge_key === "string" ? value.bridge_key : typeof value.bridgeKey === "string" ? value.bridgeKey : undefined,
+    }, canvasCommandPlansFromEnvelopes(envelopes), anchorTextPrefix, canvasSurfaceEventOrder(value, feedbacks.length));
+    feedbacks.splice(0, feedbacks.length, ...next);
   }
   return feedbacks;
 }
+
+export const canvasCommandFeedbacksFromUiEventsForTest = canvasCommandFeedbacksFromUiEvents;
 
 function canvasCommandApprovalDetailsFromUiEvents(events: unknown[] | undefined): CanvasCommandApprovalEventDetail[] {
   if (!events || events.length === 0) return [];
@@ -12607,6 +12903,7 @@ export function SuperChatPanel({
   const queryClient = useQueryClient();
   const isFreezoneLayout = variant === "freezone";
   const displayName = useAuthStore((s) => s.displayName);
+  const [currentReferenceProduction, setCurrentReferenceProduction] = useState<ReferenceProductionState | null>(null);
   const [draft, setDraft] = useState("");
   const [selectedHtmlReference, setSelectedHtmlReference] = useState<HtmlArtifactReference | null>(null);
   useEffect(() => {
@@ -12668,6 +12965,7 @@ export function SuperChatPanel({
   const dragDepthRef = useRef(0);
   const speechRef = useRef<SpeechRecognitionLike | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [referenceSummaryTarget, setReferenceSummaryTarget] = useState<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -12705,7 +13003,6 @@ export function SuperChatPanel({
   });
   const updateChatUiEvent = chat.updateUiEvent;
   const [pendingCanvasCommandApprovals, setPendingCanvasCommandApprovals] = useState<PendingCanvasCommandApproval[]>([]);
-  const [cancelledWorkflowDrafts, setCancelledWorkflowDrafts] = useState<Record<string, CancelledWorkflowDraft>>({});
   const [canvasCommandFeedbackByMessageId, setCanvasCommandFeedbackByMessageId] = useState<Record<string, CanvasCommandFeedback[]>>({});
   const [canvasContextActivitiesByMessageId, setCanvasContextActivitiesByMessageId] = useState<Record<string, CanvasContextActivity[]>>({});
   const [executingCanvasCommandApprovalIds, setExecutingCanvasCommandApprovalIds] = useState<Set<string>>(() => new Set());
@@ -13291,7 +13588,7 @@ export function SuperChatPanel({
   const appendCanvasCommandFeedback = useCallback((
     messageId: string,
     feedbackKey: string,
-    result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors" | "commandResults">,
+    result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors" | "commandResults"> & Partial<CanvasCommandFeedback>,
     plans: CanvasCommandPlan[] = [],
     anchorTextPrefix?: string | null,
     surfaceOrder?: number,
@@ -13312,7 +13609,7 @@ export function SuperChatPanel({
   const replaceCanvasCommandFeedback = useCallback((
     messageId: string,
     feedbackKey: string,
-    result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors" | "commandResults">,
+    result: Pick<CanvasChatCommandApplyResult, "applied" | "openedUiActions" | "errors" | "commandResults"> & Partial<CanvasCommandFeedback>,
     plans: CanvasCommandPlan[] = [],
     anchorTextPrefix?: string | null,
     surfaceOrder?: number,
@@ -13490,7 +13787,7 @@ export function SuperChatPanel({
     appendCanvasCommandFeedback(
       messageId,
       feedbackKey,
-      detail.result,
+      { ...detail.result, turnId: turnId ?? undefined, bridgeKey: detail.bridgeKey ?? undefined, envelopes, workflowRunId: resolveFeedbackWorkflowRunId({ commandResults: detail.result.commandResults }) ?? undefined },
       plans,
       detail.anchorTextPrefix,
       detail.receivedAt,
@@ -13502,7 +13799,15 @@ export function SuperChatPanel({
       plans,
       anchorTextPrefix: detail.anchorTextPrefix ?? undefined,
       surfaceOrder: detail.receivedAt,
+      turnId: turnId ?? undefined,
+      bridgeKey: detail.bridgeKey ?? undefined,
+      envelopes,
+      workflowRunId: resolveFeedbackWorkflowRunId({ commandResults: detail.result.commandResults }) ?? undefined,
     };
+    const feedbackPart: ChatMessagePart = {
+      id: canvasFeedbackPartId(feedback), type: "canvas_feedback", event: feedback,
+    };
+    let replacedApproval = false;
     for (const approval of pendingCanvasCommandApprovals) {
       if (!pendingCanvasCommandApprovalMatches(approval, {
         id: canvasCommandApprovalKey(detail.bridgeKey, turnId, envelopes, detail.receivedAt),
@@ -13516,19 +13821,14 @@ export function SuperChatPanel({
         commandCount: envelopes.reduce((sum, envelope) => sum + envelope.commands.length, 0),
         plans,
       })) continue;
-      chat.removeAssistantMessagePart(
+      chat.replaceAssistantMessagePart(
         { messageId: approval.messageId, turnId: approval.turnId },
         canvasApprovalPartId(approval),
+        feedbackPart,
       );
+      replacedApproval = true;
     }
-    chat.upsertAssistantMessagePart(
-      { messageId, turnId },
-      {
-        id: canvasFeedbackPartId(feedback),
-        type: "canvas_feedback",
-        event: feedback,
-      },
-    );
+    if (!replacedApproval) chat.upsertAssistantMessagePart({ messageId, turnId }, feedbackPart);
     setPendingCanvasCommandApprovals((current) => removePendingCanvasCommandApprovalsForResult(current, detail));
   }, [activeMessages, appendCanvasCommandFeedback, chat, effectiveFreezoneCanvasId, freezoneAgentMatches, latestAssistantMessageId, pendingCanvasCommandApprovals, variant]);
 
@@ -13721,6 +14021,7 @@ export function SuperChatPanel({
             id: params.project,
             surface: "freezone",
             canvasId: effectiveFreezoneCanvasId,
+            agentId: effectiveFreezoneAgentId,
           },
           turn_id: turnId,
           event,
@@ -13735,7 +14036,7 @@ export function SuperChatPanel({
         });
         return false;
       });
-  }, [effectiveFreezoneCanvasId, params.project]);
+  }, [effectiveFreezoneAgentId, effectiveFreezoneCanvasId, params.project]);
 
   useEffect(() => {
     const projectId = params.project?.trim();
@@ -13747,9 +14048,10 @@ export function SuperChatPanel({
       persistedCanvasCommandFeedbackByMessageId,
     )) {
       for (const feedback of feedbacks) {
-        if (!feedback.workflowRunId || !canvasCommandFeedbackBackgroundRunning(feedback)) continue;
-        if (!pendingByRunId.has(feedback.workflowRunId)) {
-          pendingByRunId.set(feedback.workflowRunId, { messageId, feedback });
+        const runId = resolveFeedbackWorkflowRunId(feedback);
+        if (!runId || !canvasCommandFeedbackBackgroundRunning(feedback)) continue;
+        if (!pendingByRunId.has(runId)) {
+          pendingByRunId.set(runId, { messageId, feedback });
         }
       }
     }
@@ -13780,7 +14082,7 @@ export function SuperChatPanel({
             replaceCanvasCommandFeedback(
               messageId,
               feedback.key,
-              result,
+              { ...result, turnId: feedback.turnId, bridgeKey: feedback.bridgeKey, workflowRunId: runId, envelopes: feedback.envelopes, cancelled: feedback.cancelled, cancelReason: feedback.cancelReason },
               feedback.plans,
               feedback.anchorTextPrefix,
               feedback.surfaceOrder,
@@ -13798,17 +14100,30 @@ export function SuperChatPanel({
                 event: terminalFeedback,
               },
             );
-            await persistCanvasCommandUiEvent(feedback.turnId, {
+            const terminalUiEvent = {
               schema_version: "canvas_command_result.v1",
               type: "canvas_command_result",
               canvas_id: canvasIdForRequest,
+              turn_id: feedback.turnId ?? null,
               bridge_key: feedback.bridgeKey ?? null,
               workflow_run_id: runId,
               envelopes: feedback.envelopes,
               result,
               anchor_text_prefix: feedback.anchorTextPrefix ?? null,
               received_at: Date.now(),
-            });
+            };
+            const saved = await persistCanvasCommandUiEvent(feedback.turnId, terminalUiEvent);
+            if (saved && feedback.turnId) {
+              chat.updateUiEvent(feedback.turnId, (event) => {
+                if (!event || typeof event !== "object") return false;
+                const value = event as Record<string, unknown>;
+                if (value.type !== "canvas_command_result") return false;
+                const bridgeKey = typeof value.bridge_key === "string" ? value.bridge_key : typeof value.bridgeKey === "string" ? value.bridgeKey : null;
+                if (!bridgeKey || !feedback.bridgeKey || canonicalBridgeRequestId(bridgeKey) !== canonicalBridgeRequestId(feedback.bridgeKey)) return false;
+                const eventResult = canvasCommandApplyResultFromUnknown(value.result);
+                return resolveFeedbackWorkflowRunId({ workflowRunId: typeof value.workflow_run_id === "string" ? value.workflow_run_id : undefined, commandResults: eventResult?.commandResults }) === runId;
+              }, (event) => ({ ...(event as Record<string, unknown>), ...terminalUiEvent }));
+            }
             return;
           }
         } finally {
@@ -13926,6 +14241,7 @@ export function SuperChatPanel({
         let result: CanvasChatCommandApplyResult;
         let backgroundAccepted = false;
         let persistedWorkflowRunId: string | null = null;
+        let acceptedNativeReceipt: import("@/features/freezone/canvasChatCommands").NativeProductionWorkflowAcceptance | undefined;
         try {
           let resolveWorkflowRunPersisted: ((runId: string) => void) | undefined;
           const runsInBackground = canvasCommandEnvelopesRunInBackground(approval.envelopes);
@@ -13935,8 +14251,27 @@ export function SuperChatPanel({
           const execution = applyCanvasChatCommandsAsync(approval.envelopes, {
             projectId: params.project,
             canvasId: effectiveFreezoneCanvasId,
-            onWorkflowRunPersisted: (runId) => {
+            bridgeKey: approval.bridgeKey,
+            beforeWorkflowActions: async (graphResult) => apiCall<GraphDeliveryCheckpoint>(
+              "chat/canvas-command-graph-delivery", {
+                method: "post",
+                json: {
+                  bridge_key: approval.bridgeKey,
+                  turn_id: approval.turnId,
+                  project_id: params.project,
+                  canvas_id: effectiveFreezoneCanvasId,
+                  agent_id: approval.agentId ?? effectiveFreezoneAgentId,
+                  canvas_apply_status: "applied",
+                  applied: graphResult.applied > 0,
+                  applied_count: graphResult.applied,
+                  created_node_ids: graphResult.createdNodeIds,
+                  command_results: graphResult.commandResults,
+                },
+              },
+            ),
+            onWorkflowRunPersisted: (runId, nativeReceipt) => {
               persistedWorkflowRunId = runId;
+              acceptedNativeReceipt = nativeReceipt;
               resolveWorkflowRunPersisted?.(runId);
             },
           });
@@ -13957,6 +14292,7 @@ export function SuperChatPanel({
                 canvasId: effectiveFreezoneCanvasId,
                 agentId: approval.agentId ?? effectiveFreezoneAgentId,
                 accepted: true,
+                nativeReceipt: acceptedNativeReceipt,
               });
               const pendingResult = backgroundCanvasCommandPendingResult(
                 approval.plans,
@@ -13965,7 +14301,7 @@ export function SuperChatPanel({
               appendCanvasCommandFeedback(
                 approval.messageId,
                 feedbackKey,
-                pendingResult,
+                { ...pendingResult, turnId: approval.turnId ?? undefined, bridgeKey: approval.bridgeKey ?? undefined, workflowRunId: persistedWorkflowRunId ?? undefined, envelopes: approval.envelopes },
                 approval.plans,
                 approval.anchorTextPrefix,
                 receivedAt,
@@ -13974,7 +14310,7 @@ export function SuperChatPanel({
                 appendCanvasCommandFeedback(
                   approval.turnId,
                   feedbackKey,
-                  pendingResult,
+                  { ...pendingResult, turnId: approval.turnId, bridgeKey: approval.bridgeKey ?? undefined, workflowRunId: persistedWorkflowRunId ?? undefined, envelopes: approval.envelopes },
                   approval.plans,
                   approval.anchorTextPrefix,
                   receivedAt,
@@ -14043,11 +14379,33 @@ export function SuperChatPanel({
         // Apply the local store mutation first, then flush the registered
         // canvas sync runtime so the server snapshot cannot lag behind the
         // approval result and overwrite the just-created/deleted nodes.
-        if (result.errors.length === 0 && params.project && effectiveFreezoneCanvasId) {
+        if (canvasGraphNeedsDurableFlush(result) && params.project && effectiveFreezoneCanvasId) {
           await flushFreezoneCanvasRuntime(params.project, effectiveFreezoneCanvasId);
         }
 
-        reportCanvasCommandToolResult({
+        if (!backgroundAccepted) {
+          const mixedNativeReceipt = nativeProductionAcceptanceFromResult(result);
+          if (mixedNativeReceipt) {
+            acceptedNativeReceipt = mixedNativeReceipt;
+            backgroundAccepted = true;
+            reportCanvasCommandToolResult({
+              bridgeKey: approval.bridgeKey,
+              turnId: approval.turnId,
+              anchorTextPrefix: approval.anchorTextPrefix,
+              projectId: params.project,
+              canvasId: effectiveFreezoneCanvasId,
+              agentId: approval.agentId ?? effectiveFreezoneAgentId,
+              accepted: true,
+              nativeReceipt: mixedNativeReceipt,
+              result,
+            });
+          }
+        }
+
+        // Native task completion is delivered from the host observer. Reporting
+        // the browser's pending result as a follow-up would restart the Agent
+        // before the generated artifact has actually been published.
+        if (!backgroundAccepted || !acceptedNativeReceipt) reportCanvasCommandToolResult({
           bridgeKey: approval.bridgeKey,
           turnId: approval.turnId,
           anchorTextPrefix: approval.anchorTextPrefix,
@@ -14063,7 +14421,7 @@ export function SuperChatPanel({
         updateFeedback(
           approval.messageId,
           feedbackKey,
-          result,
+          { ...result, turnId: approval.turnId ?? undefined, bridgeKey: approval.bridgeKey ?? undefined, workflowRunId: persistedWorkflowRunId ?? resolveFeedbackWorkflowRunId({ commandResults: result.commandResults }) ?? undefined, envelopes: approval.envelopes },
           approval.plans,
           approval.anchorTextPrefix,
           receivedAt,
@@ -14072,7 +14430,7 @@ export function SuperChatPanel({
           updateFeedback(
             approval.turnId,
             feedbackKey,
-            result,
+            { ...result, turnId: approval.turnId, bridgeKey: approval.bridgeKey ?? undefined, workflowRunId: persistedWorkflowRunId ?? resolveFeedbackWorkflowRunId({ commandResults: result.commandResults }) ?? undefined, envelopes: approval.envelopes },
             approval.plans,
             approval.anchorTextPrefix,
             receivedAt,
@@ -14085,6 +14443,10 @@ export function SuperChatPanel({
           plans: approval.plans,
           anchorTextPrefix: approval.anchorTextPrefix ?? undefined,
           surfaceOrder: receivedAt,
+          workflowRunId: persistedWorkflowRunId ?? resolveFeedbackWorkflowRunId({ commandResults: result.commandResults }) ?? undefined,
+          turnId: approval.turnId ?? undefined,
+          bridgeKey: approval.bridgeKey ?? undefined,
+          envelopes: approval.envelopes,
         };
         const feedbackPart = {
           id: canvasFeedbackPartId(feedback),
@@ -14109,7 +14471,8 @@ export function SuperChatPanel({
           canvas_id: effectiveFreezoneCanvasId,
           turn_id: approval.turnId ?? null,
           bridge_key: approval.bridgeKey ?? null,
-          workflow_run_id: persistedWorkflowRunId,
+          workflow_run_id: resolveFeedbackWorkflowRunId({ commandResults: result.commandResults })
+            ?? persistedWorkflowRunId,
           envelopes: approval.envelopes,
           result,
           anchor_text_prefix: approval.anchorTextPrefix ?? null,
@@ -14179,6 +14542,7 @@ export function SuperChatPanel({
       schema_version: "canvas_command_result.v1",
       type: "canvas_command_result",
       canvas_id: effectiveFreezoneCanvasId,
+      turn_id: approval.turnId ?? null,
       bridge_key: approval.bridgeKey ?? null,
       envelopes: approval.envelopes,
       result,
@@ -14190,7 +14554,7 @@ export function SuperChatPanel({
     appendCanvasCommandFeedback(
       approval.messageId,
       feedbackKey,
-      result,
+      { ...result, turnId: approval.turnId ?? undefined, bridgeKey: approval.bridgeKey ?? undefined, envelopes: approval.envelopes, cancelled: true, cancelReason: reason },
       approval.plans,
       approval.anchorTextPrefix,
       receivedAt,
@@ -14199,7 +14563,7 @@ export function SuperChatPanel({
       appendCanvasCommandFeedback(
         approval.turnId,
         feedbackKey,
-        result,
+        { ...result, turnId: approval.turnId, bridgeKey: approval.bridgeKey ?? undefined, envelopes: approval.envelopes, cancelled: true, cancelReason: reason },
         approval.plans,
         approval.anchorTextPrefix,
         receivedAt,
@@ -14215,15 +14579,13 @@ export function SuperChatPanel({
       cancelReason: reason,
       anchorTextPrefix: approval.anchorTextPrefix ?? undefined,
       surfaceOrder: receivedAt,
+      turnId: approval.turnId ?? undefined,
+      bridgeKey: approval.bridgeKey ?? undefined,
     };
     chat.replaceAssistantMessagePart(
       { messageId: approval.messageId, turnId: approval.turnId },
       canvasApprovalPartId(approval),
-      {
-        id: canvasFeedbackPartId(feedback),
-        type: "canvas_feedback",
-        event: feedback,
-      },
+      { id: canvasFeedbackPartId(feedback), type: "canvas_feedback", event: feedback },
     );
     setPendingCanvasCommandApprovals((current) => removePendingCanvasCommandApproval(current, approval));
   }, [appendCanvasCommandFeedback, chat, effectiveFreezoneAgentId, effectiveFreezoneCanvasId, params.project, persistCanvasCommandUiEvent, t]);
@@ -14304,21 +14666,15 @@ export function SuperChatPanel({
     const messages = activeMessages.filter((message) =>
       !shouldHideSkillStudioStatusOnlyMessage(message, submittedSkillStudioTurnIds)
       && !shouldHideOrphanRecoveredUiEventsMessage(message, userTurnIds)
-      && !isUsageOnlyRuntimeMetadataMessage(message),
-    );
-    const scope = `${params.project}:${effectiveFreezoneCanvasId}`;
-    const cancelled = workflowDraftIds(chat.messages)
-      .map((draftId) => cancelledWorkflowDrafts[`${scope}:${draftId}`])
-      .filter((draft): draft is CancelledWorkflowDraft => Boolean(draft));
-    const orderedMessages = insertWorkflowDraftCancellationMessages(
-      messages, cancelled, t("workflowDraftContinuation.cancelled"),
+      && !isUsageOnlyRuntimeMetadataMessage(message)
+      && !isReferenceProductionOnlyMessage(message),
     );
     return searchQuery
-      ? orderedMessages.filter((message) => message.text.toLowerCase().includes(searchQuery))
-      : orderedMessages;
-  }, [activeMessages, cancelledWorkflowDrafts, chat.messages, effectiveFreezoneCanvasId, params.project, searchQuery, t]);
+      ? messages.filter((message) => message.text.toLowerCase().includes(searchQuery))
+      : messages;
+  }, [activeMessages, searchQuery]);
   const activeClarificationEvent = useMemo(
-    () => latestPendingAssistantClarificationEventForActiveTurn(visibleMessages, {
+    () => latestPendingAssistantClarificationEventForComposer(visibleMessages, {
       busy: chat.busy,
       activeTurnId: chat.activeTurnId,
     }),
@@ -15430,7 +15786,12 @@ export function SuperChatPanel({
     event: AssistantClarificationUiEvent,
     answers: AssistantClarificationAnswers,
   ): Promise<boolean> => {
-    if (!chat.busy || !event.turn_id || event.turn_id !== chat.activeTurnId) {
+    // Reference generation parameter cards deliberately outlive the model
+    // turn: the agent returns `waiting_user` and the server sends chat.done
+    // before the human chooses the parameters. They remain scoped by their
+    // signed bridge receipt, so an ended turn is still a valid submission
+    // target. A different live turn must still not consume an old card.
+    if (!event.turn_id || (chat.busy && event.turn_id !== chat.activeTurnId)) {
       toast.error("这轮对话已结束，不能继续提交这个问题");
       return false;
     }
@@ -16188,21 +16549,6 @@ export function SuperChatPanel({
                     freezoneRecipeCatalog={freezoneRecipeCatalog}
                   />
                 ))}
-                {variant === "freezone" && params.project && effectiveFreezoneCanvasId && (
-                  <WorkflowDraftContinuation
-                    messages={chat.messages}
-                    projectId={params.project}
-                    canvasId={effectiveFreezoneCanvasId}
-                    busy={chat.busy}
-                    hasApproval={pendingCanvasCommandApprovals.length > 0}
-                    onConfirm={(display, transport) => chat.send(display, [], transport)}
-                    onCancelled={(cancelled) => setCancelledWorkflowDrafts((current) => {
-                      const key = `${params.project}:${effectiveFreezoneCanvasId}:${cancelled.draftId}`;
-                      return current[key]?.updatedAt === cancelled.updatedAt
-                        ? current : { ...current, [key]: cancelled };
-                    })}
-                  />
-                )}
                 {thinkingCanvasContextActivity && !thinkingCanvasContextMessageId && (
                   <MessageBubble
                     message={{
@@ -16232,6 +16578,8 @@ export function SuperChatPanel({
                 )}
               </div>
             )}
+            {isFreezoneLayout && workflowStatusEnabled ? <ReferenceAnalysisStatus projectId={params.project ?? null} canvasId={effectiveFreezoneCanvasId} agentId={effectiveFreezoneAgentId} connected={chat.connected} summaryTarget={referenceSummaryTarget} currentProduction={currentReferenceProduction} conversationMode /> : null}
+            {isFreezoneLayout && workflowStatusEnabled ? <ReferenceProductionPanel messages={chat.messages} projectId={params.project ?? null} canvasId={effectiveFreezoneCanvasId} agentId={effectiveFreezoneAgentId} connected={chat.connected} summaryTarget={referenceSummaryTarget} onCurrentState={setCurrentReferenceProduction} conversationMode /> : null}
           </div>
           {showScrollToBottom && (
             <Button
@@ -16276,6 +16624,7 @@ export function SuperChatPanel({
                 />
               )}
           </div>
+          <div ref={setReferenceSummaryTarget} className="space-y-1 text-xs" aria-label="制作进度摘要" />
           {!isFreezoneLayout || workflowStatusEnabled ? (
             <ChatTaskStatusBar
               projectId={params.project ?? null}
@@ -16331,6 +16680,12 @@ export function SuperChatPanel({
                 onSubmit={submitAssistantClarificationResponse}
               />
             )}
+            <ComposerPromptStop
+              hasActiveComposerPrompt={hasActiveComposerPrompt}
+              busy={chat.busy}
+              onAbort={chat.abort}
+              label={t("aiAssistant.stop")}
+            />
             {!hasActiveComposerPrompt && showClearCommandSuggestion && (
               <button
                 type="button"

@@ -12,6 +12,7 @@ const backend = vi.hoisted(() => ({
   render: vi.fn(),
   upload: vi.fn(),
   clipSubmit: vi.fn(),
+  transcriptReady: null as Promise<void> | null,
 }));
 
 vi.mock('@/lib/url-params', () => ({ readUrl: () => ({ project: 'demo', canvas: 'default' }) }));
@@ -25,6 +26,18 @@ vi.mock('@/api/client', async (importOriginal) => {
     ...actual,
     apiCall: vi.fn(async (path: string, options?: { json?: Record<string, unknown> }) => {
       const json = options?.json ?? {};
+      if (path.endsWith('/reference-analysis')) {
+        const transcript = useCanvasStore.getState().nodes.find(node => node.id === json.transcript_node_id);
+        const ref = transcript?.data.artifactRef as { artifactId: string; revision: number } | undefined;
+        backend.artifacts.set('joint-analysis:1', { id: 'joint-analysis', revision: 1, schema: 'reference_analysis.v1', upstream_refs: [], payload: {
+          media_hash: `sha256:${'a'.repeat(64)}`, transcript_status: ref ? 'completed' : 'no_audio',
+          transcript_ref: ref ? { artifact_id: ref.artifactId, revision: ref.revision } : null, evidence_ref: { artifact_id: 'evidence', revision: 1 },
+          story: { video_story: { adaptation_structure: { narrative_role: '通过展示引出核心信息。', reusable_beats: ['展示', '讲解'] } },
+            reference_events: [{ event_id: 'product', start_us: 0, end_us: 2_000_000, observed_frame: { pts: 0, time_base: '1/1000', time_us: 0, url: '/frame.png' },
+              spoken_range: null, visual_observation: '产品特写', narrative_inference: '产品登场', user_narrative_role: '产品登场', review_state: 'needs_review' }] } },
+        });
+        return { operation_id: 'joint-operation', status: 'completed', analysis_ref: { artifact_id: 'joint-analysis', revision: 1 } };
+      }
       const expected = Number(json.expected_revision);
       const artifactId = path.split('/artifacts/')[1];
       const current = backend.artifacts.get(`${artifactId}:${expected}`);
@@ -55,7 +68,7 @@ vi.mock('@/api/ops', async (importOriginal) => {
         event_id: 'product', start_us: 0, end_us: 2_000_000,
         observed_frame: { pts: 0, time_base: '1/1000', time_us: 0, url: '/frame.png' },
         spoken_range: null, visual_observation: '产品特写', narrative_inference: '产品登场',
-        user_narrative_role: '产品登场', review_state: 'reviewed',
+        user_narrative_role: '产品登场', review_state: 'needs_review',
       }],
     })),
   };
@@ -96,6 +109,11 @@ vi.mock('@/api/remix', async (importOriginal) => {
       backend.submit(request);
       if (action === 'analyze_reference_video') {
         backend.operations.set(operationId, { operation_id: operationId, status: 'completed', output_refs: [{ artifact_id: 'evidence', revision: 1 }] });
+      } else if (action === 'transcribe_media') {
+        if (backend.transcriptReady) await backend.transcriptReady;
+        const words = putArtifact('word_timeline.v1', { status: 'completed', language: 'en', media_hash: `sha256:${'a'.repeat(64)}`,
+          transcript: 'Original speech', words: [{ text: 'Original speech', start_char: 0, end_char: 15, start_us: 0, end_us: 1_000_000 }] });
+        backend.operations.set(operationId, { operation_id: operationId, status: 'completed', output_refs: [{ artifact_id: words.id, revision: words.revision }] });
       } else if (action === 'generate_script_draft') {
         const blueprintRef = request.blueprintRef as { artifactId: string; revision: number };
         const draft = putArtifact('remix_script.v1', {
@@ -158,6 +176,7 @@ vi.mock('@/api/remix', async (importOriginal) => {
 vi.mock('@/features/freezone/canvasSyncRuntime', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/features/freezone/canvasSyncRuntime')>()), flushFreezoneCanvasRuntime: vi.fn(async () => true) }));
 
 import { AudioNode } from '@/features/canvas/nodes/AudioNode';
+import { apiCall } from '@/api/client';
 import { ScriptNode } from '@/features/canvas/nodes/ScriptNode';
 import { SemanticTimelineNode } from '@/features/canvas/nodes/SemanticTimelineNode';
 import { TranscriptNode } from '@/features/canvas/nodes/TranscriptNode';
@@ -198,6 +217,7 @@ function JourneyCanvas() {
 
 describe('native canvas remix journey integration', () => {
   beforeEach(() => {
+    backend.transcriptReady = null; vi.mocked(apiCall).mockClear();
     backend.artifacts.clear(); backend.operations.clear(); backend.nextArtifact = 1;
     backend.submit.mockClear(); backend.render.mockClear(); backend.upload.mockClear(); backend.clipSubmit.mockClear();
     backend.artifacts.set('evidence:1', { id: 'evidence', revision: 1, schema: 'reference_evidence.v1', upstream_refs: [], payload: { media_hash: `sha256:${'a'.repeat(64)}`, duration_us: 2_000_000, frames: [] } });
@@ -214,6 +234,7 @@ describe('native canvas remix journey integration', () => {
   it('shows node actions without a remix journey button', () => {
     render(<JourneyCanvas />);
     expect(screen.getByRole('button', { name: /分析原片/ })).toBeVisible();
+    expect(screen.getByRole('button', { name: '转写' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '视频用途' })).not.toBeInTheDocument();
   });
@@ -223,6 +244,62 @@ describe('native canvas remix journey integration', () => {
     render(<JourneyCanvas />);
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /分析原片/ })).toBeVisible();
+  });
+
+  it('lets a reference video transcribe independently from its toolbar', async () => {
+    const source = useCanvasStore.getState().nodes[0];
+    useCanvasStore.getState().updateNodeData(source.id, { remixMedia: { ...(source.data.remixMedia as object), has_audio: true } });
+    render(<JourneyCanvas />);
+    fireEvent.click(screen.getByRole('button', { name: '转写' }));
+    await waitFor(() => expect(backend.submit).toHaveBeenCalledWith(expect.objectContaining({ action: 'transcribe_media', mediaPath: 'reference.mp4' })));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find(node => node.type === 'transcriptNode')?.data.words).toHaveLength(1));
+    expect(useCanvasStore.getState().nodes.filter(node => node.type === 'videoStoryNode')).toHaveLength(0);
+    const transcript = useCanvasStore.getState().nodes.find(node => node.type === 'transcriptNode')!;
+    act(() => useCanvasStore.getState().setSelectedNode(source.id));
+    fireEvent.click(screen.getByRole('button', { name: /分析原片/ }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find(node => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
+    const analysis = useCanvasStore.getState().nodes.find(node => node.type === 'videoStoryNode')!;
+    expect(useCanvasStore.getState().edges.some(edge => edge.source === transcript.id && edge.target === analysis.id)).toBe(true);
+    expect(analysis.data.referenceTranscriptRef).toEqual(transcript.data.artifactRef);
+    expect(backend.submit).toHaveBeenCalledTimes(1);
+  });
+  it('starts real component transcription from analysis and waits for saved words before its analysis POST', async () => {
+    const source = useCanvasStore.getState().nodes[0];
+    useCanvasStore.getState().updateNodeData(source.id, { remixMedia: { ...(source.data.remixMedia as object), has_audio: true } });
+    let release!: () => void;
+    backend.transcriptReady = new Promise<void>(resolve => { release = resolve; });
+    render(<JourneyCanvas />);
+    fireEvent.click(screen.getByRole('button', { name: /分析原片/ }));
+    await waitFor(() => expect(backend.submit).toHaveBeenCalledWith(expect.objectContaining({ action: 'transcribe_media' })));
+    const transcript = useCanvasStore.getState().nodes.find(node => node.type === 'transcriptNode')!;
+    const analysis = useCanvasStore.getState().nodes.find(node => node.type === 'videoStoryNode')!;
+    try {
+      expect(transcript.data.artifactRef).toBeFalsy();
+      expect(analysis.data.rawResult).toBeFalsy();
+      expect(vi.mocked(apiCall).mock.calls.some(([path]) => path.endsWith('/reference-analysis'))).toBe(false);
+      expect(useCanvasStore.getState().edges.some(edge => edge.source === transcript.id && edge.target === analysis.id)).toBe(true);
+    } finally { await act(async () => release()); }
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find(node => node.id === analysis.id)?.data.remixAnalysisStage).toBe('completed'));
+    const savedWords = useCanvasStore.getState().nodes.find(node => node.id === transcript.id)!;
+    const savedAnalysis = useCanvasStore.getState().nodes.find(node => node.id === analysis.id)!;
+    expect(savedWords.data.status).toBe('completed');
+    expect(savedWords.data.words).toHaveLength(1);
+    expect(savedAnalysis.data.referenceTranscriptRef).toEqual(savedWords.data.artifactRef);
+    expect(backend.submit.mock.calls.filter(([request]) => request.action === 'transcribe_media')).toHaveLength(1);
+  });
+  it('keeps the real completed transcript when the following analysis request returns 422', async () => {
+    const source = useCanvasStore.getState().nodes[0];
+    useCanvasStore.getState().updateNodeData(source.id, { remixMedia: { ...(source.data.remixMedia as object), has_audio: true } });
+    vi.mocked(apiCall).mockRejectedValueOnce(new Error('reference-analysis 422'));
+    render(<JourneyCanvas />);
+    fireEvent.click(screen.getByRole('button', { name: /分析原片/ }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.find(node => node.type === 'videoStoryNode')?.data.analysisError).toBe('reference-analysis 422'));
+    const transcript = useCanvasStore.getState().nodes.find(node => node.type === 'transcriptNode')!;
+    expect(transcript.data.status).toBe('completed');
+    expect(transcript.data.artifactRef).toBeTruthy();
+    expect(transcript.data.words).toHaveLength(1);
+    expect(transcript.data.unresolved).toEqual([]);
+    expect(backend.submit.mock.calls.filter(([request]) => request.action === 'transcribe_media')).toHaveLength(1);
   });
 
   it('offers batch keyframe and clip imports on a story node toolbar', async () => {
@@ -246,13 +323,68 @@ describe('native canvas remix journey integration', () => {
     expect(backend.clipSubmit.mock.calls[0][0].tracks[0].items[0]).toMatchObject({ sourceUrl: '/static/reference.mp4', sourceStart: 0, sourceEnd: 1 });
   });
 
+  it('creates independent production plan branches from nine unreviewed analysis events', async () => {
+    useCanvasStore.getState().setCanvasData([{
+      id: 'story-1', type: 'videoStoryNode', position: { x: 0, y: 0 },
+      data: {
+        sourceVideoUrl: '/static/reference.mp4',
+        referenceEvents: Array.from({ length: 9 }, (_, index) => ({ event_id: `event-${index}`, start_us: index * 1_000_000, end_us: (index + 1) * 1_000_000, visual_observation: `画面 ${index}`, narrative_inference: '产品展示', review_state: 'needs_review' })),
+        referenceBlueprintRef: { artifactId: 'blueprint-1', revision: 2 },
+      },
+    } as CanvasNode], []);
+    useCanvasStore.getState().setSelectedNode('story-1');
+    render(<JourneyCanvas />);
+
+    expect(screen.getByRole('button', { name: '新建作品方案' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '新建作品方案' }));
+    const firstEditor = await screen.findByRole('dialog', { name: '编辑作品方案' });
+    fireEvent.change(firstEditor.querySelector('input[id^="plan-goal-"]')!, { target: { value: '第一版方案' } });
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    const firstPlan = useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'production_plan')!;
+    expect(firstPlan.data.productionPlanDraft).toMatchObject({ goal: '第一版方案' });
+
+    act(() => useCanvasStore.getState().setSelectedNode('story-1'));
+    expect(screen.getByRole('button', { name: '新建作品方案' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '新建作品方案' }));
+    await waitFor(() => expect(useCanvasStore.getState().nodes.filter((node) => node.data.remixRole === 'production_plan')).toHaveLength(2));
+    const plans = useCanvasStore.getState().nodes.filter((node) => node.data.remixRole === 'production_plan');
+    expect(plans[0].id).not.toBe(plans[1].id);
+    expect(plans[0].data.productionPlanDraft).toMatchObject({ goal: '第一版方案' });
+    expect(plans[1].data.productionPlanDraft).toMatchObject({ goal: '' });
+    expect(useCanvasStore.getState().edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'story-1', target: plans[0].id }),
+      expect.objectContaining({ source: 'story-1', target: plans[1].id }),
+    ]));
+    expect(useCanvasStore.getState().nodes.find((node) => node.id === 'story-1')!.data.referenceEvents).toEqual(Array.from({ length: 9 }, (_, index) => expect.objectContaining({ event_id: `event-${index}`, review_state: 'needs_review' })));
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    act(() => useCanvasStore.getState().setSelectedNode(firstPlan.id));
+    fireEvent.click(screen.getByRole('button', { name: '编辑作品方案' }));
+    const reopened = await screen.findByRole('dialog', { name: '编辑作品方案' });
+    expect((reopened.querySelector('input[id^="plan-goal-"]') as HTMLInputElement).value).toBe('第一版方案');
+  });
+
   it('clicks node actions from uploaded reference through manual audio to a compose manifest', async () => {
     render(<JourneyCanvas />);
 
     fireEvent.click(await screen.findByRole('button', { name: /分析原片/ }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')?.data.remixAnalysisStage).toBe('completed'));
 
-    fireEvent.click(await screen.findByRole('button', { name: '生成改编脚本' }));
+    // The default entry now creates a production plan. Keep this journey on a
+    // pre-existing legacy script branch to verify old projects remain usable.
+    const existingStory = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
+    act(() => {
+      const store = useCanvasStore.getState();
+      const legacyId = store.addNode('scriptNode', store.findNodePosition(existingStory.id, 420, 0), {
+        remixRole: 'remix_script', sourceVideoStoryId: existingStory.id,
+        referenceEvidenceRef: existingStory.data.referenceEvidenceRef,
+        sourceMediaPath: existingStory.data.sourceMediaPath,
+      });
+      store.addEdge(existingStory.id, legacyId);
+    });
+
+    expect(screen.getByRole('button', { name: '新建作品方案' })).toBeVisible();
+    act(() => useCanvasStore.getState().setSelectedNode(useCanvasStore.getState().nodes.find((node) => node.data.remixRole === 'remix_script')!.id));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.some((node) => node.type === 'scriptNode')).toBe(true));
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).not.toBeInTheDocument();
     await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
@@ -271,6 +403,13 @@ describe('native canvas remix journey integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     const storyNode = useCanvasStore.getState().nodes.find((node) => node.type === 'videoStoryNode')!;
     const scriptNode = useCanvasStore.getState().nodes.find((node) => node.type === 'scriptNode')!;
+    act(() => useCanvasStore.getState().setSelectedNode(storyNode.id));
+    expect(screen.getByRole('button', { name: '新建作品方案' })).toBeVisible();
+    act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
+    expect(useCanvasStore.getState().nodes.filter((node) => node.type === 'scriptNode')).toHaveLength(1);
+    expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     const visualInput = document.querySelector(`input[type="file"]`) as HTMLInputElement;
     fireEvent.change(visualInput, { target: { files: [new File(['png'], 'product.png', { type: 'image/png' })] } });
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === visual.id)?.data.imageUrl).toContain('broll.png'));
@@ -282,7 +421,7 @@ describe('native canvas remix journey integration', () => {
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     expect(screen.queryByRole('button', { name: '规划 B-roll' })).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '规划 B-roll' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.id === scriptNode.id)?.data.remixBrollPlanStatus).toBe('completed'));
@@ -299,8 +438,8 @@ describe('native canvas remix journey integration', () => {
     expect(backend.upload).toHaveBeenCalledWith(voice);
 
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    expect(await screen.findByRole('button', { name: '编辑改编脚本' })).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
+    expect(await screen.findByRole('button', { name: '编辑作品脚本' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '编辑作品脚本' }));
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     act(() => useCanvasStore.getState().setSelectedNode(audio.id));
@@ -310,6 +449,8 @@ describe('native canvas remix journey integration', () => {
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '生成语义时间轴' }));
     await waitFor(() => expect(useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')?.data.artifactRef).toBeTruthy());
+    expect(screen.getByText('下一步：检查语义时间轴')).toBeInTheDocument();
+    expect(screen.getByText('下一步：进入成片编排')).toBeInTheDocument();
     const timelineNode = useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')!;
     act(() => useCanvasStore.getState().setSelectedNode(timelineNode.id));
     fireEvent.click(await screen.findByRole('button', { name: '生成合成清单' }));
@@ -319,7 +460,7 @@ describe('native canvas remix journey integration', () => {
     const compose = useCanvasStore.getState().nodes.find((node) => node.type === 'videoComposeNode')!;
     act(() => useCanvasStore.getState().updateNodeData(compose.id, { remixInputsCurrent: true, resultVideoUrl: '/final.mp4' }));
     act(() => useCanvasStore.getState().setSelectedNode(scriptNode.id));
-    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
     fireEvent.click(screen.getByRole('checkbox', { name: '产品登场需要 B-roll' }));
     expect(useCanvasStore.getState().nodes.find((node) => node.id === scriptNode.id)?.data.remixBrollDecisions).toEqual({ product: false });
     const timeline = useCanvasStore.getState().nodes.find((node) => node.type === 'semanticTimelineNode')!;
@@ -397,10 +538,10 @@ describe('native canvas remix journey integration', () => {
     expect(arollStage.compareDocumentPosition(brollStage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(arollStage.parentElement).toHaveTextContent('已保存版本 1 · 0 个片段');
     expect(brollStage.parentElement).toHaveTextContent('1/2 项素材已关联');
-    expect(screen.queryByText(/下一步：/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '编辑改编脚本' })).toBeVisible();
+    expect(screen.getByText('下一步：补齐 1 项 B-roll 素材')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '编辑作品脚本' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /继续改编/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(screen.getByRole('button', { name: '编辑作品脚本' }));
 
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     act(() => useCanvasStore.getState().updateNodeData('script', { remixBrollPlanStatus: 'running' }));
@@ -422,12 +563,12 @@ describe('native canvas remix journey integration', () => {
     expect(screen.getByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     act(() => useCanvasStore.getState().setSelectedNode('script'));
-    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
     expect(await screen.findByRole('dialog', { name: '改编脚本与语义区间' })).toBeVisible();
     expect(backend.submit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     expect(screen.queryByRole('button', { name: '创建主画面节点' })).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: '编辑改编脚本' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑作品脚本' }));
     const editor = await screen.findByRole('dialog', { name: '改编脚本与语义区间' });
     const createPrimary = screen.getByRole('button', { name: '创建缺少的主画面视频节点' });
     expect(editor.contains(createPrimary)).toBe(true);

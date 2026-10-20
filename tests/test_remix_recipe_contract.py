@@ -7,6 +7,14 @@ from novelvideo.freezone.recipe_runtime import RecipeRuntimeError, validate_stru
 from novelvideo.freezone.recipe_runtime import publish_structured_recipe_output
 
 
+def test_builtin_production_recipe_describes_distinct_shot_ranges_and_author_text() -> None:
+    root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins/recipes"
+    prompt = json.loads((root / "reference-production-plan.json").read_text())["system_prompt"]
+    assert 'ref_id:本镜头起始台词id' in prompt
+    assert 'text_hash，宿主保存时填充' in prompt
+    assert '不能全部覆盖整段' in prompt
+
+
 def recipe() -> dict:
     return {"schema_version": "dramaclaw.recipe.v2", "id": "reference-blueprint", "enabled": True, "version": "1", "name": "Blueprint", "output_kind": "text", "action_keys": ["reference-blueprint"], "system_prompt": "Return JSON", "planning_prompt": "Plan", "result_summary": "Blueprint", "input_contract": {"required": ["evidence_ref"]}, "output_schema": {"type": "object", "required": ["narrative_role"], "properties": {"narrative_role": {"type": "string"}}}}
 
@@ -64,15 +72,25 @@ def test_builtin_reference_remix_skill_declares_review_and_rerun_contract() -> N
     root = Path(__file__).parents[1] / "src/novelvideo/freezone/agent_catalog/builtins"
     skill = json.loads((root / "skills/reference-video-remix.json").read_text())
     skill = validate_agent_skill_config(skill)
+    assert skill["version"] == "2.1.0"
+    assert skill["name"] == "参考视频复刻"
     assert skill["allowed_recipe_ids"] == [
         "reference-blueprint",
-        "reference-remix-script",
-        "reference-broll-plan",
+        "reference-production-plan",
+        "general-image",
+        "general-video",
+        "general-audio",
     ]
     rules = "\n".join(skill["planning"]["conduct_rules"])
     assert "注册动作" in rules
     assert "人工确认" in rules
     assert "只重跑" in rules
+    assert "无台词" in rules
+    assert "多个" in rules
+    assert "原片分析事件" in skill["planning"]["planning_notes"]
+    assert "不等于复刻视频必须生成同样数量的镜头" in skill["planning"]["prompt_guide"]
+    assert "由 Agent 根据新目标" in skill["planning"]["prompt_guide"]
+    assert "向用户复述分析时使用“原片分析事件/证据窗口”" in skill["planning"]["prompt_guide"]
     assert "shell" not in json.dumps(skill).lower()
 
 

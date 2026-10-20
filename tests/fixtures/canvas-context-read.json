@@ -1,0 +1,206 @@
+{
+  "canvas": {
+    "project_id": "p",
+    "canvas_id": "c",
+    "revision": "r7",
+    "nodes": [
+      {
+        "id": "video",
+        "type": "videoNode",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "data": {
+          "label": "Reference",
+          "videoUrl": "/source.mp4"
+        }
+      },
+      {
+        "id": "analysis",
+        "type": "videoStoryNode",
+        "position": {
+          "x": 1,
+          "y": 0
+        },
+        "data": {
+          "sourceVideoUrl": "/source.mp4",
+          "rawResult": {
+            "video_story": {
+              "summary": "提问再反转"
+            }
+          },
+          "referenceAnalysisRunId": "run",
+          "referenceBlueprintRef": {
+            "artifact_id": "blueprint",
+            "revision": 2
+          },
+          "secret": "never-return",
+          "referenceAnalysisRef": {
+            "artifact_id": "analysis_artifact",
+            "revision": 2
+          },
+          "referenceEvidenceRef": {
+            "artifact_id": "evidence",
+            "revision": 2
+          },
+          "referenceTranscriptRef": {
+            "artifact_id": "transcript",
+            "revision": 2
+          }
+        }
+      },
+      {
+        "id": "plan",
+        "type": "scriptNode",
+        "position": {
+          "x": 2,
+          "y": 0
+        },
+        "data": {
+          "remixRole": "production_plan",
+          "productionPlanV2Ref": {
+            "artifactId": "plan_artifact",
+            "revision": 3
+          },
+          "productionPlanV2Draft": {
+            "schema_version": 2,
+            "goal": "新主题",
+            "output": {
+              "width": 1080,
+              "height": 1920,
+              "fps_num": 30,
+              "fps_den": 1
+            }
+          },
+          "productionPlanV2Dirty": false
+        }
+      },
+      {
+        "id": "compose",
+        "type": "videoComposeNode",
+        "position": {
+          "x": 3,
+          "y": 0
+        },
+        "data": {
+          "planRef": {
+            "artifact_id": "plan_artifact",
+            "revision": 3
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "video",
+        "target": "analysis",
+        "data": {
+          "link_type": "media_input_for"
+        }
+      },
+      {
+        "id": "e2",
+        "source": "video",
+        "target": "plan",
+        "data": {
+          "link_type": "media_input_for"
+        }
+      },
+      {
+        "id": "e3",
+        "source": "plan",
+        "target": "compose",
+        "data": {
+          "link_type": "composition_for"
+        }
+      }
+    ]
+  },
+  "parity": {
+    "analysis": {
+      "node_id": "analysis",
+      "node_type": "videoStoryNode",
+      "reference_analysis": {
+        "status": "completed",
+        "analysis_node_id": "analysis",
+        "run_id": "run",
+        "source_url": "/source.mp4",
+        "summary": "提问再反转",
+        "result_ref": {
+          "artifact_id": "blueprint",
+          "revision": 2
+        },
+        "next_action": "prepare_native_plan",
+        "analysis_ref": {
+          "artifact_id": "analysis_artifact",
+          "revision": 2
+        },
+        "evidence_ref": {
+          "artifact_id": "evidence",
+          "revision": 2
+        },
+        "transcript_ref": {
+          "artifact_id": "transcript",
+          "revision": 2
+        },
+        "blueprint_ref": {
+          "artifact_id": "blueprint",
+          "revision": 2
+        }
+      }
+    },
+    "plan": {
+      "node_id": "plan",
+      "node_type": "scriptNode",
+      "production_plan": {
+        "remix_role": "production_plan",
+        "schema": "production_plan.v2",
+        "plan_ref": {
+          "artifact_id": "plan_artifact",
+          "revision": 3
+        },
+        "goal": "新主题",
+        "output": {
+          "width": 1080,
+          "height": 1920,
+          "fps_num": 30,
+          "fps_den": 1
+        },
+        "dirty": false,
+        "conflict": false
+      },
+      "reference_media": [
+        {
+          "mention": "@视频1",
+          "node_id": "video",
+          "label": "视频",
+          "media_type": "video",
+          "source_url": "/source.mp4",
+          "preview_url": "/source.mp4",
+          "link_type": "media_input_for"
+        }
+      ]
+    },
+    "video": {
+      "node_id": "video",
+      "node_type": "videoNode",
+      "media_type": "video",
+      "source_url": "/source.mp4"
+    },
+    "compose": {
+      "node_id": "compose",
+      "node_type": "videoComposeNode"
+    }
+  },
+  "coverage": {
+    "excluded": [
+      "selection",
+      "unsaved_changes",
+      "editable_parameters",
+      "dynamic_action_catalog",
+      "full_ontology"
+    ]
+  }
+}

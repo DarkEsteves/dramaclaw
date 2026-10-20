@@ -244,7 +244,7 @@ export function buildReferenceBlueprint(input: ReferenceBlueprintInput): Record<
           observed_frame: { evidence_ref: exactPayloadRef(input.evidenceRef!), time_us: secondsToUs(row.startTime), ...(row.keyframeUrl ? { url: row.keyframeUrl } : {}) },
           spoken_range: null,
           model: { visual_observation: row.visualDescription ?? '', narrative_inference: row.narrative ?? '' },
-          user_override: { narrative_role: row.narrative ?? '', review_state: 'reviewed' },
+          user_override: { narrative_role: row.narrative ?? '', review_state: 'needs_review' },
         }))
         : input.rows.length
           ? input.rows.map((row, index) => ({ shot: index + 1, start_time: row.startTime, end_time: row.endTime, visual_description: row.visualDescription ?? '', narrative: row.narrative ?? '' }))
@@ -308,7 +308,6 @@ export function blueprintReadinessErrors(payload: Record<string, unknown>, conte
     if (!model || typeof model.visual_observation !== 'string' || typeof model.narrative_inference !== 'string') errors.push(`事件 ${index + 1} 缺少模型分析结构`);
     const override = event.user_override as Record<string, unknown> | null;
     if (!override || typeof override.narrative_role !== 'string' || !override.narrative_role.trim()) errors.push(`事件 ${index + 1} 缺少叙事作用`);
-    if (!override || !['reviewed', 'reviewed_uncertain'].includes(String(override.review_state))) errors.push(`事件 ${index + 1} 尚未核对`);
   });
   return errors;
 }

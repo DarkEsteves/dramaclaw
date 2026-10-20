@@ -64,7 +64,7 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
     if record["status"] == "completed":
         return record
 
-    def exact_inputs(node: dict | None) -> bool:
+    def exact_inputs(canvas: dict | None, node: dict | None) -> bool:
         refs, revision = _current(node)
         expected = [{"artifact_id": ref["artifact_id"], "revision": ref["revision"]} for ref in record["input_refs"]]
         data = node.get("data") if isinstance(node, dict) else None
@@ -73,10 +73,50 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
             or data.get("remixInputFingerprint") != (record.get("normalized_parameters") or {}).get("input_fingerprint")
             or record.get("producer_version") != "remix-render.v1"):
             return False
+        artifacts = RemixArtifactStore(Path(output_dir), project_id)
         try:
-            manifest = RemixArtifactStore(Path(output_dir), project_id).read(expected[0]["artifact_id"], expected[0]["revision"])
+            manifest = artifacts.read(expected[0]["artifact_id"], expected[0]["revision"])
         except (FileNotFoundError, ValueError):
             return False
+        if manifest["schema"] == "composition_manifest.v2":
+            versions = manifest["payload"].get("source_versions")
+            source_ref = versions[0] if isinstance(versions, list) and versions else None
+            if (not isinstance(source_ref, dict) or set(source_ref) != {"artifact_id", "revision"}
+                    or not isinstance(source_ref["artifact_id"], str)
+                    or type(source_ref["revision"]) is not int):
+                raise _StaleNode("production_plan_changed")
+            try:
+                plan_artifact = artifacts.read(source_ref["artifact_id"], source_ref["revision"])
+                latest = artifacts.read_latest(source_ref["artifact_id"])
+            except (FileNotFoundError, ValueError) as exc:
+                raise _StaleNode("production_plan_changed") from exc
+            if plan_artifact["schema"] != "production_plan.v2" or latest["revision"] != source_ref["revision"]:
+                raise _StaleNode("production_plan_changed")
+            plan_id = data.get("productionPlanNodeId")
+            plan_node = _node(canvas, plan_id) if isinstance(plan_id, str) else None
+            plan_data = plan_node.get("data") if isinstance(plan_node, dict) else None
+            if (not isinstance(plan_data, dict) or plan_data.get("productionPlanV2Dirty") is True
+                    or plan_data.get("productionPlanV2Conflict") is True):
+                raise _StaleNode("production_plan_changed")
+            draft = plan_data.get("productionPlanV2Draft")
+            if draft is not None:
+                from .contracts import validate_payload
+
+                try:
+                    normalized = validate_payload("production_plan.v2", draft)
+                except ValueError as exc:
+                    raise _StaleNode("production_plan_changed") from exc
+                if normalized != plan_artifact["payload"]:
+                    raise _StaleNode("production_plan_changed")
+            # Keep the same V2 binding gate as render submission inside the
+            # canvas mutex, so a human graph/media edit cannot win during FFmpeg.
+            from novelvideo.api.routes.remix import _validate_v2_canvas_bindings
+
+            try:
+                _validate_v2_canvas_bindings(canvas, manifest["payload"], expected[0],
+                                             plan_artifact["payload"], node_id, project_id)
+            except ValueError as exc:
+                raise _StaleNode("production_canvas_bindings_changed") from exc
         hashes = sorted({str(item.get("media_hash")).lower() for item in manifest["payload"].get("media_bindings", []) if isinstance(item, dict) and isinstance(item.get("media_hash"), str)})
         if hashes != record.get("input_media_hashes", []):
             return False
@@ -92,7 +132,7 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
     def build(existing: dict | None) -> dict:
         node = _node(existing, node_id)
         expected = record["input_refs"]
-        if not exact_inputs(node):
+        if not exact_inputs(existing, node):
             raise _StaleNode("exact_inputs_changed")
         updated = deepcopy(existing)
         target = _node(updated, node_id)
@@ -102,6 +142,17 @@ def confirm_render(output_dir: Path, state_dir: Path, project_id: str, operation
         target["data"]["remixRenderManifestRef"] = {
             "artifactId": expected[0]["artifact_id"], "revision": expected[0]["revision"]
         }
+        # A lost render POST response must not hide an otherwise verified V2
+        # result. Derive this marker from the immutable manifest source, never
+        # from the mutable latest plan node data.
+        manifest = RemixArtifactStore(Path(output_dir), project_id).read(
+            expected[0]["artifact_id"], expected[0]["revision"]
+        )
+        if manifest["schema"] == "composition_manifest.v2":
+            source_ref = manifest["payload"]["source_versions"][0]
+            target["data"]["productionPlanRenderedRef"] = {
+                "artifactId": source_ref["artifact_id"], "revision": source_ref["revision"]
+            }
         updated["revision"] = int(updated["revision"]) + 1
         updated["updated_at"] = canvas_store.utc_now_iso()
         updated["save_source"] = "remix_result_confirmation"

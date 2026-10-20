@@ -23,6 +23,7 @@ from novelvideo.sqlite_pragmas import configure_sqlite_connection
 
 BRIDGE_RESULT_TTL_SECONDS = 24 * 60 * 60
 BRIDGE_DELIVERY_LEASE_SECONDS = 15
+BRIDGE_OWNER_LEASE_SECONDS = 45
 BRIDGE_PENDING_TTL_SECONDS = {
     # Commands include a browser approval (up to five minutes), validation,
     # and receipt delivery. A 75-second transport TTL expired a live approval
@@ -35,6 +36,13 @@ BRIDGE_PENDING_TTL_SECONDS = {
     "clarification_event": 10 * 60,
 }
 _BRIDGE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS canvas_bridge_browsers (
+    consumer_id TEXT PRIMARY KEY, binding_json TEXT NOT NULL, expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS canvas_bridge_producer_turns (
+    scope_json TEXT NOT NULL, turn_id TEXT NOT NULL, expires_at REAL NOT NULL,
+    PRIMARY KEY(scope_json,turn_id)
+);
 CREATE TABLE IF NOT EXISTS canvas_command_messages (
     bridge_key          TEXT PRIMARY KEY,
     kind                TEXT NOT NULL,
@@ -51,6 +59,9 @@ CREATE TABLE IF NOT EXISTS canvas_command_messages (
     updated_at          REAL NOT NULL,
     expires_at          REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_canvas_bridge_browsers_expiry ON canvas_bridge_browsers(expires_at);
+CREATE INDEX IF NOT EXISTS idx_canvas_bridge_browsers_scope ON canvas_bridge_browsers(binding_json,expires_at);
+CREATE INDEX IF NOT EXISTS idx_canvas_bridge_producers_expiry ON canvas_bridge_producer_turns(expires_at);
 CREATE INDEX IF NOT EXISTS idx_canvas_command_messages_pending
 ON canvas_command_messages(project_id, canvas_id, kind, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_canvas_command_messages_expiry
@@ -122,15 +133,14 @@ def _prune_bridge_rows(
     now: float,
     bridge_dir: str | Path | None = None,
 ) -> int:
-    shortest_ttl = min(BRIDGE_PENDING_TTL_SECONDS.values())
+    # Filter actual kind deadlines before LIMIT, avoiding an old long-TTL
+    # prefix starving newer short-TTL messages during bounded cleanup.
+    kind_ttl = "CASE kind " + " ".join("WHEN ? THEN ?" for _ in BRIDGE_PENDING_TTL_SECONDS) + " ELSE 600 END"
+    parameters = [value for pair in BRIDGE_PENDING_TTL_SECONDS.items() for value in pair]
     expirable = conn.execute(
-        """
-        SELECT bridge_key, kind, request_fingerprint, created_at
-          FROM canvas_command_messages
-         WHERE status IN ('pending', 'delivered')
-           AND created_at <= ?
-        """,
-        (now - shortest_ttl,),
+        "SELECT bridge_key,kind,request_fingerprint,created_at FROM canvas_command_messages "
+        "WHERE status IN ('pending','delivered') AND created_at + " + kind_ttl + " <= ? ORDER BY created_at LIMIT 200",
+        [*parameters, now],
     ).fetchall()
     for row in expirable:
         ttl = BRIDGE_PENDING_TTL_SECONDS.get(str(row["kind"]), 10 * 60)
@@ -166,7 +176,7 @@ def _prune_bridge_rows(
         # command after the durable tombstone is eventually pruned.
         _unlink_if_exists(_path("pending", str(row["bridge_key"]), bridge_dir))
     cursor = conn.execute(
-        "DELETE FROM canvas_command_messages WHERE expires_at <= ?",
+        "DELETE FROM canvas_command_messages WHERE bridge_key IN (SELECT bridge_key FROM canvas_command_messages WHERE expires_at<=? ORDER BY expires_at LIMIT 200)",
         (now,),
     )
     return max(int(cursor.rowcount or 0), 0)
@@ -186,6 +196,7 @@ def bridge_status_counts(*, bridge_dir: str | Path | None = None) -> dict[str, i
 def read_bridge_message(
     key: str, *, bridge_dir: str | Path | None = None
 ) -> dict[str, Any] | None:
+    key = canonical_bridge_key(key)
     with _bridge_db(bridge_dir) as conn:
         row = conn.execute(
             "SELECT * FROM canvas_command_messages WHERE bridge_key = ?",
@@ -201,6 +212,7 @@ def read_bridge_message(
         "key": str(row["bridge_key"]),
         "kind": str(row["kind"]),
         "transport_status": str(row["status"]),
+        "result": _decode_bridge_json(row["result_json"]),
     }
 
 
@@ -234,6 +246,13 @@ def find_clarification_bridge_message(
         ).fetchall()
     for row in rows:
         payload = _decode_bridge_json(row["payload_json"])
+        actor = os.environ.get("DRAMACLAW_USERNAME", "").strip()
+        profile = os.environ.get("DRAMACLAW_AGENT_PROFILE", "")
+        agent = os.environ.get("DRAMACLAW_AGENT_ID", "").strip() or (profile.split(":",1)[1] if ":" in profile else "main")
+        if actor and (not payload or not isinstance(payload.get("producer_binding"),dict)
+                      or payload["producer_binding"].get("username") != actor
+                      or payload["producer_binding"].get("agent_id") != agent):
+            continue
         event = payload.get("event") if payload else None
         if not isinstance(event, dict) or str(event.get("clarification_id") or "") != wanted:
             continue
@@ -272,6 +291,7 @@ def list_pending_bridge_messages(
     created_after: float | None = None,
     limit: int = 100,
     bridge_dir: str | Path | None = None,
+    producer_binding: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Read pending or redeliverable messages across API workers."""
     now = time.time()
@@ -280,6 +300,10 @@ def list_pending_bridge_messages(
         "project_id = ? AND canvas_id = ? AND "
         "(status = 'pending' OR (status = 'delivered' AND lease_expires_at <= ?))"
     )
+    if producer_binding is not None:
+        producer_where, producer_parameters = _producer_scope_sql(producer_binding)
+        where += " AND " + producer_where
+        parameters.extend(producer_parameters)
     if kinds:
         placeholders = ",".join("?" for _ in kinds)
         where += f" AND kind IN ({placeholders})"
@@ -308,20 +332,50 @@ def list_pending_bridge_messages(
                 "kind": str(row["kind"]),
                 "transport_status": str(row["status"]),
                 "created_at": float(row["created_at"]),
+                "delivery_attempts": int(row["delivery_attempts"]),
             }
         )
     return items
+
+
+def _producer_scope_sql(binding: dict[str, Any]) -> tuple[str, list[Any]]:
+    """Filter verified producer identity before any bounded transport page."""
+    fields = {"username", "project_id", "canvas_id", "agent_id", "turn_id"}
+    if not set(binding).issubset(fields):
+        raise ValueError("invalid producer binding fields")
+    clauses = ["json_valid(payload_json)", "json_type(payload_json,'$.producer_binding')='object'",
+               "COALESCE(json_extract(payload_json,'$.producer_binding.turn_id'),'')<>''"]
+    parameters = []
+    for field, value in binding.items():
+        clauses.append(f"json_extract(payload_json,'$.producer_binding.{field}')=?")
+        parameters.append(value)
+    return " AND ".join(clauses), parameters
 
 
 def mark_bridge_message_delivered(
     key: str,
     *,
     consumer_id: str,
+    binding: dict[str, Any] | None = None,
+    execution_token: str | None = None,
     bridge_dir: str | Path | None = None,
 ) -> bool:
     now = time.time()
     with _bridge_db(bridge_dir) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if binding is not None:
+            row = conn.execute("SELECT payload_json,consumer_id FROM canvas_command_messages WHERE bridge_key = ?", (key,)).fetchone()
+            payload = _decode_bridge_json(row["payload_json"]) if row else None
+            producer = payload.get("producer_binding") if payload else None
+            if producer and producer != binding:
+                return False
+            if (payload and payload.get("execution_token")
+                    and float(payload.get("owner_expires_at") or 0) > now
+                    and (row["consumer_id"] != consumer_id or payload["execution_token"] != execution_token)):
+                return False
+            previous_binding = payload.get("delivery_binding") if payload else None
+            if previous_binding and previous_binding != binding:
+                return False
         cursor = conn.execute(
             """
             UPDATE canvas_command_messages
@@ -340,7 +394,21 @@ def mark_bridge_message_delivered(
                 now,
             ),
         )
-        return int(cursor.rowcount or 0) == 1
+        claimed = int(cursor.rowcount or 0) == 1
+        if claimed and binding is not None:
+            row = conn.execute("SELECT payload_json FROM canvas_command_messages WHERE bridge_key = ?", (key,)).fetchone()
+            payload = _decode_bridge_json(row["payload_json"]) or {}
+            payload["delivery_binding"] = binding
+            if execution_token:
+                payload["execution_token"] = execution_token
+                payload["owner_expires_at"] = now + BRIDGE_OWNER_LEASE_SECONDS
+            fingerprint = str(payload.get("request_fingerprint") or "")
+            if not fingerprint:
+                request = {name: value for name, value in payload.items() if name != "delivery_binding"}
+                fingerprint = hashlib.sha256(_canonical_json(request).encode("utf-8")).hexdigest()
+                payload["request_fingerprint"] = fingerprint
+            conn.execute("UPDATE canvas_command_messages SET payload_json = ?, request_fingerprint = ? WHERE bridge_key = ?", (_canonical_json(payload), fingerprint, key))
+        return claimed
 
 
 def _canonical_json(value: Any) -> str:
@@ -380,6 +448,8 @@ def canvas_command_idempotency_key(
     """
     payload = {
         "kind": "canvas_command_idempotency",
+        "producer_actor": os.environ.get("DRAMACLAW_USERNAME", ""),
+        "producer_agent": os.environ.get("DRAMACLAW_AGENT_ID", "") or os.environ.get("DRAMACLAW_AGENT_PROFILE", ""),
         "project_id": project_id or "",
         "canvas_id": canvas_id or "",
         "commands": commands,
@@ -489,6 +559,25 @@ def _put_pending_bridge_message(
     terminal_result: dict[str, Any] | None = None,
     bridge_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
+    origin = {
+        "username": os.environ.get("DRAMACLAW_USERNAME", "").strip(),
+        "project_id": os.environ.get("DRAMACLAW_PROJECT_ID", "").strip(),
+        "canvas_id": os.environ.get("DRAMACLAW_CANVAS_ID", "").strip(),
+        "agent_id": os.environ.get("DRAMACLAW_AGENT_ID", "").strip() or
+            (os.environ.get("DRAMACLAW_AGENT_PROFILE", "").split(":", 1)[1]
+             if ":" in os.environ.get("DRAMACLAW_AGENT_PROFILE", "") else "main"),
+        "turn_id": os.environ.get("DRAMACLAW_TURN_ID", "").strip(),
+    }
+    if not origin["turn_id"] and all(value for key,value in origin.items() if key != "turn_id"):
+        # A persistent Hermes worker has trusted actor/profile provenance but
+        # no process-wide turn ID. Resolve only a unique, live host registration.
+        scope = {key:value for key,value in origin.items() if key != "turn_id"}
+        with _bridge_db(bridge_dir) as origin_db:
+            turns = origin_db.execute("SELECT turn_id FROM canvas_bridge_producer_turns WHERE scope_json=? AND expires_at>?",(_canonical_json(scope),time.time())).fetchall()
+        if len(turns)==1:
+            origin["turn_id"] = str(turns[0]["turn_id"])
+    if all(origin.values()) and origin["project_id"] == project_id and origin["canvas_id"] == canvas_id:
+        payload = {**payload, "producer_binding": origin}
     now = time.time()
     with _bridge_db(bridge_dir) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -498,6 +587,11 @@ def _put_pending_bridge_message(
             (key,),
         ).fetchone()
         if existing is not None:
+            previous_payload = _decode_bridge_json(existing["payload_json"]) or {}
+            previous_origin = previous_payload.get("producer_binding")
+            next_origin = payload.get("producer_binding")
+            if previous_origin != next_origin and (previous_origin or next_origin):
+                return _canvas_command_idempotency_conflict(key=key,project_id=project_id,canvas_id=canvas_id)
             existing_fingerprint = str(existing["request_fingerprint"] or "")
             if request_fingerprint and existing_fingerprint != request_fingerprint:
                 return _canvas_command_idempotency_conflict(
@@ -584,6 +678,8 @@ def _resolve_durable_bridge_message(
     *,
     bridge_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    result = dict(result)
+    expected_token = result.pop("_bridge_execution_token", None)
     now = time.time()
     with _bridge_db(bridge_dir) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -591,6 +687,11 @@ def _resolve_durable_bridge_message(
             "SELECT * FROM canvas_command_messages WHERE bridge_key = ?",
             (key,),
         ).fetchone()
+        if expected_token is not None:
+            pending = _decode_bridge_json(existing["payload_json"]) if existing else None
+            if not pending or pending.get("execution_token") != expected_token:
+                from fastapi import HTTPException
+                raise HTTPException(409, "bridge receipt executor was superseded")
         if (
             existing is not None
             and str(existing["status"]) in _TERMINAL_BRIDGE_STATUSES
@@ -869,7 +970,7 @@ def _resolve_canvas_command_locked(
         # browser continues executing it. A duplicate recovered approval may
         # later expire; that late cancellation must not overwrite the result
         # already consumed by the waiting tool call.
-        _resolve_durable_bridge_message(key, existing, bridge_dir=bridge_dir)
+        _resolve_durable_bridge_message(key, {**existing, "_bridge_execution_token":result.get("_bridge_execution_token")}, bridge_dir=bridge_dir)
         _unlink_if_exists(_path("pending", key, bridge_dir))
         return existing
     pending = _read_json(_path("pending", key, bridge_dir))
@@ -987,3 +1088,222 @@ def wait_clarification_result(
         poll_seconds=poll_seconds,
         bridge_dir=bridge_dir,
     )
+
+
+def release_bridge_delivery(
+    key: str, *, consumer_id: str, bridge_dir: str | Path | None = None
+) -> None:
+    """Make an unsuccessful delivery immediately available without stealing a lease."""
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload_json FROM canvas_command_messages WHERE bridge_key=? AND status='delivered' AND consumer_id=?",
+            (key, consumer_id[:160]),
+        ).fetchone()
+        if row:
+            payload = _decode_bridge_json(row["payload_json"]) or {}
+            payload["owner_expires_at"] = 0
+            conn.execute(
+                "UPDATE canvas_command_messages SET payload_json=? WHERE bridge_key=?",
+                (_canonical_json(payload), key),
+            )
+        conn.execute(
+            "UPDATE canvas_command_messages SET status = 'pending', consumer_id = NULL, lease_expires_at = NULL WHERE bridge_key = ? AND status = 'delivered' AND consumer_id = ?",
+            (key, consumer_id[:160]),
+        )
+
+
+def canonical_bridge_key(key: str) -> str:
+    """Decode an opaque executor receipt key to its durable inbox key."""
+    return key.rsplit(".executor.", 1)[0] if ".executor." in key else key
+
+
+def heartbeat_bridge_browser(
+    *, consumer_id: str, binding: dict[str, Any], bridge_dir=None
+) -> None:
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute(
+            "DELETE FROM canvas_bridge_browsers WHERE consumer_id IN (SELECT consumer_id FROM canvas_bridge_browsers WHERE expires_at<=? ORDER BY expires_at LIMIT 200)", (time.time(),)
+        )
+        conn.execute(
+            "INSERT INTO canvas_bridge_browsers VALUES (?, ?, ?) ON CONFLICT(consumer_id) DO UPDATE SET binding_json=excluded.binding_json, expires_at=excluded.expires_at",
+            (
+                consumer_id,
+                _canonical_json(binding),
+                time.time() + BRIDGE_OWNER_LEASE_SECONDS,
+            ),
+        )
+
+
+def browser_is_online(*, binding: dict[str, Any], bridge_dir=None) -> bool:
+    with _bridge_db(bridge_dir) as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM canvas_bridge_browsers WHERE binding_json=? AND expires_at>? LIMIT 1",
+                (_canonical_json(binding), time.time()),
+            ).fetchone()
+            is not None
+        )
+
+
+def renew_bridge_owner(
+    key: str, *, consumer_id: str, execution_token: str, bridge_dir=None
+) -> bool:
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload_json FROM canvas_command_messages WHERE bridge_key=? AND consumer_id=? AND status='delivered'",
+            (canonical_bridge_key(key), consumer_id),
+        ).fetchone()
+        payload = _decode_bridge_json(row["payload_json"]) if row else None
+        if not payload or payload.get("execution_token") != execution_token:
+            return False
+        payload["owner_expires_at"] = time.time() + BRIDGE_OWNER_LEASE_SECONDS
+        conn.execute(
+            "UPDATE canvas_command_messages SET payload_json=?, lease_expires_at=? WHERE bridge_key=?",
+            (
+                _canonical_json(payload),
+                time.time() + BRIDGE_DELIVERY_LEASE_SECONDS,
+                canonical_bridge_key(key),
+            ),
+        )
+        return True
+
+
+def release_bridge_owner(*, consumer_id: str, bridge_dir=None) -> None:
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM canvas_bridge_browsers WHERE consumer_id=?", (consumer_id,)
+        )
+        rows = conn.execute(
+            "SELECT bridge_key,payload_json FROM canvas_command_messages WHERE consumer_id=? AND status='delivered'",
+            (consumer_id,),
+        ).fetchall()
+        for row in rows:
+            payload = _decode_bridge_json(row["payload_json"]) or {}
+            payload["owner_expires_at"] = 0
+            conn.execute(
+                "UPDATE canvas_command_messages SET payload_json=?,lease_expires_at=0 WHERE bridge_key=?",
+                (_canonical_json(payload), row["bridge_key"]),
+            )
+
+
+def renew_browser_owned_messages(*, consumer_id: str, bridge_dir=None) -> None:
+    with _bridge_db(bridge_dir) as conn:
+        rows = conn.execute(
+            "SELECT bridge_key,payload_json FROM canvas_command_messages WHERE consumer_id=? AND status='delivered'",
+            (consumer_id,),
+        ).fetchall()
+    for row in rows:
+        payload = _decode_bridge_json(row["payload_json"]) or {}
+        if token := payload.get("execution_token"):
+            renew_bridge_owner(
+                str(row["bridge_key"]),
+                consumer_id=consumer_id,
+                execution_token=token,
+                bridge_dir=bridge_dir,
+            )
+
+
+def list_browser_owned_messages(
+    *, consumer_id: str, bridge_dir=None
+) -> list[dict[str, Any]]:
+    with _bridge_db(bridge_dir) as conn:
+        _prune_bridge_rows(conn, now=time.time(), bridge_dir=bridge_dir)
+        rows = conn.execute(
+            "SELECT * FROM canvas_command_messages WHERE consumer_id=? AND status='delivered' ORDER BY created_at LIMIT 100",
+            (consumer_id,),
+        ).fetchall()
+    return [
+        {
+            **(_decode_bridge_json(row["payload_json"]) or {}),
+            "key": row["bridge_key"],
+            "kind": row["kind"],
+        }
+        for row in rows
+    ]
+
+
+def list_scope_bridge_receipts(
+    *, binding: dict[str, Any], bridge_dir=None
+) -> list[dict[str, Any]]:
+    """Real terminal receipts only, with producer identity checked before exposure."""
+    producer_where, producer_parameters = _producer_scope_sql(binding)
+    with _bridge_db(bridge_dir) as conn:
+        _prune_bridge_rows(conn, now=time.time(), bridge_dir=bridge_dir)
+        rows = conn.execute(
+            "SELECT * FROM canvas_command_messages WHERE project_id=? AND canvas_id=? "
+            "AND status IN ('applied','failed','cancelled','expired') AND " + producer_where +
+            " ORDER BY updated_at DESC LIMIT 100",
+            [binding["project_id"], binding["canvas_id"], *producer_parameters],
+        ).fetchall()
+    receipts = []
+    for row in rows:
+        payload = _decode_bridge_json(row["payload_json"]) or {}
+        producer = payload.get("producer_binding")
+        result = _decode_bridge_json(row["result_json"])
+        if (
+            isinstance(producer, dict)
+            and {key: producer.get(key) for key in binding} == binding
+            and result
+        ):
+            receipts.append(
+                {
+                    "request_id": row["bridge_key"],
+                    "kind": row["kind"],
+                    "turn_id": producer["turn_id"],
+                    "status": row["status"],
+                    "result": result,
+                }
+            )
+        if len(receipts) >= 100:
+            break
+    return receipts
+
+
+def register_bridge_producer_turn(*, binding: dict[str, Any], bridge_dir=None) -> None:
+    scope = {key: value for key, value in binding.items() if key != "turn_id"}
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute(
+            "DELETE FROM canvas_bridge_producer_turns WHERE rowid IN (SELECT rowid FROM canvas_bridge_producer_turns WHERE expires_at<=? ORDER BY expires_at LIMIT 200)",
+            (time.time(),),
+        )
+        conn.execute(
+            "INSERT INTO canvas_bridge_producer_turns VALUES (?,?,?) ON CONFLICT(scope_json,turn_id) DO UPDATE SET expires_at=excluded.expires_at",
+            (
+                _canonical_json(scope),
+                binding["turn_id"],
+                time.time() + BRIDGE_OWNER_LEASE_SECONDS,
+            ),
+        )
+
+
+def release_bridge_producer_turn(*, binding: dict[str, Any], bridge_dir=None) -> None:
+    scope = {key: value for key, value in binding.items() if key != "turn_id"}
+    with _bridge_db(bridge_dir) as conn:
+        conn.execute(
+            "DELETE FROM canvas_bridge_producer_turns WHERE scope_json=? AND turn_id=?",
+            (_canonical_json(scope), binding["turn_id"]),
+        )
+
+
+def record_plan_revision_sync(key: str, statuses: list[dict[str, Any]], *, bridge_dir=None) -> dict[str, Any] | None:
+    """Host-only enrichment of a successful receipt; never replay its command."""
+    key = canonical_bridge_key(key)
+    with _key_lock(key, bridge_dir):
+        with _bridge_db(bridge_dir) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT result_json FROM canvas_command_messages WHERE bridge_key=? AND status=\'applied\'', (key,)).fetchone()
+            result = _decode_bridge_json(row['result_json']) if row else None
+            if not result or result.get('ok') is not True or not statuses:
+                return result
+            summary = [{name: item[name] for name in ('status', 'plan_ref') if name in item}
+                       for item in statuses]
+            result['plan_revision_sync'] = summary
+            if len(summary) == 1:
+                result['plan_ref'] = summary[0]['plan_ref']
+            conn.execute('UPDATE canvas_command_messages SET result_json=? WHERE bridge_key=?',
+                         (_canonical_json(result), key))
+        _write_json(_path('result', key, bridge_dir), result)
+        return result

@@ -20,6 +20,30 @@ function task(partial: Partial<TaskState>): TaskState {
 }
 
 describe("taskErrorMessage", () => {
+  it("shows the current production plan timing issue and ignores stale details", () => {
+    const t = vi.fn((key: string, options?: Record<string, string>) => {
+      if (key === "tasks.planValidation.start") return "start";
+      if (key === "tasks.planValidation.speechSourceCycle") {
+        return `carrier=${options?.placement}, turn=${options?.turn}, edge=${options?.edge}`;
+      }
+      return options?.defaultValue ?? key;
+    }) as unknown as TFunction;
+    const failure = {
+      task_id: "task_1", error_code: "plan_validation_failed",
+      issues: [{ code: "speech_source_timing_cycle", path: "/placements/0/start",
+                 placement_id: "carrier", turn_id: "line-1" }],
+    };
+    const current = task({ task_type: "remix_generate_production_plan_draft",
+      error: "plan_validation_failed", metadata: { production_plan_failure: failure } });
+    expect(taskErrorMessage(current, t)).toBe("carrier=carrier, turn=line-1, edge=start");
+    expect(taskErrorMessage({ ...current, metadata: {},
+      result: { task_metadata: { production_plan_failure: failure } } }, t)).toBe(
+        "carrier=carrier, turn=line-1, edge=start",
+    );
+    expect(taskErrorMessage({ ...current, task_id: "new-task" }, t)).not.toContain("carrier=carrier");
+    expect(taskErrorMessage({ ...current, task_type: "build_characters" }, t)).not.toContain("carrier=carrier");
+  });
+
   it("uses i18n for a missing novel task error", () => {
     const tMock = vi.fn((key: string, options?: { defaultValue?: string }) => {
       if (key === "common.novelImportRequired") {

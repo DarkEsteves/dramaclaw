@@ -82,7 +82,61 @@ def _load_plugin_module():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    # Most plugin tests isolate browser admission/receipt behavior; preflight
+    # state reads are exercised in focused tests below.
+    module._real_reference_analysis_current_state = module._reference_analysis_current_state
+    module._reference_analysis_current_state = lambda *_args: {'ok': True, 'data': {'branches': []}}
     return module
+
+
+def test_production_state_tool_is_scoped_read_only(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "demo")
+    captured = []
+    monkeypatch.setattr(plugin, "_request", lambda method, path, **kwargs: captured.append((method, path, kwargs)) or {
+        "ok": True,
+        "data": {"plan_ref": {"artifact_id": "plan-1", "revision": 2}, "goal": "复刻",
+                 "beats": [], "unbound_placement_ids": [], "speech_cues_pending": []},
+    })
+    result = plugin._handle_get_production_state({"artifact_id": "plan-1", "revision": 2})
+    assert result["ok"] is True
+    assert result["plan_ref"]["revision"] == 2
+    assert captured == [("GET", "/api/v1/projects/demo/freezone/remix/production-plans/plan-1/state", {"query": {"revision": 2}})]
+    words = plugin._handle_get_production_state({"artifact_id": "plan-1", "entity_id": "turn-1", "include_words": True})
+    assert words["ok"] is True
+    assert captured[-1][2] == {"query": {"entity_id": "turn-1", "include_words": True}}
+    assert plugin._handle_get_production_state({"artifact_id": "plan-1", "include_words": True})["ok"] is False
+    assert plugin._handle_get_production_state({"project_id": "peer", "artifact_id": "plan-1"})["ok"] is False
+    assert len(captured) == 2
+    assert "freezone_get_production_state" in {name for name, _, _ in plugin.TOOLS}
+    Draft202012Validator(plugin._output_schema("freezone_get_production_state")).validate(result)
+
+
+def test_production_edit_command_must_use_frontend_approval_bridge():
+    plugin = _load_plugin_module()
+    command = {"type": "production_plan_command", "node_id": "plan-node", "command": {
+        "command_id": "agent-edit-1", "plan_ref": {"artifact_id": "plan-1", "revision": 2},
+        "kind": "edit_beat", "target_id": "opening", "payload": {"purpose": "提出问题"},
+    }}
+    assert plugin._validate_write_commands_shape("demo", "canvas", [command]) is None
+    assert plugin._approval_required_for_commands([command])[0] is True
+    assert plugin._requires_frontend_canvas_executor([command]) is True
+    bad = {**command, "command": {**command["command"], "payload": {"plan": {"all": "overwrite"}}}}
+    assert plugin._validate_write_commands_shape("demo", "canvas", [bad]) is not None
+
+
+def test_prepare_production_edit_routes_through_canvas_approval(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "demo")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    captured = []
+    monkeypatch.setattr(plugin, "_emit_canvas_commands", lambda *args, **kwargs: captured.append((args, kwargs)) or {"ok": True})
+    edit = {"command_id": "agent-edit-1", "plan_ref": {"artifact_id": "plan-1", "revision": 2},
+            "kind": "edit_beat", "target_id": "opening", "payload": {"purpose": "提出问题"}}
+    plugin._handle_prepare_production_edit({"node_id": "plan-node", "command": edit})
+    assert captured == [(("demo", "canvas", [{"type": "production_plan_command", "node_id": "plan-node", "command": edit}]),
+                         {"slim_result": True, "require_canvas_receipt": True})]
+    assert "freezone_prepare_production_edit" in {name for name, _, _ in plugin.TOOLS}
 
 
 def test_node_create_schema_forwards_selected_model(monkeypatch):
@@ -718,6 +772,29 @@ def test_freezone_run_workflow_emits_one_deterministic_runner_command(monkeypatc
         "direction": "downstream",
         "regenerate": True,
     }
+
+
+def test_freezone_run_workflow_does_not_bypass_pending_native_material_draft(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project-a")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas-a")
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {"ok": True, "data": {"draft_status": "ready", "draft_id": "workflow_draft_material"}}
+
+    monkeypatch.setattr(plugin, "_request", request)
+    monkeypatch.setattr(plugin, "_single_write_command", lambda *_args: pytest.fail("must not emit canvas command"))
+
+    result = plugin._handle_run_workflow({
+        "scope": "canvas",
+        "workflow_draft_id": "workflow_draft_material",
+    })
+
+    assert result["status"] == "material_workflow_confirmation_required"
+    assert "freezone_confirm_workflow_draft" in result["agent_instruction"]
+    assert calls[0][0] == "GET"
 
 
 def test_freezone_agent_rules_bound_content_policy_remediation() -> None:
@@ -1638,7 +1715,7 @@ def test_dynamic_workflow_plan_uses_draft_before_canvas_bridge(monkeypatch, tmp_
     assert prepared["preview"]["node_count"] == 0
     assert prepared["preview"]["nodes"] == []
     assert prepared["preview"]["recipe_pipelines"] == []
-    assert prepared["next_action"] == "review_and_confirm"
+    assert prepared["next_action"] == "submit_canvas_approval"
     assert "Do not call freezone_get_workflow" in prepared["agent_instruction"]
     assert captured.get("commands") is None
     assert captured["preflight_plan"] is plan
@@ -1672,6 +1749,67 @@ def test_dynamic_workflow_plan_uses_draft_before_canvas_bridge(monkeypatch, tmp_
     assert confirmed_run["draft_id"] == prepared_run["draft_id"]
     assert confirmed_run["run_after_create"] is True
     _assert_real_mcp_output(plugin, "freezone_confirm_workflow_draft", confirmed_run)
+
+
+def test_confirm_reference_draft_passes_verified_analysis_snapshot_to_canvas_graph(monkeypatch, tmp_path):
+    plugin = _load_plugin_module()
+    _install_workflow_draft_api(monkeypatch, plugin, tmp_path)
+    snapshot = {"rawResult": {"video_story": {"summary": "原片结构"}}, "sourceVideoUrl": "/ref.mp4",
+                "referenceBlueprintRef": None, "blueprintDirty": False}
+    compiled = {"ok": True, "skill_id": "reference-video-remix", "plan": {
+        "schema_version": "freezone_workflow_plan.v1", "summary": "参考视频复刻", "nodes": [], "edges": [],
+    }, "external_inputs_verified": {"analysis": {
+        "node_id": "story-actual", "media_url": "/ref.mp4", "analysis_snapshot": snapshot,
+    }}}
+    monkeypatch.setattr(plugin, "compile_workflow_intent", lambda _: compiled)
+    monkeypatch.setattr(plugin, "_workflow_runtime_preflight", lambda *args, **kwargs: {"status": "ready", "blockers": [], "warnings": []})
+    captured = []
+    def build(args):
+        captured.append(args)
+        return {"ok": True, "commands": [{"type": "create_node", "node_type": "scriptNode", "data": {}}], "plan": args["plan"]}
+    monkeypatch.setattr(plugin, "build_workflow_graph_commands", build)
+    monkeypatch.setattr(plugin, "_external_generation_parameter_preflight", lambda *args: None)
+    monkeypatch.setattr(plugin, "_emit_canvas_commands", lambda *args, **kwargs: {"ok": True, "canvas_apply_status": "applied", "applied": True})
+    prepared = plugin._handle_prepare_workflow_draft({"intent": {"skill_id": "reference-video-remix", "user_goal": "复刻"}})
+    assert prepared["ok"] is True
+    confirmed = plugin._handle_confirm_workflow_draft({"draft_id": prepared["draft_id"], "revision": prepared["revision"]})
+    assert confirmed["ok"] is True
+    assert captured[-1]["external_analysis_snapshots"] == {"analysis": snapshot}
+    assert captured[-1]["external_node_ids"] == {"analysis": "story-actual"}
+
+
+def test_workflow_dispatch_exception_preserves_admitted_attempt(monkeypatch, tmp_path):
+    from novelvideo.freezone.workflow_drafts import read_workflow_draft
+
+    plugin = _load_plugin_module()
+    _install_workflow_draft_api(monkeypatch, plugin, tmp_path)
+    compiled = {"ok": True, "skill_id": "video-ad", "plan": {
+        "schema_version": "freezone_workflow_plan.v1", "nodes": [{"id": "plan"}], "edges": [],
+    }}
+    monkeypatch.setattr(plugin, "compile_workflow_intent", lambda _: compiled)
+    monkeypatch.setattr(plugin, "_workflow_runtime_preflight", lambda *args, **kwargs: {
+        "status": "ready", "blockers": [], "warnings": [],
+    })
+    monkeypatch.setattr(plugin, "build_workflow_graph_commands", lambda _args: {
+        "ok": True, "commands": [{"type": "create_node", "node_type": "scriptNode", "data": {}}],
+    })
+    monkeypatch.setattr(plugin, "_external_generation_parameter_preflight", lambda *args: None)
+    def interrupted(*_args, **_kwargs):
+        raise RuntimeError("browser dispatch interrupted")
+    monkeypatch.setattr(plugin, "_emit_canvas_commands", interrupted)
+
+    prepared = plugin._handle_prepare_workflow_draft({
+        "intent": {"skill_id": "video-ad", "user_goal": "short clip"},
+    })
+    assert prepared["ok"] is True
+    with pytest.raises(RuntimeError, match="browser dispatch interrupted"):
+        plugin._handle_confirm_workflow_draft({
+            "draft_id": prepared["draft_id"], "revision": prepared["revision"],
+        })
+    saved, _ = read_workflow_draft(project_dir=tmp_path, canvas_id="canvas-a",
+                                   draft_id=prepared["draft_id"])
+    assert saved["status"] == "submitted"
+    assert saved["confirmation_started_at"] is not None
 
 
 def test_dynamic_workflow_creation_stops_when_live_model_catalog_is_unavailable(
@@ -1857,7 +1995,7 @@ def test_workflow_draft_can_be_prepared_patched_and_confirmed_once(
         "shot_2",
     ]
     assert prepared["preview"]["recipe_pipelines"] == []
-    assert prepared["next_action"] == "review_and_confirm"
+    assert prepared["next_action"] == "submit_canvas_approval"
     assert "freezone_get_workflow" in prepared["agent_instruction"]
     assert prepared["run_after_create"] is True
     assert "do not mention credits" in prepared["agent_instruction"].lower()
@@ -1881,7 +2019,7 @@ def test_workflow_draft_can_be_prepared_patched_and_confirmed_once(
         "shot_3",
     ]
     assert patched["preview"]["recipe_pipelines"] == []
-    assert patched["next_action"] == "review_and_confirm"
+    assert patched["next_action"] == "submit_canvas_approval"
     _assert_real_mcp_output(plugin, "freezone_patch_workflow_draft", patched)
 
     stale_patch = plugin._handle_patch_workflow_draft(
@@ -2698,6 +2836,25 @@ def test_workflow_graph_can_run_validated_nodes_after_create():
     }
 
 
+def test_workflow_graph_only_creates_nodes_when_run_after_create_is_false():
+    plugin = _load_plugin_module()
+    built = plugin.build_workflow_graph_commands({
+        "plan": {
+            "schema_version": "freezone_workflow_plan.v1",
+            "workflow_type": "dynamic.example",
+            "nodes": [
+                {"id": "brief", "node_type": "textAnnotationNode"},
+                {"id": "image", "node_type": "imageGenNode"},
+            ],
+            "edges": [{"source": "brief", "target": "image", "link_type": "prompt_for"}],
+        },
+        "run_after_create": False,
+    })
+    assert built["ok"] is True
+    assert sum(command["type"] == "create_node" for command in built["commands"]) == 2
+    assert not any(command["type"] == "run_workflow" for command in built["commands"])
+
+
 def test_workflow_graph_leaves_mixed_text_edge_roles_for_per_edge_inference():
     plugin = _load_plugin_module()
     built = plugin.build_workflow_graph_commands(
@@ -3333,6 +3490,27 @@ def _clarification_handler(plugin):
     return {name: handler for name, _schema, handler in plugin.TOOLS}[
         "freezone_request_user_clarification"
     ]
+
+
+def test_generation_parameter_card_returns_durable_wait_without_blocking_tool(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_TURN_ID', 'reference-remix-test-resume-1')
+    saved = []
+    monkeypatch.setattr(plugin, 'clarification_bridge_key', lambda **_kw: 'generation-bridge')
+    monkeypatch.setattr(plugin, 'put_pending_clarification_event', lambda **kw: saved.append(kw))
+    monkeypatch.setattr(plugin, 'wait_clarification_result',
+                        lambda *_a, **_kw: pytest.fail('parameter wait must not block the tool'))
+    result = plugin._tool_result_payload(plugin._emit_clarification_event(
+        'project-a', 'canvas-a', {
+            'type': 'assistant.clarification.request', 'clarification_id': 'clarify-generation',
+            'questions': [{'id': 'image_model', 'title': '选择模型', 'options': []}],
+        }))
+    assert len(saved) == 1
+    assert result['ok'] is True
+    assert result['status'] == 'waiting_user'
+    assert result['clarification_status'] == 'pending_user_input'
+    assert result['bridge_key'] == 'generation-bridge'
+    assert result['clarification_id'] == 'clarify-generation'
 
 
 def test_clarification_timeout_result_tells_agent_how_to_resume(monkeypatch):
@@ -4822,20 +5000,42 @@ def test_prepare_workflow_maps_raw_generation_answers(monkeypatch, tmp_path):
     assert received[0]["inputs"]["video_resolution"] == "720P"
 
 
-def test_prepare_workflow_rejects_incomplete_generation_answers(monkeypatch):
+def test_prepare_workflow_accepts_stage_partial_preferences_without_media_nodes(monkeypatch, tmp_path):
     plugin = _load_plugin_module()
+    _install_workflow_draft_api(monkeypatch, plugin, tmp_path)
+    compiled_inputs = []
+    def compile_intent(intent):
+        compiled_inputs.append(copy.deepcopy(intent['inputs']))
+        return {'ok': True, 'skill_id': 'reference-video-remix',
+                'plan': {'nodes': [{'id': 'plan', 'node_type': 'scriptNode', 'data': {}},
+                                   {'id': 'compose', 'node_type': 'videoComposeNode', 'data': {}}],
+                         'edges': []}}
     monkeypatch.setattr(
-        plugin, "compile_workflow_intent",
-        lambda _intent: pytest.fail("incomplete answers must stop before compilation"),
+        plugin, 'compile_workflow_intent', compile_intent,
     )
+    monkeypatch.setattr(plugin, '_workflow_runtime_preflight',
+                        lambda *_args, **_kwargs: {'blockers': []})
     result = plugin._handle_prepare_workflow_draft({
         "project_id": "project-a", "canvas_id": "canvas-a",
-        "intent": {"skill_id": "video-ad", "user_goal": "广告"},
-        "generation_answers": {"image_model": {"option_ids": ["image-a"]}},
+        "intent": {"skill_id": "reference-video-remix", "user_goal": "复刻"},
+        "generation_answers": {
+            "video_model": {"option_ids": ["fixture-video-model"]},
+            "video_aspect_ratio": {"option_ids": ["9:16"]},
+        },
     })
 
-    assert result["status"] == "generation_answers_incomplete"
-    assert "image_aspect_ratio" in result["error"]
+    assert result['ok'] is True
+    assert compiled_inputs == [{'video_model': 'fixture-video-model',
+                                'video_aspect_ratio': '9:16'}]
+
+
+def test_partial_generation_receipt_rejects_conflicting_value():
+    plugin = _load_plugin_module()
+    _, error = plugin._parse_generation_answers({
+        'answers': {'video_model': {'option_ids': ['fixture-a']}},
+        'generation_choices': {'video_model': 'fixture-b'},
+    })
+    assert error['status'] == 'generation_answers_incomplete'
 
 
 def test_prepare_exact_plan_unsupported_generation_answer_returns_recovery(monkeypatch):
@@ -5098,6 +5298,26 @@ def test_followup_generation_mode_overlays_remembered_parameter_card(monkeypatch
         "video_aspect_ratio": {"option_ids": ["16:9"]},
         "video_generation_mode": {"option_ids": ["firstFrame"]},
     }
+
+
+def test_host_parameter_receipt_is_available_only_to_bound_commission_turn(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_TURN_ID", "resume-turn")
+    monkeypatch.setenv("DRAMACLAW_REFERENCE_PARAMETER_ANSWERS", json.dumps({
+        "project_id": "project-a", "canvas_id": "canvas-a",
+        "turn_id": "resume-turn", "commission_id": "commission-a",
+        "answers": {"video_generate_audio": {"option_ids": ["true"]}},
+    }))
+    assert plugin._remembered_generation_answers(
+        "project-a", "canvas-a", commission_id="commission-a",
+    ) == {"video_generate_audio": {"option_ids": ["true"]}}
+    assert plugin._remembered_generation_answers(
+        "project-a", "canvas-a", commission_id="commission-b",
+    ) is None
+    monkeypatch.setenv("DRAMACLAW_TURN_ID", "another-turn")
+    assert plugin._remembered_generation_answers(
+        "project-a", "canvas-a", commission_id="commission-a",
+    ) is None
 
 
 def test_supplemental_generation_card_merges_with_remembered_answers(monkeypatch):
@@ -5699,6 +5919,25 @@ def test_unified_prepare_maps_raw_generation_answers(monkeypatch):
     assert result["ok"] is True
     assert captured["intent"]["inputs"]["image_variants_per_node"] == 2
     assert "generation_answers" not in captured
+
+
+def test_unified_prepare_forwards_partial_preferences_for_plan_stage(monkeypatch):
+    plugin = _load_plugin_module()
+    captured = {}
+
+    def request(method, path, *, body=None, **_kwargs):
+        assert method == 'POST' and path.endswith('/workflow-drafts')
+        captured.update(body)
+        return {'ok': True, 'data': {'ok': True, 'status': 'workflow_draft_ready'}}
+
+    monkeypatch.setattr(plugin, '_request', request)
+    result = plugin._handle_prepare_workflow({
+        'project_id': 'project-a', 'canvas_id': 'canvas-a', 'operation_id': 'op-a',
+        'intent': {'skill_id': 'reference-video-remix', 'user_goal': '复刻'},
+        'generation_answers': {'video_model': {'option_ids': ['fixture-video-model']}},
+    })
+    assert result['ok'] is True
+    assert captured['intent']['inputs']['video_model'] == 'fixture-video-model'
 
 
 def test_unified_prepare_recovers_plan_identity_and_reserved_text_stage(monkeypatch):
@@ -8581,7 +8820,9 @@ def test_freezone_plugin_create_node_schema_hides_internal_node_types():
     assert "storyboardGenNode" not in enum_values
     assert "imageNode" not in enum_values
     assert "exportImageNode" not in enum_values
-    assert "videoStoryNode" not in enum_values
+    assert "videoStoryNode" in enum_values
+    assert "transcriptNode" in enum_values
+    assert "semanticTimelineNode" in enum_values
     assert "skillNode" in enum_values
     assert "nodeType" not in create_node_tool["parameters"]["properties"]
     assert add_next_enum_values == enum_values
@@ -8602,7 +8843,7 @@ def test_canvas_command_tools_expose_discriminated_minimal_schema():
     assert set(emit["properties"]) == {"project_id", "canvas_id", "commands"}
 
     variants = emit["properties"]["commands"]["items"]["oneOf"]
-    assert len(variants) == 18
+    assert len(variants) == 19
     by_type = {}
     for variant in variants:
         by_type.setdefault(variant["properties"]["type"]["enum"][0], []).append(variant)
@@ -9152,6 +9393,8 @@ def test_freezone_plugin_degrades_when_interactive_story_sibling_is_missing(
     copied = tmp_path / "plugins" / "freezone" / "__init__.py"
     copied.parent.mkdir(parents=True)
     shutil.copyfile(source, copied)
+    for sibling in ("production_command_schema.json", "director_tools.py"):
+        shutil.copyfile(source.with_name(sibling), copied.with_name(sibling))
 
     tools_module = types.ModuleType("tools")
     registry_module = types.ModuleType("tools.registry")
@@ -9293,6 +9536,35 @@ def test_workflow_requires_browser_receipt_even_in_direct_apply_mode(monkeypatch
         require_canvas_receipt=True,
     )
     assert result == "browser"
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_direct_apply_preserves_or_rejects_external_reference_analysis_snapshot(monkeypatch, changed):
+    plugin = _load_plugin_module()
+    snapshot = {"rawResult": {"video_story": {"summary": "原片结构"}}, "sourceVideoUrl": "/ref.mp4", "referenceBlueprintRef": None, "blueprintDirty": False}
+    source_data = copy.deepcopy(snapshot)
+    if changed:
+        source_data["rawResult"]["video_story"]["summary"] = "已修改"
+    saved = []
+    def request(method, _path, **kwargs):
+        if method == "GET":
+            return {"ok": True, "data": {"revision": 1, "nodes": [
+                {"id": "analysis", "type": "videoStoryNode", "data": source_data},
+                {"id": "plan", "type": "scriptNode", "data": {"remixRole": "production_plan"}},
+            ], "edges": []}}
+        saved.append(kwargs["body"])
+        return {"ok": True, "data": {"revision": 2}}
+    monkeypatch.setattr(plugin, "_request", request)
+    result = plugin._direct_apply_canvas_commands("project-a", "canvas-a", [{
+        "type": "create_edge", "source": "analysis", "target": "plan", "link_type": "media_input_for",
+        "expected_source_analysis_snapshot": snapshot,
+    }], slim_result=False)
+    assert result["ok"] is not changed
+    if changed:
+        assert not saved
+        assert "workflow source analysis changed" in result["errors"][0]
+    else:
+        assert saved[0]["edges"][0]["data"]["workflowExternalInputAnalysisSnapshot"] == snapshot
 
 
 def test_direct_apply_resolves_add_next_client_alias_for_later_commands(monkeypatch):
@@ -9592,6 +9864,33 @@ def test_workflow_http_error_preserves_safe_diagnostics(monkeypatch, body, expec
     assert structured.get("code") == expected.get("code")
 
 
+def test_http_error_preserves_fastapi_validation_details_for_material_work(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_API_URL", "http://localhost:8780")
+    monkeypatch.setattr(plugin, "_request_headers", lambda _agent: {})
+
+    detail = [
+        {"loc": ["body", "steps", 0, "label"], "msg": "Field required", "type": "missing"},
+        {"loc": ["body", "requirements", 1, "media_kind"], "msg": "Input should be 'image', 'video' or 'audio'", "type": "literal_error"},
+    ]
+
+    def reject(request, timeout):
+        raise HTTPError(
+            request.full_url, 422, "Unprocessable Entity", None,
+            io.BytesIO(json.dumps({"detail": detail}).encode()),
+        )
+
+    monkeypatch.setattr(plugin, "urlopen", reject)
+    result = plugin._request("POST", "/projects/p/freezone/canvases/c/director/material-work")
+
+    assert result["ok"] is False
+    assert result["errors"] == [
+        {"path": "steps[0].label", "message": "Field required"},
+        {"path": "requirements[1].media_kind", "message": "Input should be 'image', 'video' or 'audio'"},
+    ]
+    assert result["error"] == "steps[0].label: Field required"
+
+
 @pytest.mark.parametrize("body", [b"<html>upstream failure</html>", b""])
 def test_workflow_http_error_handles_non_json_and_empty_body(monkeypatch, body):
     plugin = _load_plugin_module()
@@ -9830,3 +10129,1100 @@ def test_mcp_prepare_preserves_missing_execution_policy(monkeypatch, name, polic
     assert ("run_after_create" in captured[0]) is (policy is not None)
     if policy is not None:
         assert captured[0]["run_after_create"] is policy
+
+
+def test_reference_analysis_submission_keeps_task_identity_and_stops_polling(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'project-a')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'canvas-a')
+    requests = []
+    monkeypatch.setenv('DRAMACLAW_AGENT_ID', 'wrong-fallback')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:director')
+    run = {'run_id': 'run-a', 'status': 'analyzing', 'project_id': 'project-a', 'canvas_id': 'canvas-a',
+           'source_node_id': 'source-a', 'agent_id': 'director',
+           'analysis_node_id': 'analysis-a', 'task_id': 'task-a', 'task_key': 'task-key-a'}
+    def emit(project, canvas, commands, **kwargs):
+        requests.append((project, canvas, commands))
+        assert kwargs.get('require_canvas_receipt') is True
+        return {'ok': True, 'applied': True, 'canvas_apply_status': 'applied', 'command_results': [{
+            'type': 'run_node_action', 'nodeId': 'source-a', 'action': 'run_video_analyze_story',
+            'status': 'success', 'output': {'reference_analysis_run': run}}]}
+    monkeypatch.setattr(plugin, '_emit_canvas_commands', emit)
+    def verify(method, path, **kwargs):
+        assert method == 'GET', 'only the browser may POST native admission after confirmation'
+        assert '/run-a/receipt?' in path
+        return {'ok': True, 'data': run}
+    monkeypatch.setattr(plugin, '_request', verify)
+    result = plugin._handle_start_reference_analysis({
+        'source_node_id': 'source-a', 'user_goal': '参考片换产品', 'idempotency_key': 'turn-a', 'inputs': {'plan_count': 1}})
+    assert result['submitted'] is True
+    assert result['run_id'] == 'run-a'
+    assert result['task_key'] == 'task-key-a'
+    assert result['analysis_node_id'] == 'analysis-a'
+    assert 'Do not poll' in result['agent_instruction']
+    from novelvideo.chat.runtime_event_evidence import _codex_freezone_non_canvas_receipt
+    from novelvideo.chat.runtime_port import ChatBackendEvent
+    from novelvideo.freezone.remix.reference_analysis_identity import analysis_admission_key
+    event = ChatBackendEvent(type='tool_updated', name='dramaclaw.freezone_start_reference_analysis', status='completed',
+        structured=result, input={'source_node_id': 'source-a', 'idempotency_key': 'turn-a'})
+    assert _codex_freezone_non_canvas_receipt(
+        event, expected_project='project-a', expected_canvas='canvas-a', expected_agent='director',
+        admission_key_for_request=analysis_admission_key,
+    ) is not None
+    Draft202012Validator(plugin._output_schema('freezone_start_reference_analysis')).validate(result)
+    assert requests[0] == ('project-a', 'canvas-a', [{'type': 'run_node_action', 'node_id': 'source-a',
+        'action': 'run_video_analyze_story', 'parameters': {'reference_analysis': {
+            'project_id': 'project-a', 'canvas_id': 'canvas-a', 'source_node_id': 'source-a',
+            'user_goal': '参考片换产品', 'inputs': {'plan_count': 1}, 'idempotency_key': 'turn-a', 'agent_id': 'director'}}}])
+
+
+def test_unicode_reference_analysis_key_is_ascii_in_native_command_and_verified_receipt(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project-a")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas-a")
+    monkeypatch.setenv("DRAMACLAW_AGENT_PROFILE", "freezone:director")
+    monkeypatch.setattr(plugin, "_reference_analysis_current_state",
+                        lambda *_: {"ok": True, "data": {"branches": []}})
+    run = {"run_id": "run-a", "project_id": "project-a", "canvas_id": "canvas-a", "agent_id": "director",
+           "source_node_id": "source-a", "analysis_node_id": "analysis-a",
+           "status": "analyzing", "task_id": "task-a", "task_key": "task-key-a"}
+    captured = {}
+
+    def emit(_project, _canvas, commands, **_kwargs):
+        captured["key"] = commands[0]["parameters"]["reference_analysis"]["idempotency_key"]
+        return {"ok": True, "command_results": [{"type": "run_node_action", "nodeId": "source-a",
+                "action": "run_video_analyze_story", "status": "success",
+                "output": {"reference_analysis_run": run}}]}
+
+    monkeypatch.setattr(plugin, "_emit_canvas_commands", emit)
+    monkeypatch.setattr(plugin, "_request", lambda *_args, **_kwargs: {"ok": True, "data": run})
+    request = {"source_node_id": "source-a", "user_goal": "换产品", "inputs": {},
+               "idempotency_key": "分析原片-第一轮"}
+    result = plugin._handle_start_reference_analysis(request)
+    assert result["submitted"] is True
+    assert captured["key"] == result["idempotency_key"]
+    assert captured["key"].isascii()
+    from novelvideo.chat.runtime_event_evidence import _codex_freezone_non_canvas_receipt
+    from novelvideo.chat.runtime_port import ChatBackendEvent
+    from novelvideo.freezone.remix.reference_analysis_identity import analysis_admission_key
+    event = ChatBackendEvent(type="tool_updated", name="dramaclaw.freezone_start_reference_analysis",
+                             status="completed", structured=result, input=request)
+    assert _codex_freezone_non_canvas_receipt(event, expected_project="project-a",
+                                                expected_canvas="canvas-a", expected_agent="director",
+                                                admission_key_for_request=analysis_admission_key) is result
+
+
+def test_changed_direction_reuses_scoped_analysis_without_new_canvas_command(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'project-a')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'canvas-a')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:director')
+    monkeypatch.setattr(plugin, '_emit_canvas_commands',
+                        lambda *_args, **_kwargs: pytest.fail('existing source must not submit analysis again'))
+    def current_state(project, canvas, agent_id):
+        assert (project, canvas, agent_id) == ('project-a', 'canvas-a', 'director')
+        return {'ok': True, 'data': {'branches': [{
+            'source_node_id': 'source-a', 'analysis_node_id': 'analysis-a',
+            'run_id': 'run-a', 'phase': 'awaiting_direction',
+            'commission_ref': {'artifact_id': 'commission-a',
+                                                'revision': 1, 'project_id': 'project-a'},
+        }]}}
+    monkeypatch.setattr(plugin, '_reference_analysis_current_state', current_state)
+    result = plugin._handle_start_reference_analysis({
+        'source_node_id': 'source-a', 'user_goal': '黑咖啡',
+        'inputs': {'remix_direction': '换成黑咖啡，其他不变'}, 'idempotency_key': 'new-direction'})
+    assert result['status'] == 'reference_analysis_reused'
+    assert result['submitted'] is False
+    assert result['commission_ref']['artifact_id'] == 'commission-a'
+    Draft202012Validator(plugin._output_schema('freezone_start_reference_analysis')).validate(result)
+
+
+def test_existing_analysis_is_reused_even_if_agent_omits_direction_inputs(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'project-a')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'canvas-a')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:director')
+    monkeypatch.setattr(plugin, '_emit_canvas_commands',
+                        lambda *_args, **_kwargs: pytest.fail('must reuse saved analysis'))
+    monkeypatch.setattr(plugin, '_reference_analysis_current_state', lambda *_args: {'ok': True, 'data': {
+        'branches': [{'source_node_id': 'source-a', 'analysis_node_id': 'analysis-a',
+                      'run_id': 'run-a', 'phase': 'awaiting_direction',
+                      'commission_ref': {'artifact_id': 'commission-a', 'revision': 1,
+                                         'project_id': 'project-a'}}]}})
+    result = plugin._handle_start_reference_analysis({
+        'source_node_id': 'source-a', 'user_goal': '换成黑咖啡', 'idempotency_key': 'followup'})
+    assert result['status'] == 'reference_analysis_reused'
+
+
+def test_reference_analysis_preflight_reads_agent_scoped_progress(monkeypatch):
+    plugin = _load_plugin_module()
+    observed = []
+    monkeypatch.setattr(plugin, '_request', lambda method, path, **kwargs:
+                        observed.append((method, path, kwargs)) or
+                        {'ok': True, 'data': {'branches': []}})
+    result = plugin._real_reference_analysis_current_state('p', 'c', 'agent')
+    assert result['ok'] is True
+    assert observed == [('GET', '/api/v1/projects/p/freezone/canvases/c/director/production-state',
+                         {'query': {'agent_id': 'agent'}})]
+
+
+def test_multiple_saved_branches_do_not_trigger_a_new_analysis(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'c')
+    monkeypatch.setattr(plugin, '_emit_canvas_commands',
+                        lambda *_args, **_kwargs: pytest.fail('must choose saved branch first'))
+    branches = [{'source_node_id': 'source', 'analysis_node_id': 'analysis',
+                 'run_id': f'run-{index}', 'phase': 'drafting_plan',
+                 'commission_ref': {'artifact_id': f'commission-{index}', 'revision': 1}}
+                for index in (1, 2)]
+    monkeypatch.setattr(plugin, '_reference_analysis_current_state',
+                        lambda *_args: {'ok': True, 'data': {'branches': branches}})
+    result = plugin._handle_start_reference_analysis({
+        'source_node_id': 'source', 'user_goal': '改成黑咖啡', 'idempotency_key': 'followup'})
+    assert result['status'] == 'ambiguous_existing_reference'
+    assert result['submitted'] is False
+
+
+@pytest.mark.parametrize('receipt', [
+    {'ok': False, 'cancelled': True, 'canvas_apply_status': 'failed'},
+    {'ok': True, 'applied': True, 'canvas_apply_status': 'accepted'},
+    {'ok': True, 'applied': True, 'command_results': [{'status': 'success', 'output': {'reference_analysis_run': {
+        'run_id': 'wrong', 'project_id': 'peer', 'canvas_id': 'canvas-a', 'source_node_id': 'source-a', 'agent_id': 'main'}}}]},
+])
+def test_reference_analysis_never_claims_submission_without_matching_native_receipt(monkeypatch, receipt):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'project-a')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'canvas-a')
+    monkeypatch.setattr(plugin, '_request', lambda *a, **kw: pytest.fail('no start before confirmation'))
+    monkeypatch.setattr(plugin, '_emit_canvas_commands', lambda *a, **kw: receipt)
+    result = plugin._handle_start_reference_analysis({'source_node_id': 'source-a', 'user_goal': 'goal', 'idempotency_key': 'key'})
+    assert result.get('submitted') is not True
+    assert result.get('status') != 'reference_analysis_submitted'
+
+
+def test_reference_analysis_tool_is_registered_as_a_terminal_write():
+    plugin = _load_plugin_module()
+    from novelvideo.chat.tool_policy import FREEZONE_CANVAS_WRITE_TOOLS, FREEZONE_BACKGROUND_SUBMISSION_TOOLS, FREEZONE_TERMINAL_WRITE_TOOLS
+    assert 'freezone_start_reference_analysis' in FREEZONE_BACKGROUND_SUBMISSION_TOOLS
+    assert 'freezone_start_reference_analysis' in FREEZONE_TERMINAL_WRITE_TOOLS
+    assert 'freezone_start_reference_analysis' not in FREEZONE_CANVAS_WRITE_TOOLS
+    assert any(item[0] == 'freezone_start_reference_analysis' for item in plugin.TOOLS)
+
+
+def test_agent_direct_plan_tool_is_not_exposed():
+    plugin = _load_plugin_module()
+    assert all(name != "freezone_create_production_plan" for name, _, _ in plugin.TOOLS)
+
+
+def test_reference_analysis_submission_cannot_escape_bound_canvas(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project-a")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas-a")
+    monkeypatch.setattr(plugin, "_request", lambda *args, **kwargs: pytest.fail("must reject before admission"))
+    result = plugin._handle_start_reference_analysis({"project_id": "project-a", "canvas_id": "other",
+        "source_node_id": "source", "user_goal": "goal", "idempotency_key": "request"})
+    assert result["ok"] is False
+
+
+def test_background_saved_context_uses_authenticated_api_not_browser(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, 'wait_canvas_context_result', lambda *a, **kw: kw["timeout_result"])
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE', 'saved')
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'c')
+    observed = []
+    def request(method, path, **kwargs):
+        observed.append((method,path,kwargs))
+        return {'ok':True,'data':{'responses':[{'type':'node_detail','node_id':'analysis','data':{'nodes':[]}}], 'canvas_context_status':'resolved','source':'saved_canvas','canvas_revision':'r7','coverage':{'complete':False}}}
+    monkeypatch.setattr(plugin,'_request',request)
+    result=plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'node_detail','node_id':'analysis'}])
+    assert result['source']=='saved_canvas'
+    assert result['canvas_revision']=='r7'
+    assert observed[0][0:2]==('POST','/projects/p/freezone/canvases/c/context/read')
+    assert observed[0][2]['body']['read_consistency']=='saved'
+
+
+def test_background_browser_requirement_and_original_api_error(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, 'wait_canvas_context_result', lambda *a, **kw: kw["timeout_result"])
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE','saved')
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID','p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID','c')
+    monkeypatch.setattr(plugin,'_request',lambda *a,**kw:{'ok':False,'error':'network_error: connection refused'})
+    r=plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'node_detail','node_id':'analysis'}])
+    assert r['error']=='network_error: connection refused'
+    r=plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'selection_detail'}])
+    assert r['code']=='requires_browser'
+
+
+def test_canvas_read_mode_is_host_selected_and_default_clears_inherited_mode(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from novelvideo.chat.service import _build_codex_env
+    from novelvideo.freezone.canvas_context_reader import saved_context_execution
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE','saved')
+    assert _build_codex_env('user','p')['DRAMACLAW_CANVAS_READ_MODE']=='current_browser'
+    identity=SimpleNamespace(surface='freezone',requester_user_id='u',project_id='p',canvas_id='c',agent_id='main')
+    with saved_context_execution(execution_context=identity,turn_id='turn',state_dir=tmp_path):
+        assert _build_codex_env('user','p')['DRAMACLAW_CANVAS_READ_MODE']=='saved'
+    assert _build_codex_env('user','p')['DRAMACLAW_CANVAS_READ_MODE']=='current_browser'
+
+
+def test_codex_session_protocol_separates_saved_and_browser_mcp(tmp_path):
+    from types import SimpleNamespace
+    from novelvideo.chat.service import _codex_scope_key, _dramaclaw_mcp_servers
+    from novelvideo.freezone.canvas_context_reader import saved_context_execution
+    foreground=_codex_scope_key('p',agent_profile='freezone:main',canvas_id='c')
+    identity=SimpleNamespace(surface='freezone',requester_user_id='u',project_id='p',canvas_id='c',agent_id='main')
+    with saved_context_execution(execution_context=identity,turn_id='turn',state_dir=tmp_path):
+        background=_codex_scope_key('p',agent_profile='freezone:main',canvas_id='c')
+    assert foreground != background
+    assert _codex_scope_key('p',agent_profile='freezone:main',canvas_id='c') == foreground
+    assert 'DRAMACLAW_CANVAS_READ_MODE' in _dramaclaw_mcp_servers('freezone_canvas')['dramaclaw']['env_vars']
+
+
+def test_saved_context_output_schema_and_unsupported_ontology(monkeypatch):
+    plugin=_load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE','saved')
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID','p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID','c')
+    monkeypatch.setattr(plugin,'_request',lambda *a,**kw:{'ok':True,'data':{'schema_version':'canvas_context_response.v1','source':'saved_canvas','canvas_revision':'r7','canvas_context_status':'resolved','coverage':{'complete':False},'responses':[{'type':'canvas_ontology','data':None,'status':'unsupported'}]}})
+    result=plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'canvas_ontology'}])
+    assert result['ok'] is False
+    assert result['code']=='unsupported'
+    Draft202012Validator(plugin._output_schema('freezone_get_canvas_ontology')).validate(result)
+
+
+def test_saved_read_cursor_is_forwarded_by_existing_tools(monkeypatch):
+    plugin=_load_plugin_module()
+    seen=[]
+    monkeypatch.setattr(plugin,'_request_canvas_context_from_frontend',lambda **kw:seen.append(kw) or {})
+    plugin._handle_node_detail({'project_id':'p','canvas_id':'c','node_id':'n','cursor':'page'})
+    plugin._handle_neighbor_graph({'project_id':'p','canvas_id':'c','node_id':'n','cursor':'page','depth':2})
+    plugin._handle_summarize_canvas({'project_id':'p','canvas_id':'c','cursor':'page'})
+    for request in seen:
+        assert request['requests'][0]['cursor']=='page'
+    for name in ('freezone_get_node_detail','freezone_get_neighbor_graph','freezone_summarize_canvas'):
+        schema=next(item[1] for item in plugin.TOOLS if item[0]==name)
+        assert 'cursor' in schema['parameters']['properties']
+
+
+def test_background_saved_clarification_wait_is_bounded_but_foreground_unchanged(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE', 'saved')
+    assert plugin._clarification_timeout_seconds() == 1
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE', 'current_browser')
+    assert plugin._clarification_timeout_seconds() == 600
+
+
+def test_saved_dynamic_context_bridges_only_when_authenticated_browser_online(monkeypatch):
+    plugin=_load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE','saved')
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID','p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID','c')
+    requests=[]
+    published=[]
+    monkeypatch.setattr(plugin,'_request',lambda method,path,**kwargs: requests.append((method,path)) or {'ok':True,'data':{'online':True}})
+    monkeypatch.setattr(plugin,'put_pending_canvas_context',lambda **kwargs:published.append(kwargs))
+    monkeypatch.setattr(plugin,'wait_canvas_context_result',lambda *args,**kwargs:{'ok':True,'source':'current_browser','responses':[{'type':'selection_detail','data':{'node_ids':['selected']}}]})
+    result=plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'selection_detail'}])
+    assert result['source']=='current_browser'
+    assert len(published)==1
+    assert requests==[('GET','/projects/p/freezone/canvases/c/context/browser-presence')]
+    monkeypatch.setattr(plugin,'_request',lambda *args,**kwargs:{'ok':True,'data':{'online':False}})
+    assert plugin._request_canvas_context_from_frontend(project='p',canvas='c',requests=[{'type':'selection_detail'}])['code']=='requires_browser'
+    assert len(published)==1
+
+
+def test_production_edit_guidance_example_is_a_valid_atomic_edit(tmp_path):
+    import re
+    from novelvideo.freezone.remix.production_commands import apply_production_command, validate_production_command
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    schema = {name: schema for name, schema, _ in _load_plugin_module().TOOLS}["freezone_prepare_production_edit"]
+    guidance = schema["parameters"]["properties"]["command"]["properties"]["payload"]["description"]
+    example = json.loads(re.search(r"```json\n(.*?)\n```", guidance, re.S).group(1))
+    assert "placeholder" in guidance.lower()
+    assert "direction" in guidance and "timing_status" in guidance
+    store = RemixArtifactStore(tmp_path / "project", project_id="project", created_by="alice")
+    saved = store.create("production_plan.v2", {
+        "schema_version": 2, "goal": "Example", "output": {"width": 1920, "height": 1080, "fps_num": 24, "fps_den": 1},
+        "beats": [{"id": "BEAT_ID", "purpose": "Old", "duration_frames": 72,
+                   "turns": [{"id": "TURN_ID", "speaker": "Guest", "text": "Old"}]}],
+        "resources": [], "placements": [], "provenance": {},
+    }, [])
+    example["plan_ref"] = {"artifact_id": saved["id"], "revision": saved["revision"]}
+    assert validate_production_command(example) == example
+    result = apply_production_command(store, example)
+    assert result["plan_ref"]["revision"] == 2
+    beat = store.read_latest(saved["id"])["payload"]["beats"][0]
+    assert beat["purpose"] == "Opening question"
+    assert [(turn["id"], turn["text"]) for turn in beat["turns"]] == [("TURN_ID", "Why now?"), ("NEW_TURN_ID", "Here is why.")]
+
+
+def test_production_state_guidance_requires_saved_entity_before_placement_edit():
+    plugin = _load_plugin_module()
+    schema = next(schema for name, schema, _ in plugin.TOOLS if name == "freezone_get_production_state")
+    assert "before upsert_placement" in schema["description"]
+    assert "numeric" in schema["description"]
+    assert "purpose" in schema["description"]
+    assert "untargeted" in schema["parameters"]["properties"]["entity_id"]["description"]
+
+
+def test_director_review_findings_advertise_native_contract():
+    from novelvideo.freezone.remix.production_review import ReviewFinding
+
+    plugin = _load_plugin_module()
+    schema = next(schema for name, schema, _ in plugin.TOOLS
+                  if name == "freezone_review_production_plan")
+    item = schema["parameters"]["properties"]["findings"]["items"]
+    native = ReviewFinding.model_json_schema()
+    assert item["required"] == native["required"]
+    assert item["additionalProperties"] is False
+    assert set(item["properties"]) == set(native["properties"])
+    for field in native["properties"]:
+        for constraint in ("type", "enum", "minLength", "minItems"):
+            if constraint in native["properties"][field]:
+                assert item["properties"][field][constraint] == native["properties"][field][constraint]
+    assert item["properties"]["evidence"]["items"] == {"type": "string", "minLength": 1}
+    assert item["properties"]["evidence_refs"]["anyOf"][0]["items"]["properties"]["field"]["enum"] == [
+        "goal", "purpose", "text", "description", "media_path", "graphic.text",
+    ]
+
+
+def test_director_review_advertised_placeholder_is_valid_and_concrete():
+    from pydantic import ValidationError
+    from novelvideo.freezone.remix.production_review import ReviewFinding, evaluate_production_review
+
+    plugin = _load_plugin_module()
+    schema = next(schema for name, schema, _ in plugin.TOOLS
+                  if name == "freezone_review_production_plan")
+    description = schema["description"]
+    example = json.JSONDecoder().raw_decode(description.split("Placeholder finding example: ", 1)[1])[0]
+    item = schema["parameters"]["properties"]["findings"]["items"]
+    Draft202012Validator(item).validate(example)
+    assert ReviewFinding.model_validate(example).entity_id == "plan"
+    payload = {"schema_version": 2, "goal": "Explain", "output": {"width": 1920, "height": 1080, "fps_num": 24, "fps_den": 1},
+               "beats": [{"id": "intro", "purpose": "Introduce", "duration_frames": 48, "turns": []}]}
+    result = evaluate_production_review(payload, {"goal": "Explain"}, [example])
+    assert result["findings"] == [example]
+    assert result["status"] == "changes_required"  # One example does not cover every category.
+    malformed = {"category": "direction", "entity_id": "plan", "reason": "Checked", "status": "passed"}
+    assert not Draft202012Validator(item).is_valid(malformed)
+    with pytest.raises(ValidationError):
+        ReviewFinding.model_validate(malformed)
+    for invalid_id in ("intro|other", "*", "imagined"):
+        with pytest.raises(ValueError, match="unknown entity"):
+            evaluate_production_review(payload, {}, [{**example, "entity_kind": "beat", "entity_id": invalid_id}])
+    for evidence in ([], [""], ["   "]):
+        with pytest.raises(ValueError):
+            evaluate_production_review(payload, {}, [{**example, "evidence": evidence}])
+    assert "one actual entity ID" in description
+    assert "saves the review and advances" in description
+    assert "Do not invent an advance event" in description
+
+
+def test_production_command_metadata_insert_and_batch_shape():
+    plugin = _load_plugin_module()
+    schema = plugin._PRODUCTION_COMMAND_SCHEMA
+    validator = Draft202012Validator(schema)
+    base = {"command_id": "insert-shape", "plan_ref": {"artifact_id": "plan-1", "revision": 1}, "kind": "insert_turn", "target_id": "reply"}
+    payload = {"beat_id": "intro", "index": 1, "turn": {"id": "reply", "text": "Reply"}}
+    validator.validate({**base, "payload": payload})
+    validator.validate({**base, "kind": "edit_turn", "payload": {"text": "Changed"}})
+    child = {"kind": "insert_turn", "target_id": "reply", "payload": payload}
+    validator.validate({**base, "kind": "batch", "payload": {"commands": [child]}})
+    for bad in [
+        {"turn": {"beat_id": "intro", "id": "reply", "text": "Reply", "timing_status": "estimated"}},
+        {**payload, "turn": {**payload["turn"], "timing_status": "estimated"}},
+        {**payload, "index": -1},
+    ]:
+        assert not validator.is_valid({**base, "payload": bad})
+        assert not validator.is_valid({**base, "kind": "batch", "payload": {"commands": [{**child, "payload": bad}]}})
+    assert not validator.is_valid({**base, "kind": "batch", "payload": {"commands": [{**child, "command_id": "child"}]}})
+    assert not validator.is_valid({**base, "kind": "batch", "payload": {"commands": [{"kind": "batch", "target_id": "plan", "payload": {"commands": [child]}}]}})
+
+
+def test_isolated_plugin_contract_accepts_and_rejects_native_shapes():
+    from test_production_command_schema import ANCHOR, END, CASES, command
+
+    plugin = _load_plugin_module()
+    tool = next(schema for name, schema, _ in plugin.TOOLS
+                if name == "freezone_prepare_production_edit")
+    validator = Draft202012Validator(tool["parameters"])
+    for kind, payload, *target in CASES:
+        value = command(kind, payload, target[0] if target else "intro")
+        validator.validate({"node_id": "plan-node", "command": value})
+    for bad in [
+        command("upsert_placement", {"placement": {"id": "shot", "kind": "graphic", "role": "effect",
+                                                     "track_id": "graphic", "start": ANCHOR, "end": END}}, "shot"),
+        command("batch", {"commands": [{"kind": "edit_turn", "payload": {"text": "Hello"}}]}),
+        command("edit_beat", {"purpose": "Opening", "unexpected": True}),
+    ]:
+        assert not validator.is_valid({"node_id": "plan-node", "command": bad})
+
+
+def test_insert_metadata_matches_native_structural_turn_schema():
+    from novelvideo.freezone.remix.production_plan_v2 import TurnV2
+    native = TurnV2.model_json_schema()
+    definitions = native.pop("$defs")
+    def inline(row):
+        if isinstance(row, dict):
+            if "$ref" in row:
+                return inline(definitions[row["$ref"].split("/")[-1]])
+            return {key: inline(value) for key, value in row.items() if key != "title"}
+        if isinstance(row, list):
+            return [inline(value) for value in row]
+        return row
+    assert _load_plugin_module()._PRODUCTION_INSERT_TURN_SCHEMA == inline(native)
+
+
+def test_historical_insert_payload_fails_before_canvas_publish(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "put_pending_canvas_command", lambda **kwargs: pytest.fail("invalid insert reached UI bridge"))
+    result = plugin._handle_prepare_production_edit({"project_id": "p", "canvas_id": "c", "node_id": "plan-node", "command": {
+        "command_id": "bad-insert", "plan_ref": {"artifact_id": "plan-1", "revision": 1}, "kind": "insert_turn", "target_id": "reply",
+        "payload": {"turn": {"beat_id": "intro", "id": "reply", "speaker": "Guest", "text": "Reply", "timing_status": "estimated"}},
+    }})
+    assert result["ok"] is False
+    assert result["status"] == "invalid_command_schema"
+    assert "missing required payload keys: beat_id, index" in result["error"]
+
+
+def test_production_prevalidation_error_has_no_side_effects_and_field_details(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "put_pending_canvas_command", lambda **kwargs: pytest.fail("invalid edit reached approval bridge"))
+    result = plugin._handle_prepare_production_edit({"project_id": "p", "canvas_id": "c", "node_id": "plan-node",
+        "command": {"command_id": "missing-target", "plan_ref": {"artifact_id": "plan-1", "revision": 1},
+                    "kind": "batch", "target_id": "plan", "payload": {"commands": [
+                        {"kind": "edit_turn", "payload": {"text": "Hello"}}
+                    ]}}})
+    assert result["ok"] is False
+    assert result["side_effects"] == "none"
+    assert result["error_path"] == "payload.commands[0].target_id"
+    assert result["expected_branch"] == "edit_turn"
+    assert result["missing_fields"] == ["target_id"]
+
+
+def test_production_prevalidation_reports_missing_outer_field(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "put_pending_canvas_command", lambda **kwargs: pytest.fail("invalid edit reached approval bridge"))
+    result = plugin._handle_prepare_production_edit({"project_id": "p", "canvas_id": "c", "node_id": "plan-node",
+        "command": {"command_id": "missing-target", "plan_ref": {"artifact_id": "plan-1", "revision": 1},
+                    "kind": "edit_turn", "payload": {"text": "Hello"}}})
+    assert result["error_path"] == "target_id"
+    assert result["expected_branch"] == "edit_turn"
+    assert result["missing_fields"] == ["target_id"]
+    assert result["side_effects"] == "none"
+
+
+def _material_author_call():
+    return {"commission_ref": {"artifact_id": "commission", "revision": 1},
+            "plan_ref": {"artifact_id": "plan", "revision": 1}, "command_id": "materials",
+            "requirements": [{"id": "final", "description": "final clip", "placement_ids": ["picture"],
+                              "media_kind": "video", "final_step_id": "video"}],
+            "steps": [{"id": "image", "label": "shared image", "media_kind": "image", "source": "generate",
+                       "recipe_id": "general-image", "prompt": "product"},
+                      {"id": "video", "label": "final video", "media_kind": "video", "source": "generate",
+                       "recipe_id": "general-video", "prompt": "move", "depends_on": ["image"],
+                       "references": [{"step_id": "image", "role": "first_frame"}]}]}
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda a: a["plan_ref"].update(project_id="p"),
+    lambda a: a["requirements"][0].pop("media_kind"),
+    lambda a: a["requirements"][0].pop("final_step_id"),
+    lambda a: a["steps"][0].update(description="invented", output_kind="image", placement_id="picture", step_kind="reference", uses=[]),
+    lambda a: a["steps"][0].update(status="accepted"),
+    lambda a: a["steps"][0].update(generation_inputs={"reference_inputs": []}),
+    lambda a: a["steps"][1]["references"][0].update(node_id="also-node"),
+    lambda a: a.update(steps=[]),
+    lambda a: a["requirements"][0].update(unknown="field"),
+    lambda a: a["steps"][1]["references"][0].update(unknown="field"),
+    lambda a: a["steps"][0].update(recipe_id="general-video"),
+    lambda a: a["steps"][0].update(prompt="   "),
+    lambda a: a["steps"][0].update(source="invented"),
+    lambda a: a["steps"][0].update(label="x" * 201),
+    lambda a: a["steps"][0].update(execution={"task": "forged"}),
+    lambda a: a["steps"][0].update(task_id="forged"),
+])
+def test_material_author_schema_rejects_invalid_live_contract(mutation):
+    from jsonschema.exceptions import ValidationError
+    plugin = _load_plugin_module()
+    schema = next(s["parameters"] for n, s, _ in plugin.TOOLS if n == "freezone_prepare_material_work")
+    args = _material_author_call()
+    mutation(args)
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate(args)
+
+
+def test_material_author_schema_preserves_native_initial_optionals(tmp_path):
+    from novelvideo.freezone.remix.material_work import prepare_material_work
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    plugin = _load_plugin_module()
+    schema = next(s["parameters"] for n, s, _ in plugin.TOOLS if n == "freezone_prepare_material_work")
+    args = _material_author_call()
+    args["requirements"][0].update(take_ids=[], turn_ids=[], acceptance=["product visible"])
+    args["steps"][0].update(status="planned", candidates=[], accepted_resource=None, review_ref=None,
+        execution=None, task_id=None, reason="shared reference", node_id=None, generation_inputs={"aspect_ratio": "16:9"})
+    args["steps"].append({"id": "upload", "label": "uploaded voice", "media_kind": "audio", "source": "upload",
+                          "recipe_id": None, "status": "awaiting_upload", "references": [{"node_id": "voice", "step_id": None, "role": "voice"}]})
+    store = RemixArtifactStore(tmp_path, project_id="p", created_by="test")
+    plan = store.create("production_plan.v2", {"schema_version": 2, "goal": "product", "output": {"width": 1280, "height": 720, "fps_num": 24, "fps_den": 1},
+        "beats": [{"id": "opening", "purpose": "product", "duration_frames": 72, "turns": []}], "resources": [],
+        "placements": [{"id": "picture", "kind": "visual", "role": "primary", "track_id": "main", "start": {"kind": "beat", "ref_id": "opening", "edge": "start"}, "end": {"kind": "beat", "ref_id": "opening", "edge": "end"}}], "provenance": {}}, [])
+    args["plan_ref"] = {"artifact_id": plan["id"], "revision": 1}
+    Draft202012Validator(schema).validate(args)
+    result = prepare_material_work(store, args["plan_ref"], args["requirements"], args["steps"], args["command_id"])
+    assert result["ready_step_ids"] == ["image", "upload"]
+    assert store.read(result["work_ref"]["artifact_id"], 1)["payload"]["steps"][0]["generation_inputs"] == {"aspect_ratio": "16:9"}
+
+
+def test_material_author_schema_keeps_falsy_native_execution_placeholders():
+    from novelvideo.freezone.remix.material_work import MaterialStep
+    plugin = _load_plugin_module()
+    schema = next(s["parameters"] for n, s, _ in plugin.TOOLS if n == "freezone_prepare_material_work")
+    args = _material_author_call()
+    args["steps"][0].update(review_ref={}, execution={}, task_id="")
+    MaterialStep.model_validate(args["steps"][0])
+    Draft202012Validator(schema).validate(args)
+
+
+def test_material_ref_metadata_changes_only_native_exact_operations():
+    plugin = _load_plugin_module()
+    schemas = {name: schema["parameters"] for name, schema, _ in plugin.TOOLS}
+    for name in ("freezone_get_material_work", "freezone_prepare_material_stage", "freezone_review_material_candidate",
+                 "freezone_accept_material_candidate", "freezone_retry_material_step", "freezone_associate_material_upload"):
+        assert set(schemas[name]["properties"]["work_ref"]["properties"]) == {"artifact_id", "revision"}
+    assert set(schemas["freezone_accept_material_candidate"]["properties"]["review_ref"]["properties"]) == {"artifact_id", "revision"}
+    for name in ("freezone_prepare_reference_decision", "freezone_review_production_plan"):
+        assert "project_id" in schemas[name]["properties"]["commission_ref"]["properties"]
+    assert "project_id" in schemas["freezone_review_production_plan"]["properties"]["plan_ref"]["properties"]
+
+
+def test_material_author_handler_preserves_valid_fields(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "p")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "c")
+    args = _material_author_call()
+    args["commission_ref"]["project_id"] = "p"
+    args["steps"][0]["generation_inputs"] = {"aspect_ratio": "16:9"}
+    observed = []
+    monkeypatch.setattr(plugin, "_request", lambda method, path, **kw: observed.append(kw["body"]) or
+                        {"ok": True, "data": {"work_ref": {"artifact_id": "work", "revision": 1}, "ready_step_ids": []}})
+    handler = next(h for n, _, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+    handler(args)
+    assert observed == [args]
+
+
+def test_material_author_handler_returns_validation_guidance_to_agent(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "p")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "c")
+    args = _material_author_call()
+    args["commission_ref"]["project_id"] = "p"
+    monkeypatch.setattr(
+        plugin,
+        "_request",
+        lambda *_a, **_kw: {
+            "ok": False,
+            "status_code": 422,
+            "error": "steps[0].label: Field required",
+            "errors": [{"path": "steps[0].label", "message": "Field required"}],
+        },
+    )
+    handler = next(h for n, _, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+
+    result = handler(args)
+
+    assert result["ok"] is False
+    assert result["error"] == "steps[0].label: Field required"
+    assert result["errors"] == [{"path": "steps[0].label", "message": "Field required"}]
+    assert "按 error 中的字段路径" in result["agent_instruction"]
+
+
+def test_material_author_handler_preserves_current_ref_from_failed_api_response(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "p")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "c")
+    args = _material_author_call()
+    args["commission_ref"]["project_id"] = "p"
+    current_work_ref = {"artifact_id": "work-1", "revision": 3}
+    monkeypatch.setattr(
+        plugin,
+        "_request",
+        lambda *_a, **_kw: {
+            "ok": False,
+            "status_code": 422,
+            "error": {
+                "code": "material_work_invalid",
+                "errors": [{"path": "steps[0].prompt", "message": "Field required"}],
+            },
+            "data": {"work_ref": current_work_ref, "ready_step_ids": ["image"]},
+        },
+    )
+    handler = next(h for n, _, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+
+    result = handler(args)
+
+    assert result["error"] == "material_work_invalid"
+    assert result["phase"] == "drafting"
+    assert result["current_ref"] == {"work_ref": current_work_ref}
+    assert result["errors"] == [{"path": "steps[0].prompt", "message": "Field required"}]
+    assert result["next_action"] == "revise_current_material_work"
+    Draft202012Validator(plugin._output_schema("freezone_prepare_material_work")).validate(result)
+
+
+def test_material_work_tool_describes_save_before_generation(monkeypatch):
+    plugin = _load_plugin_module()
+    description = next(schema["description"] for name, schema, _ in plugin.TOOLS
+                       if name == "freezone_prepare_material_work")
+    assert "save" in description.lower()
+    assert "does not create or run a native generation task" in description.lower()
+    assert "4-15 second" in description.lower()
+
+
+_MATERIAL_PREPARE_TOOLS = ("freezone_prepare_material_work", "freezone_prepare_material_stage")
+_MATERIAL_ADMITTED_OPERATION = "agent_product_0123456789abcdef0123456789abcdef"
+
+
+def test_shared_duration_answer_does_not_fill_production_material_node():
+    plugin = _load_plugin_module()
+    plan = {'inputs': {}, 'nodes': [{
+        'id': 'clip', 'node_type': 'videoNode',
+        'data': {'workflowCatalog': {'skillId': 'reference-video-remix',
+                                     'stepId': 'clip', 'recipeId': 'general-video'}},
+    }]}
+    plugin._apply_generation_choices_to_plan(plan, {'video_duration_seconds': 5})
+    assert 'durationSec' not in plan['nodes'][0]['data']
+
+
+def _ready_material_adapter(monkeypatch, tmp_path, tool_name):
+    from test_material_work import setup_work
+    from novelvideo.freezone.remix.material_work import material_workflow_intent
+    from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft
+    from novelvideo.api.routes.reference_material import MaterialStageBody
+    from novelvideo.api.routes.reference_director import MaterialWorkRequest
+
+    plugin = _load_plugin_module()
+    store, plan_ref, prepared = setup_work(tmp_path)
+    work = store.read(prepared["work_ref"]["artifact_id"], 1)["payload"]
+    intent = material_workflow_intent(work)
+    assert [item["id"] for item in intent["items"]] == ["image"]
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(plugin, "tool_result", json.dumps)
+    monkeypatch.setattr(plugin, "_available", lambda: True)
+    monkeypatch.setattr(plugin, "_workflow_runtime_preflight", lambda *_a, **_kw: {"blockers": []})
+    requests, draft_arguments = [], []
+    original_prepare = plugin._handle_prepare_workflow_draft
+
+    def prepare(arguments):
+        draft_arguments.append(copy.deepcopy(arguments))
+        return original_prepare(arguments)
+
+    def request(method, path, **kwargs):
+        requests.append((method, path, copy.deepcopy(kwargs)))
+        body = kwargs.get("body", {})
+        if path.endswith(("/director/material-work", "/director/material-stage")):
+            assert "operation_id" not in body and "run_after_create" not in body
+            if path.endswith("/material-stage"):
+                MaterialStageBody.model_validate(body)
+            else:
+                MaterialWorkRequest.model_validate(body)
+            return {"ok": True, "data": {
+                "work_ref": dict(prepared["work_ref"]), "ready_step_ids": ["image"],
+                "workflow_intent": copy.deepcopy(intent),
+            }}
+        if "/agent-product-operations/" in path:
+            if path.endswith(_MATERIAL_ADMITTED_OPERATION):
+                return {"ok": True, "data": {
+                    "operation_id": _MATERIAL_ADMITTED_OPERATION,
+                    "product_kind": "workflow_result", "canvas_id": "canvas", "status": "admitted",
+                }}
+            return {"ok": False, "error": "operation was not admitted"}
+        if path.endswith("/workflow-drafts"):
+            error = plugin._workflow_plan_operation_admission_error(body, "project", "canvas")
+            if error:
+                return error
+            draft = create_workflow_draft(
+                project_dir=tmp_path, project_id="project", canvas_id="canvas",
+                intent=body["intent"], compiled=body["compiled"],
+                run_after_create=body.get("run_after_create", False), operation_id=body["operation_id"],
+            )
+            return {"ok": True, "data": draft}
+        if path.endswith("/execution-draft"):
+            attached = attach_material_execution_draft(
+                store, {"artifact_id": prepared["work_ref"]["artifact_id"], "revision": body["revision"]},
+                canvas_id="canvas", draft_id=body["draft_id"], draft_revision=body["draft_revision"],
+            )
+            return {"ok": True, "data": attached}
+        raise AssertionError((method, path, kwargs))
+
+    monkeypatch.setattr(plugin, "_request", request)
+    monkeypatch.setattr(plugin, "_handle_prepare_workflow_draft", prepare)
+    handler = next(h for n, _, h in plugin.TOOLS if n == tool_name)
+    arguments = {"work_ref": dict(prepared["work_ref"])}
+    if tool_name.endswith("material_work"):
+        arguments = {
+            "commission_ref": {"artifact_id": "commission", "revision": 1},
+            "plan_ref": plan_ref, "requirements": work["requirements"],
+            "steps": work["steps"], "command_id": "prepare-1",
+        }
+    return plugin, handler, arguments, intent, requests, draft_arguments
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+@pytest.mark.parametrize("run_option", [True, False, "omitted"])
+def test_material_prepare_forwards_admitted_ready_wave(monkeypatch, tmp_path, tool_name, run_option):
+    from novelvideo.freezone.workflow_drafts import read_workflow_draft
+    plugin, handler, arguments, intent, requests, draft_arguments = _ready_material_adapter(
+        monkeypatch, tmp_path, tool_name
+    )
+    arguments["operation_id"] = _MATERIAL_ADMITTED_OPERATION
+    if run_option != "omitted":
+        arguments["run_after_create"] = run_option
+    result = json.loads(handler(arguments))
+    assert result["ok"] is True, result
+    expected = {"project_id": "project", "canvas_id": "canvas", "intent": intent,
+                "operation_id": _MATERIAL_ADMITTED_OPERATION}
+    if run_option != "omitted":
+        expected["run_after_create"] = run_option
+    assert draft_arguments == [expected]
+    stored, error = read_workflow_draft(
+        project_dir=tmp_path, canvas_id="canvas", draft_id=result["draft_id"]
+    )
+    assert error is None
+    assert stored["run_after_create"] is (run_option is True)
+    assert stored["operation_id"] == _MATERIAL_ADMITTED_OPERATION
+    assert stored["status"] == "ready"
+    assert not stored["task_id"]
+    assert stored["intent"]["items"] == intent["items"]
+    assert any(path.endswith("/execution-draft") for _, path, _ in requests)
+
+
+def test_material_stage_forwards_selected_placement_to_existing_native_approval(monkeypatch, tmp_path):
+    _, handler, arguments, intent, requests, draft_arguments = _ready_material_adapter(
+        monkeypatch, tmp_path, 'freezone_prepare_material_stage'
+    )
+    arguments.update(placement_ids=['picture'], operation_id=_MATERIAL_ADMITTED_OPERATION,
+                     run_after_create=True)
+    result = json.loads(handler(arguments))
+    assert result['ok'] is True, result
+    stage = next(body['body'] for _, path, body in requests if path.endswith('/material-stage'))
+    assert stage == {'work_ref': arguments['work_ref'], 'placement_ids': ['picture']}
+    assert draft_arguments == [{
+        'project_id': 'project', 'canvas_id': 'canvas', 'intent': intent,
+        'operation_id': _MATERIAL_ADMITTED_OPERATION, 'run_after_create': True,
+    }]
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+@pytest.mark.parametrize("operation", [None, "invented", "agent_product_ffffffffffffffffffffffffffffffff"])
+def test_material_prepare_preserves_native_admission_failure(monkeypatch, tmp_path, tool_name, operation):
+    plugin, handler, arguments, intent, requests, draft_arguments = _ready_material_adapter(
+        monkeypatch, tmp_path, tool_name
+    )
+    if operation is not None:
+        arguments.update(operation_id=operation, run_after_create=True)
+    result = json.loads(handler(arguments))
+    expected_arguments = {"project_id": "project", "canvas_id": "canvas", "intent": intent}
+    if operation is not None:
+        expected_arguments.update(operation_id=operation, run_after_create=True)
+    assert draft_arguments == [expected_arguments]
+    native = json.loads(plugin._handle_prepare_workflow_draft(expected_arguments))
+    assert result["ok"] is False
+    assert result["status"] == "workflow_result_admission_required"
+    for key, value in native.items():
+        if key != "agent_instruction":
+            assert result[key] == value
+    assert "freezone_prepare_material_stage" in result.get("agent_instruction", "")
+    assert not any(path.endswith("/execution-draft") for _, path, _ in requests)
+    assert "draft_id" not in result
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+def test_material_prepare_metadata_has_optional_typed_admission_options(tool_name):
+    plugin = _load_plugin_module()
+    schemas = {name: schema["parameters"] for name, schema, _ in plugin.TOOLS}
+    schema = schemas[tool_name]
+    assert schema["properties"]["operation_id"]["type"] == "string"
+    assert schema["properties"]["run_after_create"]["type"] == "boolean"
+    assert "operation_id" not in schema["required"]
+    assert "run_after_create" not in schema["required"]
+    for name in ("freezone_get_material_work", "freezone_accept_material_candidate", "freezone_retry_material_step"):
+        assert "operation_id" not in schemas[name]["properties"]
+        assert "run_after_create" not in schemas[name]["properties"]
+    arguments = {"work_ref": {"artifact_id": "work", "revision": 1}}
+    if tool_name.endswith("material_work"):
+        arguments = _material_author_call()
+    validator = Draft202012Validator(schema)
+    validator.validate(arguments)
+    validator.validate({**arguments, "operation_id": _MATERIAL_ADMITTED_OPERATION, "run_after_create": True})
+    assert not validator.is_valid({**arguments, "operation_id": 123})
+    assert not validator.is_valid({**arguments, "run_after_create": "true"})
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+def test_material_prepare_retains_bound_scope_before_requests(monkeypatch, tmp_path, tool_name):
+    _, handler, arguments, _, requests, draft_arguments = _ready_material_adapter(monkeypatch, tmp_path, tool_name)
+    arguments.update(project_id="peer", operation_id=_MATERIAL_ADMITTED_OPERATION, run_after_create=True)
+    result = json.loads(handler(arguments))
+    assert result["ok"] is False
+    assert requests == [] and draft_arguments == []
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+def test_material_prepare_description_explains_native_admission_return_chain(tool_name):
+    plugin = _load_plugin_module()
+    schema = next(schema for name, schema, _ in plugin.TOOLS if name == tool_name)
+    description = schema["description"]
+    for field in ("freezone_begin_agent_product_generation", "operation_id", "run_after_create=true",
+                  "freezone_prepare_material_stage", "work_ref"):
+        assert field in description
+    assert "Do not switch to generic workflow preparation" in description
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+@pytest.mark.parametrize("operation", [None, "invented", "agent_product_ffffffffffffffffffffffffffffffff"])
+def test_material_admission_required_returns_static_recovery_for_saved_work(monkeypatch, tmp_path, tool_name, operation):
+    _, handler, arguments, _, requests, draft_arguments = _ready_material_adapter(monkeypatch, tmp_path, tool_name)
+    if operation is not None:
+        arguments.update(operation_id=operation, run_after_create=True)
+    result = json.loads(handler(arguments))
+    assert result["ok"] is False
+    assert result["status"] == "workflow_result_admission_required"
+    assert set(result["work_ref"]) == {"artifact_id", "revision"}
+    assert "agent_instruction" in result
+    instruction = result["agent_instruction"]
+    for field in ("freezone_begin_agent_product_generation", "workflow_result", "operation_id",
+                  "freezone_prepare_material_stage", "work_ref", "run_after_create=true"):
+        assert field in instruction
+    assert "Do not switch to generic workflow preparation" in instruction
+    assert "Do not register again" in instruction
+    assert "native workflow approval" in instruction
+    assert len(instruction) < 1500
+    assert not any(method == "POST" and "/agent-product-operations" in path for method, path, _ in requests)
+    assert not any(path.endswith("/execution-draft") for _, path, _ in requests)
+    assert "draft_id" not in result
+    if operation is None:
+        assert "operation_id" not in draft_arguments[0]
+        assert "run_after_create" not in draft_arguments[0]
+    else:
+        assert operation not in instruction
+        assert draft_arguments[0]["operation_id"] == operation
+    assert result["work_ref"]["revision"] == 1
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+@pytest.mark.parametrize("status", ["workflow_preflight_blocked", "workflow_model_unavailable"])
+def test_material_admission_guidance_keeps_other_native_diagnostics(monkeypatch, tmp_path, tool_name, status):
+    plugin, handler, arguments, _, requests, _ = _ready_material_adapter(monkeypatch, tmp_path, tool_name)
+    native = {"ok": False, "status": status, "error": "Native preflight issue",
+              "agent_instruction": "Keep the actual provider-specific preflight action", "next_action": "review_preflight"}
+    monkeypatch.setattr(plugin, "_handle_prepare_workflow_draft", lambda _args: json.dumps(native))
+    result = json.loads(handler(arguments))
+    for key, value in native.items():
+        assert result[key] == value
+    assert result["work_ref"]["revision"] == 1
+    assert "revise the same work" in result["material_recovery_instruction"]
+    assert not any(path.endswith("/execution-draft") for _, path, _ in requests)
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+def test_material_model_blocker_preserves_same_work_and_admission(monkeypatch, tmp_path, tool_name):
+    plugin, handler, arguments, _, requests, _ = _ready_material_adapter(monkeypatch, tmp_path, tool_name)
+    arguments.update(operation_id=_MATERIAL_ADMITTED_OPERATION, run_after_create=True)
+    blocker = {"path": "runtime.models.image.model", "code": "model_selection_required"}
+    monkeypatch.setattr(plugin, "_handle_prepare_workflow_draft", lambda _args: json.dumps({
+        "ok": False, "status": "workflow_preflight_failed", "blockers": [blocker],
+        "required_choices": {"image": ["model"]},
+    }))
+    result = json.loads(handler(arguments))
+    assert result["status"] == "workflow_preflight_failed"
+    assert result["work_ref"]["artifact_id"]
+    assert result["work_ref"]["revision"] == 1
+    assert result["ready_step_ids"] == ["image"]
+    assert result["operation_id"] == _MATERIAL_ADMITTED_OPERATION
+    assert result["blockers"] == [blocker]
+    assert not any(path.endswith("/execution-draft") for _, path, _ in requests)
+
+
+@pytest.mark.parametrize("tool_name", _MATERIAL_PREPARE_TOOLS)
+def test_material_work_without_ready_generation_keeps_admission_optional(monkeypatch, tmp_path, tool_name):
+    plugin, handler, arguments, _, _, draft_arguments = _ready_material_adapter(monkeypatch, tmp_path, tool_name)
+    calls = []
+    def read_only_preparation(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {"ok": True, "data": {"work_ref": {"artifact_id": "saved-work", "revision": 1},
+                                       "ready_step_ids": [], "workflow_intent": {"items": []}}}
+    monkeypatch.setattr(plugin, "_request", read_only_preparation)
+    result = json.loads(handler(arguments))
+    assert result["ok"] is True and result["status"] == "ready"
+    assert len(calls) == 1
+    assert draft_arguments == []
+
+
+def test_native_reference_analysis_slim_receipt_and_bridge_key_survive_duplicate_delivery(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_EXTERNAL_MCP', '1')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:custom-director')
+    commands = [{'type': 'run_node_action', 'node_id': 'source', 'action': 'run_video_analyze_story', 'parameters': {
+        'reference_analysis': {'project_id': 'p', 'canvas_id': 'c', 'source_node_id': 'source', 'user_goal': 'goal',
+            'inputs': {}, 'idempotency_key': 'request', 'agent_id': 'custom-director'}}}]
+    keys = []
+    result = {'ok': True, 'applied': True, 'project_id': 'p', 'canvas_id': 'c', 'command_results': [{'status':'success', 'output': {'reference_analysis_run': {'run_id':'real'}}}]}
+    monkeypatch.setattr(plugin, 'put_pending_canvas_command', lambda **kw: keys.append(kw['key']) or result)
+    for _ in range(2):
+        receipt = plugin._dispatch_mcp_approved_frontend_commands(project='p', canvas='c', commands=commands, slim_result=True)
+        assert receipt['command_results'] == result['command_results']
+    assert keys[0] == keys[1], 'the same admitted key must not create two browser approvals'
+
+
+@pytest.mark.parametrize('changes', [{'status':'analysis_failed','error':'failed'}, {'status':'analyzing','task_id':None}, {'status':'stale'}])
+def test_reference_analysis_rejects_failed_or_unbound_native_identity(monkeypatch, changes):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'c')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:custom')
+    run = {'run_id':'real','analysis_node_id':'analysis','project_id':'p','canvas_id':'c','source_node_id':'source','agent_id':'custom',
+        'status':'analyzing','task_id':'task','task_key':'key',**changes}
+    monkeypatch.setattr(plugin,'_emit_canvas_commands',lambda *a, **kw: {'ok':True,'applied':True,'command_results':[{
+        'type':'run_node_action','nodeId':'source','action':'run_video_analyze_story','status':'success','output':{'reference_analysis_run':run}}]})
+    monkeypatch.setattr(plugin,'_request',lambda method,path,**kw: {'ok':True,'data':run} if method=='GET' else pytest.fail('no admission POST'))
+    result = plugin._handle_start_reference_analysis({'source_node_id':'source','user_goal':'goal','idempotency_key':'request'})
+    assert result['ok'] is False and result.get('submitted') is not True
+    Draft202012Validator(plugin._output_schema('freezone_start_reference_analysis')).validate(result)
+
+
+def test_reference_analysis_requires_stable_admission_key_before_creating_approval(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID','p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID','c')
+    monkeypatch.setattr(plugin,'_emit_canvas_commands',lambda *a,**kw: pytest.fail('must provide stable idempotency key'))
+    result = plugin._handle_start_reference_analysis({'source_node_id':'source','user_goal':'goal'})
+    assert result['ok'] is False
+
+
+@pytest.mark.parametrize('dispatch', ['external', 'hermes'])
+@pytest.mark.parametrize('current', ['unchanged', 'replacement', 'failed', 'progress', 'bound'])
+def test_cached_reference_admission_revalidates_native_source_and_persisted_run(monkeypatch, dispatch, current):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'c')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:director')
+    old_run = {'run_id':'original-run','project_id':'p','canvas_id':'c','source_node_id':'source','source_video_url':'/original.mp4',
+        'agent_id':'director','analysis_node_id':'original-analysis','task_id':'original-task','task_key':'original-key','status':'analyzing'}
+    admitted_run = dict(old_run)
+    if current == 'bound':
+        old_run.update(status='submitting',task_id=None,task_key=None)
+    cached = {'ok':True,'applied':True,'canvas_apply_status':'applied','project_id':'p','canvas_id':'c','command_results':[{
+        'type':'run_node_action','nodeId':'source','action':'run_video_analyze_story','status':'success','output':{'reference_analysis_run':old_run}}]}
+    monkeypatch.setattr(plugin,'put_pending_canvas_command',lambda **kw: cached)
+    bridge = plugin._dispatch_mcp_approved_frontend_commands if dispatch == 'external' else plugin._dispatch_frontend_canvas_commands
+    monkeypatch.setattr(plugin,'_emit_canvas_commands',lambda p,c,commands,**kw: bridge(project=p,canvas=c,commands=commands,slim_result=True))
+    reads = []
+    def request(method,path,**kwargs):
+        assert method == 'GET', 'replay must never admit a fresh run or task'
+        reads.append(path)
+        assert '/original-run/receipt?' in path and 'source_node_id=source' in path and 'idempotency_key=request' in path and 'agent_id=director' in path
+        if current == 'replacement':
+            return {'ok':False,'error':'original source fingerprint no longer matches'}
+        return {'ok':True,'data':{**old_run,'status':'analysis_failed','error':'native failed'} if current == 'failed' else {**old_run,'status':'analysis_ready'} if current == 'progress' else admitted_run if current == 'bound' else old_run}
+    monkeypatch.setattr(plugin,'_request',request)
+    result = plugin._handle_start_reference_analysis({'source_node_id':'source','user_goal':'goal','inputs':{},'idempotency_key':'request'})
+    if current in {'unchanged','progress','bound'}:
+        assert result['run']['status'] == ('analysis_ready' if current == 'progress' else 'analyzing')
+        assert result['submitted'] is True and result['run_id']=='original-run' and result['task_id']=='original-task'
+    else:
+        assert result['ok'] is False and result.get('submitted') is not True
+    assert len(reads) == 1, 'the cached receipt must be verified against persisted original native facts'
+
+
+def _reference_analysis_transport_result(monkeypatch, *, dispatch, delivery, boundary, failure):
+    """Exercise the real bridge/handler with synthetic transport boundaries only."""
+    plugin = _load_plugin_module()
+    monkeypatch.setenv('DRAMACLAW_PROJECT_ID', 'p')
+    monkeypatch.setenv('DRAMACLAW_CANVAS_ID', 'c')
+    monkeypatch.setenv('DRAMACLAW_AGENT_PROFILE', 'freezone:main')
+    run = {'run_id': 'original-run', 'analysis_node_id': 'analysis', 'project_id': 'p',
+        'canvas_id': 'c', 'source_node_id': 'source', 'agent_id': 'main',
+        'status': 'analyzing', 'task_id': 'original-task', 'task_key': 'original-key'}
+    resolved = failure if boundary == 'bridge' else {'ok': True, 'applied': True, 'command_results': [{
+        'type': 'run_node_action', 'nodeId': 'source', 'action': 'run_video_analyze_story',
+        'status': 'success', 'output': {'reference_analysis_run': run}}]}
+    calls = []
+    def put(**kwargs):
+        calls.append('put')
+        return resolved if delivery == 'cached' else None
+    def wait(*args, **kwargs):
+        calls.append('wait')
+        return resolved
+    def request(method, path, **kwargs):
+        assert method == 'GET' and '/original-run/receipt?' in path
+        calls.append('GET')
+        return failure
+    monkeypatch.setattr(plugin, 'put_pending_canvas_command', put)
+    monkeypatch.setattr(plugin, 'wait_canvas_command_result', wait)
+    monkeypatch.setattr(plugin, '_request', request)
+    bridge = plugin._dispatch_mcp_approved_frontend_commands if dispatch == 'external' else plugin._dispatch_frontend_canvas_commands
+    monkeypatch.setattr(plugin, '_emit_canvas_commands', lambda p, c, commands, **kw:
+        bridge(project=p, canvas=c, commands=commands, slim_result=True))
+    result = plugin._handle_start_reference_analysis({'source_node_id': 'source', 'user_goal': 'remix', 'idempotency_key': 'same-key'})
+    assert calls == ['put'] + (['wait'] if delivery == 'fresh' else []) + (['GET'] if boundary == 'receipt' else [])
+    return result
+
+
+_REFERENCE_AUTH_FAILURES = [
+    {'ok': False, 'status_code': 401, 'error': 'Session expired; authenticate again'},
+    {'ok': False, 'code': 'invalid_agent_session', 'error': 'Session expired; authenticate again'},
+    {'ok': False, 'detail': 'Invalid agent session'},
+]
+
+
+@pytest.mark.parametrize('dispatch', ['external', 'hermes'])
+@pytest.mark.parametrize('delivery', ['fresh', 'cached'])
+@pytest.mark.parametrize('boundary', ['receipt', 'bridge'])
+@pytest.mark.parametrize('failure', _REFERENCE_AUTH_FAILURES)
+def test_reference_analysis_transport_auth_failure_reaches_actual_host_classifier(monkeypatch, dispatch, delivery, boundary, failure):
+    from novelvideo.chat.tool_auth import agent_session_invalid_result
+    result = _reference_analysis_transport_result(monkeypatch, dispatch=dispatch, delivery=delivery, boundary=boundary, failure=failure)
+    assert result['ok'] is False and result['submitted'] is False
+    assert agent_session_invalid_result(result) is True
+    if 'status_code' in failure:
+        assert result['status_code'] == failure['status_code']
+    if 'code' in failure:
+        assert result['code'] == failure['code']
+    assert result['error'] == failure.get('error', failure.get('detail'))
+    Draft202012Validator(_load_plugin_module()._output_schema('freezone_start_reference_analysis')).validate(result)
+
+
+@pytest.mark.parametrize('boundary', ['receipt', 'bridge'])
+@pytest.mark.parametrize('failure', [
+    {'ok': False, 'status_code': 409, 'error': 'Original source changed'},
+    {'ok': False, 'status_code': 403, 'error': 'User confirmation required'},
+    {'ok': False, 'error': 'Subtitle contains Invalid agent session', 'data': {'ok': False, 'status_code': 401}},
+    {'ok': False, 'error': {'ok': False, 'status_code': 401}},
+    {'ok': False, 'cancelled': True, 'status_code': 401, 'error': 'Cancelled by user'},
+    {'ok': True, 'data': {'ok': False, 'status_code': 401, 'error': 'Invalid agent session'}},
+])
+def test_reference_analysis_non_auth_transport_does_not_promote_nested_content(monkeypatch, boundary, failure):
+    from novelvideo.chat.tool_auth import agent_session_invalid_result
+    result = _reference_analysis_transport_result(monkeypatch, dispatch='external', delivery='cached', boundary=boundary, failure=failure)
+    assert result['ok'] is False and result['submitted'] is False
+    assert agent_session_invalid_result(result) is False
+    assert result['status'] == ('reference_analysis_cancelled' if boundary == 'bridge' and failure.get('cancelled') else
+        'reference_analysis_not_submitted' if boundary == 'bridge' and failure['ok'] is False else 'reference_analysis_receipt_missing')
+
+
+@pytest.mark.parametrize('boundary', ['receipt', 'bridge'])
+@pytest.mark.parametrize('error,expected', [
+    ('Session expired ' + 'x' * 1000, ('Session expired ' + 'x' * 1000)[:300]),
+    ('Authorization Bearer private-test-value', 'Agent session authentication failed'),
+])
+def test_reference_analysis_transport_auth_diagnostic_is_bounded(monkeypatch, boundary, error, expected):
+    result = _reference_analysis_transport_result(monkeypatch, dispatch='external', delivery='cached', boundary=boundary,
+        failure={'ok': False, 'status_code': 401, 'error': error, 'data': {'private': 'do not forward'}})
+    assert result['status_code'] == 401 and result['error'] == expected
+    assert len(result['error']) <= 300
+    assert 'private-test-value' not in json.dumps(result) and 'do not forward' not in json.dumps(result)

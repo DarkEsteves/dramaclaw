@@ -1,4 +1,8 @@
-"""Structured final-response contract for receipt-backed canvas operations."""
+"""Host-owned outcome projection for canvas operations.
+
+Legacy envelope helpers remain for stored history and migration tests; live
+canvas turns use :func:`summarize_canvas_operations` independently of prose.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,32 @@ import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def summarize_canvas_operations(*, operations: list[dict[str, Any]], disposition: str) -> dict[str, Any]:
+    """Report host-observed operations without interpreting assistant prose."""
+    settled: list[dict[str, Any]] = []
+    blocking: list[str] = []
+    for operation in operations:
+        status = str(operation.get("status") or "")
+        verified = operation.get("verified") is True
+        if status in {"completed", "succeeded"}:
+            status = "completed" if verified and operation.get("receipt") else "unverified"
+        elif status in {"accepted", "submitted", "running"}:
+            status = status if verified else "unverified"
+        elif status in {"pending", "awaiting_approval", "waiting_approval"}:
+            status = "awaiting_approval"
+        elif status not in {"failed", "timeout", "cancelled"}:
+            status = "unverified"
+        call_id = str(operation.get("call_id") or "")
+        if status in {"failed", "timeout", "cancelled", "unverified"} and call_id:
+            blocking.append(call_id)
+        settled.append({**operation, "status": status})
+    return {
+        "operations": settled,
+        "blocking_call_ids": blocking,
+        "disposition": disposition,
+    }
 
 CANVAS_FINAL_RESPONSE_INSTRUCTIONS = (
     "Your final response must be exactly one JSON object with message, mode, and "
@@ -29,6 +59,11 @@ CANVAS_FINAL_RESPONSE_INSTRUCTIONS = (
     "Validation/read tools may return a newer snapshot revision; that value is not "
     "a write receipt. For a mutation, copy the revision from the successful write "
     "tool result, not from a later validation result. "
+    "Saved director decisions/reviews/material packages, prepared workflow drafts, "
+    "and background reference analysis submission are not canvas apply receipts: "
+    "use mode=read_only with canvas_receipts=[] to describe those exact outcomes. "
+    "Direct production plan creation adds canvas nodes and returns a saved canvas "
+    "revision; use that revision for its mutation receipt. "
     "A creation receipt does not prove media generation or parameter persistence."
 )
 
@@ -45,6 +80,17 @@ CANVAS_FORMAT_REPAIR_PROMPT = (
     "that statement is false: do not repeat it, and say instead that the canvas "
     "was not changed. Use mode=read_only (or blocked if the request could not be "
     "completed) and canvas_receipts=[]."
+)
+
+CANVAS_SAVED_ARTIFACT_FORMAT_REPAIR_PROMPT = (
+    "Your previous final response was not the required JSON object. This turn "
+    "has successful, verified non-canvas tool results but no canvas apply "
+    "receipts. Do not call any tools or repeat any writes. Rewrite your answer "
+    "using only this turn's verified tool results and preserve the distinction "
+    "between saved artifacts or background submissions and canvas changes. "
+    "Do not claim a canvas node, edge, or parameter was changed. Use "
+    "mode=read_only, canvas_receipts=[], and put the user-facing answer in "
+    "message."
 )
 
 _REPLY_CONTRACT_FAILURE = "回复未通过操作结果校验："
@@ -137,6 +183,14 @@ def _parse_canvas_envelope(text: str) -> tuple[dict[str, Any] | None, str]:
     return reply, ""
 
 
+def canvas_reply_content(text: str) -> str | None:
+    """Return actual non-blocked reply content, never a generated diagnostic."""
+    reply, _ = _parse_canvas_envelope(text)
+    if reply is None or reply["mode"] == "blocked":
+        return None
+    return reply["message"].strip()
+
+
 def finalize_canvas_reply(
     text: str,
     *,
@@ -163,6 +217,10 @@ def finalize_canvas_reply(
         return "画布操作等待超时：未收到执行回执，请确认画布连接后重试。"
     if "cancelled" in states:
         return "画布操作已取消，未完成全部操作。"
+    if "running" in states:
+        return "画布操作进行中，尚未完成。"
+    if "accepted" in states:
+        return "画布操作已提交，尚未完成。"
     if states - {"succeeded"}:
         return "画布操作等待确认或执行回执，尚未完成。"
     if draft_ready and not attempts:
@@ -226,3 +284,30 @@ def needs_canvas_format_repair(
     if attempts or receipts or draft_ready:
         return False
     return _parse_canvas_envelope(text)[0] is None
+
+
+def production_reply_from_evidence(payload: dict[str, Any]) -> str:
+    """Describe a native submission using host tool data, never model prose."""
+    if payload.get('ok') is False:
+        return '作品方案操作未完成：' + str(payload.get('error') or payload.get('code') or '未收到有效执行回执。')[:1000]
+    stage = payload.get('native_plan_stage') or {}
+    slots = stage.get('slots') or []
+    states = {slot.get('state') for slot in slots} or {stage.get('state')}
+    if states == {'ready_for_review'} and slots and all(
+            slot.get('task_id') and slot.get('plan_ref') for slot in slots):
+        return '作品方案已生成并保存到原方案节点，等待审核。'
+    if 'failed' in states:
+        return '作品方案节点已保留；起草任务失败，请查看原任务错误后决定下一步。'
+    if any(slot.get('state') == 'running' and slot.get('task_id') for slot in slots):
+        return '作品方案起草任务正在运行，完成后会继续审核。'
+    if any(slot.get('state') == 'submitted' and slot.get('task_id') for slot in slots):
+        return '作品方案起草任务已提交，等待完成事件。'
+    if states == {'ready_to_submit'} and slots and all(slot.get('plan_node_id') for slot in slots):
+        return '作品方案节点已创建，尚未提交起草任务。'
+    if payload.get('canvas_apply_status') in {'accepted', 'applied', 'direct_applied'} and payload.get('applied') is True:
+        return '作品方案画布执行请求已受理；节点和起草进度以实际任务回执为准。'
+    if payload.get('canvas_apply_status') in {'pending', 'awaiting_approval', 'waiting_approval'} or payload.get('status') in {'pending', 'awaiting_approval', 'waiting_approval'}:
+        return '作品方案操作等待画布审批，尚未执行生成。'
+    if stage.get('draft_id'):
+        return '作品方案草稿已保存，等待画布或任务执行回执；尚无生成完成凭据。'
+    return '作品方案操作尚未收到有效执行回执。'

@@ -11,8 +11,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from novelvideo.freezone.remix import p0
 from novelvideo.freezone.remix.p0 import compile_events, render_sample
@@ -27,193 +25,6 @@ def _harness_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def _write_cached_models(cache: Path) -> None:
-    asr = cache / "models--Systran--faster-whisper-small" / "snapshots" / "asr-rev"
-    asr.mkdir(parents=True)
-    for name in ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt"):
-        (asr / name).write_text(name, encoding="utf-8")
-    zh = (
-        cache
-        / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
-        / "snapshots"
-        / "align-rev"
-    )
-    zh.mkdir(parents=True)
-    for name in ("pytorch_model.bin", "config.json", "vocab.json"):
-        (zh / name).write_text(name, encoding="utf-8")
-    (cache / "wav2vec2_fairseq_base_ls960_asr_ls960.pth").write_bytes(b"model")
-
-
-def _remix_client() -> TestClient:
-    from novelvideo.api.auth import get_api_user
-    from novelvideo.api.routes import remix
-
-    app = FastAPI()
-    app.include_router(remix.router, prefix="/api/v1")
-    app.dependency_overrides[get_api_user] = lambda: {"username": "local-test"}
-    return TestClient(app)
-
-
-def test_speech_readiness_probes_whisperx_import_and_expected_cached_models_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache = tmp_path / "models"
-    _write_cached_models(cache)
-    python = tmp_path / "whisperx-python"
-    python.write_text("#!/bin/sh\n", encoding="utf-8")
-    python.chmod(0o755)
-    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
-    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
-    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
-    calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
-        assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
-        return subprocess.CompletedProcess(
-            command, 0, json.dumps({"whisperx_version": "3.8.6"}), ""
-        )
-
-    from novelvideo.api.routes import remix as routes
-
-    monkeypatch.setattr(routes.subprocess, "run", fake_run)
-
-    response = _remix_client().get(
-        "/api/v1/projects/local/freezone/remix/speech-readiness"
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "data": {
-            "ready": True,
-            "engine": "whisperx",
-            "python": "external",
-            "model_cache": "available",
-            "whisperx_version": "3.8.6",
-            "downloads_allowed": False,
-            "error": None,
-        },
-    }
-    assert len(calls) == 1
-    command, options = calls[0]
-    assert command[0] == str(python)
-    assert command[1].endswith("whisperx_worker.py")
-    assert json.loads(options["input"]) == {"action": "probe"}
-
-
-def test_speech_readiness_reports_missing_cache_without_downloading(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    python = tmp_path / "whisperx-python"
-    python.write_text("#!/bin/sh\n", encoding="utf-8")
-    python.chmod(0o755)
-    missing = tmp_path / "missing-model-cache"
-    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
-    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(missing))
-    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: pytest.fail(
-            "readiness must not execute or download anything"
-        ),
-    )
-
-    response = _remix_client().get(
-        "/api/v1/projects/local/freezone/remix/speech-readiness"
-    )
-
-    assert response.status_code == 200
-    assert response.json()["data"] == {
-        "ready": False,
-        "engine": "whisperx",
-        "python": "external",
-        "model_cache": "missing",
-        "whisperx_version": None,
-        "downloads_allowed": False,
-        "error": f"WhisperX model cache directory is missing: {missing}",
-    }
-
-
-def test_speech_readiness_rejects_incomplete_cache_before_import_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache = tmp_path / "models"
-    cache.mkdir()
-    python = tmp_path / "whisperx-python"
-    python.write_text("#!/bin/sh\n", encoding="utf-8")
-    python.chmod(0o755)
-    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
-    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
-    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
-    from novelvideo.api.routes import remix as routes
-
-    calls = []
-    monkeypatch.setattr(
-        routes.subprocess,
-        "run",
-        lambda *args, **kwargs: calls.append(args)
-        or subprocess.CompletedProcess(args[0], 1, "", "cannot import whisperx"),
-    )
-
-    response = _remix_client().get(
-        "/api/v1/projects/local/freezone/remix/speech-readiness"
-    )
-
-    assert response.json()["data"]["ready"] is False
-    assert "cached model files are incomplete" in response.json()["data"]["error"]
-    assert calls == []
-
-
-def test_speech_readiness_rejects_python_that_cannot_import_whisperx(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache = tmp_path / "models"
-    _write_cached_models(cache)
-    python = tmp_path / "whisperx-python"
-    python.write_text("#!/bin/sh\n", encoding="utf-8")
-    python.chmod(0o755)
-    monkeypatch.setenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "whisperx")
-    monkeypatch.setenv("DRAMACLAW_REMIX_MODEL_CACHE", str(cache))
-    monkeypatch.setenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", str(python))
-    from novelvideo.api.routes import remix as routes
-
-    monkeypatch.setattr(
-        routes.subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 1, "", "cannot import whisperx"
-        ),
-    )
-
-    response = _remix_client().get(
-        "/api/v1/projects/local/freezone/remix/speech-readiness"
-    )
-
-    assert response.json()["data"]["ready"] is False
-    assert "worker runtime cannot start" in response.json()["data"]["error"]
-
-
-def test_local_speech_launcher_pins_ce_paths_and_checks_readiness() -> None:
-    launcher = ROOT / "scripts" / "start-remix-speech.sh"
-
-    result = subprocess.run(
-        ["bash", "-n", str(launcher)], capture_output=True, text=True, check=False
-    )
-
-    assert result.returncode == 0, result.stderr
-    source = launcher.read_text(encoding="utf-8")
-    assert "DRAMACLAW_REMIX_SPEECH_ENGINE=whisperx" in source
-    assert "DRAMACLAW_REMIX_WHISPERX_PYTHON" in source
-    assert "DRAMACLAW_REMIX_MODEL_CACHE" in source
-    assert "ST_EDITION=ce" in source
-    assert "ST_CONTROL_PLANE_DSN=" in source
-    assert "/speech-readiness" in source
-    assert "API_KEY" not in source
 
 
 @pytest.mark.skipif(
@@ -266,14 +77,8 @@ def test_p0_command_does_not_trust_global_approved_label_without_fixture_provena
             "approved-real",
             "--speech-concurrency",
             "1",
-            "--asr-weight-version",
+            "--model-version",
             "synthetic-none",
-            "--asr-weight-license",
-            "not-applicable",
-            "--alignment-weight-version",
-            "synthetic-none",
-            "--alignment-weight-license",
-            "not-applicable",
         ],
         capture_output=True,
         text=True,
@@ -285,10 +90,8 @@ def test_p0_command_does_not_trust_global_approved_label_without_fixture_provena
     assert report["fixture_kind"] == "approved-real"
     assert report["host"]["platform"]
     assert report["speech_runtime"]["concurrency_limit"] == 1
-    assert report["speech_runtime"]["asr_weight"] == {
-        "version": "synthetic-none",
-        "license": "not-applicable",
-    }
+    assert report["speech_runtime"]["model"] == "audio-transcribe"
+    assert report["speech_runtime"]["model_version"] == "synthetic-none"
     assert report["cases"][0]["elapsed_s"] >= 0
     assert report["cases"][0]["process_cumulative_high_water_mb"] > 0
     assert (
@@ -302,7 +105,7 @@ def test_p0_command_does_not_trust_global_approved_label_without_fixture_provena
         "all six categories" in blocker for blocker in report["p0_gate"]["blockers"]
     )
     assert any(
-        "ASR weight version" in blocker for blocker in report["p0_gate"]["blockers"]
+        "ASR model version" in blocker for blocker in report["p0_gate"]["blockers"]
     )
 
 
@@ -533,14 +336,9 @@ def test_fixture_evidence_accepts_verified_six_category_inventory(
     assert (
         harness._runtime_metadata_blockers(
             {
-                "whisperx_version": "3.8.6",
-                "whisperx_license": "BSD-2-Clause",
-                "model": "small",
-                "asr_weight": {"version": "repo@abc123", "license": "MIT"},
-                "alignment_weight": {
-                    "version": "repo@def456",
-                    "license": "Apache-2.0",
-                },
+                "gateway": "newapi",
+                "model": "audio-transcribe",
+                "model_version": "gateway@abc123",
                 "platform_support": "macOS arm64 CPU measured",
             }
         )
@@ -1048,7 +846,7 @@ def test_p0_gate_is_blocked_without_executable_asr_or_100_boundaries() -> None:
     )
 
     assert report["status"] == "blocked"
-    assert "ASR/forced alignment is not executable" in report["blockers"]
+    assert "ASR word alignment is not executable" in report["blockers"]
     assert any(
         item.startswith("zh requires 100 manually annotated boundaries")
         for item in report["blockers"]

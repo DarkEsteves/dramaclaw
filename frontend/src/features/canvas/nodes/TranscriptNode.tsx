@@ -1,9 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
-import { FileText } from 'lucide-react';
-import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef } from '@/api/remix';
+import { AudioLines, FileText, Maximize2, Pause, Play, Volume2, VolumeX } from 'lucide-react';
+import { fetchRemixArtifact, fetchRemixOperation, fetchRemixTaskStatus, submitRemixProcessAction, type RemixArtifactRef, type RemixProcessRequest } from '@/api/remix';
 import type { TranscriptNodeData } from '@/features/canvas/domain/canvasNodes';
-import { correctedTimeline, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, speechReviewItems, timelineWords, transcriptPlaybackParts, transcriptSrt, type SpeechMatchReport, type SpeechMismatch, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
+import { correctedTimeline, readableTranscript, RealignmentRequiredError, sourceMediaForTranscript, sourceScriptForTranscript, speechReviewItems, timelineWords, transcriptPlaybackParts, transcriptSrt, type SpeechMatchReport, type SpeechMismatch, type TranscriptTimeline } from '@/features/canvas/remix/transcriptModel';
 import { reviseTranscriptArtifact } from '@/features/canvas/remix/transcriptArtifactApi';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
@@ -15,6 +15,8 @@ import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 
 type Props = NodeProps & { id: string; data: TranscriptNodeData; selected?: boolean };
 type TranscriptLanguage = 'auto' | 'zh' | 'en';
+type SpeechSubmission = Extract<RemixProcessRequest, { action: 'transcribe_media' | 'align_script' }>;
+const activeSubmissions = new Map<string, ReturnType<typeof submitRemixProcessAction>>();
 
 function transcriptLanguage(value: unknown): TranscriptLanguage {
   return value === 'zh' || value === 'en' || value === 'auto' ? value : 'auto';
@@ -23,6 +25,12 @@ function transcriptLanguage(value: unknown): TranscriptLanguage {
 function stamp(us: number): string {
   const ms = Math.max(0, Math.floor(us / 1_000));
   return `${String(Math.floor(ms / 60_000)).padStart(2, '0')}:${String(Math.floor(ms / 1_000) % 60).padStart(2, '0')}.${String(ms % 1_000).padStart(3, '0')}`;
+}
+
+function playbackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
+  const whole = Math.floor(seconds);
+  return `${String(Math.floor(whole / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
 }
 
 function download(name: string, body: string, type: string): void {
@@ -48,10 +56,15 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const [showWordDetails, setShowWordDetails] = useState(false);
   const [confirmedTiming, setConfirmedTiming] = useState(false);
   const [activePartIndex, setActivePartIndex] = useState(-1);
+  const [mediaTime, setMediaTime] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
+  const [mediaPlaying, setMediaPlaying] = useState(false);
+  const [mediaMuted, setMediaMuted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mediaRef = useRef<HTMLMediaElement>(null);
   const autoStartConsumed = useRef(false);
+  const submissionReconciled = useRef(false);
   useEffect(() => updateNodeInternals(id), [id, updateNodeInternals]);
   useEffect(() => setEdited(data.words.map((word) => word.text)), [data.words]);
   useEffect(() => setLanguage(transcriptLanguage(data.transcriptLanguage)), [data.transcriptLanguage]);
@@ -62,7 +75,8 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
   const transcriptText = typeof data.transcriptText === 'string' && data.transcriptText.trim()
     ? data.transcriptText
     : data.words.map((word) => word.text).join('');
-  const playbackParts = useMemo(() => transcriptPlaybackParts(transcriptText, data.words), [transcriptText, data.words]);
+  const displayTranscript = useMemo(() => readableTranscript(transcriptText, data.words), [transcriptText, data.words]);
+  const playbackParts = useMemo(() => transcriptPlaybackParts(displayTranscript, data.words), [displayTranscript, data.words]);
   const speechMismatch = data.speechMismatch as SpeechMismatch | null | undefined;
   const speechMatchReport = data.speechMatchReport as SpeechMatchReport | null | undefined;
   const speechReview = useMemo(() => speechReviewItems(speechMismatch, speechMatchReport), [speechMatchReport, speechMismatch]);
@@ -115,6 +129,25 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     };
   }, [playbackParts, source?.url]);
   useEffect(() => {
+    const media = mediaRef.current;
+    if (!media) return;
+    const sync = () => {
+      setMediaTime(media.currentTime);
+      setMediaDuration(Number.isFinite(media.duration) ? media.duration : 0);
+      setMediaPlaying(!media.paused);
+      setMediaMuted(media.muted);
+    };
+    for (const event of ['loadedmetadata', 'durationchange', 'timeupdate', 'seeking', 'play', 'pause', 'ended', 'volumechange']) {
+      media.addEventListener(event, sync);
+    }
+    sync();
+    return () => {
+      for (const event of ['loadedmetadata', 'durationchange', 'timeupdate', 'seeking', 'play', 'pause', 'ended', 'volumechange']) {
+        media.removeEventListener(event, sync);
+      }
+    };
+  }, [source?.url, source?.kind]);
+  useEffect(() => {
     if (!project || !artifactRef || data.transcriptText || data.words.length === 0) return;
     let cancelled = false;
     void fetchRemixArtifact(project, artifactRef).then((artifact) => {
@@ -132,23 +165,59 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     }
   }, [artifactRef, data.alignedScriptRef, id, scriptRef, updateNodeData]);
 
-  const start = async (mode: 'transcribe' | 'align') => {
-    if (busy || operationId || data.managedOperationId) return;
-    if (!project || !source) { setError('请先连接已上传的音频或带声音视频'); return; }
-    if (mode === 'align' && !scriptRef) { setError('请先连接已保存脚本的节点'); return; }
-    if (data.words.length > 0 && !window.confirm('重新识别会替换当前校字结果，确定继续吗？')) return;
+  const start = async (mode: 'transcribe' | 'align', reconcile = false) => {
+    const live = useCanvasStore.getState().nodes.find(node => node.id === id)?.data;
+    if (busy || operationId || live?.operationId || live?.managedOperationId || (live?.transcriptSubmissionPending && !reconcile)) return;
+    const saved = live?.transcriptSubmissionRequest as { project: string; request: SpeechSubmission } | undefined;
+    if (saved && (saved.project !== project || !saved.request || !['transcribe_media', 'align_script'].includes(saved.request.action)
+      || !saved.request.idempotencyKey || !saved.request.mediaPath || !Number.isInteger(saved.request.nodeRevision))) {
+      if (reconcile) updateNodeData(id, { transcriptSubmissionPending: null });
+      setError('原转写提交范围已变化，请核对已有任务'); return;
+    }
+    if (!project || !source) {
+      if (reconcile) updateNodeData(id, { transcriptSubmissionPending: null });
+      setError('请先连接已上传的音频或带声音视频'); return;
+    }
+    if (!saved && mode === 'align' && !scriptRef) { setError('请先连接已保存脚本的节点'); return; }
+    if (!saved && data.words.length > 0 && !window.confirm('重新识别会替换当前校字结果，确定继续吗？')) return;
+    const revision = (typeof data.nodeRevision === 'number' ? data.nodeRevision : 0) + 1;
+    const request: SpeechSubmission = saved?.request ?? (mode === 'align'
+      ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
+      : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
+    const submissionKey = request.idempotencyKey;
+    const ownsSubmission = () => useCanvasStore.getState().nodes.find(node => node.id === id)?.data.transcriptSubmissionPending === submissionKey;
+    updateNodeData(id, { transcriptSubmissionPending: submissionKey, transcriptSubmissionRequest: { project, request } });
     setBusy(true); setError(null);
     try {
-      const revision = (typeof data.nodeRevision === 'number' ? data.nodeRevision : 0) + 1;
-      const task = await submitRemixProcessAction(project, mode === 'align'
-        ? { action: 'align_script', mediaPath: source.path, scriptRef: scriptRef!, idempotencyKey: crypto.randomUUID(), nodeRevision: revision }
-        : { action: 'transcribe_media', mediaPath: source.path, language, idempotencyKey: crypto.randomUUID(), nodeRevision: revision });
-      updateNodeData(id, { operationId: task.operation_id, sourceMediaPath: source.path, nodeRevision: revision, status: 'needs_review', unresolved: [], artifactRef: null, reviewArtifactRef: null, speechMismatch: null, speechMatchReport: null, words: [], transcriptText: null, pendingScriptRef: mode === 'align' ? scriptRef : null, alignedScriptRef: null, alignmentStale: false });
+      const key = JSON.stringify([project, submissionKey]);
+      let admission = activeSubmissions.get(key);
+      if (!admission) {
+        admission = submitRemixProcessAction(project, request).finally(() => activeSubmissions.delete(key));
+        activeSubmissions.set(key, admission);
+      }
+      const task = await admission;
+      if (!ownsSubmission()) {
+        if (useCanvasStore.getState().nodes.find(node => node.id === id)?.data.operationId === task.operation_id) setOperationId(task.operation_id);
+        return;
+      }
+      updateNodeData(id, { transcriptSubmissionPending: null, transcriptSubmissionRequest: null, operationId: task.operation_id, sourceMediaPath: request.mediaPath, nodeRevision: request.nodeRevision, status: 'needs_review', unresolved: [], artifactRef: null, reviewArtifactRef: null, speechMismatch: null, speechMatchReport: null, words: [], transcriptText: null, pendingScriptRef: request.action === 'align_script' ? request.scriptRef : null, alignedScriptRef: null, alignmentStale: false });
       setShowWordDetails(false);
       setOperationId(task.operation_id);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
-    finally { setBusy(false); }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      if (ownsSubmission()) updateNodeData(id, { status: 'failed', unresolved: [`转写提交未完成：${message}`] });
+      setError(message);
+    }
+    finally { if (ownsSubmission()) updateNodeData(id, { transcriptSubmissionPending: null }); setBusy(false); }
   };
+  useEffect(() => {
+    // Reconcile one saved admission per mount with its actual original key.
+    // A failed receipt leaves manual retry available with the same request.
+    if (submissionReconciled.current || operationId || !data.transcriptSubmissionRequest) return;
+    submissionReconciled.current = true;
+    const saved = data.transcriptSubmissionRequest as { request?: SpeechSubmission };
+    void start(saved.request?.action === 'align_script' ? 'align' : 'transcribe', true);
+  }, [data.transcriptSubmissionRequest, id, operationId, project]);
   useEffect(() => {
     const mode = data.autoStartMode;
     if (mode !== 'transcribe' && mode !== 'align') { autoStartConsumed.current = false; return; }
@@ -269,39 +338,84 @@ export const TranscriptNode = memo(({ id, data, selected }: Props) => {
     if (action === 'export_transcript_srt') void exportResult('srt');
   }), [artifactRef?.artifactId, artifactRef?.revision, id, project]);
 
+  const sourceName = source?.path.split('/').pop() || source?.path;
+  const mediaStatus = operationId || data.managedOperationId || data.transcriptSubmissionPending
+    ? '处理中…'
+    : data.status === 'no_speech' ? '未识别到人声'
+      : artifactRef ? `已完成 · 版本 ${artifactRef.revision}`
+        : data.status === 'failed' ? '失败' : '待转写';
+  const togglePlayback = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    if (media.paused) void media.play().catch(() => setError('无法播放来源素材'));
+    else media.pause();
+  };
+
   return <div className="group relative w-[420px]" onClick={() => setSelectedNode(id)}>
     <Handle type="target" position={Position.Left} id="target" className="!h-2 !w-2 !border-0 !bg-[rgb(148,163,184)]" />
     <Handle type="source" position={Position.Right} id="source" className="!h-2 !w-2 !border-0 !bg-[rgb(45,212,191)]" />
     <NodeHeader className={NODE_HEADER_FLOATING_POSITION_CLASS} icon={<FileText className="h-4 w-4" />} titleText={data.displayName || '转写与对齐'} editable={false} />
     <NodeResizeHandle minWidth={320} minHeight={220} maxWidth={760} maxHeight={900} />
     <div className={`flex max-h-[600px] flex-col overflow-hidden rounded-[var(--node-radius)] border ${CANVAS_NODE_PANEL_SURFACE_CLASS} ${canvasNodeFrameClass({ selected })}`}>
-      <div className="border-b border-white/[0.08] p-3 text-xs text-text-muted">
-        <div className="mb-2 truncate" title={source?.path}>{source ? `${source.kind === 'audio' ? '音频' : '视频'}：${source.path.split('/').pop()}` : '请连接上传的音频或带声音视频'}</div>
-        {source?.url && (source.kind === 'audio' ? <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} controls className="w-full" /> : <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} controls className="max-h-40 w-full" />)}
-        <div className="mt-2 flex items-center gap-2">
-          <span>{language === 'zh' ? '中文' : language === 'en' ? 'English' : '自动识别'}</span>
-          <span className="text-white/20">·</span>
-          <span>{operationId || data.managedOperationId ? '处理中…' : artifactRef ? `已完成 · 版本 ${artifactRef.revision}` : data.status === 'failed' ? '失败' : '待转写'}</span>
+      <div className="border-b border-[rgb(var(--border-rgb))] p-3">
+        <div className="flex gap-3">
+          <div className="flex h-36 w-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[rgb(var(--border-rgb))] bg-[rgb(var(--bg-rgb))]">
+            {source?.url && source.kind === 'video'
+              ? <video ref={mediaRef as React.RefObject<HTMLVideoElement>} src={source.url} preload="metadata" playsInline className="h-full w-full object-contain" />
+              : source?.url && source.kind === 'audio'
+                ? <><audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={source.url} preload="metadata" /><AudioLines aria-hidden="true" className="h-7 w-7 text-text-muted" /></>
+                : <FileText aria-hidden="true" className="h-7 w-7 text-text-muted" />}
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="text-xs text-text-muted">{source ? source.kind === 'audio' ? '来源音频' : '来源视频' : '来源素材'}</div>
+            <div className="mt-1 truncate text-sm font-medium text-text-dark" title={source?.path}>
+              {sourceName || '请连接音频或带声音视频'}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
+              <span>{language === 'zh' ? '中文' : language === 'en' ? 'English' : '自动识别'}</span>
+              <span aria-hidden="true" className="h-1 w-1 rounded-full bg-[rgb(var(--text-muted-rgb))]" />
+              <span>{mediaStatus}</span>
+            </div>
+            {source?.url && <div className="mt-auto space-y-2">
+              <div className="flex items-center gap-2 text-xs text-text-muted">
+                <button type="button" aria-label={mediaPlaying ? '暂停原片' : '播放原片'} onClick={togglePlayback} className="nodrag flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[rgb(var(--accent-rgb)/0.16)] text-[rgb(var(--accent-rgb))] hover:bg-[rgb(var(--accent-rgb)/0.24)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[rgb(var(--accent-rgb))]">
+                  {mediaPlaying ? <Pause aria-hidden="true" className="h-3.5 w-3.5 fill-current" /> : <Play aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}
+                </button>
+                <span className="min-w-0 flex-1 whitespace-nowrap font-mono">{playbackTime(mediaTime)} / {playbackTime(mediaDuration)}</span>
+                <button type="button" aria-label={mediaMuted ? '取消静音' : '静音'} onClick={() => { if (mediaRef.current) mediaRef.current.muted = !mediaRef.current.muted; }} className="nodrag rounded-sm p-1 text-text-muted hover:text-text-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-[rgb(var(--accent-rgb))]">
+                  {mediaMuted ? <VolumeX aria-hidden="true" className="h-4 w-4" /> : <Volume2 aria-hidden="true" className="h-4 w-4" />}
+                </button>
+                {source.kind === 'video' && <button type="button" aria-label="全屏播放" onClick={() => void mediaRef.current?.requestFullscreen?.()} className="nodrag rounded-sm p-1 text-text-muted hover:text-text-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-[rgb(var(--accent-rgb))]">
+                  <Maximize2 aria-hidden="true" className="h-4 w-4" />
+                </button>}
+              </div>
+              <input type="range" aria-label="播放进度" min={0} max={mediaDuration || 0} step={0.01} value={Math.min(mediaTime, mediaDuration || 0)} disabled={!mediaDuration} onChange={(event) => { if (mediaRef.current) mediaRef.current.currentTime = Number(event.target.value); setMediaTime(Number(event.target.value)); }} className="nodrag h-1 w-full cursor-pointer accent-[rgb(var(--accent-rgb))] disabled:cursor-not-allowed" />
+            </div>}
+          </div>
         </div>
       </div>
-      <div className="ui-scrollbar nowheel overflow-auto p-2">
+      <div className="ui-scrollbar nowheel overflow-auto p-3">
+        <div className="mb-2 flex items-center justify-between text-xs text-text-muted">
+          <span className="font-medium text-text-dark">转写内容</span>
+          {data.words.length > 0 && <span>{data.words.length} 词</span>}
+        </div>
         {Boolean(data.alignmentStale) && <p className="px-2 py-1 text-xs text-amber-300">{data.unresolved?.[0] || (data.pendingCorrectionText ? '台词已修改，请同步脚本并重新对齐' : '脚本已修改，请重新对齐')}</p>}
         {hasSpeechReview && <div className="mx-2 mb-2 rounded-[12px] border border-white/10 bg-surface-field p-2 text-xs text-text-muted">
           <ul className="space-y-1">{(speechReview.length ? speechReview : ['对齐覆盖不完整，请核对台词']).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
           <div className="mt-2 flex gap-2">
             <button type="button" onClick={reviewScript} className={NODE_CONTEXT_CONTROL_TRIGGER_CLASS}>校对台词</button>
-            <button type="button" disabled={!scriptRef || busy || Boolean(operationId || data.managedOperationId) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>重新对齐</button>
+            <button type="button" disabled={!scriptRef || busy || Boolean(operationId || data.managedOperationId || data.transcriptSubmissionPending) || !source} onClick={() => void start('align')} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>重新对齐</button>
           </div>
         </div>}
-        {data.words.length > 0 && <><p className="whitespace-pre-wrap px-2 py-2 text-[13px] leading-6 text-text-dark">{playbackParts.map((part, index) => part.startUs === undefined
+        {data.words.length > 0 && <><p className="whitespace-pre-wrap text-sm leading-6 text-text-dark">{playbackParts.map((part, index) => part.startUs === undefined
           ? <span key={index}>{part.text}</span>
-          : <button key={index} type="button" aria-label={`跳转到 ${part.text}，${stamp(part.startUs)}`} aria-current={activePartIndex === index ? 'true' : undefined} onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = part.startUs! / 1_000_000; setActivePartIndex(index); }} className={`nodrag rounded-sm text-inherit hover:bg-white/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/50 ${activePartIndex === index ? 'bg-primary/25' : ''}`}>{part.text}</button>)}</p><button type="button" onClick={() => setShowWordDetails((current) => !current)} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mx-2 my-1`}>{showWordDetails ? '收起逐词校对' : `展开逐词校对（${data.words.length}）`}</button></>}
+          : <button key={index} type="button" aria-label={`跳转到 ${part.text}，${stamp(part.startUs)}`} aria-current={activePartIndex === index ? 'true' : undefined} onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = part.startUs! / 1_000_000; setActivePartIndex(index); }} className={`nodrag rounded-sm text-inherit hover:bg-[rgb(var(--accent-rgb)/0.12)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[rgb(var(--accent-rgb))] ${activePartIndex === index ? 'bg-[rgb(var(--accent-rgb)/0.2)]' : ''}`}>{part.text}</button>)}</p><button type="button" onClick={() => setShowWordDetails((current) => !current)} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} mt-3`}>{showWordDetails ? '收起逐词校对' : `展开逐词校对（${data.words.length}）`}</button></>}
         {showWordDetails && data.words.map((word, index) => <div key={`${word.startUs}-${index}`} className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px] text-text-dark">
           <button type="button" className="w-[145px] shrink-0 text-left font-mono text-[11px] text-text-muted" onClick={() => { if (mediaRef.current) mediaRef.current.currentTime = word.startUs / 1_000_000; }}>{stamp(word.startUs)} – {stamp(word.endUs)}</button>
           <input aria-label={`第 ${index + 1} 个字词`} value={edited[index] ?? word.text} onChange={(event) => { setConfirmedTiming(false); setEdited((current) => current.map((text, position) => position === index ? event.target.value : text)); }} className="nodrag min-w-0 flex-1 rounded-[12px] border border-white/10 bg-surface-field px-2 py-1 outline-none focus:border-white/25" />
           {typeof word.confidence === 'number' && word.confidence < 0.6 && <span className="shrink-0 text-amber-300">低置信度</span>}
         </div>)}
-        {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">暂无转写内容</p>}
+        {data.words.length === 0 && <p className="px-2 py-3 text-[12px] text-text-muted">{data.status === 'no_speech' ? '这段素材未识别到人声，原片拆解会继续分析画面。' : '暂无转写内容'}</p>}
       </div>
       {artifactRef && showWordDetails && <div className="border-t border-white/[0.08] p-3 text-xs"><label className="mb-2 flex items-center gap-2 text-text-muted"><input type="checkbox" checked={confirmedTiming} onChange={(event) => setConfirmedTiming(event.target.checked)} />仅校正同一发音和词边界，保留原时间</label><button type="button" disabled={!canSave || busy} onClick={() => void saveCorrections()} className={`${NODE_CONTEXT_CONTROL_TRIGGER_CLASS} disabled:opacity-50`}>保存校字</button></div>}
       {error && error !== data.unresolved?.[0] && <p role="alert" className="px-3 pb-2 text-xs text-red-300">{error}</p>}

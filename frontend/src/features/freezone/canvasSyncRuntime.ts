@@ -8,7 +8,7 @@ export type RemoteCanvasMerge = (
   remoteEdges: CanvasEdge[],
   localNodes: CanvasNode[],
   localEdges: CanvasEdge[],
-) => { nodes: CanvasNode[]; edges: CanvasEdge[] };
+) => { nodes: CanvasNode[]; edges: CanvasEdge[]; metadata?: Record<string, unknown> | null };
 
 export interface RemoteCanvasApplyOptions {
   /**
@@ -29,6 +29,14 @@ type RemoteCanvasApplier = (
 
 type CanvasFlush = () => Promise<boolean>;
 
+export interface FreezoneCanvasBaseline {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  revision: number | null;
+  metadata?: Record<string, unknown> | null;
+  localMetadata?: Record<string, unknown> | null;
+}
+
 export interface LocalProjectionPayload {
   projectionKey: string;
   nodes: CanvasNode[];
@@ -42,6 +50,7 @@ type LocalProjectionApplier = (
 type LocalProjectionRemover = (projectionKey: string) => boolean;
 
 interface RemoteCanvasRuntime {
+  sessionId: number;
   project: string;
   canvasId: string;
   apply: RemoteCanvasApplier;
@@ -51,9 +60,12 @@ interface RemoteCanvasRuntime {
   /** Include hydration and local saves in the revision barrier. */
   getRevision?: () => number | null;
   appliedRevision: number | null;
+  getBaseline?: () => FreezoneCanvasBaseline | null;
 }
 
 let currentRuntime: RemoteCanvasRuntime | null = null;
+let nextSessionId = 1;
+let runtimeEpoch = 0;
 const pendingLocalProjections = new Map<string, LocalProjectionPayload[]>();
 
 function runtimeKey(project: string, canvasId: string): string {
@@ -68,17 +80,26 @@ export function registerFreezoneCanvasRuntime(
   applyLocalProjection?: LocalProjectionApplier,
   removeLocalProjection?: LocalProjectionRemover,
   getRevision?: () => number | null,
+  getBaseline?: () => FreezoneCanvasBaseline | null,
 ): () => void {
   const runtime: RemoteCanvasRuntime = {
+    sessionId: nextSessionId++,
     project, canvasId, apply, flush, applyLocalProjection, removeLocalProjection,
-    getRevision, appliedRevision: null,
+    getRevision, getBaseline, appliedRevision: null,
   };
   currentRuntime = runtime;
+  runtimeEpoch += 1;
   return () => {
     if (currentRuntime === runtime) {
       currentRuntime = null;
+      runtimeEpoch += 1;
     }
   };
+}
+
+export function getFreezoneCanvasBaseline(project: string, canvasId: string): FreezoneCanvasBaseline | null {
+  if (!currentRuntime || currentRuntime.project !== project || currentRuntime.canvasId !== canvasId) return null;
+  return currentRuntime.getBaseline?.() ?? null;
 }
 
 /** null means no runtime is registered; false means an active runtime refused the data.
@@ -206,4 +227,20 @@ export function removeLocalFreezoneProjection(
 export function captureFreezoneCanvasScope(project: string, canvasId: string): () => boolean {
   const runtime = currentRuntime;
   return () => Boolean(runtime && currentRuntime === runtime && runtime.project === project && runtime.canvasId === canvasId);
+}
+
+/** Autosave has no canvasId argument, so bind it to the current registration
+ * at schedule/flush time. A later registration, even for the same IDs, is a
+ * different session and must have an independent queue.
+ */
+export function captureRegisteredFreezoneCanvasSession(project: string): { id: string; isCurrent: () => boolean } {
+  const runtime = currentRuntime;
+  if (!runtime) {
+    const epoch = runtimeEpoch;
+    return { id: `unregistered-${epoch}`, isCurrent: () => currentRuntime === null && runtimeEpoch === epoch };
+  }
+  return {
+    id: String(runtime.sessionId),
+    isCurrent: () => currentRuntime === runtime && runtime.project === project,
+  };
 }

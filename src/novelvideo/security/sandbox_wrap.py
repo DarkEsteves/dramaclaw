@@ -309,7 +309,8 @@ def build_macos_profile(spec: SandboxSpec) -> str:
         "\n;; READ deny: per-user data roots wholesale "
         "(blocks all peers incl. future — no enumeration)\n"
     )
-    parts.append(_deny_read_block(_expand_aliases(spec.data_roots())))
+    data_roots = _expand_aliases(spec.data_roots())
+    parts.append(_deny_read_block(data_roots))
 
     # --- READ allow-back: this user's own trees + shared read-only resources ---
     # Comes AFTER the data-root deny so last-match-wins re-opens only the
@@ -322,18 +323,34 @@ def build_macos_profile(spec: SandboxSpec) -> str:
     )
     parts.append(_allow_read_block(allow_back))
 
+    host_secrets = _expand_aliases([
+        Path.home() / ".ssh", Path.home() / ".gnupg", Path.home() / ".aws",
+        Path.home() / ".kube", Path.home() / ".docker",
+        Path("/etc/shadow"), Path("/etc/sudoers"), Path("/etc/sudoers.d"),
+    ])
+    # SQLite's VFS stats ancestors while resolving an already-authorized DB
+    # path. Only data-root ancestors need reopening; other ancestors already
+    # have broad metadata access. Never reopen a peer or host-secret subtree:
+    # a literal metadata allow can outrank a later subpath read deny.
+    ancestors: set[Path] = set()
+    for authorized in [*allow_back, *_expand_aliases([home])]:
+        for path in (authorized, authorized.resolve()):
+            ancestors.update(path.parents)
+    roots = {*data_roots, *(root.resolve() for root in data_roots)}
+    secrets = {*host_secrets, *(path.resolve() for path in host_secrets)}
+    ancestors = {
+        path for path in ancestors & roots
+        if not any(path.is_relative_to(secret) for secret in secrets)
+    }
+    parts.append("\n;; READ metadata: exact ancestors of authorized paths only\n")
+    if ancestors:
+        parts.append("(allow file-read-metadata\n")
+        parts.extend(f"  (literal {json.dumps(str(path))})\n" for path in sorted(ancestors))
+        parts.append(")\n")
+
     # --- READ deny: host secrets (LAST so nothing above can re-open them) ---
     parts.append("\n;; READ deny: host secrets — overrides every allow above\n")
-    parts.append(_deny_read_block(_expand_aliases([
-        Path.home() / ".ssh",
-        Path.home() / ".gnupg",
-        Path.home() / ".aws",
-        Path.home() / ".kube",
-        Path.home() / ".docker",
-        Path("/etc/shadow"),
-        Path("/etc/sudoers"),
-        Path("/etc/sudoers.d"),
-    ])))
+    parts.append(_deny_read_block(host_secrets))
 
     # --- WRITE: base profile is `deny default`, so peer/other-user writes
     #     (existing AND future) are already denied without enumeration. Only

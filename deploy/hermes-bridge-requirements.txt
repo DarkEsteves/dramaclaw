@@ -1,0 +1,3 @@
+# The fork supplies Pydantic. Keep only portable canvas validation dependencies
+# here; application model/provider runtimes belong in the application environment.
+jsonschema>=4.20.0,<5

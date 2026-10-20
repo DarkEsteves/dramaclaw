@@ -10,9 +10,10 @@ describe('script canvas state', () => {
   it('shows the remix editor only for a linked or existing remix script', () => {
     expect(remixScriptEditorLabel({}, false)).toBeNull();
     expect(remixScriptEditorLabel({ prompt: '普通分镜提示词' }, false)).toBeNull();
-    expect(remixScriptEditorLabel({}, true)).toBe('编写改编脚本');
-    expect(remixScriptEditorLabel({ remixScriptDraft: { dialogue: '新台词', selections: [] } }, false)).toBe('编辑改编脚本');
-    expect(remixScriptEditorLabel({ remixScriptRef: saved }, false)).toBe('编辑改编脚本');
+    expect(remixScriptEditorLabel({}, true)).toBe('编辑作品脚本');
+    expect(remixScriptEditorLabel({ remixScriptDraft: { dialogue: '新台词', selections: [] } }, false)).toBe('编辑作品脚本');
+    expect(remixScriptEditorLabel({ remixScriptRef: saved }, false)).toBe('编辑作品脚本');
+    expect(remixScriptEditorLabel({ remixRole: 'remix_script', sourceVideoStoryId: 'story-1' }, false)).toBe('编辑作品脚本');
   });
 
   it('shows the draft and asks to save when there is no saved script', () => {

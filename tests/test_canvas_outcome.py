@@ -9,7 +9,37 @@ from novelvideo.chat.canvas_outcome import (
     recover_unstructured_canvas_message,
     CANVAS_FORMAT_REPAIR_PROMPT,
     needs_canvas_format_repair,
+    summarize_canvas_operations,
 )
+
+
+def test_unverified_transport_completion_cannot_become_saved_success():
+    result = summarize_canvas_operations(operations=[
+        {"call_id": "write-a", "status": "completed", "verified": False,
+         "receipt": None, "error_code": None},
+    ], disposition="completed")
+    assert result["blocking_call_ids"] == ["write-a"]
+    assert result["operations"][0]["status"] == "unverified"
+
+
+def test_success_does_not_hide_an_independent_failure():
+    result = summarize_canvas_operations(operations=[
+        {"call_id": "write-a", "status": "completed", "verified": True,
+         "receipt": {"revision": 4}, "error_code": None},
+        {"call_id": "action-b", "status": "failed", "verified": False,
+         "receipt": None, "error_code": "provider_error"},
+    ], disposition="completed")
+    assert result["blocking_call_ids"] == ["action-b"]
+    assert result["operations"][0]["status"] == "completed"
+
+
+def test_canvas_agent_final_answer_is_natural_language():
+    from novelvideo.chat.service import _codex_developer_instructions
+
+    instructions = _codex_developer_instructions("freezone_canvas")
+    assert "ordinary conversation in natural language" in instructions
+    assert "Your final response MUST be a JSON object" not in instructions
+    assert "canvas_receipts" not in instructions
 
 
 def reply(mode="read_only", claims=None, message="建议保持当前布局。"):
@@ -45,24 +75,13 @@ def test_complete_message_can_be_recovered_from_truncated_reply():
     assert recover_unstructured_canvas_message('{"message":"视频规划') is None
 
 
-def test_freezone_instructions_embed_schema_and_valid_greeting_example():
+def test_freezone_instructions_allow_natural_streaming_without_final_envelope():
     from novelvideo.chat import service
 
     instructions = service._codex_developer_instructions("freezone_canvas")
-    schema = json.loads(instructions.rsplit("\n", 1)[1])
-    assert schema == CANVAS_REPLY_SCHEMA
-    example, _ = json.JSONDecoder().raw_decode(
-        instructions.split("For a greeting, return ", 1)[1]
-    )
-    Draft202012Validator(schema).validate(example)
-    assert (
-        finalize_canvas_reply(json.dumps(example), attempts={}, receipts=set())
-        == example["message"]
-    )
-    assert example["mode"] == "read_only"
-    assert example["canvas_receipts"] == []
-    assert "not plain text or Markdown" in instructions
-    assert "interactive-story or interactive-ad proposal" in instructions
+    assert "Reply to ordinary conversation in natural language" in instructions
+    assert "Tool execution and canvas persistence are independently verified" in instructions
+    assert "Your final response must be exactly one JSON object" not in instructions
     assert "ordinary conversation" in instructions
     assert "canvas_receipts" not in service._codex_developer_instructions("default")
 
@@ -165,6 +184,21 @@ def test_workflow_draft_is_pending_approval_not_success_or_failure():
     )
     assert "等待你确认" in result
     assert "操作未完成" not in result
+
+
+@pytest.mark.parametrize('state', ['accepted', 'running'])
+def test_submitted_edit_is_not_reported_as_completed(state):
+    result = finalize_canvas_reply(reply('mutation'),
+                                   attempts={'edit': state}, receipts=set())
+    assert '尚未完成' in result
+    assert '生成完成' not in result
+
+
+def test_accepted_and_running_canvas_operations_have_distinct_messages():
+    assert '已提交' in finalize_canvas_reply(reply(),
+        attempts={'edit': 'accepted'}, receipts=set())
+    assert '进行中' in finalize_canvas_reply(reply(),
+        attempts={'edit': 'running'}, receipts=set())
 
 
 @pytest.mark.parametrize(

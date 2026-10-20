@@ -33,7 +33,7 @@ import {
   buildCanvasActionCatalog,
   BASE_CANVAS_ACTION_CAPABILITIES,
 } from "@/features/freezone/context/canvasActionCatalog";
-import { validateCanvasChatCommandEnvelopes } from "@/features/freezone/context/canvasCommandValidator";
+import { preflightCanvasChatCommandEnvelopes } from "@/features/freezone/context/canvasCommandValidator";
 import {
   CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
   isCanvasChatRunNodeAction,
@@ -70,6 +70,7 @@ export function canvasSelectionAttachmentDeliveryKey(
 
 type CanvasNodeReferenceItem = {
   html_artifact?: { id: string; version: number };
+  production_plan?: NativeProductionPlanReference;
   workflow_identity?: {
     instance_id: string;
     plan_node_id: string | null;
@@ -89,6 +90,21 @@ type CanvasNodeReferenceItem = {
   position: { x: number; y: number };
   action_catalog: CanvasNodeActionCatalog & Record<string, unknown>;
 };
+
+type NativeProductionPlanReference = {
+  remix_role: "production_plan";
+  schema: "production_plan.v2" | null;
+  plan_ref: { artifact_id: string; revision: number } | null;
+  goal: string | null;
+  output: {
+    width: number; height: number; fps_num: number; fps_den: number; background?: string;
+  } | null;
+  dirty: boolean;
+  conflict: boolean;
+};
+
+const PRODUCTION_PLAN_REFERENCE_INSTRUCTION =
+  "production_plan is read-only native author data, independent of the generic script prompt. Copy freezone_get_production_state.artifact_id from node_detail.production_plan.plan_ref.artifact_id (or the referenced production_plan_json.plan_ref.artifact_id), not the canvas node_id; copy its revision too. A null plan_ref is unsaved; dirty/conflict means local edits are pending. Read saved state before proposing freezone_prepare_production_edit with its exact plan_ref; do not overwrite native author data through generic node parameters.";
 
 type CanvasEdgeReferenceItem = {
   edge_id: string;
@@ -381,12 +397,41 @@ function nodeTextReference(
   return { text_field: field, text_content: textValueFromField(node, field) };
 }
 
+function nativeProductionPlanReference(node: CanvasNode): NativeProductionPlanReference | null {
+  if (node.type !== CANVAS_NODE_TYPES.script || node.data.remixRole !== "production_plan") return null;
+  const ref = recordOrNull(node.data.productionPlanV2Ref);
+  const planRef = ref && typeof ref.artifactId === "string"
+    && /^[A-Za-z0-9_-]{1,64}$/.test(ref.artifactId)
+    && Number.isSafeInteger(ref.revision) && Number(ref.revision) > 0
+      ? { artifact_id: ref.artifactId, revision: Number(ref.revision) }
+      : null;
+  const v2Draft = recordOrNull(node.data.productionPlanV2Draft);
+  const draft = v2Draft?.schema_version === 2 ? v2Draft
+    : !planRef ? recordOrNull(node.data.productionPlanDraft) : null;
+  const sourceOutput = v2Draft?.schema_version === 2 ? recordOrNull(v2Draft.output) : null;
+  const output = sourceOutput && ["width", "height", "fps_num", "fps_den"].every(
+    (key) => Number.isSafeInteger(sourceOutput[key]) && Number(sourceOutput[key]) > 0,
+  ) ? {
+    width: Number(sourceOutput.width), height: Number(sourceOutput.height),
+    fps_num: Number(sourceOutput.fps_num), fps_den: Number(sourceOutput.fps_den),
+    ...(typeof sourceOutput.background === "string" && /^#[0-9a-fA-F]{6}$/.test(sourceOutput.background)
+      ? { background: sourceOutput.background } : {}),
+  } : null;
+  return {
+    remix_role: "production_plan", schema: planRef ? "production_plan.v2" : null,
+    plan_ref: planRef, goal: compactTextPreview(stringOrNull(draft?.goal)), output,
+    dirty: node.data.productionPlanV2Dirty === true || !planRef && node.data.productionPlanDirty === true,
+    conflict: node.data.productionPlanV2Conflict === true,
+  };
+}
+
 function nodeReferenceItem(
   node: CanvasNode,
   context?: { nodes?: readonly CanvasNode[]; edges?: readonly CanvasEdge[] },
   options: { includeActionCatalog?: boolean } = {},
 ): CanvasNodeReferenceItem {
   const textReference = nodeTextReference(node);
+  const productionPlan = nativeProductionPlanReference(node);
   const artifactId = node.data.artifactId;
   const artifactVersion = node.data.artifactVersion;
   const htmlArtifact = node.type === CANVAS_NODE_TYPES.htmlArtifact &&
@@ -414,6 +459,7 @@ function nodeReferenceItem(
     label: resolveNodeDisplayName(node.type, node.data),
     ...textReference,
     ...(htmlArtifact ? { html_artifact: htmlArtifact } : {}),
+    ...(productionPlan ? { production_plan: productionPlan } : {}),
     ...(workflowIdentity ? { workflow_identity: workflowIdentity } : {}),
     media_type: nodeMediaType(node),
     source_url: nodeSourceUrl(node),
@@ -1978,10 +2024,12 @@ export async function buildCanvasContextRequestResponses(params: {
               envelopes,
               params.nodes.map((node) => node.id),
             );
-          const validation = validateCanvasChatCommandEnvelopes(
+          const validation = await preflightCanvasChatCommandEnvelopes(
             normalizedEnvelopes,
             params.nodes,
             params.edges,
+            params.project,
+            params.canvasId,
           );
           response.push({
             type: "validate_canvas_commands",
@@ -2352,6 +2400,7 @@ function compactNodeDetailItem(
     position: node.position,
   };
   if (node.html_artifact) item.html_artifact = node.html_artifact;
+  if (node.production_plan) item.production_plan = node.production_plan;
   if (node.workflow_identity)
     item.workflow_identity = node.workflow_identity;
   if (node.text_field) item.text_field = node.text_field;
@@ -2398,14 +2447,34 @@ function buildCompactCanvasNodeDetailPayload(
     nodes: payload.nodes.map((node) => {
       const item = node as CanvasNodeReferenceItem;
       const sourceNode = nodeById.get(item.node_id);
-      return compactNodeDetailItem(
+      const detail = compactNodeDetailItem(
         item,
         sourceNode ? nodeReferenceMedia(sourceNode, allNodes, edges) : [],
       );
+      if (sourceNode?.type === 'videoStoryNode') {
+        const data = sourceNode.data as Record<string, unknown>;
+        const raw = isRecord(data.rawResult) ? data.rawResult : null;
+        const story = raw && isRecord(raw.video_story) ? raw.video_story : null;
+        const status = data.analysisError ? 'failed' : data.isAnalyzing ? 'running' : raw ? 'completed' : 'not_started';
+        detail.reference_analysis = { status, analysis_node_id: sourceNode.id,
+          run_id: data.referenceAnalysisRunId ?? data.referenceAnalysisCompletedRunId ?? null,
+          source_url: data.sourceVideoUrl ?? null,
+          summary: typeof story?.summary === 'string' ? story.summary.slice(0, 1200) : null,
+          result_ref: data.referenceBlueprintRef ?? null,
+          analysis_ref: data.referenceAnalysisRef ?? null,
+          evidence_ref: data.referenceEvidenceRef ?? null,
+          transcript_ref: data.referenceTranscriptRef ?? null,
+          blueprint_ref: data.referenceBlueprintRef ?? null,
+          next_action: status === 'running' ? 'await_completion_event' : status === 'completed' ? 'freezone_get_production_progress' : 'inspect_error',
+        };
+      }
+      return detail;
     }),
     edges: Array.isArray(payload.edges) ? payload.edges : [],
     instruction:
-      "This is compact node detail. workflow_identity means the node belongs to a persisted workflow; a one-node workflow is still a workflow and run/continue/resume must use freezone_run_workflow, never freezone_run_node_action. Use node.parameters only for editable node data fields, current values, and enum options. Node parameters are not toolbar/action/tool parameters. If the user asks about an action or panel such as HD/upscale, crop, matting, split, lighting, rotate, or download, call freezone_get_node_action_catalog with node_id and action before answering. If a node includes reference_media, use mention values such as @图片1 in prompt edits; numbering matches the node's top reference thumbnails from left to right. For a group child that needs inspection, call freezone_get_node_detail with that child node_id.",
+      "This is compact node detail. workflow_identity means the node belongs to a persisted workflow; a one-node workflow is still a workflow and run/continue/resume must use freezone_run_workflow, never freezone_run_node_action. Use node.parameters only for editable node data fields, current values, and enum options. Node parameters are not toolbar/action/tool parameters. If the user asks about an action or panel such as HD/upscale, crop, matting, split, lighting, rotate, or download, call freezone_get_node_action_catalog with node_id and action before answering. If a node includes reference_media, use mention values such as @图片1 in prompt edits; numbering matches the node's top reference thumbnails from left to right. For a group child that needs inspection, call freezone_get_node_detail with that child node_id."
+      + (payload.nodes.some((node) => Boolean((node as CanvasNodeReferenceItem).production_plan))
+        ? ` ${PRODUCTION_PLAN_REFERENCE_INSTRUCTION}` : ""),
   };
 }
 
@@ -2432,6 +2501,9 @@ export function buildCanvasNodeReferenceContext(
     "html_artifact_json is read-only saved identity/version. Use the HTML node actions read_source and update_source; preserve artifact identity and pass the read base_version. Never change artifactId/artifactVersion via editable node fields.",
     "Keep user-visible replies concise and non-technical. Do not mention raw JSON, schema names, field ids, action ids, command ids, or node_id unless the user asks for implementation details.",
   ];
+  if (payloads.some((payload) => [...(payload.display_nodes ?? []), ...payload.nodes].some((node) => node.production_plan))) {
+    lines.push(PRODUCTION_PLAN_REFERENCE_INSTRUCTION);
+  }
 
   payloads.forEach((payload, payloadIndex) => {
     lines.push("");
@@ -2477,6 +2549,8 @@ export function buildCanvasNodeReferenceContext(
       lines.push(`${prefix}_position_json: ${JSON.stringify(node.position)}`);
       if (node.html_artifact)
         lines.push(`${prefix}_html_artifact_json: ${JSON.stringify(node.html_artifact)}`);
+      if (node.production_plan)
+        lines.push(`${prefix}_production_plan_json: ${JSON.stringify(node.production_plan)}`);
       if (node.workflow_identity)
         lines.push(
           `${prefix}_workflow_identity_json: ${JSON.stringify(node.workflow_identity)}`,

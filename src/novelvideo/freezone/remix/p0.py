@@ -20,111 +20,36 @@ class AlignmentRunner(Protocol):
         """Return character spans with Unicode code-point ranges and microseconds."""
 
 
-class WhisperXAlignmentRunner:
-    """Lazy WhisperX adapter using only locally available packages and weights."""
+class NewApiAlignmentRunner:
+    """Use the configured gateway's measured word boundaries for P0 fixtures."""
 
-    def __init__(
-        self,
-        *,
-        device: str,
-        model_name: str,
-        compute_type: str,
-        batch_size: int,
-        model_cache: Path | None = None,
-    ) -> None:
-        self.device = device
-        self.model_name = model_name
-        self.compute_type = compute_type
-        self.batch_size = batch_size
-        self.model_cache = model_cache
-        self.engine_version = "whisperx-unloaded"
+    engine_version = "audio-transcribe"
+    device = "newapi"
+
+    def __init__(self, *, transcriber: Any | None = None) -> None:
+        if transcriber is None:
+            from novelvideo.freezone.remix.alignment import configured_newapi_transcriber
+
+            transcriber = configured_newapi_transcriber()
+        self.transcriber = transcriber
 
     def align(self, audio: Path, *, language: str, script: str) -> list[dict[str, Any]]:
-        """Transcribe, verify the controlled script, then force-align it to audio.
-
-        Imports and model loading happen here rather than when the command starts.
-        Both model loading APIs are asked to use local files only, so this harness
-        cannot silently obtain weights during an experiment.
-        """
-        try:
-            import whisperx
-        except ImportError as error:  # pragma: no cover - exercised on configured host
-            raise RuntimeError("WhisperX is not installed") from error
-
-        self.engine_version = getattr(whisperx, "__version__", "whisperx-unknown")
-        cache = str(self.model_cache) if self.model_cache else None
-        model = whisperx.load_model(
-            self.model_name,
-            self.device,
-            compute_type=self.compute_type,
-            language=language,
-            download_root=cache,
-            local_files_only=True,
-        )
-        waveform = whisperx.load_audio(str(audio))
-        transcription = model.transcribe(
-            waveform, batch_size=self.batch_size, language=language
-        )
-        transcript = "".join(segment["text"] for segment in transcription["segments"])
-        if not transcription["segments"] or not transcript.strip():
+        result = self.transcriber.align(audio, script, language)
+        if result["status"] == "no_speech":
             raise ValueError("ASR produced no speech segments")
-        if _normalize_for_script_check(transcript) != _normalize_for_script_check(
-            script
-        ):
-            raise ValueError(
-                "ASR transcript does not match the controlled fixture script"
-            )
-        duration_s = max(
-            (float(segment["end"]) for segment in transcription["segments"]),
-            default=0.0,
-        )
-        if duration_s <= 0:
-            raise ValueError("ASR produced no speech segments")
-        align_model, metadata = whisperx.load_align_model(
-            language_code=language,
-            device=self.device,
-            model_dir=cache,
-            model_cache_only=True,
-        )
-        aligned = whisperx.align(
-            [{"text": script, "start": 0.0, "end": duration_s}],
-            align_model,
-            metadata,
-            waveform,
-            self.device,
-            return_char_alignments=True,
-        )
-        characters = [
-            character
-            for segment in aligned["segments"]
-            for character in segment.get("chars", [])
+        if result["status"] == "script_mismatch":
+            raise ValueError("ASR transcript does not match the controlled fixture script")
+        if result["status"] != "completed":
+            raise ValueError("ASR returned an unsupported status")
+        return [
+            {
+                "start_char": word["start_char"],
+                "end_char": word["end_char"],
+                "start_us": round(float(word["start"]) * 1_000_000),
+                "end_us": round(float(word["end"]) * 1_000_000),
+            }
+            for word in result["words"]
         ]
-        if "".join(character["char"] for character in characters) != script:
-            raise ValueError(
-                "forced alignment did not preserve the controlled fixture script"
-            )
-        timeline: list[dict[str, Any]] = []
-        for index, character in enumerate(characters):
-            if "start" not in character or "end" not in character:
-                continue
-            start_us = round(float(character["start"]) * 1_000_000)
-            end_us = round(float(character["end"]) * 1_000_000)
-            if end_us > start_us:
-                timeline.append(
-                    {
-                        "start_char": index,
-                        "end_char": index + 1,
-                        "start_us": start_us,
-                        "end_us": end_us,
-                    }
-                )
-        return timeline
-
-
-def _normalize_for_script_check(text: str) -> str:
-    return "".join(
-        character for character in text.casefold() if not character.isspace()
-    )
 
 
 def boundary_p95_ms(
@@ -230,7 +155,7 @@ def evaluate_p0_gate(
     """Return the evidence-based P0 decision without inventing ASR quality data."""
     blockers: list[str] = []
     if not asr_executable:
-        blockers.append("ASR/forced alignment is not executable")
+        blockers.append("ASR word alignment is not executable")
     for language in ("zh", "en"):
         count = annotated_boundary_counts.get(language, 0)
         p95 = boundary_p95_ms.get(language)

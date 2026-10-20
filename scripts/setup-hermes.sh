@@ -44,6 +44,19 @@ except Exception:
 PY
 }
 
+ensure_bridge_runtime() {
+  if ! "$HERMES_PYTHON" "$root_dir/deploy/verify_hermes_bridge.py" --dependencies-only; then
+    if [ "$mode" = "--check" ] || [ "$mode" = "check" ]; then
+      echo "Hermes canvas bridge dependencies are missing. Run: scripts/setup-hermes.sh" >&2
+      exit 1
+    fi
+    command -v uv >/dev/null 2>&1 || {
+      echo "uv is required to install Hermes canvas bridge dependencies." >&2; exit 2; }
+    uv pip install --python "$HERMES_PYTHON" -r "$root_dir/deploy/hermes-bridge-requirements.txt"
+  fi
+  "$HERMES_PYTHON" "$root_dir/deploy/verify_hermes_bridge.py"
+}
+
 if [ ! -x "$HERMES_PYTHON" ]; then
   if [ "$mode" = "--check" ] || [ "$mode" = "check" ]; then
     echo "Hermes isolated environment is not installed: $HERMES_ENV_DIR" >&2
@@ -59,6 +72,7 @@ if [ ! -x "$HERMES_PYTHON" ]; then
 fi
 
 if fork_is_installed; then
+  ensure_bridge_runtime
   echo "Hermes fork is installed ($("$HERMES_CLI_PATH" --version 2>/dev/null | head -n 1))."
   exit 0
 fi
@@ -99,4 +113,5 @@ if ! fork_is_installed; then
   exit 1
 fi
 
+ensure_bridge_runtime
 echo "Hermes fork ready: ${installed_sha:0:12} ($("$HERMES_CLI_PATH" --version 2>/dev/null | head -n 1))"

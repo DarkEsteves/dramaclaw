@@ -16,6 +16,7 @@ describe('createProductionPlanFromStory', () => {
     expect(createProductionPlanFromStory('story-1')).toBe('plan-1');
     expect(addNode).toHaveBeenCalledWith('scriptNode', { x: 400, y: 0 }, expect.objectContaining({
       remixRole: 'production_plan', productionPlanBlueprintRef: { artifactId: 'blueprint', revision: 2 },
+      productionPlanV2Draft: expect.objectContaining({ schema_version: 2, goal: '', beats: [], resources: [], placements: [] }),
     }));
     expect(addEdge).toHaveBeenCalledWith('story-1', 'plan-1');
   });

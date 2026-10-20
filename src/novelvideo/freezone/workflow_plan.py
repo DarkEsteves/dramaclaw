@@ -40,6 +40,7 @@ _OBJECT_TYPE_BY_NODE_TYPE = {
     "audioNode": "AudioNode",
     "videoComposeNode": "VideoNode",
     "htmlArtifactNode": "HtmlNode",
+    "videoStoryNode": "VideoNode",
 }
 
 _LINK_RULES = {
@@ -126,6 +127,10 @@ def compile_process_descriptors(plan: dict[str, Any], *, node_revision: int) -> 
         if not isinstance(node_id, str):
             raise ValueError("process node requires an id")
         bindings: dict[str, dict[str, str]] = {}
+        if action == "generate_production_plan_arrangement":
+            if data.get("remixRole") != "production_plan":
+                raise ValueError("arrangement requires a production plan node")
+            bindings["production_plan"] = {"node_id": node_id}
         for edge in incoming.get(node_id, []):
             source_id = edge.get("source")
             source = node_by_id.get(source_id)
@@ -176,6 +181,11 @@ def validate_workflow_plan(
     errors: list[dict[str, str]] = []
     if not isinstance(payload, dict):
         return _invalid([_issue("$", "plan must be an object")])
+    selected_skill = payload.get("skill")
+    is_reference_remix = (
+        isinstance(selected_skill, dict)
+        and selected_skill.get("id") == "reference-video-remix"
+    )
     errors.extend(_oversized_planning_text_issues(payload))
     if payload.get("schema_version") != WORKFLOW_PLAN_SCHEMA_VERSION:
         errors.append(
@@ -307,12 +317,14 @@ def validate_workflow_plan(
         alias, node_id = source.get("id"), source.get("node_id")
         if (not isinstance(alias, str) or not _ID_RE.fullmatch(alias)
                 or alias in node_types or not isinstance(node_id, str)
-                or not _ID_RE.fullmatch(node_id) or source.get("media_kind") != "image"):
+                or not _ID_RE.fullmatch(node_id)
+                or source.get("media_kind") not in ({"image", "reference_analysis"} if is_reference_remix else {"image"})):
             errors.append(_issue(path, "invalid external image input"))
             continue
         external_ids.add(alias)
-        node_types[alias] = "imageGenNode"
-        node_values[alias] = {"id": alias, "node_type": "imageGenNode", "data": {}}
+        external_type = "videoStoryNode" if source.get("media_kind") == "reference_analysis" else "imageGenNode"
+        node_types[alias] = external_type
+        node_values[alias] = {"id": alias, "node_type": external_type, "data": {}}
         node_indexes[alias] = -1
 
     top_level_skill = payload.get("skill")
@@ -375,7 +387,7 @@ def validate_workflow_plan(
         if target in external_ids:
             errors.append(_issue(f"{path}.target", "external input cannot be an edge target"))
         if source in external_ids and link_type != "media_input_for":
-            errors.append(_issue(f"{path}.link_type", "external image input requires media_input_for"))
+            errors.append(_issue(f"{path}.link_type", "external input requires media_input_for"))
         if source not in node_types:
             errors.append(_issue(f"{path}.source", f"unknown node: {source}"))
         if target not in node_types:
@@ -449,7 +461,7 @@ def validate_workflow_plan(
         for node_id, node_type in node_types.items()
         if node_type == "videoComposeNode"
     ]
-    if len(compose_node_ids) > 1:
+    if len(compose_node_ids) > 1 and not is_reference_remix:
         errors.append(
             _issue(
                 "nodes",
@@ -482,11 +494,29 @@ def validate_workflow_plan(
                 if _edge_link_type_value(edge) == "composition_input_for"
                 and node_types.get(str(edge.get("source") or "")) == "videoNode"
             ]
-            if not video_inputs:
+            production_plan_inputs = [
+                edge
+                for edge in compose_inputs
+                if is_reference_remix
+                and _edge_link_type_value(edge) == "composition_input_for"
+                and node_types.get(str(edge.get("source") or "")) == "scriptNode"
+                and isinstance(
+                    node_values.get(str(edge.get("source") or ""), {}).get("data"),
+                    dict,
+                )
+                and node_values[str(edge.get("source"))]["data"].get("remixRole")
+                == "production_plan"
+            ]
+            if len(production_plan_inputs) > 1:
+                errors.append(_issue(
+                    f"nodes[{node_index}]",
+                    "videoComposeNode may consume only one production plan",
+                ))
+            if not video_inputs and not production_plan_inputs:
                 errors.append(
                     _issue(
                         f"nodes[{node_index}]",
-                        "videoComposeNode requires at least one video composition input",
+                        "videoComposeNode requires at least one video or production plan composition input",
                     )
                 )
             if adjacency.get(node_id):

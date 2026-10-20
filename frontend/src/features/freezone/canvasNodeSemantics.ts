@@ -13,6 +13,7 @@ export type CanvasNodeIoRole =
   | "planning_text"
   | "input_text"
   | "context_text"
+  | "production_plan"
   | "image_output"
   | "audio_output"
   | "video_output";
@@ -32,6 +33,7 @@ export function isCanvasNodeIoRole(value: unknown): value is CanvasNodeIoRole {
     value === "planning_text" ||
     value === "input_text" ||
     value === "context_text" ||
+    value === "production_plan" ||
     value === "image_output" ||
     value === "audio_output" ||
     value === "video_output"
@@ -154,6 +156,8 @@ export function getCanvasNodePrimaryOutputRole(params: {
   nodeType: CanvasNodeType | null | undefined;
   data?: unknown;
 }): CanvasNodeIoRole | null {
+  if (params.nodeType === CANVAS_NODE_TYPES.script && params.data && typeof params.data === 'object'
+    && (params.data as { remixRole?: unknown }).remixRole === 'production_plan') return 'production_plan';
   return dataIoRole(params.data) ?? getCanvasNodeSemanticSpec(params.nodeType)?.primaryOutputRole ?? null;
 }
 

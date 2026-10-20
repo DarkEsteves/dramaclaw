@@ -6,6 +6,7 @@ import { CANVAS_NODE_TYPES, type CanvasNodeType } from "@/features/canvas/domain
 import {
   canvasNodeDefinitions,
   getAllowedDownstreamTargetTypes,
+  getConnectMenuNodeTypes,
   getDownstreamSpawnTypes,
   getMenuNodeDefinitions,
   getUpstreamSpawnTypes,
@@ -16,6 +17,38 @@ import {
 } from "@/features/canvas/domain/nodeRegistry";
 
 describe("canvas node registry", () => {
+  it("keeps every node type present on staging registered", () => {
+    const stagingTypes = [
+      'vectorSvgNode', 'animatedGifNode', 'htmlArtifactNode', 'uploadNode',
+      'imageNode', 'imageGenNode', 'exportImageNode', 'beatContextNode',
+      'textAnnotationNode', 'groupNode', 'storyboardNode', 'storyboardGenNode',
+      'videoNode', 'audioNode', 'videoStoryNode', 'videoComposeNode',
+      'scriptNode', 'pano360ViewerNode', 'threeDWorldNode', 'skillNode',
+      'styleNode',
+    ];
+    for (const type of stagingTypes) {
+      expect(canvasNodeDefinitions).toHaveProperty(type);
+      expect(canvasNodeDefinitions[type as CanvasNodeType].createDefaultData()).toEqual(expect.any(Object));
+    }
+    expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.videoStory].connectivity.sourceHandle).toBe(true);
+    expect(isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.script, CANVAS_NODE_TYPES.videoCompose)).toBe(true);
+  });
+
+  it("offers independent transcription but no new standalone semantic timeline", () => {
+    expect(getMenuNodeDefinitions().map((item) => item.type)).toContain(CANVAS_NODE_TYPES.transcript);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.video)).toContain(CANVAS_NODE_TYPES.transcript);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toContain(CANVAS_NODE_TYPES.transcript);
+    expect(getMenuNodeDefinitions().map((item) => item.type)).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getConnectMenuNodeTypes('source')).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getConnectMenuNodeTypes('target')).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.script)).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getUpstreamSpawnTypes(CANVAS_NODE_TYPES.videoCompose)).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    // Existing graphs still need these types and their historical edges.
+    expect(canvasNodeDefinitions).toHaveProperty(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.script, CANVAS_NODE_TYPES.semanticTimeline)).toBe(true);
+    expect(isUpstreamConnectionAllowed(CANVAS_NODE_TYPES.semanticTimeline, CANVAS_NODE_TYPES.videoCompose)).toBe(true);
+  });
+
   it("keeps ordinary audio nodes on the stable reference-voice default", () => {
     const definition = canvasNodeDefinitions[CANVAS_NODE_TYPES.audio];
     const data = definition.createDefaultData() as Record<string, unknown>;
@@ -86,7 +119,7 @@ describe("建边白名单", () => {
     );
 
     expect([...reachable].sort()).toEqual(
-      [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline].sort(),
+      [CANVAS_NODE_TYPES.video, CANVAS_NODE_TYPES.videoCompose, CANVAS_NODE_TYPES.transcript, CANVAS_NODE_TYPES.semanticTimeline, CANVAS_NODE_TYPES.script].sort(),
     );
   });
 
@@ -202,7 +235,6 @@ describe("连线菜单候选", () => {
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toEqual([
       CANVAS_NODE_TYPES.video,
       CANVAS_NODE_TYPES.transcript,
-      CANVAS_NODE_TYPES.semanticTimeline,
       CANVAS_NODE_TYPES.videoCompose,
     ]);
     // 图片类节点的下游不含音频。

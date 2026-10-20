@@ -2,11 +2,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getFreezoneCanvas,
   listFreezoneWorkflowRuns,
   updateFreezoneWorkflowRun,
   type FreezoneWorkflowRun,
 } from "@/api/canvas";
-import { applyCanvasChatCommandsAsync } from "@/features/freezone/canvasChatCommands";
+import { applyCanvasChatCommandsAsync, FREEZONE_WORKFLOW_RUN_UPDATED_EVENT } from "@/features/freezone/canvasChatCommands";
 import {
   recoverableWorkflowNodeIds,
   resumableWorkflowNodeIds,
@@ -16,6 +17,12 @@ import {
 import { CANVAS_NODE_TYPES } from "@/features/canvas/domain/canvasNodes";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTaskCenterStore } from "@/task-center/store";
+import { fetchRemixArtifact } from "@/api/remix";
+import { buildProductionWorkflowAction, markProductionWorkflowSubmission } from "@/features/canvas/remix/productionWorkflowRuntime";
+import { flushProductionPlanV2AutoSave } from "@/features/canvas/remix/productionPlanV2AutoSave";
+import { applyRemoteFreezoneCanvas, getFreezoneCanvasBaseline } from "@/features/freezone/canvasSyncRuntime";
+import { normalizeCanvasData } from "@/stores/canvasStore";
+import type { ProductionPlanV2 } from "@/features/canvas/remix/productionPlanV2Model";
 
 const failedRun: FreezoneWorkflowRun = {
   schema_version: "freezone_workflow_run.v1",
@@ -38,6 +45,7 @@ vi.mock("@/api/canvas", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/canvas")>();
   return {
     ...actual,
+    getFreezoneCanvas: vi.fn(),
     listFreezoneWorkflowRuns: vi.fn(),
     updateFreezoneWorkflowRun: vi.fn(),
   };
@@ -50,6 +58,30 @@ vi.mock("@/features/freezone/canvasChatCommands", async (importOriginal) => {
     applyCanvasChatCommandsAsync: vi.fn(),
   };
 });
+
+vi.mock("@/api/remix", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/api/remix")>(),
+  fetchRemixArtifact: vi.fn(),
+}));
+
+vi.mock("@/features/freezone/canvasSyncRuntime", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/features/freezone/canvasSyncRuntime")>(),
+  captureFreezoneCanvasScope: vi.fn(() => () => true),
+  getFreezoneCanvasBaseline: vi.fn(() => ({ nodes: structuredClone(useCanvasStore.getState().nodes),
+    edges: structuredClone(useCanvasStore.getState().edges), revision: 1 })),
+  applyRemoteFreezoneCanvas: vi.fn((_project, _canvasId, remote, merge) => {
+    const current = useCanvasStore.getState();
+    const normalized = normalizeCanvasData(remote.nodes, remote.edges);
+    const merged = merge(normalized.nodes, normalized.edges, current.nodes, current.edges);
+    current.setCanvasData(merged.nodes, merged.edges);
+    return true;
+  }),
+}));
+
+vi.mock("@/features/canvas/remix/productionPlanV2AutoSave", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/features/canvas/remix/productionPlanV2AutoSave")>(),
+  flushProductionPlanV2AutoSave: vi.fn(),
+}));
 
 describe("WorkflowRunRecoveryBar", () => {
   beforeEach(() => {
@@ -75,8 +107,13 @@ describe("WorkflowRunRecoveryBar", () => {
       },
     ], []);
     vi.mocked(listFreezoneWorkflowRuns).mockReset();
+    vi.mocked(getFreezoneCanvas).mockReset();
+    vi.mocked(fetchRemixArtifact).mockReset();
+    vi.mocked(getFreezoneCanvasBaseline).mockClear();
+    vi.mocked(applyRemoteFreezoneCanvas).mockClear();
     vi.mocked(updateFreezoneWorkflowRun).mockReset();
     vi.mocked(applyCanvasChatCommandsAsync).mockReset();
+    vi.mocked(flushProductionPlanV2AutoSave).mockReset().mockResolvedValue({ artifactId: 'plan', revision: 2 });
     vi.mocked(listFreezoneWorkflowRuns).mockResolvedValue({ runs: [failedRun] });
     vi.mocked(updateFreezoneWorkflowRun).mockResolvedValue({
       ...failedRun,
@@ -98,6 +135,87 @@ describe("WorkflowRunRecoveryBar", () => {
       failedRun,
       new Set(["image-1", "video-1", "compose-1"]),
     )).toEqual(["video-1"]);
+  });
+
+  it("restores a completed editable plan after refresh without starting another task", async () => {
+    useCanvasStore.getState().setCanvasData([{ id: 'plan-node', type: CANVAS_NODE_TYPES.script,
+      position: { x: 0, y: 0 }, data: { remixRole: 'production_plan', processingAction: 'generate_production_plan_draft',
+        processingPayload: { topic: '新片', analysis_context: { summary: '原片' } }, remixNodeRevision: 1 } }], []);
+    vi.mocked(listFreezoneWorkflowRuns).mockResolvedValue({ runs: [{ ...failedRun, run_id: 'run-completed',
+      status: 'completed', resumable: false, actions: [{ node_id: 'plan-node', action: 'generate_production_plan_draft',
+        status: 'completed', artifact_status: 'valid', node_revision: 1,
+        payload: { topic: '新片', analysis_context: { summary: '原片' } }, result_ref: { artifact_id: 'plan-artifact', revision: 1 } }] }] });
+    const original = structuredClone(useCanvasStore.getState().nodes[0]);
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [{ ...original, data: { ...original.data,
+      productionPlanV2Ref: { artifactId: 'plan-artifact', revision: 1 },
+      productionPlanV2Draft: { schema_version: 2, goal: '新片', output: { width: 1920, height: 1080, fps_num: 24, fps_den: 1 },
+        provenance: {}, beats: [], resources: [], placements: [], speech_takes: [] } } }], edges: [], revision: 2 } as never);
+    render(<WorkflowRunRecoveryBar projectId="project-a" canvasId="canvas-a" />);
+    await waitFor(() => expect(useCanvasStore.getState().nodes[0].data.productionPlanV2Ref).toEqual({ artifactId: 'plan-artifact', revision: 1 }));
+    expect(applyCanvasChatCommandsAsync).not.toHaveBeenCalled();
+    expect(fetchRemixArtifact).not.toHaveBeenCalled();
+  });
+
+  it("does not restore a fetched artifact into another project canvas with the same node ID", async () => {
+    const oldNode = { id: 'plan-node', type: CANVAS_NODE_TYPES.script,
+      position: { x: 0, y: 0 }, data: { remixRole: 'production_plan', processingAction: 'generate_production_plan_draft',
+        processingPayload: { topic: '新片', analysis_context: { summary: '原片' } }, remixNodeRevision: 1 } };
+    useCanvasStore.getState().setCanvasData([oldNode], []);
+    vi.mocked(listFreezoneWorkflowRuns).mockResolvedValue({ runs: [{ ...failedRun, run_id: 'old-completed',
+      status: 'completed', resumable: false, actions: [{ node_id: 'plan-node', action: 'generate_production_plan_draft',
+        status: 'completed', artifact_status: 'valid', node_revision: 1,
+        payload: { topic: '新片', analysis_context: { summary: '原片' } }, result_ref: { artifact_id: 'old-artifact', revision: 1 } }] }] });
+    let releaseFetch!: (value: unknown) => void;
+    vi.mocked(getFreezoneCanvas).mockImplementation(() => new Promise((resolve) => { releaseFetch = resolve as typeof releaseFetch; }));
+    const view = render(<WorkflowRunRecoveryBar projectId="project-a" canvasId="canvas-a" />);
+    await waitFor(() => expect(getFreezoneCanvas).toHaveBeenCalledWith('project-a', 'canvas-a'));
+
+    view.rerender(<WorkflowRunRecoveryBar projectId="project-b" canvasId="canvas-b" />);
+    useCanvasStore.getState().setCanvasData([{ ...oldNode, data: { ...oldNode.data, displayName: '新画布节点' } }], []);
+    await act(async () => { releaseFetch({ nodes: [{ ...oldNode, data: { ...oldNode.data,
+      productionPlanV2Ref: { artifactId: 'old-artifact', revision: 1 } } }], edges: [], revision: 2 }); });
+    expect(useCanvasStore.getState().nodes[0].data.productionPlanV2Ref).toBeUndefined();
+    expect(applyRemoteFreezoneCanvas).not.toHaveBeenCalled();
+  });
+
+  it("keeps a speech recovery alive while the same canvas refreshes its run list", async () => {
+    const hash = 'a'.repeat(64);
+    const draft: ProductionPlanV2 = { schema_version: 2, goal: '对话',
+      output: { width: 1920, height: 1080, fps_num: 24, fps_den: 1 }, provenance: {},
+      beats: [{ id: 'beat', purpose: '开场', duration_frames: 120, turns: [{ id: 'turn', speaker: '甲', text: '你好' }] }],
+      resources: [{ id: 'media', node_id: 'video', media_kind: 'video', media_path: 'media/talk.mp4',
+        media_hash: hash, duration_us: 4_000_000, has_audio: true }],
+      placements: [{ id: 'visual', kind: 'visual', role: 'primary', track_id: 'visual', resource_id: 'media',
+        start: { kind: 'beat', ref_id: 'beat', edge: 'start' }, end: { kind: 'beat', ref_id: 'beat', edge: 'end' } }],
+      speech_takes: [{ id: 'take', beat_id: 'beat', resource_id: 'media', turn_ids: ['turn'], origin_placement_id: 'visual',
+        source_in_us: 0, source_out_us: 4_000_000, speed_num: 1, speed_den: 1, lead_in_frames: 0 }] };
+    useCanvasStore.getState().setCanvasData([{ id: 'plan-node', type: CANVAS_NODE_TYPES.script, position: { x: 0, y: 0 },
+      data: { remixRole: 'production_plan', productionPlanV2Ref: { artifactId: 'plan', revision: 1 },
+        productionPlanV2Draft: draft, productionPlanV2Dirty: false, processingAction: 'align_production_speech',
+        processingPayload: { turn_id: 'turn', take_id: 'take', media_path: 'media/talk.mp4' }, remixNodeRevision: 1 } }], []);
+    const state = useCanvasStore.getState();
+    const descriptor = buildProductionWorkflowAction(state.nodes[0], state.nodes, state.edges)!;
+    markProductionWorkflowSubmission(descriptor);
+    const action = { node_id: 'plan-node', action: 'align_production_speech', status: 'completed' as const,
+      artifact_status: 'valid' as const, node_revision: 1, payload: descriptor.payload,
+      result_ref: { artifact_id: 'words', revision: 1 } };
+    const completed = { ...failedRun, run_id: 'speech-completed', status: 'completed' as const,
+      resumable: false, actions: [action] };
+    vi.mocked(listFreezoneWorkflowRuns).mockResolvedValue({ runs: [completed] });
+    const savedNode = structuredClone(useCanvasStore.getState().nodes[0]);
+    let releaseFetch!: (value: unknown) => void;
+    vi.mocked(getFreezoneCanvas).mockImplementation(() => new Promise((resolve) => { releaseFetch = resolve as typeof releaseFetch; }));
+    render(<WorkflowRunRecoveryBar projectId="project-a" canvasId="canvas-a" />);
+    await waitFor(() => expect(getFreezoneCanvas).toHaveBeenCalledWith('project-a', 'canvas-a'));
+
+    act(() => { window.dispatchEvent(new CustomEvent(FREEZONE_WORKFLOW_RUN_UPDATED_EVENT, {
+      detail: { projectId: 'project-a', canvasId: 'canvas-a', run: { ...completed, updated_at: '2026-07-21T00:02:00Z' } },
+    })); });
+    await act(async () => { releaseFetch({ nodes: [{ ...savedNode, data: { ...savedNode.data,
+      productionWorkflowResultRef: { artifactId: 'words', revision: 1 } } }], edges: [], revision: 2 }); });
+    await waitFor(() => expect(useCanvasStore.getState().nodes[0].data.productionWorkflowResultRef).toEqual({ artifactId: 'words', revision: 1 }));
+    expect(fetchRemixArtifact).not.toHaveBeenCalled();
+    expect(flushProductionPlanV2AutoSave).not.toHaveBeenCalled();
   });
 
   it("does not expose blocked downstream generation as another retry target", () => {

@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -69,6 +70,7 @@ def workflow_run_client(monkeypatch, tmp_path):
         runtime_dir=str(tmp_path / "_runtime"),
         is_home_node=True,
         requester_user_id="u-alice",
+        effective_role="editor",
         enqueued_tasks=[],
     )
 
@@ -203,6 +205,115 @@ def test_workflow_run_api_lifecycle(workflow_run_client: TestClient) -> None:
         workflow_run_client.get(base).json()["data"]["runs"][0]["run_id"]
         == created["run_id"]
     )
+
+
+def test_approved_graph_alias_admits_one_host_owned_native_run(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.routes import chat, remix
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.canvas_command_bridge import canonical_bridge_key
+    from novelvideo.freezone.remix import production_processing_settlement, reference_director
+
+    bridge_key = "bridge-native.executor.owner"
+    assert canonical_bridge_key(bridge_key) == "bridge-native"
+    binding = {"username": "alice", "project_id": "proj_demo", "canvas_id": "default",
+               "agent_id": "main", "turn_id": "turn-1"}
+    approved = {"kind": "canvas_command", "transport_status": "delivered",
+                "producer_binding": binding, "delivery_binding": binding,
+                "project_id": "proj_demo", "canvas_id": "default", "execution_token": "owner",
+                "commands": [
+                    {"type": "create_node", "client_id": "planned", "data": {
+                        "workflowInstanceId": "workflow_draft_1", "workflowPlanNodeId": "production_plan_1"}},
+                    {"type": "create_node", "client_id": "planned-b", "data": {
+                        "workflowInstanceId": "workflow_draft_1", "workflowPlanNodeId": "production_plan_2"}},
+                    {"type": "run_workflow", "node_ids": ["planned", "planned-b"]},
+                ]}
+    monkeypatch.setattr(chat, "_canvas_bridge_dir", lambda *_args, **_kwargs: workflow_run_client.state_dir)
+    from novelvideo.freezone import canvas_command_bridge
+    monkeypatch.setattr(canvas_command_bridge, "read_bridge_message", lambda *_args, **_kwargs: approved)
+    monkeypatch.setattr(canvas_store, "read_canvas", lambda *_args, **_kwargs: {
+        "project_id": "proj_demo", "canvas_id": "default", "revision": 1,
+        "nodes": [{"id": "actual-plan", "data": {"workflowInstanceId": "workflow_draft_1",
+                                                    "workflowPlanNodeId": "production_plan_1"}},
+                  {"id": "actual-plan-b", "data": {"workflowInstanceId": "workflow_draft_1",
+                                                      "workflowPlanNodeId": "production_plan_2"}}],
+    })
+    monkeypatch.setattr(reference_director, "list_director_artifacts", lambda *_args, **_kwargs: {"commissions": []})
+    monkeypatch.setattr(production_processing_settlement, "native_action_automation_control",
+                        lambda *_args, **_kwargs: None)
+    def prepared(_store, action, payload, **_kwargs):
+        return {"input_refs": [], "producer_version": "test", "normalized_parameters": {
+            "action": action, "payload": payload}, "input_media_hashes": [], "scope": "",
+            "task_type": "freezone_production_plan", "queue_kind": "default", "task_payload": {}}
+    monkeypatch.setattr(remix, "prepare_registered_action", prepared)
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    request = {"bridge_key": bridge_key, "idempotency_key": "canvas-run:approved-1",
+               "runner_id": "canvas-runner:browser", "metadata": {"native_completion_owner": "browser"},
+               "actions": [{"node_id": node_id, "action": "generate_production_plan_draft",
+                            "node_revision": 1, "payload": {"topic": "coffee"}}
+                           for node_id in ("actual-plan", "actual-plan-b")]}
+    first = workflow_run_client.post(base, json=request)
+    assert first.status_code == 200, first.text
+    run = first.json()["data"]
+    assert run["acceptance"] == {"workflow_run_id": run["run_id"], "completion_owner": "host"}
+    assert run["runner_id"] is None
+    assert run["actions"][0]["task_id"] == "workflow-task-1"
+    assert run["actions"][1]["task_id"] == "workflow-task-2"
+    assert run["metadata"]["native_approved_actions"] == [
+        {"node_id": node_id, "action": "generate_production_plan_draft"}
+        for node_id in ("actual-plan", "actual-plan-b")]
+    assert run["metadata"]["canvas_bridge_key"] == "bridge-native"
+    approved["execution_token"] = "reclaimed-owner"
+    second = workflow_run_client.post(base, json={
+        **request, "bridge_key": "bridge-native.executor.reclaimed-owner",
+    })
+    assert second.status_code == 200, second.text
+    assert second.json()["data"]["run_id"] == run["run_id"]
+    assert len(workflow_run_client.enqueued_tasks) == 2
+
+
+def test_approved_bridge_owner_rotation_recovers_ordinary_run(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.routes import chat
+    from novelvideo.freezone import canvas_command_bridge
+    from novelvideo.freezone.workflow_runs import workflow_runs_db_path
+
+    binding = {"username": "alice", "project_id": "proj_demo", "canvas_id": "default",
+               "agent_id": "main", "turn_id": "turn-ordinary"}
+    approved = {"kind": "canvas_command", "transport_status": "delivered",
+                "producer_binding": binding, "delivery_binding": binding,
+                "project_id": "proj_demo", "canvas_id": "default", "execution_token": "first",
+                "commands": [{"type": "run_node_action", "node_id": "note", "action": "save"}]}
+    monkeypatch.setattr(chat, "_canvas_bridge_dir", lambda *_args, **_kwargs: workflow_run_client.state_dir)
+    monkeypatch.setattr(canvas_command_bridge, "read_bridge_message", lambda *_args, **_kwargs: approved)
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    request = {"bridge_key": "ordinary-bridge.executor.first",
+               "idempotency_key": "canvas-run:ordinary-bridge", "runner_id": "canvas-runner:first",
+               "actions": [{"node_id": "note", "action": "save"}]}
+    first = workflow_run_client.post(base, json=request)
+    assert first.status_code == 200, first.text
+    approved["execution_token"] = "second"
+    second = workflow_run_client.post(base, json={
+        **request, "bridge_key": "ordinary-bridge.executor.second",
+        "runner_id": "canvas-runner:second",
+    })
+    assert second.status_code == 409, second.text
+    with sqlite3.connect(workflow_runs_db_path(workflow_run_client.state_dir)) as conn:
+        conn.execute("UPDATE workflow_runs SET lease_expires_at=? WHERE run_id=?",
+                     ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                      first.json()["data"]["run_id"]))
+    second = workflow_run_client.post(base, json={
+        **request, "bridge_key": "ordinary-bridge.executor.second",
+        "runner_id": "canvas-runner:second",
+    })
+    assert second.status_code == 200, second.text
+    assert second.json()["data"]["run_id"] == first.json()["data"]["run_id"]
+    assert second.json()["data"]["runner_id"] == "canvas-runner:second"
+    assert workflow_run_client.patch(f'{base}/{first.json()["data"]["run_id"]}', json={
+        "status": "running", "runner_id": "canvas-runner:first",
+    }).status_code == 409
 
 
 def test_recipe_media_claim_reports_interrupted_run_before_enqueue(
@@ -2030,6 +2141,365 @@ def test_metered_workflow_result_is_delivered_once_before_canvas_confirmation(
     assert after_confirm["status"] == "delivered"
 
 
+def test_workflow_stage_rejection_settles_the_admitted_result_operation(
+    workflow_run_client: TestClient, monkeypatch, caplog,
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.agent_product_operations import (
+        bind_agent_product_model_execution,
+        read_agent_product_operation,
+    )
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    admitted = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={
+            "product_kind": "workflow_result",
+            "generation_session_id": "rejected-stage-session",
+            "canvas_id": "default",
+            "artifact_id": "video-ad@1.0.0",
+            "normalized_inputs_hash": "rejected-stage-inputs",
+            "metadata": {"skill_id": "video-ad", "skill_version": "1.0.0"},
+        },
+    )
+    assert admitted.status_code == 200
+    operation = admitted.json()["data"]
+    bind_agent_product_model_execution(
+        project_dir=workflow_run_client.state_dir,
+        operation_id=operation["operation_id"],
+        model_call_id="agent-turn:rejected-stage:tool:call",
+        executed_at=1.0,
+        source="server_observed_agent_turn",
+        turn_id="rejected-stage",
+        tool_call_id="call",
+    )
+
+    async def reject_stage(*_args, **_kwargs):
+        raise HTTPException(409, {
+            "code": "reference_plan_must_use_native_stage",
+            "message": "private user plan text",
+        })
+
+    monkeypatch.setattr(freezone, "_enforce_reference_workflow_stage", reject_stage)
+    rejected = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-drafts",
+        json={
+            "operation_id": operation["operation_id"],
+            "intent": {"skill_id": "video-ad", "user_goal": "广告"},
+            "compiled": _valid_draft_compiled(),
+        },
+    )
+    assert rejected.status_code == 409
+    assert (
+        "workflow_draft.create.rejected project_id=proj_demo canvas_id=default "
+        f"operation_id={operation['operation_id']} phase=reference_stage "
+        "status_code=409 code=reference_plan_must_use_native_stage"
+    ) in caplog.text
+    assert "private user plan text" not in caplog.text
+    settled = read_agent_product_operation(
+        project_dir=workflow_run_client.state_dir,
+        operation_id=operation["operation_id"],
+    )
+    assert settled["status"] == "failed"
+    assert settled["result_ref"] == {}
+
+
+def test_late_stage_rejection_returns_concurrently_delivered_draft(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.agent_product_operations import (
+        bind_agent_product_model_execution, finish_agent_product_operation,
+    )
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    admitted = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={"product_kind": "workflow_result", "generation_session_id": "racing-stage",
+              "canvas_id": "default", "artifact_id": "video-ad@1.0.0",
+              "normalized_inputs_hash": "racing-inputs",
+              "metadata": {"skill_id": "video-ad", "skill_version": "1.0.0"}},
+    ).json()["data"]
+    bind_agent_product_model_execution(
+        project_dir=workflow_run_client.state_dir,
+        operation_id=admitted["operation_id"],
+        model_call_id="agent-turn:racing:tool:call", executed_at=1.0,
+        source="server_observed_agent_turn", turn_id="racing", tool_call_id="call",
+    )
+    winner = {}
+
+    async def concurrent_winner(*_args, **_kwargs):
+        draft = create_workflow_draft(
+            project_dir=workflow_run_client.state_dir, project_id="proj_demo",
+            canvas_id="default", intent={"skill_id": "video-ad", "user_goal": "广告"},
+            compiled=_valid_draft_compiled(), run_after_create=False,
+            operation_id=admitted["operation_id"],
+        )
+        winner["draft_id"] = draft["draft_id"]
+        finish_agent_product_operation(
+            project_dir=workflow_run_client.state_dir,
+            operation_id=admitted["operation_id"], outcome="delivered",
+            expected_task_id=admitted["task_id"],
+            result_ref={"kind": "workflow_draft", "id": draft["draft_id"],
+                        "revision": draft["revision"], "digest": draft["plan_digest"]},
+        )
+        raise HTTPException(409, {"code": "reference_plan_must_use_native_stage"})
+
+    monkeypatch.setattr(freezone, "_enforce_reference_workflow_stage", concurrent_winner)
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-drafts",
+        json={"operation_id": admitted["operation_id"],
+              "intent": {"skill_id": "video-ad", "user_goal": "广告"},
+              "compiled": _valid_draft_compiled()},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["draft_id"] == winner["draft_id"]
+
+
+@pytest.mark.parametrize("change_direction,draft_failure", [(False, False), (False, True), (True, False)])
+def test_confirmed_reference_direction_prepares_one_bound_native_draft(
+    workflow_run_client: TestClient, monkeypatch, change_direction: bool, draft_failure: bool,
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.agent_workflows.catalog import compile_workflow_intent
+    from novelvideo.freezone.agent_product_operations import bind_agent_product_model_execution
+    from novelvideo.freezone.remix.reference_commission import (
+        AuthenticatedDecisionEvidence, advance_reference_commission,
+        create_reference_commission,
+    )
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    state_dir = workflow_run_client.state_dir
+    canvas_store.save_canvas(
+        state_dir, "default", base_revision=None, enforce_revision=False,
+        build_payload=lambda _old: {
+            "project_id": "proj_demo", "canvas_id": "default", "revision": 1,
+            "nodes": [{"id": "analysis", "type": "videoStoryNode", "data": {
+                "sourceVideoUrl": "/static/projects/proj_demo/reference.mp4",
+                "rawResult": {"video_story": {"summary": "question then reversal"}},
+            }}], "edges": [],
+        },
+    )
+    store = RemixArtifactStore(state_dir, "proj_demo", created_by="u-alice")
+    commission = create_reference_commission(
+        store, canvas_id="default", requester_user_id="u-alice",
+        analysis_node_id="analysis", goal="改成黑咖啡",
+        analysis_evidence={"task_id": "analysis-task", "result_fingerprint": "analysis-hash"},
+    )
+    commission = advance_reference_commission(
+        store, commission["commission_ref"],
+        {"type": "direction_confirmed", "direction": {"target_goal": "改成黑咖啡"}},
+        1, host_evidence=AuthenticatedDecisionEvidence("proj_demo", "default", "u-alice", "message-1"),
+    )
+    intent = {
+        "skill_id": "reference-video-remix", "user_goal": "改成黑咖啡，双人对话，保留英文字幕",
+        "reference_commission_id": commission["commission_ref"]["artifact_id"],
+        "inputs": {"plan_count": 1},
+        "external_inputs": [{"id": "analysis", "node_id": "analysis", "media_kind": "reference_analysis"}],
+    }
+    compiled = compile_workflow_intent(intent)
+    assert compiled["ok"], compiled
+    admitted = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={
+            "product_kind": "workflow_result", "generation_session_id": "native-plan-session",
+            "canvas_id": "default", "artifact_id": "reference-video-remix@2.1.0",
+            "normalized_inputs_hash": "native-plan-inputs",
+            "metadata": {"skill_id": "reference-video-remix", "skill_version": "2.1.0"},
+        },
+    )
+    assert admitted.status_code == 200
+    operation = admitted.json()["data"]
+    bind_agent_product_model_execution(
+        project_dir=state_dir, operation_id=operation["operation_id"],
+        model_call_id="agent-turn:native-plan:tool:call", executed_at=1.0,
+        source="server_observed_agent_turn", turn_id="native-plan", tool_call_id="call",
+    )
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-drafts"
+    created = workflow_run_client.post(base, json={
+        "operation_id": operation["operation_id"], "intent": intent,
+        "compiled": compiled, "run_after_create": True,
+    })
+    assert created.status_code == 200, created.text
+    draft = created.json()["data"]
+    assert len(canvas_store.read_canvas(state_dir, "default")["nodes"]) == 1
+    binding = draft["compiled"]["reference_binding"]
+    assert binding["commission_id"] == commission["commission_ref"]["artifact_id"]
+    assert binding["direction_fingerprint"] == commission["direction_fingerprint"]
+    assert draft["run_after_create"] is True
+    if change_direction:
+        commission = advance_reference_commission(
+            store, commission["commission_ref"],
+            {"type": "direction_confirmed", "direction": {"target_goal": "改成无糖茶"}},
+            commission["commission_ref"]["revision"],
+            host_evidence=AuthenticatedDecisionEvidence("proj_demo", "default", "u-alice", "message-2"),
+        )
+        stale_claim = workflow_run_client.post(f"{base}/{draft['draft_id']}/claim", json={"revision": 1})
+        assert stale_claim.status_code == 409
+        assert stale_claim.json()["detail"]["code"] == "reference_direction_changed"
+        assert len(workflow_run_client.enqueued_tasks) == 1
+        return
+    claim = workflow_run_client.post(f"{base}/{draft['draft_id']}/claim", json={"revision": 1})
+    assert claim.status_code == 200, claim.text
+    assert len(workflow_run_client.enqueued_tasks) == 2
+    assert len(canvas_store.read_canvas(state_dir, "default")["nodes"]) == 1
+    assert workflow_run_client.enqueued_tasks[-1]["task_type"] == "freezone_workflow_confirm"
+
+    # The browser reports the approved canvas result; only this draft's native
+    # plan action may subsequently count as completion of this commission.
+    from novelvideo.freezone.workflow_drafts import finish_workflow_draft_confirmation
+    from novelvideo.chat.reference_production_observer import production_event
+    from novelvideo.freezone.remix import production_plan, production_processing_settlement
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.workflow_runs import read_workflow_run
+    from novelvideo.task_backend.runners import remix as runner
+
+    confirmed = finish_workflow_draft_confirmation(
+        project_dir=state_dir, canvas_id="default", draft_id=draft["draft_id"],
+        outcome="confirmed", expected_task_id=claim.json()["data"]["task_id"],
+    )
+    assert confirmed["status"] == "confirmed"
+    plan_node = next(node for node in draft["compiled"]["plan"]["nodes"]
+                     if node["node_type"] == "scriptNode")
+    request_payload = {"topic": "改成黑咖啡，双人对话，保留英文字幕"}
+    plan_data = {
+        "remixRole": "production_plan", "workflowInstanceId": draft["draft_id"],
+        "workflowPlanNodeId": plan_node["id"], "remixNodeRevision": 1,
+        "processingAction": "generate_production_plan_draft", "processingPayload": request_payload,
+    }
+    canvas_store.save_canvas(
+        state_dir, "default", base_revision=None, enforce_revision=False,
+        build_payload=lambda old: {**old, "nodes": [*old["nodes"], {
+            "id": "approved-plan", "type": "scriptNode", "data": plan_data,
+        }], "edges": [{"source": "analysis", "target": "approved-plan"}]},
+    )
+    assert production_event(store, canvas_store.read_canvas(state_dir, "default"), commission,
+                            workflow_state_dir=state_dir) is None
+    from novelvideo.project_context import ProjectContext
+    ctx = ProjectContext(
+        "proj_demo", "demo", "user", "u-alice", "alice", "u-alice", "alice",
+        (("user", "u-alice"),), "editor", "local", state_dir, state_dir,
+        state_dir / "_runtime", True,
+    )
+    async def resolve(_project, _user, **_kwargs):
+        return ctx, "alice", "demo", state_dir, str(state_dir)
+    monkeypatch.setattr(freezone, "_resolve_freezone_project", resolve)
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{"node_id": "approved-plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": request_payload}]},
+    )
+    assert response.status_code == 200, response.text
+    native_run = response.json()["data"]
+    action = native_run["actions"][0]
+    assert action["status"] == "running", action.get("error")
+    assert workflow_run_client.enqueued_tasks[-1]["task_type"] == "remix_generate_production_plan_draft"
+    queued_payload = workflow_run_client.enqueued_tasks[-1]["payload"]
+    operations = RemixOperationStore(state_dir, "proj_demo")
+    operation = operations.get(action["processing_operation_id"])
+    assert queued_payload["workflow_run_id"] == native_run["run_id"]
+    assert queued_payload["operation_id"] == operation["operation_id"]
+    assert action["task_id"] == operation["task_id"]
+    from novelvideo.freezone.remix.production_processing_settlement import _analysis_input, _node_input
+    submission = {
+        "action": "generate_production_plan_draft", "payload": action["payload"],
+        "requestPayload": request_payload, "nodeData": _node_input({"data": plan_data}),
+        "planRef": None, "analysisNodeId": "analysis",
+        "analysisData": _analysis_input(canvas_store.read_canvas(state_dir, "default")["nodes"][0]),
+    }
+    canvas_store.save_canvas(
+        state_dir, "default", base_revision=None, enforce_revision=False,
+        build_payload=lambda old: {**old, "nodes": [
+            {**node, "data": {**node["data"], "productionWorkflowSubmission": submission}}
+            if node["id"] == "approved-plan" else node for node in old["nodes"]]},
+    )
+    model_calls = []
+    async def model_response(**kwargs):
+        model_calls.append(kwargs)
+        if draft_failure:
+            return "{bad json"
+        fixture = Path(__file__).parent / "fixtures" / "production-audio-source-plan.json"
+        return fixture.read_text(encoding="utf-8")
+    monkeypatch.setattr(production_plan, "generate_recipe_text", model_response)
+    task_id = operation["task_id"]
+    if draft_failure:
+        with pytest.raises(ValueError):
+            runner.run_remix_generate_production_plan_draft({"payload": queued_payload}, ctx)
+        task = SimpleNamespace(task_id=task_id, status="failed", result=None,
+                               error="json_parse_failed")
+    else:
+        result = runner.run_remix_generate_production_plan_draft({"payload": queued_payload}, ctx)
+        task = SimpleNamespace(task_id=task_id, status="completed", result=result, error=None)
+    assert len(model_calls) == 1
+    assert len(operations.get(operation["operation_id"])["output_refs"]) == (0 if draft_failure else 1)
+    manager = SimpleNamespace(get_task_for_project=lambda *_args, **_kwargs: task,
+                              _task_key_for_state=lambda _task: action["task_key"])
+    production_processing_settlement.settle_native_task_delivery(
+        ctx, manager, payload=queued_payload, task_type="remix_generate_production_plan_draft",
+        expected_task_id=task_id, episode=0, scope=operation["operation_id"],
+    )
+    settled = read_workflow_run(project_dir=state_dir, canvas_id="default", run_id=native_run["run_id"])
+    canvas = canvas_store.read_canvas(state_dir, "default")
+    from novelvideo.chat.reference_production_observer import ReferenceProductionObserver
+    from novelvideo.freezone.remix.reference_commission import read_reference_commission
+    deliveries = []
+    director_run = {
+        "run_id": "director-run", "commission_ref": commission["commission_ref"],
+        "project_id": "proj_demo", "canvas_id": "default", "requester_user_id": "u-alice",
+        "username": "alice", "commission_phase": "drafting_plan",
+    }
+    class Coordinator:
+        async def _resolve_context(self, record):
+            assert record is director_run
+            return ctx
+        def _assert_current(self, resolved, record, **kwargs):
+            assert resolved is ctx and record is director_run and kwargs["completed"] is True
+            return canvas_store.read_canvas(state_dir, "default")
+        async def _notify(self, record, notice, event_key):
+            deliveries.append(("notice", notice, event_key))
+        async def continue_commission(self, **kwargs):
+            deliveries.append(("continue", kwargs["event_key"]))
+    observer = ReferenceProductionObserver(Coordinator())
+    async def no_cards(_ctx, _run):
+        return None
+    async def settled_tasks(_ctx, _run):
+        return {}
+    monkeypatch.setattr(observer, "_publish_cards", no_cards)
+    monkeypatch.setattr(observer, "_material_snapshot", settled_tasks)
+    assert asyncio.run(observer.observe_run(director_run)) is True
+    latest_commission = read_reference_commission(store, commission["commission_ref"], latest=True)
+    if draft_failure:
+        assert settled["status"] == "failed"
+        assert not canvas["nodes"][-1]["data"].get("productionPlanV2Ref")
+        failed_event = production_event(store, canvas, commission, workflow_state_dir=state_dir)
+        assert failed_event["event"] is None
+        assert failed_event["native_failure"] is True
+        assert latest_commission.get("plan_ref") is None
+        assert latest_commission["phase"] == "drafting_plan"
+        assert all("作品方案已保存" not in item[1] for item in deliveries if item[0] == "notice")
+        return
+    assert settled["status"] == "completed"
+    plan_ref = operations.get(operation["operation_id"])["output_refs"][0]
+    assert canvas["nodes"][-1]["data"]["productionPlanV2Ref"] == {
+        "artifactId": plan_ref["artifact_id"], "revision": plan_ref["revision"],
+    }
+    observed = production_event(
+        store, canvas, commission,
+        workflow_state_dir=state_dir,
+    )
+    assert observed["event"]["type"] == "plan_ready"
+    assert all(observed["event"]["plan_ref"][key] == value for key, value in plan_ref.items())
+    assert latest_commission["plan_ref"] == observed["event"]["plan_ref"]
+    assert latest_commission["phase"] == "awaiting_plan_review"
+    assert [item for item in deliveries if item[0] == "continue"] == [
+        ("continue", observed["event_key"]),
+    ]
+    assert any(item[0] == "notice" and item[2] == observed["event_key"] for item in deliveries)
+
+
 def test_workflow_result_rejects_operation_for_another_compiled_skill(
     workflow_run_client: TestClient,
 ) -> None:
@@ -2841,12 +3311,10 @@ def test_workflow_run_api_rejects_empty_actions(
 def test_workflow_run_dispatches_registered_remix_action_without_recipe(
     workflow_run_client: TestClient, monkeypatch
 ) -> None:
-    from novelvideo.api.routes import freezone
 
     media = workflow_run_client.state_dir / "media" / "reference.mp4"
     media.parent.mkdir()
     media.write_bytes(b"reference")
-    monkeypatch.setattr(freezone, "_speech_engine_ready", lambda: True, raising=False)
     base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
 
     response = workflow_run_client.post(base, json={
@@ -2868,6 +3336,210 @@ def test_workflow_run_dispatches_registered_remix_action_without_recipe(
     assert action["product_operation_id"] is None
     assert action["recipe_id"] is None
     assert workflow_run_client.enqueued_tasks[0]["payload"]["media_sha256"]
+
+
+def test_workflow_production_draft_requests_v2_output(workflow_run_client: TestClient) -> None:
+    from novelvideo.freezone import canvas_store
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode", "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    response = workflow_run_client.post(base, json={
+        "idempotency_key": "production-draft-v2-run",
+        "actions": [{"node_id": "plan", "action": "generate_production_plan_draft", "node_revision": 1,
+                     "payload": {"topic": "横屏短片"}}],
+    })
+    assert response.status_code == 200, response.text
+    queued = workflow_run_client.enqueued_tasks[-1]
+    assert queued["task_type"] == "remix_generate_production_plan_draft"
+    assert "output_version" not in queued["payload"]
+
+
+def test_workflow_native_plan_binds_active_automation_before_enqueue(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.auth import get_api_user
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix import production_automation, production_processing_settlement
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode", "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    workflow_run_client.app.dependency_overrides[get_api_user] = lambda: {
+        "id": "u-alice", "username": "alice", "credential_kind": "agent_session",
+    }
+    monkeypatch.setattr(production_processing_settlement, "native_action_automation_control",
+                        lambda *_args, **_kwargs: {"active": True, "generation": 3,
+                            "scope": {"commission_id": "commission", "agent_id": "main"}})
+    bindings = []
+
+    def bind(_ctx, **kwargs):
+        assert not workflow_run_client.enqueued_tasks
+        bindings.append(kwargs)
+
+    monkeypatch.setattr(production_automation, "bind_automation_operation", bind)
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "coffee"}}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(bindings) == len(workflow_run_client.enqueued_tasks) == 1
+    assert bindings[0]["commission_id"] == "commission"
+    assert bindings[0]["generation"] == 3
+
+
+def test_workflow_native_plan_does_not_enqueue_after_automation_stops(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.auth import get_api_user
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix import production_automation, production_processing_settlement
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode", "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    workflow_run_client.app.dependency_overrides[get_api_user] = lambda: {
+        "id": "u-alice", "username": "alice", "credential_kind": "agent_session",
+    }
+    monkeypatch.setattr(production_processing_settlement, "native_action_automation_control",
+                        lambda *_args, **_kwargs: {"active": False, "generation": 3,
+                            "scope": {"commission_id": "commission", "agent_id": "main"}})
+    monkeypatch.setattr(production_automation, "bind_automation_operation",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("production automation stopped")))
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "coffee"}}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["actions"][0]["status"] == "failed"
+    assert workflow_run_client.enqueued_tasks == []
+
+
+def test_manual_plan_draft_enqueues_after_automation_stops(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix import production_automation, production_processing_settlement
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode", "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    monkeypatch.setattr(production_processing_settlement, "native_action_automation_control",
+                        lambda *_args, **_kwargs: {"active": False, "generation": 3,
+                            "scope": {"commission_id": "commission", "agent_id": "main"}})
+    monkeypatch.setattr(production_automation, "bind_automation_operation",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not bind")))
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"idempotency_key": "manual-draft-once",
+              "runner_id": "canvas-runner:browser",
+              "metadata": {"native_execution_source": "agent_command"},
+              "actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "coffee"}}]},
+    )
+
+    assert response.status_code == 200, response.text
+    run = response.json()["data"]
+    assert run["metadata"]["native_execution_source"] == "canvas_user"
+    assert run["metadata"]["native_completion_owner"] == "host"
+    assert run["runner_id"] is None
+    assert run["metadata"]["native_execution_context"] == {
+        "source": "canvas_user", "requester_user_id": "u-alice",
+        "project_id": "proj_demo", "canvas_id": "default", "run_id": run["run_id"],
+    }
+    assert len(workflow_run_client.enqueued_tasks) == 1
+    assert run["actions"][0]["task_key"]
+    from novelvideo.freezone.workflow_runs import interrupt_stale_workflow_runs
+    assert interrupt_stale_workflow_runs(
+        project_dir=workflow_run_client.state_dir, canvas_id="default",
+        stale_after_seconds=60,
+        now=datetime.now(timezone.utc) + timedelta(seconds=181),
+    ) == []
+    duplicate = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"idempotency_key": "manual-draft-twice",
+              "runner_id": "canvas-runner:browser-two",
+              "actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "coffee"}}]},
+    )
+    assert duplicate.status_code == 409
+    assert len(workflow_run_client.enqueued_tasks) == 1
+    from novelvideo.api.auth import get_api_user
+    workflow_run_client.app.dependency_overrides[get_api_user] = lambda: {
+        "id": "u-alice", "username": "alice", "credential_kind": "agent_session",
+    }
+    replay = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"idempotency_key": "manual-draft-once",
+              "actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "coffee"}}]},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["data"]["run_id"] == run["run_id"]
+    assert replay.json()["data"]["metadata"]["native_execution_source"] == "canvas_user"
+    assert len(workflow_run_client.enqueued_tasks) == 1
+
+
+def test_workflow_script_alignment_uses_newapi_readiness(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import remix
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    media = workflow_run_client.state_dir / "media" / "voice.wav"
+    media.parent.mkdir()
+    media.write_bytes(b"voice")
+    script = RemixArtifactStore(workflow_run_client.state_dir, "proj_demo").create(
+        "remix_script.v1",
+        {"dialogue": "你好", "segments": [], "selections": [],
+         "blueprint_mappings": [], "media_requirements": []},
+        [],
+    )
+    monkeypatch.setattr(remix, "_transcription_engine_ready", lambda: True)
+
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"idempotency_key": "newapi-align-run", "actions": [{
+            "node_id": "align", "action": "align_script", "node_revision": 1,
+            "payload": {"media_path": "media/voice.wav", "script_ref": {
+                "artifact_id": script["id"], "revision": script["revision"],
+            }},
+        }]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert workflow_run_client.enqueued_tasks[0]["task_type"] == "remix_align_script"
+
+
+def test_workflow_production_alignment_preflights_transcription_engine(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import remix
+
+    monkeypatch.setattr(remix, "_transcription_engine_ready", lambda: False)
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"idempotency_key": "production-align-not-configured", "actions": [{
+            "node_id": "align", "action": "align_production_speech", "node_revision": 1,
+            "payload": {"media_path": "media/voice.wav", "plan_ref": {"artifact_id": "pending", "revision": 1},
+                        "turn_id": "line", "placement_id": "picture"},
+        }]},
+    )
+    assert response.status_code == 400
+    assert "NewAPI audio-transcribe is not configured" in response.text
 
 
 def test_concurrent_workflow_processing_dispatch_enqueues_once(
@@ -2911,6 +3583,185 @@ def test_concurrent_workflow_processing_dispatch_enqueues_once(
 
     assert first_response.status_code == second_response.status_code == 200
     assert calls == 1
+
+
+def test_workflow_definite_task_envelope_rejection_finishes_action(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.freezone import canvas_store
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode",
+                        "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    attempts = []
+
+    class RejectingBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            attempts.append(kwargs)
+            raise InvalidTaskEnvelope()
+
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: RejectingBackend())
+    url = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    body = {"idempotency_key": "rejected-plan", "actions": [{
+        "node_id": "plan", "action": "generate_production_plan_draft",
+        "node_revision": 1, "payload": {"topic": "黑咖啡"},
+    }]}
+
+    first = workflow_run_client.post(url, json=body)
+    assert first.status_code == 200, first.text
+    action = first.json()["data"]["actions"][0]
+    assert action["status"] == "failed"
+    operation = RemixOperationStore(
+        workflow_run_client.state_dir, "proj_demo"
+    ).get(action["processing_operation_id"])
+    assert operation["status"] == "failed"
+    assert operation["failure_reason"] == "TASK_ENVELOPE_INVALID"
+
+    repeated = workflow_run_client.post(url, json=body)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["data"]["actions"][0]["status"] == "failed"
+    assert len(attempts) == 1
+
+
+def test_workflow_envelope_rejection_preserves_concurrent_cancellation(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.freezone import canvas_store
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode",
+                        "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(workflow_run_client.state_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    operations = RemixOperationStore(workflow_run_client.state_dir, "proj_demo")
+
+    class CancellingBackend:
+        async def enqueue_project_task(self, _ctx, **kwargs):
+            import novelvideo.freezone.remix.operations as operations_module
+
+            submitted = operations.get(kwargs["payload"]["operation_id"])
+            monkeypatch.setattr(
+                operations_module, "time",
+                SimpleNamespace(time=lambda: submitted["submission_claimed_at"] + 120),
+            )
+            operations.claim_cancellation(
+                kwargs["payload"]["operation_id"],
+                reason="user_cancelled", owner="user-request",
+            )
+            raise InvalidTaskEnvelope()
+
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: CancellingBackend())
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{"node_id": "plan", "action": "generate_production_plan_draft",
+                           "node_revision": 1, "payload": {"topic": "黑咖啡"}}]},
+    )
+
+    assert response.status_code == 200, response.text
+    action = response.json()["data"]["actions"][0]
+    operation = operations.get(action["processing_operation_id"])
+    assert operation["cancel_reason"] == "user_cancelled"
+    assert operation["status"] == "pending_reconciliation"
+    assert action["status"] != "failed"
+
+
+def test_workflow_plan_draft_crosses_real_signed_inline_backend(
+    workflow_run_client: TestClient, monkeypatch,
+) -> None:
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.ports import registry
+    from novelvideo.ports.local.tasks import InlineTaskBackend, InMemoryCancellationStore
+    from novelvideo.project_context import ProjectContext
+    from novelvideo.task_backend.consumer import TaskEnvelopeConsumer
+    from novelvideo.task_backend.runners import remix as runner
+    from novelvideo.task_state import TaskStateManager
+    from test_task_envelope_producer import FakeAuthz, KEYRING, NOW, _producer
+
+    project_dir = workflow_run_client.state_dir
+    ctx = ProjectContext(
+        "proj_demo", "demo", "user", "u-alice", "alice", "u-alice", "alice",
+        (("user", "u-alice"),), "editor", "local", project_dir, project_dir,
+        project_dir / "_runtime", True,
+    )
+
+    async def resolve(_project, _user, **_kwargs):
+        return ctx, "alice", "demo", project_dir, str(project_dir)
+
+    monkeypatch.setattr(freezone, "_resolve_freezone_project", resolve)
+    manager = TaskStateManager()
+    monkeypatch.setattr(registry, "_PORTS", dict(registry._PORTS))
+    registry.register_port("cancellation_store", InMemoryCancellationStore())
+    monkeypatch.setattr("novelvideo.task_state._task_manager", manager)
+    monkeypatch.setattr("novelvideo.ports.local.tasks.get_task_manager", lambda: manager)
+    authz = FakeAuthz()
+    backend = InlineTaskBackend(
+        producer=_producer(authz),
+        consumer=TaskEnvelopeConsumer(keyring=KEYRING, authz=authz, clock=lambda: NOW),
+    )
+    monkeypatch.setattr(freezone, "get_task_backend", lambda: backend)
+    canvas = canvas_store.default_canvas_payload(project_id="proj_demo", actor_id="u-alice")
+    canvas["nodes"] = [{"id": "plan", "type": "scriptNode",
+                        "data": {"remixRole": "production_plan"}}]
+    path = canvas_store.canvas_path(project_dir, "default")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas_store.atomic_write_json(path, canvas)
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return {
+            "schema_version": 2, "goal": kwargs["topic"],
+            "output": {"width": 1080, "height": 1920, "fps_num": 30, "fps_den": 1},
+            "beats": [{"id": "hook", "purpose": "开场", "duration_frames": 90,
+                       "turns": []}],
+            "resources": [], "placements": [], "provenance": {},
+        }
+
+    monkeypatch.setattr(runner, "generate_production_plan_draft", generate)
+    url = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    body = {"idempotency_key": "signed-workflow-plan", "actions": [{
+        "node_id": "plan", "action": "generate_production_plan_draft",
+        "node_revision": 1, "payload": {"topic": "作品目标"},
+    }]}
+    with workflow_run_client as client:
+        accepted = client.post(url, json=body)
+        assert accepted.status_code == 200, accepted.text
+        action = accepted.json()["data"]["actions"][0]
+        operation_id = action["processing_operation_id"]
+        deadline = time.monotonic() + 5
+        state = None
+        while time.monotonic() < deadline:
+            state = manager.get_task_for_project(
+                ctx, "remix_generate_production_plan_draft", 0, scope=operation_id,
+            )
+            if state is not None and state.status in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        assert state is not None and state.status == "completed", state
+        replay = client.post(url, json=body)
+        assert replay.status_code == 200, replay.text
+
+    assert len(calls) == 1
+    operation = RemixOperationStore(project_dir, "proj_demo").get(operation_id)
+    assert len(operation["output_refs"]) == 1
+    ref = operation["output_refs"][0]
+    artifact = RemixArtifactStore(project_dir, "proj_demo").read(
+        ref["artifact_id"], ref["revision"],
+    )
+    assert artifact["schema"] == "production_plan.v2"
 
 
 def test_workflow_processing_persists_operation_before_ambiguous_enqueue_and_reconciles_task(
@@ -4208,6 +5059,173 @@ def test_workflow_run_cancel_stops_linked_active_project_task(
     assert response.status_code == 200
     assert cancelled_tasks == [task]
     assert response.json()["data"]["actions"][0]["status"] == "skipped"
+
+
+def test_recover_completed_generation_binds_task_after_run_cancelled(
+    workflow_run_client: TestClient,
+):
+    """A completed media task must be bound without reopening the cancelled run."""
+    from novelvideo.freezone.workflow_runs import (
+        recover_completed_generation_task,
+        read_workflow_run,
+    )
+
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(
+        base,
+        json={
+            "actions": [{
+                "node_id": "bgm-1",
+                "action": "generate_audio",
+                "generation_attempt_id": "attempt-bgm-1",
+            }],
+        },
+    ).json()["data"]
+    cancelled = workflow_run_client.patch(
+        f"{base}/{created['run_id']}", json={"status": "cancelled"}
+    )
+    assert cancelled.status_code == 200
+
+    recovered = recover_completed_generation_task(
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        run_id=created["run_id"],
+        node_id="bgm-1",
+        task_key="task:freezone_audio_eleven_music:project:proj_demo:0:bgm-1",
+        task_type="freezone_audio_eleven_music",
+        job_id="bgm-1",
+        result_ref={"value": "/static/projects/proj_demo/bgm-1.mp3"},
+    )
+
+    assert recovered["status"] == "cancelled"
+    assert recovered["actions"][0]["status"] == "completed"
+    assert recovered["actions"][0]["task_key"].endswith(":bgm-1")
+    assert read_workflow_run(
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        run_id=created["run_id"],
+    )["status"] == "cancelled"
+
+
+def test_bind_generation_task_does_not_depend_on_recipe_operation(
+    workflow_run_client: TestClient,
+):
+    from novelvideo.freezone.workflow_runs import bind_workflow_generation_task
+
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(
+        base,
+        json={
+            "actions": [{
+                "node_id": "bgm-1",
+                "action": "generate_audio",
+                "generation_attempt_id": "attempt-bgm-1",
+            }],
+        },
+    ).json()["data"]
+    bound = bind_workflow_generation_task(
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        run_id=created["run_id"],
+        node_id="bgm-1",
+        generation_attempt_id="attempt-bgm-1",
+        task_key="task:freezone_audio_eleven_music:project:proj_demo:0:bgm-1",
+        task_type="freezone_audio_eleven_music",
+        job_id="bgm-1",
+    )
+    action = bound["actions"][0]
+    assert action["task_key"].endswith(":bgm-1")
+    assert action["task_type"] == "freezone_audio_eleven_music"
+    assert action["status"] == "running"
+
+
+def test_verified_media_link_accepts_saved_canvas_workflow_context(
+    workflow_run_client: TestClient,
+):
+    from novelvideo.api.routes import freezone as freezone_routes
+
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(
+        base,
+        json={
+            "actions": [{
+                "node_id": "bgm-1",
+                "action": "generate_audio",
+                "generation_attempt_id": "attempt-bgm-1",
+            }],
+        },
+    ).json()["data"]
+    link_context = SimpleNamespace(
+        project_id="proj_demo", state_dir=str(workflow_run_client.state_dir)
+    )
+    assert freezone_routes._verified_workflow_media_link(
+        ctx=link_context,
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        node_id="bgm-1",
+        operation_id="",
+        attempt_id="attempt-bgm-1",
+        workflow_run_id=created["run_id"],
+    ) == {
+        "workflow_run_id": created["run_id"],
+        "generation_attempt_id": "attempt-bgm-1",
+    }
+
+
+def test_workflow_list_recovers_unlinked_completed_audio_task(
+    workflow_run_client: TestClient,
+    monkeypatch,
+):
+    """A node task completed after the browser lost its PATCH is recovered once."""
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.history import append_generation_history, build_node_history_record
+
+    base = "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs"
+    created = workflow_run_client.post(
+        base,
+        json={
+            "actions": [{
+                "node_id": "bgm-1",
+                "action": "generate_audio",
+                "generation_attempt_id": "attempt-bgm-1",
+            }],
+        },
+    ).json()["data"]
+    workflow_run_client.patch(
+        f"{base}/{created['run_id']}", json={"status": "cancelled"}
+    )
+    task_key = "task:freezone_audio_eleven_music:project:proj_demo:0:bgm-1"
+    append_generation_history(
+        project_dir=workflow_run_client.state_dir,
+        canvas_id="default",
+        node_id="bgm-1",
+        record=build_node_history_record(
+            task_type="freezone_audio_eleven_music",
+            job_id="bgm-1",
+            task_key=task_key,
+            status="completed",
+            media_type="audio",
+            result={"audio_url": "/static/projects/proj_demo/bgm-1.mp3"},
+        ),
+    )
+    monkeypatch.setattr(
+        freezone,
+        "get_task_manager",
+        lambda: SimpleNamespace(
+            # The task state may expire after a successful generation; the
+            # node history remains the durable evidence used for recovery.
+            list_tasks_for_project=lambda _ctx: [],
+            get_task_for_project=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    listed = workflow_run_client.get(base).json()["data"]["runs"]
+    recovered = next(item for item in listed if item["run_id"] == created["run_id"])
+    action = recovered["actions"][0]
+    assert action["task_key"] == task_key
+    assert action["task_type"] == "freezone_audio_eleven_music"
+    assert action["status"] == "completed"
+    assert recovered["status"] == "cancelled"
 
 
 def test_workflow_run_list_cancels_orphaned_failed_record(

@@ -84,6 +84,8 @@ def test_freezone_policy_names_are_published_by_the_freezone_plugin() -> None:
     published = _published_tool_names(_load_hermes_plugin("freezone"))
     for policy in (
         tool_policy.FREEZONE_CANVAS_WRITE_TOOLS,
+        tool_policy.FREEZONE_ARTIFACT_WRITE_TOOLS,
+        tool_policy.FREEZONE_BACKGROUND_SUBMISSION_TOOLS,
         tool_policy.FREEZONE_TERMINAL_WRITE_TOOLS,
         tool_policy.FREEZONE_WORKFLOW_DRAFT_PREPARE_TOOLS,
         tool_policy.FREEZONE_WORKFLOW_DRAFT_TOOLS,
@@ -115,8 +117,11 @@ def test_every_plugin_canvas_mutation_is_classified_as_a_canvas_write() -> None:
 def test_policy_sets_are_internally_consistent() -> None:
     assert (
         tool_policy.FREEZONE_TERMINAL_WRITE_TOOLS
-        <= tool_policy.FREEZONE_CANVAS_WRITE_TOOLS
+        <= (tool_policy.FREEZONE_CANVAS_WRITE_TOOLS | tool_policy.FREEZONE_BACKGROUND_SUBMISSION_TOOLS)
     )
+    assert not (tool_policy.FREEZONE_CANVAS_WRITE_TOOLS & tool_policy.FREEZONE_ARTIFACT_WRITE_TOOLS)
+    assert not (tool_policy.FREEZONE_CANVAS_WRITE_TOOLS & tool_policy.FREEZONE_BACKGROUND_SUBMISSION_TOOLS)
+    assert "freezone_create_production_plan" not in tool_policy.FREEZONE_CANVAS_WRITE_TOOLS
     assert (
         tool_policy.FREEZONE_WORKFLOW_DRAFT_PREPARE_TOOLS
         < tool_policy.FREEZONE_WORKFLOW_DRAFT_TOOLS

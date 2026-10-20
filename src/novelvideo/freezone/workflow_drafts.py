@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ DEFAULT_TTL_SECONDS = 24 * 60 * 60
 DRAFT_ID_RE = re.compile(r"^workflow_draft_[a-zA-Z0-9_-]{1,80}$")
 DRAFT_STATUSES = {"ready", "confirming", "submitted", "confirmed", "cancelled"}
 CONFIRMATION_OUTCOMES = {"ready", "submitted", "confirmed"}
+logger = logging.getLogger(__name__)
 
 WORKFLOW_DRAFT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_drafts (
@@ -52,6 +54,48 @@ CREATE INDEX IF NOT EXISTS idx_workflow_drafts_canvas_updated
 ON workflow_drafts(canvas_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_drafts_expiry
 ON workflow_drafts(expires_at);
+CREATE TABLE IF NOT EXISTS native_plan_claims (
+    project_id TEXT NOT NULL,
+    canvas_id TEXT NOT NULL,
+    requester_user_id TEXT NOT NULL,
+    commission_id TEXT NOT NULL,
+    direction_revision INTEGER NOT NULL,
+    draft_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (project_id, canvas_id, requester_user_id, commission_id, direction_revision)
+);
+CREATE TABLE IF NOT EXISTS native_plan_slots (
+    draft_id TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    plan_node_id TEXT NOT NULL,
+    compose_node_id TEXT NOT NULL DEFAULT '',
+    canvas_revision INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    PRIMARY KEY (draft_id, slot_id)
+);
+CREATE TABLE IF NOT EXISTS workflow_delivery_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canvas_id TEXT NOT NULL,
+    draft_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt REAL NOT NULL,
+    bridge_key TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(draft_id, revision, task_id, attempt, bridge_key, payload_digest)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_delivery_receipts_draft
+ON workflow_delivery_receipts(canvas_id, draft_id, id);
+CREATE TABLE IF NOT EXISTS reference_parameter_submissions (
+    scope_digest TEXT NOT NULL,
+    requirements_digest TEXT NOT NULL,
+    bridge_key TEXT NOT NULL,
+    clarification_id TEXT NOT NULL,
+    interaction_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (scope_digest, requirements_digest, bridge_key, clarification_id)
+);
 """
 
 _SCHEMA_READY_PATHS: set[Path] = set()
@@ -116,6 +160,103 @@ def _validate_scope(canvas_id: str, draft_id: str | None = None) -> None:
         raise ValueError(f"invalid canvas_id: {canvas_id!r}")
     if draft_id is not None and not DRAFT_ID_RE.match(draft_id):
         raise ValueError("invalid workflow draft id")
+
+
+def record_workflow_delivery_receipt(*, project_dir: Path, canvas_id: str,
+                                     draft_id: str, revision: int, task_id: str,
+                                     attempt: float, bridge_key: str,
+                                     receipt: dict[str, Any], proof: dict[str, Any]) -> None:
+    """Append a bounded, sanitized proof without replacing an earlier result."""
+    _validate_scope(canvas_id, draft_id)
+    safe = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+    def identifier(value: Any) -> str:
+        return value if isinstance(value, str) and safe.fullmatch(value) else ""
+
+    commands = [{key: identifier(step.get(key)) for key in
+                 ("type", "status", "createdNodeId", "nodeId")}
+                for step in (receipt.get("command_results") or [])[:100]
+                if isinstance(step, dict)]
+    mismatches = [{key: identifier(row.get(key)) for key in ("source", "target", "link_type")}
+                  for row in (proof.get("mismatches") or [])[:50] if isinstance(row, dict)]
+    summary = {"event": "workflow_graph_delivery_checked", "draft_id": draft_id,
+               "revision": revision, "task_id": task_id, "attempt": attempt,
+               "bridge_key": identifier(bridge_key),
+               "canvas_revision": proof.get("canvas_revision"),
+               "graph_state": identifier(proof.get("state")),
+               "reason": identifier(proof.get("reason")),
+               "commands": commands, "mismatches": mismatches}
+    serialized = json.dumps(summary, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(serialized.encode()).hexdigest()
+    with _connect(project_dir) as conn:
+        conn.execute("""INSERT OR IGNORE INTO workflow_delivery_receipts
+            (canvas_id, draft_id, revision, task_id, attempt, bridge_key,
+             payload_digest, summary_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (canvas_id, draft_id, revision, task_id, attempt, identifier(bridge_key),
+             digest, serialized, time.time()))
+
+
+def list_workflow_delivery_receipts(*, project_dir: Path, canvas_id: str,
+                                    draft_id: str) -> list[dict[str, Any]]:
+    _validate_scope(canvas_id, draft_id)
+    with _connect(project_dir) as conn:
+        rows = conn.execute("""SELECT summary_json FROM workflow_delivery_receipts
+            WHERE canvas_id=? AND draft_id=? ORDER BY id""", (canvas_id, draft_id)).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def record_reference_parameter_submission(*, project_dir: Path, scope: dict[str, Any],
+                                          requirements_digest: str,
+                                          interaction: dict[str, Any]) -> None:
+    """Persist a host-verified parameter answer for all turns of one commission."""
+    from novelvideo.freezone.remix.reference_parameter_receipts import _parameter_receipt
+
+    if (not isinstance(scope, dict) or interaction.get("scope") != scope
+            or interaction.get("generation_requirements_digest") != requirements_digest):
+        raise ValueError("reference parameter scope differs")
+    receipt = _parameter_receipt(interaction, require_complete_media=False)
+    if receipt is None:
+        raise ValueError("reference parameter submission is not verified")
+    snapshot = receipt.get("requirements_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict) or hashlib.sha256(json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest() != requirements_digest:
+            raise ValueError("reference parameter requirements snapshot differs")
+    scope_digest = _digest(scope)
+    answers = receipt["answers"]
+    sanitized = {
+        "bridge_key": interaction["bridge_key"],
+        "clarification_id": interaction["clarification_id"],
+        "scope": scope,
+        "generation_requirements_digest": requirements_digest,
+        "requirements_snapshot": receipt.get("requirements_snapshot"),
+        "event": {"questions": [{"id": key} for key in answers]},
+        "result": {"ok": True, "status": "clarification_frontend_result", "answers": answers},
+    }
+    with _connect(project_dir) as conn:
+        conn.execute("""INSERT OR IGNORE INTO reference_parameter_submissions
+            (scope_digest, requirements_digest, bridge_key, clarification_id,
+             interaction_json, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
+            (scope_digest, requirements_digest, receipt["message_id"],
+             receipt["interaction_id"], json.dumps(sanitized, ensure_ascii=False,
+             sort_keys=True), time.time()))
+
+
+def read_reference_parameter_submissions(*, project_dir: Path, scope: dict[str, Any],
+                                         requirements_digest: str,
+                                         include_prior_requirements: bool = False) -> list[dict[str, Any]]:
+    if not isinstance(scope, dict) or not requirements_digest:
+        return []
+    with _connect(project_dir) as conn:
+        if include_prior_requirements:
+            rows = conn.execute("""SELECT interaction_json FROM reference_parameter_submissions
+                WHERE scope_digest=? ORDER BY created_at, rowid""", (_digest(scope),)).fetchall()
+        else:
+            rows = conn.execute("""SELECT interaction_json FROM reference_parameter_submissions
+                WHERE scope_digest=? AND requirements_digest=? ORDER BY created_at, rowid""",
+                (_digest(scope), requirements_digest)).fetchall()
+    return [json.loads(row[0]) for row in rows]
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -342,6 +483,184 @@ def _unavailable(error: str) -> dict[str, Any]:
     return {"ok": False, "status": "workflow_draft_unavailable", "error": error}
 
 
+def _native_claim_key(compiled: dict[str, Any], project_id: str, canvas_id: str) -> tuple | None:
+    binding = compiled.get("reference_binding")
+    if not isinstance(binding, dict):
+        return None
+    if (binding.get("project_id"), binding.get("canvas_id")) != (project_id, canvas_id):
+        raise ValueError("native plan binding scope differs from workflow draft")
+    actor = str(binding.get("requester_user_id") or "")
+    commission = str(binding.get("commission_id") or "")
+    revision = binding.get("direction_revision")
+    if not actor or not commission or type(revision) is not int or revision < 1:
+        raise ValueError("native plan binding identity is incomplete")
+    return project_id, canvas_id, actor, commission, revision
+
+
+def read_native_plan_claim(*, project_dir: Path, project_id: str, canvas_id: str,
+                           requester_user_id: str, commission_id: str,
+                           direction_revision: int) -> dict[str, Any] | None:
+    """Read the one claimed draft for a confirmed direction, including its slots."""
+    _validate_scope(canvas_id)
+    key = (project_id, canvas_id, requester_user_id, commission_id, direction_revision)
+    with _connect(project_dir) as conn:
+        row = conn.execute(
+            "SELECT draft_id FROM native_plan_claims WHERE project_id=? AND canvas_id=? "
+            "AND requester_user_id=? AND commission_id=? AND direction_revision=?", key,
+        ).fetchone()
+        return _read_draft(conn, canvas_id=canvas_id, draft_id=row["draft_id"]) if row else None
+
+
+def list_native_plan_drafts(*, project_dir: Path, canvas_id: str, binding: dict[str, Any]) -> list[dict[str, Any]]:
+    """Find historical drafts created before native claims existed; never choose by time."""
+    _validate_scope(canvas_id)
+    with _connect(project_dir) as conn:
+        rows = conn.execute("SELECT * FROM workflow_drafts WHERE canvas_id=?", (canvas_id,)).fetchall()
+    return [payload for row in rows if (payload := _payload_from_row(row))["status"] != "cancelled"
+            and (payload.get("compiled") or {}).get("reference_binding") == binding]
+
+
+def recover_native_plan_claim(*, project_dir: Path, canvas_id: str,
+                              draft_id: str) -> dict[str, Any]:
+    """Auditably claim one verified historical draft without changing its contents."""
+    _validate_scope(canvas_id, draft_id)
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        draft = _read_draft(conn, canvas_id=canvas_id, draft_id=draft_id)
+        if not draft or draft["status"] == "cancelled":
+            raise ValueError("native plan draft unavailable for recovery")
+        key = _native_claim_key(draft["compiled"], draft["project_id"], canvas_id)
+        if not key:
+            raise ValueError("native plan binding unavailable for recovery")
+        row = conn.execute(
+            "SELECT draft_id FROM native_plan_claims WHERE project_id=? AND canvas_id=? "
+            "AND requester_user_id=? AND commission_id=? AND direction_revision=?", key,
+        ).fetchone()
+        if row and row["draft_id"] != draft_id:
+            raise ValueError("native plan binding already claimed")
+        if not row:
+            conn.execute("INSERT INTO native_plan_claims VALUES (?, ?, ?, ?, ?, ?)", (*key, draft_id))
+        return draft
+
+
+def read_native_plan_slot_bindings(*, project_dir: Path, draft_id: str) -> dict[str, dict[str, str | None]]:
+    if not DRAFT_ID_RE.match(draft_id):
+        raise ValueError("invalid workflow draft id")
+    with _connect(project_dir) as conn:
+        rows = conn.execute("SELECT * FROM native_plan_slots WHERE draft_id=?", (draft_id,)).fetchall()
+    return {row["slot_id"]: {"plan_node_id": row["plan_node_id"],
+                             "compose_node_id": row["compose_node_id"] or None} for row in rows}
+
+
+def record_native_plan_canvas_binding(*, project_dir: Path, project_id: str,
+                                      canvas_id: str, requester_user_id: str,
+                                      draft_id: str, task_id: str,
+                                      canvas: dict[str, Any],
+                                      _connection: sqlite3.Connection | None = None,
+                                      ) -> dict[str, dict[str, str | None]]:
+    """Persist exact node identities after a trusted, saved canvas receipt."""
+    _validate_scope(canvas_id, draft_id)
+    if (canvas.get("project_id"), canvas.get("canvas_id")) != (project_id, canvas_id):
+        raise ValueError("native plan canvas scope changed")
+    if type(canvas.get("revision")) is not int or canvas["revision"] < 1:
+        raise ValueError("native plan canvas revision is required")
+    with (_connect(project_dir) if _connection is None else nullcontext(_connection)) as conn:
+        if _connection is None:
+            conn.execute("BEGIN IMMEDIATE")
+        draft = _read_draft(conn, canvas_id=canvas_id, draft_id=draft_id)
+        if not draft or draft["status"] != "confirmed" or draft["task_id"] != task_id:
+            raise ValueError("native plan confirmation identity changed")
+        binding = (draft["compiled"] or {}).get("reference_binding") or {}
+        if any(binding.get(key) != value for key, value in {
+            "project_id": project_id, "canvas_id": canvas_id,
+            "requester_user_id": requester_user_id,
+        }.items()):
+            raise ValueError("native plan actor or project binding changed")
+        plan_nodes = (draft["compiled"].get("plan") or {}).get("nodes") or []
+        result: dict[str, dict[str, str | None]] = {}
+        for slot in plan_nodes:
+            if not isinstance(slot, dict) or slot.get("stage") != "production_plans":
+                continue
+            slot_id = slot.get("id")
+            if not isinstance(slot_id, str) or not slot_id:
+                raise ValueError("native plan slot identity missing")
+            suffix = slot_id.removeprefix("production_plan_")
+            compose_slot = f"composition_{suffix}"
+            matches = [node for node in canvas.get("nodes", []) if isinstance(node, dict)
+                       and isinstance(node.get("data"), dict)
+                       and node["data"].get("workflowInstanceId") == draft_id
+                       and node["data"].get("workflowPlanNodeId") == slot_id]
+            compose_matches = [node for node in canvas.get("nodes", []) if isinstance(node, dict)
+                               and isinstance(node.get("data"), dict)
+                               and node["data"].get("workflowInstanceId") == draft_id
+                               and node["data"].get("workflowPlanNodeId") == compose_slot]
+            expects_compose = any(item.get("id") == compose_slot for item in plan_nodes
+                                  if isinstance(item, dict))
+            if len(matches) != 1 or (expects_compose and len(compose_matches) != 1) or (
+                not expects_compose and compose_matches
+            ):
+                raise ValueError("binding_conflict: canvas node receipt is ambiguous or incomplete")
+            planned_revision = (slot.get("data") or {}).get("remixNodeRevision")
+            if type(planned_revision) is int and matches[0]["data"].get("remixNodeRevision") != planned_revision:
+                raise ValueError("native plan node revision changed before canvas receipt")
+            actual = str(matches[0].get("id") or "")
+            compose = str(compose_matches[0].get("id") or "") if expects_compose else ""
+            if not actual or (expects_compose and not compose):
+                raise ValueError("native plan canvas node identity missing")
+            prior = conn.execute("SELECT * FROM native_plan_slots WHERE draft_id=? AND slot_id=?",
+                                 (draft_id, slot_id)).fetchone()
+            if prior and (prior["plan_node_id"], prior["compose_node_id"], prior["task_id"]) != (
+                actual, compose, task_id
+            ):
+                raise ValueError("binding_conflict: native plan slot already bound elsewhere")
+            if not prior:
+                conn.execute("INSERT INTO native_plan_slots VALUES (?, ?, ?, ?, ?, ?)",
+                             (draft_id, slot_id, actual, compose, canvas["revision"], task_id))
+            result[slot_id] = {"plan_node_id": actual, "compose_node_id": compose or None}
+        return result
+
+
+def settle_workflow_draft_delivery(*, project_dir: Path, canvas_id: str,
+                                   draft_id: str, task_id: str, revision: int,
+                                   attempt: float, proof: dict[str, Any],
+                                   canvas: dict[str, Any]) -> dict[str, Any]:
+    """Commit graph confirmation and native slot bindings as one transaction."""
+    _validate_scope(canvas_id, draft_id)
+    state = proof.get("state")
+    if state not in {"delivered", "pending", "conflict", "rejected"}:
+        raise ValueError("workflow delivery proof state is invalid")
+    with _connect(project_dir) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        draft = _read_draft(conn, canvas_id=canvas_id, draft_id=draft_id)
+        if draft is None:
+            raise ValueError("workflow draft disappeared")
+        if (draft["revision"] != revision or draft["task_id"] != task_id
+                or draft.get("confirmation_started_at") != attempt):
+            raise ValueError("workflow draft confirmation attempt changed")
+        current = draft["status"]
+        if current not in {"confirming", "submitted", "confirmed"}:
+            raise ValueError("workflow draft confirmation is not active")
+        if state == "delivered":
+            draft["status"] = "confirmed"
+            draft["confirmed_at"] = draft.get("confirmed_at") or time.time()
+        elif current != "confirmed" and state in {"pending", "conflict"}:
+            draft["status"] = "submitted"
+        elif current != "confirmed" and state == "rejected":
+            draft["status"] = "ready"
+            draft["confirmation_started_at"] = None
+        draft["updated_at"] = time.time()
+        _write_draft(conn, draft)
+        binding = (draft.get("compiled") or {}).get("reference_binding")
+        if state == "delivered" and binding:
+            record_native_plan_canvas_binding(
+                project_dir=project_dir, project_id=draft["project_id"],
+                canvas_id=canvas_id, requester_user_id=binding["requester_user_id"],
+                draft_id=draft_id, task_id=task_id, canvas=canvas,
+                _connection=conn,
+            )
+        return deepcopy(draft)
+
+
 def create_workflow_draft(
     *,
     project_dir: Path,
@@ -384,7 +703,47 @@ def create_workflow_draft(
     }
     with _connect(project_dir) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        claim_key = _native_claim_key(compiled, project_id, canvas_id)
+        if claim_key:
+            claimed = conn.execute(
+                "SELECT draft_id FROM native_plan_claims WHERE project_id=? AND canvas_id=? "
+                "AND requester_user_id=? AND commission_id=? AND direction_revision=?", claim_key,
+            ).fetchone()
+            if claimed:
+                existing = _read_draft(conn, canvas_id=canvas_id, draft_id=claimed["draft_id"])
+                if existing and existing["status"] != "cancelled" and (
+                    existing["status"] != "ready" or existing["expires_at"] >= now
+                ):
+                    if existing["compiled"].get("reference_binding") != compiled.get("reference_binding"):
+                        raise ValueError("binding_conflict: native plan direction evidence changed")
+                    return existing
+                conn.execute("DELETE FROM native_plan_claims WHERE draft_id=?", (claimed["draft_id"],))
+            else:
+                historical = [item for row in conn.execute(
+                    "SELECT * FROM workflow_drafts WHERE canvas_id=?", (canvas_id,),
+                ).fetchall() if (item := _payload_from_row(row))["status"] != "cancelled"
+                    and item["project_id"] == project_id
+                    and isinstance(item["compiled"].get("reference_binding"), dict)
+                    and tuple(item["compiled"]["reference_binding"].get(key) for key in (
+                        "project_id", "canvas_id", "requester_user_id", "commission_id", "direction_revision"
+                    )) == claim_key]
+                if len(historical) > 1:
+                    raise ValueError("binding_conflict: multiple native plan drafts require explicit selection")
+                if historical and (historical[0]["status"] != "ready" or historical[0]["expires_at"] >= now):
+                    existing = historical[0]
+                    if existing["compiled"].get("reference_binding") != compiled.get("reference_binding"):
+                        raise ValueError("binding_conflict: native plan direction evidence changed")
+                    conn.execute("INSERT INTO native_plan_claims VALUES (?, ?, ?, ?, ?, ?)",
+                                 (*claim_key, existing["draft_id"]))
+                    logger.warning("native_plan.binding_recovered project_id=%s canvas_id=%s commission_id=%s draft_id=%s",
+                                   project_id, canvas_id, claim_key[3], existing["draft_id"])
+                    return existing
         _write_draft(conn, payload)
+        if claim_key:
+            conn.execute(
+                "INSERT INTO native_plan_claims VALUES (?, ?, ?, ?, ?, ?)",
+                (*claim_key, payload["draft_id"]),
+            )
     return deepcopy(payload)
 
 
@@ -456,6 +815,13 @@ def patch_workflow_draft(
                 "error": "workflow draft skill_id cannot be changed",
                 "unsupported_fields": ["skill_id"],
             }
+        old_key = _native_claim_key(payload["compiled"], payload["project_id"], canvas_id)
+        new_key = _native_claim_key(compiled, payload["project_id"], canvas_id)
+        if old_key != new_key:
+            return None, {
+                "ok": False, "status": "invalid_workflow_draft_patch",
+                "error": "native plan direction binding cannot be changed",
+            }
         now = time.time()
         payload.update(
             {
@@ -513,6 +879,7 @@ def cancel_workflow_draft(
         payload["status"] = "cancelled"
         payload["updated_at"] = time.time()
         _write_draft(conn, payload)
+        conn.execute("DELETE FROM native_plan_claims WHERE draft_id=?", (draft_id,))
         return deepcopy(payload), None
 
 
@@ -693,11 +1060,15 @@ def prune_expired_workflow_drafts(
         deleted = 0
         for row in conn.execute(query, params).fetchall():
             payload = _payload_from_row(row)
-            if payload.get("status") in {"confirming", "submitted"}:
+            if payload.get("status") in {"confirming", "submitted"} or (
+                payload.get("status") == "confirmed"
+                and (payload.get("compiled") or {}).get("reference_binding")
+            ):
                 continue
             cursor = conn.execute(
                 "DELETE FROM workflow_drafts WHERE draft_id = ?", (payload["draft_id"],)
             )
+            conn.execute("DELETE FROM native_plan_claims WHERE draft_id=?", (payload["draft_id"],))
             deleted += max(int(cursor.rowcount), 0)
         return deleted
 

@@ -135,6 +135,22 @@ function normalizeUiEvents(value: Record<string, unknown>): unknown[] | undefine
   return events && events.length > 0 ? events : undefined;
 }
 
+function savedCanvasReplyText(text: string, metadata: Record<string, unknown>, role: ChatRole): string | null {
+  if (role !== 'assistant' || !metadata.operation_outcome) return null;
+  try {
+    const envelope: unknown = JSON.parse(text);
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return null;
+    const reply = envelope as Record<string, unknown>;
+    if (Object.keys(reply).sort().join(',') !== 'canvas_receipts,message,mode'
+      || typeof reply.message !== 'string' || !reply.message.trim()
+      || !['read_only', 'mutation', 'blocked'].includes(String(reply.mode))
+      || !Array.isArray(reply.canvas_receipts)) return null;
+    return reply.message.trim();
+  } catch {
+    return null;
+  }
+}
+
 function recordString(value: Record<string, unknown>, key: string): string | null {
   const candidate = value[key];
   return typeof candidate === "string" && candidate.trim().length > 0 ? candidate : null;
@@ -198,6 +214,7 @@ function normalizeMessageParts(value: Record<string, unknown>): ChatMessagePart[
       type === "clarification" ||
       type === "canvas_approval" ||
       type === "canvas_feedback" ||
+      type === "reference_production" ||
       type === "canvas_context" ||
       type === "tool_status" ||
       type === "agent_plan" ||
@@ -273,20 +290,35 @@ function mediaKindToType(kind: unknown): string | undefined {
 }
 
 export function normalizeMessage(message: unknown, fallbackRole: ChatRole = "assistant"): ChatMessage | null {
-  const text = extractMessageText(message).trim();
+  const rawText = extractMessageText(message).trim();
   const value = message && typeof message === "object"
     ? (message as Record<string, unknown>)
     : {};
+  const turnId = normalizeTurnId(value);
+  const metadata = value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)
+    ? value.metadata as Record<string, unknown>
+    : {};
+  const cachedRaw = value.raw && typeof value.raw === "object" && !Array.isArray(value.raw)
+    ? value.raw as Record<string, unknown>
+    : {};
+  const cachedMetadata = cachedRaw.metadata && typeof cachedRaw.metadata === "object" && !Array.isArray(cachedRaw.metadata)
+    ? cachedRaw.metadata as Record<string, unknown>
+    : {};
+  const role = "role" in value ? normalizeRole(value.role) : fallbackRole;
+  const text = savedCanvasReplyText(rawText, metadata, role)
+    ?? savedCanvasReplyText(rawText, cachedMetadata, role)
+    ?? rawText;
   const uiEvents = normalizeUiEvents(value);
-  const parts = completeMessagePartsFromText(hydrateMessagePartEvents(normalizeMessageParts(value), uiEvents), text);
+  const hydratedParts = hydrateMessagePartEvents(normalizeMessageParts(value), uiEvents);
+  const displayParts = text === rawText ? hydratedParts : hydratedParts?.map((part) =>
+    part.type === 'text' && part.text.trim() === rawText ? { ...part, text } : part);
+  const parts = completeMessagePartsFromText(displayParts, text);
   if (!text && !hasStructuredContent(message) && !uiEvents && !parts) return null;
   const id =
     normalizeId(value.id)
     ?? normalizeId(value.messageId)
     ?? `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const timestamp = normalizeTimestamp(value);
-  const role = "role" in value ? normalizeRole(value.role) : fallbackRole;
-  const turnId = normalizeTurnId(value);
   const displayName = typeof value.displayName === "string" ? value.displayName : undefined;
   const attachments = extractAttachments(value);
   return { id, role, text, turnId, displayName, attachments, parts, uiEvents, timestamp, raw: message };
@@ -359,4 +391,44 @@ export function buildLocalUserMessage(
     attachments,
     timestamp: Date.now(),
   };
+}
+
+
+/** Presentation identity only; executor aliases never confer ownership. */
+export function clarificationPresentationKey(event: unknown): string | null {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  const value = event as Record<string, unknown>;
+  if (value.type !== "assistant.clarification.request") return null;
+  const id = value.bridge_key ?? value.clarification_id;
+  return typeof id === "string" && id
+    ? JSON.stringify([id.replace(/\.executor\.[A-Za-z0-9_-]+$/, ""), ...["project_id", "canvas_id", "agent_id", "turn_id"].map(key => value[key] ?? null)])
+    : null;
+}
+
+export function mergeClarificationPresentation(existing: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> {
+  // A stale/empty browser receipt must not turn a still-pending generation
+  // card into the misleading “已提交 0 个” summary. A real submitted answer
+  // or an explicit skip/recommendation remains terminal.
+  const existingQuestions = Array.isArray(existing.questions) ? existing.questions : [];
+  const nextAnswers = next.answers && typeof next.answers === "object" && !Array.isArray(next.answers)
+    ? next.answers as Record<string, unknown>
+    : {};
+  const emptySubmitForPendingCard = existing.submitted !== true
+    && next.submitted === true
+    && (next.action ?? "submit") === "submit"
+    && existingQuestions.length > 0
+    && Object.keys(nextAnswers).length === 0;
+  if (emptySubmitForPendingCard) {
+    return {
+      ...existing,
+      ...next,
+      submitted: false,
+      clarification_status: "pending_user_input",
+      answers: existing.answers ?? {},
+    };
+  }
+  // A delayed request snapshot cannot replace an explicit committed answer.
+  return existing.submitted === true && next.submitted !== true
+    ? { ...next, ...existing }
+    : { ...existing, ...next };
 }

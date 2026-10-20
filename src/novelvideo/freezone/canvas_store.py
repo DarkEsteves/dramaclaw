@@ -722,6 +722,7 @@ def save_canvas(
     request_hash: str | None = None,
     save_source: str = "autosave",
     allow_empty_overwrite: bool = False,
+    write_fence: Callable[[], None] | None = None,
 ) -> CanvasSaveResult:
     with get_canvas_write_mutex().write_mutex(project_dir, canvas_id) as guard:
         path = canvas_path(project_dir, canvas_id)
@@ -778,7 +779,12 @@ def save_canvas(
         )
         size_warning = canvas_payload_size_warning(payload)
         backup_path = backup_canvas_snapshot(path, existing)
-        atomic_write_json(path, payload, fence=guard.reassert)
+        def reassert_before_replace() -> None:
+            guard.reassert()
+            if write_fence is not None:
+                write_fence()
+
+        atomic_write_json(path, payload, fence=reassert_before_replace)
         prune_canvas_history(project_dir, canvas_id)
         response_cache = {
             "saved": True,

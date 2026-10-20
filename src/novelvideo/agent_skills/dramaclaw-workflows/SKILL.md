@@ -94,6 +94,31 @@ Build one coherent workflow transaction, not a sequence of standalone canvas edi
 - For Skill/Recipe authoring, read and follow
   `references/skill-studio-authoring-guide.md` before asking questions or drafting.
 
+When the selected catalog Skill is `reference-video-remix`, also read
+[references/reference-video-remix.md](references/reference-video-remix.md).
+Its production plan is a versioned remix artifact, not an ordinary text node.
+Use the registered remix actions and protected workflow batch for plan creation,
+editing, media binding, timing, and composition. If the current host does not
+advertise a required action, report that missing capability; never simulate a
+plan edit with a generic text node or unprotected canvas writes.
+
+
+For native production plan creation after a confirmed direction, use
+`freezone_prepare_production_nodes(commission_ref, goal, run_after_create, plan_count)`.
+Copy the current saved commission reference, preserve the complete confirmed goal,
+and keep the authorized creation/generation policy. The tool prepares an existing
+draft and submits existing canvas approval; manual approval precedes writes and
+generation. Native creation does not require catalog search, a generic Intent,
+external input authoring, separate draft confirmation or `workflow_result` admission.
+For existing bound nodes use current state and `freezone_run_node_action` only
+for authorized registered actions. End the turn after task acceptance and await
+the actual completion/failure event; read the saved plan before review.
+Creation receipts and task receipts do not prove generation completion.
+Input errors require the specified correction; uncertain delivery requires receipt
+reconciliation. Failed generation requires user authorization for a paid retry.
+The catalog discovery and Intent/Plan admission rules below apply to generic
+dynamic workflows. They do not replace the native production entry.
+
 ## Route the request
 
 Before creating a draft or graph that will actually run image or video generation, inspect the
@@ -321,3 +346,9 @@ and `freezone_patch_workflow_draft`; do not fall back to another write after an 
   creation or generation completed until the corresponding result says it did.
 - Use `operation_id`, `draft_id`, `revision`, and returned idempotency identifiers unchanged on
   retries. Never create a replacement draft merely because delivery was retried.
+
+### Complete plan drafting and historical outline continuation
+
+`generate_production_plan_draft` saves a complete editable plan in one model call (`authoring_stage=arranged`), including beats, dialogue, visuals, needed audio, subtitles and graphics. Wait for its actual completed task and saved plan reference, then read and review the content through the normal flow. Use existing `production_plan_command` edits for changes; direction changes use public node update fields. Draft completion is not user confirmation or permission to generate media. Do not submit another generation or retry automatically.
+
+Only a historical saved outline (`authoring_stage=outline` with no arrangement) needs `generate_production_plan_arrangement`. When the user authorizes continuing, invoke it on the same node through `freezone_run_node_action`, respecting the existing action confirmation. Parameters are exactly `{"plan_ref":{"artifact_id":"CURRENT_SAVED_ID","revision":CURRENT_SAVED_REVISION}}`; read the latest saved revision after edits. Preserve its structure, dialogue and human edits; do not reconstruct source inputs or reuse internal outline files. Failure preserves the saved content; only an explicit retry repeats arrangement. The stage flag is informational: manually completed and historical plans still use existing readiness checks. No new stage cards or confirmation tools are needed.

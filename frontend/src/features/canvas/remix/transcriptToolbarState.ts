@@ -14,7 +14,7 @@ export function transcriptToolbarState(nodes: CanvasNode[], edges: CanvasEdge[],
   const words = Array.isArray(node?.data.words) ? node.data.words : [];
   const hasArtifact = Boolean(node?.data.artifactRef);
   const hasSource = Boolean(sourceMediaForTranscript(nodeId, nodes, edges));
-  const busy = Boolean(node?.data.operationId || node?.data.managedOperationId);
+  const busy = Boolean(node?.data.operationId || node?.data.managedOperationId || node?.data.transcriptSubmissionPending);
   return {
     canTranscribe: hasSource,
     canAlign: hasSource && Boolean(sourceScriptForTranscript(nodeId, nodes, edges)),

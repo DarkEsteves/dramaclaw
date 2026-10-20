@@ -1,3 +1,6 @@
+import { browserRecoveryId, canonicalBridgeRequestId, createBackgroundBridgeRecovery, mergeBridgeRecoveryMessages, type BridgeRecoveryPage } from "./backgroundBridgeRecovery";
+import { useAuthStore } from "@/stores/auth-store";
+import { SESSION_EXPIRED_EVENT } from "@/lib/session-expiry";
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -46,6 +49,9 @@ import {
 } from "@/features/freezone/interactiveStoryCanvasRefresh";
 import { CANVAS_NODE_REFERENCE_ATTACHMENT_TYPE } from "@/features/freezone/chatNodeReferences";
 import { api } from "@/lib/api";
+import { createAssistantPartsPersistence } from "./assistantPartsPersistence";
+import { REFERENCE_ANALYSIS_STATUS_EVENT } from '@/features/freezone/referenceAnalysisEvents';
+import type { ReferenceAnalysisRun } from '@/api/referenceAnalysisRuns';
 import {
   isStaleByTtl,
   pruneLocalStorageByPrefix,
@@ -704,7 +710,7 @@ function uiEventMergeKey(event: unknown): string | null {
     ?? recordString(value, "skill_studio_session_id")
     ?? recordString(value, "clarification_id");
   if (!stableId) return null;
-  return `${type}:${stableId}`;
+  return `${type}:${canonicalBridgeRequestId(stableId)}`;
 }
 
 function mergeUiEventLists(base: unknown[] | undefined, overlay: unknown[] | undefined): unknown[] | undefined {
@@ -799,6 +805,7 @@ function eventPartType(event: unknown): AssistantEventPartType | null {
   if (!event || typeof event !== "object" || Array.isArray(event)) return null;
   const type = (event as Record<string, unknown>).type;
   if (typeof type !== "string") return null;
+  if (type === "reference.production.card") return "reference_production";
   if (type.startsWith("skill_studio.")) return "skill_studio";
   if (type.startsWith("assistant.clarification.")) return "clarification";
   return null;
@@ -911,7 +918,7 @@ function assistantPartsWithPart(
     };
     return nextParts;
   }
-  nextParts.push(part);
+  nextParts.push({ ...part, seq: part.seq ?? nextAssistantPartSeq(nextParts) });
   return nextParts;
 }
 
@@ -923,6 +930,21 @@ function assistantPartsWithoutPart(
   const nextParts = parts.filter((part) => part.id !== partId);
   return nextParts.length > 0 ? nextParts : undefined;
 }
+
+function assistantPartsReplacingPart(
+  parts: ChatMessagePart[] | undefined,
+  partId: string,
+  replacement: ChatMessagePart,
+): ChatMessagePart[] {
+  const index = parts?.findIndex((part) => part.id === partId) ?? -1;
+  if (index < 0) return assistantPartsWithPart(parts, replacement);
+  return parts!.flatMap((part, partIndex) => {
+    if (partIndex === index) return [{ ...replacement, seq: part.seq ?? replacement.seq }];
+    return part.id === replacement.id ? [] : [part];
+  });
+}
+
+export const assistantPartsReplacingPartForTest = assistantPartsReplacingPart;
 
 function stableUiEventMergeKey(part: ChatMessagePart): string {
   if (part.type === "text") return part.id;
@@ -1071,7 +1093,7 @@ function upsertAssistantMessage(
   text: string,
 ): ChatMessage[] {
   const id = `assistant-${turnId}`;
-  const existingIndex = messages.findIndex((message) => message.id === id);
+  const existingIndex = messages.findIndex((message) => message.id === id || (message.role === "assistant" && message.turnId === turnId));
   if (existingIndex >= 0) {
     return sortMessages(
       messages.map((message, index) =>
@@ -1117,12 +1139,12 @@ function upsertAssistantUiEvent(
       }
     : event;
   const id = `assistant-${turnId}`;
-  const existingIndex = messages.findIndex((message) => message.id === id);
+  const existingIndex = messages.findIndex((message) => message.id === id || (message.role === "assistant" && message.turnId === turnId));
   if (existingIndex >= 0) {
     return sortMessages(
       messages.map((message, index) => {
         if (index !== existingIndex) return message;
-        const uiEvents = [...(message.uiEvents ?? []), eventWithReceivedAt];
+        const uiEvents = mergeUiEventLists(message.uiEvents, [eventWithReceivedAt]);
         return {
           ...message,
           text: message.text || "",
@@ -1924,6 +1946,8 @@ export function useSuperChat({
   freezoneAgentId?: string | null;
   connectionEnabled?: boolean;
 }) {
+  const recoveryActor = useAuthStore(state => state.username);
+  const recoveryTickRef = useRef<(() => void) | null>(null);
   const normalizedFreezoneCanvasId = canvasId ?? freezoneCanvasId ?? null;
   const desiredScope = useMemo(
     () => scopeForProject(project, surface, normalizedFreezoneCanvasId, freezoneAgentId),
@@ -1970,11 +1994,14 @@ export function useSuperChat({
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const abortGraceRef = useRef<number | null>(null);
+  const abortGraceGenerationRef = useRef(0);
   const closedRef = useRef(false);
   const authRejectedRef = useRef(false);
   const connectionIdRef = useRef(0);
   const desiredScopeRef = useRef(desiredScope);
+  const optimisticUserTurnsRef = useRef(new Map<string, { actor: string | null; scope: ChatScope }>());
   const handleFrameRef = useRef<(frame: ServerFrame) => void>(() => {});
+  const recoveredReferenceDraftsRef = useRef(new Set<string>());
   const cacheScopeKeyRef = useRef(scopeKey);
   const skipNextCacheSaveRef = useRef(false);
 
@@ -2058,24 +2085,29 @@ export function useSuperChat({
     });
   }, []);
 
+  const partsPersistence = useMemo(() => createAssistantPartsPersistence(
+    async (_key: string, payload: { scope: ChatScope; turn_id: string; event: { type: string; parts: ChatMessagePart[] } }) => {
+      await api.post("api/v1/chat/ui-events", { json: payload });
+    },
+  ), []);
+  useEffect(() => () => partsPersistence.flush(), [partsPersistence]);
+
   const persistAssistantMessageParts = useCallback((
     turnId: string,
     parts: ChatMessagePart[] | undefined,
     text?: string,
+    flush = false,
   ) => {
     const persistableParts = assistantPartsForPersistence(parts, text);
     if (!persistableParts?.some((part) => part.type !== "text")) return;
-    void api.post("api/v1/chat/ui-events", {
-      json: {
-        scope: desiredScopeRef.current,
-        turn_id: turnId,
-      event: {
-        type: "assistant.message_parts",
-        parts: persistableParts,
-      },
-      },
-    }).catch(() => undefined);
-  }, []);
+    const scope = { ...desiredScopeRef.current };
+    partsPersistence.enqueue(`${JSON.stringify(scope)}:${turnId}`, {
+      scope,
+      turn_id: turnId,
+      event: { type: "assistant.message_parts", parts: persistableParts },
+    });
+    if (flush) partsPersistence.flush();
+  }, [partsPersistence]);
 
   const upsertAssistantMessagePart = useCallback((
     target: { messageId?: string | null; turnId?: string | null },
@@ -2095,7 +2127,7 @@ export function useSuperChat({
           if (index !== existingIndex) return message;
           const parts = assistantPartsWithPart(message.parts, part);
           persistedTurnId = message.turnId;
-          return { ...message, parts, text: message.text || "", timestamp: Date.now() };
+          return { ...message, parts, text: message.text || "" };
         }));
         if (persistedTurnId) {
           const persistedMessage = next.find((message) => message.role === "assistant" && message.turnId === persistedTurnId);
@@ -2195,10 +2227,9 @@ export function useSuperChat({
       let persistedTurnId: string | undefined;
       const next = sortMessages(current.map((message, index) => {
         if (index !== existingIndex) return message;
-        const withoutPrevious = assistantPartsWithoutPart(message.parts, partId);
-        const parts = assistantPartsWithPart(withoutPrevious, replacement);
+        const parts = assistantPartsReplacingPart(message.parts, partId, replacement);
         persistedTurnId = message.turnId;
-        return { ...message, parts, text: message.text || "", timestamp: Date.now() };
+        return { ...message, parts, text: message.text || "" };
       }));
       if (persistedTurnId) {
         const persistedMessage = next.find(
@@ -2229,6 +2260,7 @@ export function useSuperChat({
         turnId,
         persistedMessage?.parts,
         persistedMessage?.text,
+        true,
       );
       return next;
     });
@@ -2238,6 +2270,7 @@ export function useSuperChat({
   }, [markTurnInactive, persistAssistantMessageParts]);
 
   const clearAbortGrace = useCallback(() => {
+    abortGraceGenerationRef.current += 1;
     if (abortGraceRef.current !== null) {
       window.clearTimeout(abortGraceRef.current);
       abortGraceRef.current = null;
@@ -2474,6 +2507,32 @@ export function useSuperChat({
         });
         break;
       }
+      case "reference.production.card": {
+        if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
+        if (typeof frame.turn_id !== "string") break;
+        setMessages((messages) => upsertAssistantUiEvent(messages, frame.turn_id as string, frame.event));
+        break;
+      }
+      case "reference.director.updated": {
+        if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
+        window.dispatchEvent(new CustomEvent('reference-director-status', { detail: { project_id: frame.project_id, canvas_id: frame.canvas_id, agent_id: frame.agent_id, canvas_changed: frame.canvas_changed } }));
+        break;
+      }
+      case "reference.remix.status": {
+        if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
+        const run = frame.run as ReferenceAnalysisRun | undefined;
+        if (!run || typeof run.run_id !== 'string' || typeof run.status !== 'string') break;
+        window.dispatchEvent(new CustomEvent(REFERENCE_ANALYSIS_STATUS_EVENT, { detail: { run } }));
+        if (run.status === 'completed' && run.workflow_draft_id) {
+          const key = `${scopeSessionKey(desiredScopeRef.current)}:${run.run_id}:${run.workflow_draft_id}:${run.workflow_draft_revision}`;
+          if (!recoveredReferenceDraftsRef.current.has(key)) {
+            recoveredReferenceDraftsRef.current.add(key);
+            if (recoveredReferenceDraftsRef.current.size > 128) recoveredReferenceDraftsRef.current.delete(recoveredReferenceDraftsRef.current.values().next().value!);
+            requestHistory();
+          }
+        }
+        break;
+      }
       case "director.auto.status": {
         if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
         window.dispatchEvent(new CustomEvent("director-auto-status", {
@@ -2654,12 +2713,14 @@ export function useSuperChat({
         }
         break;
       case "canvas.command":
+        if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
         if (typeof frame.turn_id === "string" && frame.turn_id.trim()) {
           closeActiveThoughtPart(frame.turn_id);
         }
         dispatchCanvasCommandFrame(frame, streamTextRef.current.trim() ? streamTextRef.current : null);
         break;
       case "canvas.context.request":
+        if (!frameMatchesCurrentScope(frame, desiredScopeRef.current)) break;
         if (typeof frame.turn_id === "string" && frame.turn_id.trim()) {
           closeActiveThoughtPart(frame.turn_id);
         }
@@ -2680,6 +2741,7 @@ export function useSuperChat({
         const event = frame.event && typeof frame.event === "object" && !Array.isArray(frame.event)
           ? {
               ...(frame.event as Record<string, unknown>),
+              request_id: frame.request_id,
               bridge_key: typeof frame.bridge_key === "string" ? frame.bridge_key : undefined,
               project_id: typeof frame.project_id === "string" ? frame.project_id : undefined,
               canvas_id: typeof frame.canvas_id === "string" ? frame.canvas_id : undefined,
@@ -2713,6 +2775,7 @@ export function useSuperChat({
         const event = frame.event && typeof frame.event === "object" && !Array.isArray(frame.event)
           ? {
               ...(frame.event as Record<string, unknown>),
+              request_id: frame.request_id,
               bridge_key: typeof frame.bridge_key === "string" ? frame.bridge_key : undefined,
               project_id: typeof frame.project_id === "string" ? frame.project_id : undefined,
               canvas_id: typeof frame.canvas_id === "string" ? frame.canvas_id : undefined,
@@ -2809,6 +2872,7 @@ export function useSuperChat({
               completedTurnId,
               persistedMessage?.parts,
               persistedMessage?.text,
+              true,
             );
             return next;
           });
@@ -2891,13 +2955,16 @@ export function useSuperChat({
       previous.close();
     }
 
-    const ws = new WebSocket(resolveChatWsUrl());
+    const wsUrl = new URL(resolveChatWsUrl());
+    wsUrl.searchParams.set("browser_id", browserRecoveryId());
+    const ws = new WebSocket(wsUrl.toString());
     wsRef.current = ws;
     superchatDebug("connecting", { url: resolveChatWsUrl() });
     ws.onopen = () => {
       if (connectionIdRef.current !== connectionId || wsRef.current !== ws) return;
       superchatDebug("open");
       sendFrame({ type: "scope.set", scope: desiredScopeRef.current });
+      recoveryTickRef.current?.();
     };
     ws.onmessage = (event) => {
       if (connectionIdRef.current !== connectionId || wsRef.current !== ws) return;
@@ -2927,6 +2994,7 @@ export function useSuperChat({
       if (connectionIdRef.current !== connectionId || wsRef.current !== ws) return;
       superchatDebug("close", { code: event.code, reason: event.reason });
       wsRef.current = null;
+      if (event.code === 1008) authRejectedRef.current = true;
       setConnected(false);
       const hasActiveTurn = Boolean(activeTurnIdRef.current ?? pendingClientTurnIdRef.current);
       setConnecting(hasActiveTurn);
@@ -2995,6 +3063,65 @@ export function useSuperChat({
     sendFrame({ type: "scope.set", scope: desiredScope });
   }, [desiredScope, sendFrame]);
 
+  useEffect(() => {
+    if (!recoveryActor || desiredScope.kind !== "project"
+      || desiredScope.surface !== "freezone" || !desiredScope.canvasId) return;
+    let timer: number | undefined;
+    let stopped = false;
+    let running = false;
+    let pending = false;
+    let idleDelay = 5_000;
+    const requestScope = desiredScope;
+    const recovery = createBackgroundBridgeRecovery({
+      pull: (cursor, eventCursor, signal) => api.post("api/v1/chat/pending-interactions", {
+        json: { project_id: requestScope.id, canvas_id: requestScope.canvasId,
+          agent_id: requestScope.agentId || "main", browser_id: browserRecoveryId(), cursor, event_cursor: eventCursor },
+        signal, timeout: 12_000, retry: 0,
+      }).json<{ ok: boolean; data: BridgeRecoveryPage }>().then(response => response.data),
+      receive: page => {
+        const isCurrentScope = () => useAuthStore.getState().username === recoveryActor
+          && scopeMatches(requestScope, desiredScopeRef.current);
+        if (!isCurrentScope()) return;
+        const optimisticTurns = new Set([...optimisticUserTurnsRef.current]
+          .filter(([, origin]) => origin.actor === recoveryActor && scopeMatches(origin.scope, requestScope))
+          .map(([turnId]) => turnId));
+        pending = page.frames.length > 0;
+        idleDelay = page.messages.length || page.events.length || pending ? 5_000 : Math.min(15_000, idleDelay * 2);
+        setMessages(current => isCurrentScope() ? mergeBridgeRecoveryMessages(current, page, optimisticTurns) : current);
+        // Complete persisted messages and terminal receipts never execute commands.
+        for (const frame of page.frames) handleFrameRef.current(frame);
+      },
+      denied: () => { stopped = true; authRejectedRef.current = true; disconnect(); },
+    });
+    const tick = () => {
+      if (stopped || running || authRejectedRef.current) return;
+      running = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      void recovery.tick().finally(() => {
+        running = false;
+        if (!stopped) timer = window.setTimeout(tick, pending ? 10_000 : idleDelay);
+      });
+    };
+    const expire = () => { stopped = true; recovery.stop(); disconnect(); };
+    const visible = () => { if (document.visibilityState === "visible") tick(); };
+    recoveryTickRef.current = tick;
+    window.addEventListener("focus", tick);
+    window.addEventListener("online", tick);
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    document.addEventListener("visibilitychange", visible);
+    tick();
+    return () => {
+      stopped = true;
+      recovery.stop();
+      recoveryTickRef.current = null;
+      if (timer !== undefined) window.clearTimeout(timer);
+      window.removeEventListener("focus", tick);
+      window.removeEventListener("online", tick);
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [connectionEnabled, desiredScope, recoveryActor, disconnect]);
+
   // Sweep stale/legacy message caches once on mount so abandoned conversations
   // don't accumulate and eventually exhaust the localStorage quota.
   useEffect(() => {
@@ -3043,14 +3170,16 @@ export function useSuperChat({
       window.clearTimeout(connectTimer);
       disconnect();
     };
-  }, [connect, connectionEnabled, disconnect]);
+  }, [connect, connectionEnabled, disconnect, recoveryActor]);
 
   const send = useCallback((text: string, attachments: ChatAttachment[] = [], transportText?: string) => {
     const trimmed = text.trim();
     if (!trimmed || !connected) return false;
+    clearAbortGrace();
     const outboundText = transportText?.trim() || trimmed;
     const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     pendingClientTurnIdRef.current = turnId;
+    optimisticUserTurnsRef.current.set(turnId, { actor: useAuthStore.getState().username, scope: { ...desiredScope } });
     markTurnActive(turnId);
     setMessages((current) => [...current, buildLocalUserMessage(trimmed, turnId, displayName, attachments)]);
     streamTextRef.current = "";
@@ -3072,7 +3201,7 @@ export function useSuperChat({
           : undefined,
     });
     return true;
-  }, [connected, desiredScope, displayName, markTurnActive, normalizedFreezoneCanvasId, sendFrame, surface]);
+  }, [clearAbortGrace, connected, desiredScope, displayName, markTurnActive, normalizedFreezoneCanvasId, sendFrame, surface]);
 
   const appendNotification = useCallback(async (text: string): Promise<boolean> => {
     const trimmed = text.trim();
@@ -3217,13 +3346,19 @@ export function useSuperChat({
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     clearAbortGrace();
+    const generation = abortGraceGenerationRef.current;
+    const targetScope = desiredScopeRef.current;
     abortGraceRef.current = window.setTimeout(() => {
+      // A later send invalidates even a callback already queued by the browser.
+      if (abortGraceGenerationRef.current !== generation) return;
       abortGraceRef.current = null;
-      const current = wsRef.current;
-      if (current && current.readyState === WebSocket.OPEN) {
+      const currentTurnId = activeTurnIdRef.current ?? pendingClientTurnIdRef.current;
+      if (wsRef.current !== ws || !scopeMatches(targetScope, desiredScopeRef.current)
+        || currentTurnId && currentTurnId !== turnId) return;
+      if (ws.readyState === WebSocket.OPEN) {
         // 兜底自救：服务端一直不给终态帧就关掉，`onclose` 会重连，再用
         // `scope.changed` 带回的历史对账。
-        current.close(4000, "client abort");
+        ws.close(4000, "client abort");
       }
     }, ABORT_TERMINAL_GRACE_MS);
   }, [clearAbortGrace, markTurnInactive, persistAssistantMessageParts]);

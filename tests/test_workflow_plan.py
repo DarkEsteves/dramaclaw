@@ -76,6 +76,70 @@ def test_compile_process_descriptors_covers_every_registered_remix_action() -> N
     assert descriptors[-1]["typed_inputs"] == {"composition_manifest": {"node_id": "manifest"}}
 
 
+def test_native_production_actions_use_plan_and_compose_nodes() -> None:
+    plan = {
+        "nodes": [
+            {"id": "analysis", "node_type": "videoStoryNode", "data": {"semanticOutputRole": "blueprint"}},
+            {"id": "draft", "node_type": "scriptNode", "data": {"processingAction": "generate_production_plan_draft"}},
+            {"id": "plan", "node_type": "scriptNode", "data": {"semanticOutputRole": "production_plan"}},
+            {"id": "speech", "node_type": "scriptNode", "data": {"processingAction": "align_production_speech"}},
+            {"id": "compose", "node_type": "videoComposeNode", "data": {"processingAction": "compile_production_plan"}},
+        ],
+        "edges": [
+            {"source": "analysis", "target": "draft", "link_type": "dependency_for"},
+            {"source": "plan", "target": "speech", "link_type": "dependency_for"},
+            {"source": "plan", "target": "compose", "link_type": "composition_input_for"},
+        ],
+    }
+    descriptors = compile_process_descriptors(plan, node_revision=2)
+    assert [item["typed_inputs"] for item in descriptors] == [
+        {"blueprint": {"node_id": "analysis"}},
+        {"production_plan": {"node_id": "plan"}},
+        {"production_plan": {"node_id": "plan"}},
+    ]
+    node_schema = workflow_plan_json_schema()["properties"]["nodes"]["items"]
+    Draft202012Validator(node_schema).validate(plan["nodes"][1])
+
+
+def test_reference_remix_plan_allows_independent_plans_and_compose_nodes() -> None:
+    plan = {
+        "schema_version": "freezone_workflow_plan.v1",
+        "skill": {"id": "reference-video-remix", "version": "2.1.0"},
+        "nodes": [
+            {"id": "analysis", "node_type": "videoStoryNode", "data": {"semanticOutputRole": "blueprint"}},
+            {"id": "plan-a", "node_type": "scriptNode", "data": {"remixRole": "production_plan", "semanticOutputRole": "production_plan", "processingAction": "generate_production_plan_draft"}},
+            {"id": "plan-b", "node_type": "scriptNode", "data": {"remixRole": "production_plan", "semanticOutputRole": "production_plan", "processingAction": "generate_production_plan_draft"}},
+            {"id": "compose-a", "node_type": "videoComposeNode", "data": {"processingAction": "compile_production_plan"}},
+            {"id": "compose-b", "node_type": "videoComposeNode", "data": {"processingAction": "compile_production_plan"}},
+        ],
+        "edges": [
+            {"source": "analysis", "target": "plan-a", "link_type": "dependency_for"},
+            {"source": "analysis", "target": "plan-b", "link_type": "dependency_for"},
+            {"source": "plan-a", "target": "compose-a", "link_type": "composition_input_for"},
+            {"source": "plan-b", "target": "compose-b", "link_type": "composition_input_for"},
+        ],
+    }
+    assert validate_workflow_plan(plan)["ok"] is True
+    from novelvideo.freezone.agent_workflows import catalog
+
+    validated = catalog.validate_agent_workflow_plan(plan)
+    assert validated["ok"] is True, validated
+    compiled = build_workflow_graph_commands({"plan": validated["plan"]})
+    assert compiled["ok"] is True, compiled
+    assert [item["node_type"] for item in compiled["commands"] if item["type"] == "create_node"] == [
+        "videoStoryNode", "scriptNode", "scriptNode", "videoComposeNode", "videoComposeNode",
+    ]
+    plan_commands = [
+        item for item in compiled["commands"]
+        if item["type"] == "create_node" and item["node_type"] == "scriptNode"
+    ]
+    assert all(item["data"]["remixRole"] == "production_plan" for item in plan_commands)
+    assert all(item["data"]["processingAction"] == "generate_production_plan_draft" for item in plan_commands)
+    different_skill = copy.deepcopy(plan)
+    different_skill["skill"]["id"] = "general-video"
+    assert validate_workflow_plan(different_skill)["ok"] is False
+
+
 @pytest.mark.parametrize("action", ["run_shell", "unknown_processing_action"])
 def test_compile_process_descriptors_rejects_unregistered_processing_action(action: str) -> None:
     plan = {

@@ -1176,6 +1176,13 @@ class TaskStateManager:
         state.completed_at = utc_now_iso()
         state.updated_at = utc_now_iso()
         self._save_for_context(ctx, state, ttl=self.COMPLETED_TTL)
+        # Only durable, task-id-fenced completion may hint the local observer.
+        # Separate worker processes still recover through bounded saved polling.
+        try:
+            from novelvideo.chat.reference_production_observer import wake_local_observers
+            wake_local_observers()
+        except Exception:
+            logger.debug("Reference observer wake hint unavailable")
         logger.info("Project task completed: %s/%s/%s", task_type, ctx.project_id, episode)
         return True
 
@@ -1296,6 +1303,11 @@ class TaskStateManager:
         state.completed_at = utc_now_iso()
         state.updated_at = utc_now_iso()
         self._save_for_context(ctx, state, ttl=self.COMPLETED_TTL)
+        try:
+            from novelvideo.chat.reference_production_observer import wake_local_observers
+            wake_local_observers()
+        except Exception:
+            logger.debug("Reference observer failure wake hint unavailable")
         logger.warning(
             "Project task failed: %s/%s/%s: %s",
             task_type,
@@ -1368,6 +1380,9 @@ class TaskStateManager:
                 "error = COALESCE(NULLIF(error, ''), ?), "
                 "completed_at = ?, updated_at = ?, expires_at = ? "
                 "WHERE status IN ('submitting', 'queued', 'running') "
+                "AND task_type NOT IN ('freezone_agent_workflow_result', "
+                "'freezone_agent_recipe_result', 'freezone_agent_workflow_generate', "
+                "'freezone_agent_recipe_generate') "
                 "AND updated_at < ? "
                 "AND json_valid(result_json) "
                 "AND json_extract(result_json, '$.task_metadata.backend') = 'inline'",
@@ -1384,6 +1399,9 @@ class TaskStateManager:
                 "error = COALESCE(NULLIF(error, ''), ?), "
                 "completed_at = ?, updated_at = ?, expires_at = ? "
                 "WHERE status IN ('submitting', 'queued', 'running') "
+                "AND task_type NOT IN ('freezone_agent_workflow_result', "
+                "'freezone_agent_recipe_result', 'freezone_agent_workflow_generate', "
+                "'freezone_agent_recipe_generate') "
                 "AND updated_at < ? "
                 "AND json_valid(result_json) "
                 "AND json_extract(result_json, '$.task_metadata.backend') = 'celery'",
@@ -1427,7 +1445,12 @@ class TaskStateManager:
             db_lock = self._sweep_db_locks.setdefault(key, threading.Lock())
         with self._connect_path(db_path, skip_auto_sweep=True) as conn:
             with db_lock:
-                return self._sweep_stale_tasks_on_connection(conn)
+                changed = self._sweep_stale_tasks_on_connection(conn)
+        from novelvideo.freezone.agent_product_operations import (
+            reconcile_agent_product_task_projections,
+        )
+        reconcile_agent_product_task_projections(project_dir=Path(ctx.state_dir))
+        return changed
 
     def get_task_for_project(
         self,
@@ -1437,6 +1460,12 @@ class TaskStateManager:
         beat_num: int = None,
         scope: str | None = None,
     ) -> Optional[TaskState]:
+        if task_type in {
+            "freezone_agent_workflow_result", "freezone_agent_recipe_result",
+            "freezone_agent_workflow_generate", "freezone_agent_recipe_generate",
+        }:
+            require_project_home_node(ctx, operation="read project task state")
+            self._reconcile_agent_product_projection_for_project(ctx)
         key = self._project_key(task_type, ctx.project_id, episode, beat_num, scope)
         with self._connect_context(ctx) as conn:
             row = conn.execute(
@@ -1501,6 +1530,8 @@ class TaskStateManager:
         return deleted
 
     def list_tasks_for_project(self, ctx: ProjectContext) -> List[TaskState]:
+        require_project_home_node(ctx, operation="list project task states")
+        self._reconcile_agent_product_projection_for_project(ctx)
         tasks: list[TaskState] = []
         expired_keys: list[str] = []
         with self._connect_context(ctx) as conn:
@@ -1530,6 +1561,18 @@ class TaskStateManager:
 
         tasks.sort(key=lambda task: task.updated_at or task.created_at or "", reverse=True)
         return tasks
+
+    @staticmethod
+    def _reconcile_agent_product_projection_for_project(ctx: ProjectContext) -> None:
+        try:
+            from novelvideo.freezone.agent_product_operations import (
+                reconcile_agent_product_task_projections,
+            )
+            reconcile_agent_product_task_projections(project_dir=Path(ctx.state_dir))
+        except Exception:
+            # A task read remains available while a transient recovery write
+            # is retried on the next read or explicit stale-task sweep.
+            logger.warning("agent product task reconciliation deferred", exc_info=True)
 
     def count_active_tasks_for_project(self, ctx: ProjectContext) -> int:
         try:
@@ -1735,6 +1778,96 @@ class TaskStateManager:
                 expires_at,
             ),
         )
+
+
+def reconcile_agent_product_task_for_operation(
+    *, project_dir: Path, operation: dict,
+) -> str | None:
+    """Project a terminal product operation onto its exact placeholder task.
+
+    This is deliberately repeatable: an interrupted call between operation and
+    task writes can be retried without changing a newer task with the same key.
+    Delivered reservations still require the existing credit-confirmation path.
+    """
+    from novelvideo.freezone.agent_product_operations import PRODUCT_TASK_TYPES
+
+    operation_id = str(operation.get("operation_id") or "").strip()
+    task_id = str(operation.get("task_id") or "").strip()
+    project_id = str(operation.get("project_id") or "").strip()
+    task_type = str(operation.get("task_type") or "").strip()
+    outcome = str(operation.get("status") or "").strip()
+    if (
+        not operation_id or not task_id or not project_id
+        or PRODUCT_TASK_TYPES.get(operation.get("product_kind")) != task_type
+        or outcome not in {"delivered", "failed", "cancelled"}
+    ):
+        return None
+    task_key = project_task_state_key(task_type, project_id, 0, scope=operation_id)
+    manager = TaskStateManager()
+    db_path = (Path(project_dir) / "data.db").resolve()
+    with manager._connect_path(db_path, skip_auto_sweep=True) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM task_states WHERE task_key = ? AND project_id = ?",
+            (task_key, project_id),
+        ).fetchone()
+        if row is None:
+            return None
+        state = manager._row_to_state(row)
+        if state.task_id != task_id:
+            raise ValueError("agent product operation task identity mismatch")
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        if metadata.get("operation_id") not in {None, operation_id}:
+            raise ValueError("agent product task operation identity mismatch")
+        target = {"delivered": "completed", "failed": "failed", "cancelled": "cancelled"}[outcome]
+        if state.status in TERMINAL_TASK_STATUSES:
+            if state.status != target:
+                if (
+                    outcome == "delivered"
+                    and state.status == "failed"
+                    and metadata.get("error_code") == "AGENT_PRODUCT_SETTLEMENT_PENDING"
+                ):
+                    # The existing late-delivery reconciler confirms credit
+                    # before upgrading this provisional failure to completed.
+                    return state.status
+                raise ValueError("agent product task has another terminal outcome")
+            return state.status
+        if outcome == "delivered" and (
+            metadata.get("feature_credit_reservation_id")
+            or metadata.get("feature_credit_charge_id")
+        ):
+            # The existing delivery reconciler confirms the reservation first.
+            return state.status
+        state.status = target
+        state.metadata = manager._merge_task_metadata(
+            metadata,
+            {
+                "operation_id": operation_id,
+                "operation_status": outcome,
+                "settlement_status": (
+                    "awaiting_credit_reconciliation"
+                    if metadata.get("feature_credit_reservation_id")
+                    or metadata.get("feature_credit_charge_id")
+                    else "reconciled"
+                ),
+            },
+        )
+        state.result = manager._merge_metadata_into_result(state.result, state.metadata)
+        state.updated_at = utc_now_iso()
+        state.completed_at = state.completed_at or state.updated_at
+        if outcome == "delivered":
+            state.progress = 1.0
+            state.error = None
+            state.current_task = "完成"
+        elif outcome == "cancelled":
+            state.current_task = "任务已取消"
+        else:
+            state.error = "Agent 回合结束，产品结果未交付"
+            state.current_task = "Agent 交付失败"
+        manager._save_on_connection(
+            conn, task_key, state, compute_expiry(manager.COMPLETED_TTL)
+        )
+        return state.status
 
 
 # 全局单例

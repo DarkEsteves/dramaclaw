@@ -46,6 +46,45 @@ class RemixOperationStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _settlement_path(self, key: str) -> Path:
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
+            raise ValueError("invalid settlement key")
+        return self.root / "settlements" / f"{key}.json"
+
+    def get_settlement(self, key: str) -> dict[str, Any] | None:
+        with self._locked():
+            path = self._settlement_path(key)
+            if not path.exists():
+                return None
+            record = json.loads(path.read_text())
+            if record.get("project_id") != self.project_id:
+                raise ValueError("settlement scope differs")
+            return record
+
+    def checkpoint_settlement(self, key: str, **changes: Any) -> dict[str, Any]:
+        """Persist monotonic checkpoints; callers execute checks outside this lock."""
+        stages = {"discovered": 0, "registered": 1, "checks_scheduled": 2, "notified": 3}
+        with self._locked() as guard:
+            path = self._settlement_path(key)
+            path.parent.mkdir(exist_ok=True)
+            old = json.loads(path.read_text()) if path.exists() else {}
+            if old and old.get("project_id") != self.project_id:
+                raise ValueError("settlement scope differs")
+            stage = changes.get("checkpoint", old.get("checkpoint", "discovered"))
+            if stage not in stages:
+                raise ValueError("invalid settlement checkpoint")
+            if stages[stage] < stages.get(old.get("checkpoint"), -1):
+                return old
+            for field in ("scope", "task", "native_evidence", "resource", "result_key", "native_authorization", "authorization_work_ref", "disposition"):
+                if field in old and field in changes and old[field] != changes[field]:
+                    raise ValueError("settlement identity or result changed")
+            if old.get("disposition"):
+                changes.update(status="stale", reason=old.get("reason", "generation_superseded"))
+            record = {**old, **changes, "project_id": self.project_id, "settlement_id": key,
+                      "checkpoint": stage}
+            self._atomic(path, record, guard)
+            return record
+
     def _refs(self, refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(refs, list):
             raise ValueError("input_refs must be a list")
@@ -79,6 +118,35 @@ class RemixOperationStore:
 
     def get(self, operation_id: str) -> dict[str, Any]:
         return self._read(operation_id)
+
+    def _draft_stage_path(self, operation_id: str, task_id: str, stage: str) -> Path:
+        self._path(operation_id)
+        if (not isinstance(task_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id)
+                or stage not in {"outline", "arrangement"}):
+            raise ValueError("invalid draft stage identity")
+        return self.root / "draft-stages" / operation_id / task_id / f"{stage}.json"
+
+    def record_draft_stage(
+        self, operation_id: str, task_id: str, stage: str, payload: dict[str, Any],
+    ) -> None:
+        """Keep a completed authoring stage private to its original operation."""
+        if not isinstance(payload, dict):
+            raise ValueError("invalid draft stage payload")
+        with self._locked() as guard:
+            operation = self._read(operation_id)
+            parameters = operation.get("normalized_parameters") or {}
+            if (parameters.get("action") not in {"generate_production_plan_draft", "generate_production_plan_arrangement"}
+                    or operation.get("task_id") not in {"", task_id}):
+                raise ValueError("draft stage operation differs")
+            path = self._draft_stage_path(operation_id, task_id, stage)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic(path, payload, guard)
+
+    def read_draft_stage(self, operation_id: str, task_id: str, stage: str) -> dict[str, Any]:
+        with self._locked():
+            self._read(operation_id)
+            return json.loads(self._draft_stage_path(operation_id, task_id, stage).read_text())
 
     def list(self, *, limit: int = 50) -> list[dict[str, Any]]:
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -125,8 +193,10 @@ class RemixOperationStore:
         self, bindings: Any, expected_hashes: list[str] | None
     ) -> bool:
         """Rehash exact project-local manifest bindings against a durable snapshot."""
-        if not isinstance(bindings, list) or not bindings:
+        if not isinstance(bindings, list):
             return False
+        if not bindings:
+            return expected_hashes == []
         declared: list[str] = []
         for binding in bindings:
             if not isinstance(binding, dict):
@@ -289,6 +359,27 @@ class RemixOperationStore:
                         and not record.get("cancel_reason")):
                     changes.update(status="pending", reconciliation_reason="")
                 self._update(operation_id, guard, **changes)
+
+    def reject_submission(
+        self, operation_id: str, *, owner: str, fencing_token: int, reason: str,
+    ) -> dict[str, Any]:
+        """Record a proven preaccept rejection under the submission fence."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("submission rejection reason is required")
+        with self._locked() as guard:
+            record = self._read(operation_id)
+            if (record.get("submission_owner") != owner
+                    or record.get("submission_fence") != fencing_token
+                    or record.get("task_id")):
+                raise ValueError("stale submission fencing token")
+            if record.get("cancel_reason"):
+                return record
+            if record["status"] not in {"pending", "pending_reconciliation"}:
+                raise ValueError("illegal operation state transition")
+            return self._update(
+                operation_id, guard, status="failed", failure_reason=reason.strip(),
+                submission_owner="", submission_claimed_at=0,
+            )
 
     def submission_outcome_unknown(
         self,

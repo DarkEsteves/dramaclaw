@@ -8,8 +8,8 @@ vi.mock('@xyflow/react', () => ({
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/stores/canvasStore', () => ({
-  useCanvasStore: (selector: (state: { setSelectedNode: () => void; updateNodeData: () => void }) => unknown) =>
-    selector({ setSelectedNode: vi.fn(), updateNodeData: vi.fn() }),
+  useCanvasStore: (selector: (state: { nodes: unknown[]; edges: unknown[]; setSelectedNode: () => void; updateNodeData: () => void }) => unknown) =>
+    selector({ nodes: [], edges: [], setSelectedNode: vi.fn(), updateNodeData: vi.fn() }),
 }));
 vi.mock('@/features/canvas/ui/NodeHeader', () => ({
   NodeHeader: ({ titleText }: { titleText: string }) => <div>{titleText}</div>,
@@ -27,13 +27,13 @@ import { TranscriptNode } from '@/features/canvas/nodes/TranscriptNode';
 import { VideoStoryNode } from '@/features/canvas/nodes/VideoStoryNode';
 
 describe('remix canvas nodes', () => {
-  it('offers the planned remix nodes as connectable workflow steps', () => {
+  it('keeps transcription creation and historical timeline compatibility separate', () => {
     expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.transcript].visibleInMenu).toBe(true);
-    expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.semanticTimeline].visibleInMenu).toBe(true);
+    expect(canvasNodeDefinitions[CANVAS_NODE_TYPES.semanticTimeline].visibleInMenu).toBe(false);
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.video)).toContain(CANVAS_NODE_TYPES.transcript);
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.audio)).toContain(CANVAS_NODE_TYPES.transcript);
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.transcript)).toContain(CANVAS_NODE_TYPES.videoStory);
-    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.script)).toContain(CANVAS_NODE_TYPES.semanticTimeline);
+    expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.script)).not.toContain(CANVAS_NODE_TYPES.semanticTimeline);
     expect(getDownstreamSpawnTypes(CANVAS_NODE_TYPES.semanticTimeline)).toContain(CANVAS_NODE_TYPES.videoCompose);
     expect(isManualConnectionAllowed(CANVAS_NODE_TYPES.audio, CANVAS_NODE_TYPES.transcript)).toBe(true);
   });

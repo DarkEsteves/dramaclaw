@@ -49,6 +49,103 @@ class _FakeThread:
     def is_closed(self) -> bool:
         return self.closed
 
+    async def warm(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_user,new_profile", [("bob", "main"), ("alice", "freezone:main")])
+async def test_full_pool_prewarm_leaves_other_active_slots_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_user: str, new_profile: str
+) -> None:
+    pool, calls, auth, _gateway = _patch_fake_hermes_pool(tmp_path, monkeypatch)
+    pool._max_workers = 1
+    thread = await pool.get_for_user("alice")
+    slot = thread._slot
+    await pool._begin_turn(slot)
+    try:
+        await pool.prewarm(new_user, agent_profile=new_profile)
+        assert thread.closed is False
+        assert pool._slots == {"alice": slot}
+        assert auth.revoked == []
+        assert auth.created == 1
+        assert calls == [("start", None)]
+    finally:
+        await pool._finish_turn(slot)
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_full_pool_prewarm_evicts_an_idle_slot_instead_of_active_lru(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool, _calls, auth, _gateway = _patch_fake_hermes_pool(tmp_path, monkeypatch)
+    pool._max_workers = 2
+    active = await pool.get_for_user("alice")
+    idle = await pool.get_for_user("bob")
+    await pool._begin_turn(active._slot)
+    active._slot.last_used = 1
+    idle._slot.last_used = 2
+    try:
+        await pool.prewarm("charlie")
+        assert active.closed is False
+        assert idle.closed is True
+        assert set(pool._slots) == {"alice", "charlie"}
+        assert auth.revoked == ["token-2"]
+    finally:
+        await pool._finish_turn(active._slot)
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_canvas_prewarm_does_not_rotate_an_active_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool, calls, _auth, _gateway = _patch_fake_hermes_pool(tmp_path, monkeypatch)
+    thread = await pool.get_for_user(
+        "alice", agent_profile="freezone:main", tool_mode="freezone_canvas",
+        scope_kind="project", project_id="project_a", surface="freezone",
+        canvas_id="canvas_a",
+    )
+    slot = thread._slot
+    await pool._begin_turn(slot)
+    try:
+        await pool.prewarm(
+            "alice", agent_profile="freezone:main", tool_mode="freezone_canvas",
+            scope_kind="project", project_id="project_a", surface="freezone",
+            canvas_id="canvas_b",
+        )
+        assert thread.closed is False
+        assert pool._slots["alice:freezone:main"] is slot
+        assert slot.canvas_id == "canvas_a"
+        assert calls == [("start", None)]
+    finally:
+        await pool._finish_turn(slot)
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_canvas_prewarm_rotates_an_idle_worker_to_the_requested_canvas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool, calls, _auth, _gateway = _patch_fake_hermes_pool(tmp_path, monkeypatch)
+    thread = await pool.get_for_user(
+        "alice", agent_profile="freezone:main", tool_mode="freezone_canvas",
+        scope_kind="project", project_id="project_a", surface="freezone",
+        canvas_id="canvas_a",
+    )
+    try:
+        await pool.prewarm(
+            "alice", agent_profile="freezone:main", tool_mode="freezone_canvas",
+            scope_kind="project", project_id="project_a", surface="freezone",
+            canvas_id="canvas_b",
+        )
+        assert thread.closed is True
+        assert pool._slots["alice:freezone:main"].canvas_id == "canvas_b"
+        assert calls == [("start", None), ("start", None)]
+    finally:
+        await pool.close_all()
+
 
 @pytest.mark.asyncio
 async def test_close_user_thread_requires_exact_session_id(

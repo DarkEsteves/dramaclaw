@@ -772,6 +772,7 @@
     }
   },
   "aiAssistant": {
+    "systemNotice": "系统",
     "clearChat": {
       "title": "清空当前聊天？",
       "description": "当前聊天记录将被删除，下一条消息会开启新的 Agent 上下文。画布、项目和其他聊天不会受影响；进行中的生成任务不会被取消。",
@@ -3508,6 +3509,13 @@
     "beatThumbnails": "节拍缩略图"
   },
   "tasks": {
+    "planValidation": {
+      "start": "开始",
+      "end": "结束",
+      "range": "起止",
+      "speechSourceCycle": "作品方案校验未通过：发声素材 {{placement}} 的{{edge}}时间依赖它自己承载、但尚未确定时间的台词 {{turn}}，形成循环。请先确定发声素材的段落或片段范围。本次方案尚未保存。",
+      "otherIssue": "作品方案校验未通过：字段 {{path}}，错误类型 {{code}}。本次方案尚未保存。"
+    },
     "taskCount": "{{count}} 个任务",
     "noTasks": "暂无任务",
     "cancelled": "任务已取消",
@@ -3545,6 +3553,9 @@
       "episode_prop_planner": "规划道具",
       "content_rewriter": "AI 改写",
       "remix_generate_script_draft": "生成改编台词",
+      "production_plan_outline": "AI 生成结构与台词",
+      "remix_generate_production_plan_arrangement": "AI 安排画面与声音",
+      "remix_generate_production_plan_draft": "AI 起草作品方案",
       "remix_plan_broll": "规划补充画面",
       "sketch_generation": "草图生成",
       "batch_sketch": "批量草图",
@@ -7573,6 +7584,8 @@
       "storyboardGenNode": "多版本宫格",
       "videoNode": "视频",
       "audioNode": "音频",
+      "transcriptNode": "转写",
+      "semanticTimelineNode": "语义时间线",
       "videoStoryNode": "视频故事",
       "videoComposeNode": "视频合成",
       "scriptNode": "脚本生成器",

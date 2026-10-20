@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import tomllib
+from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -68,6 +69,31 @@ _CODEX_USER_INPUT_TOOL_NAMES = {
     "freezone_request_user_clarification",
     "freezone_finish_agent_catalog_draft",
 }
+
+_CODEX_DIAGNOSTIC_EVENT_HISTORY_SIZE = 12
+
+
+def _codex_event_diagnostic(method: str, payload: Any) -> str:
+    """Summarize a runtime event without recording prompt or result content."""
+
+    details = [f"method={method}", f"payload={type(payload).__name__}"]
+    for field in ("turn_id", "item_id", "summary_index", "content_index"):
+        value = getattr(payload, field, None)
+        if value is not None:
+            details.append(f"{field}={str(value)[:120]}")
+    delta = getattr(payload, "delta", None)
+    if isinstance(delta, str):
+        details.append(f"delta_len={len(delta)}")
+    item = getattr(payload, "item", None)
+    if item is not None:
+        item_type = getattr(item, "type", None)
+        item_type = getattr(item_type, "value", item_type)
+        item_id = getattr(item, "id", None)
+        if item_type is not None:
+            details.append(f"item_type={str(item_type)[:80]}")
+        if item_id is not None:
+            details.append(f"item_id={str(item_id)[:120]}")
+    return " ".join(details)
 
 
 def _codex_tool_waits_for_user_input(name: str | None) -> bool:
@@ -1310,11 +1336,57 @@ class CodexThread:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         current_turn_id: str | None = None
+        consumer_closed = threading.Event()
+        registration_lock = threading.Lock()
+        registered_turn: tuple[str, str, Any] | None = None
+        close_interrupt_claimed = False
+        raw_event_lock = threading.Lock()
+        last_raw_event: tuple[float, str] | None = None
+        raw_event_count = 0
+        raw_event_history: deque[str] = deque(maxlen=_CODEX_DIAGNOSTIC_EVENT_HISTORY_SIZE)
+        reasoning_summary_event_count = 0
+        reasoning_summary_part_count = 0
+        reasoning_summary_orphan_count = 0
+        active_reasoning_item_id: str | None = None
+
+        def claim_close_interrupt(*, close_consumer: bool = False) -> tuple[str, str, Any] | None:
+            nonlocal close_interrupt_claimed
+            with registration_lock:
+                # Closure publication and obligation acquisition must be atomic
+                # with worker cleanup clearing its retained registered handle.
+                if close_consumer:
+                    consumer_closed.set()
+                if consumer_closed.is_set() and registered_turn and not close_interrupt_claimed:
+                    close_interrupt_claimed = True
+                    return registered_turn
+            return None
+
+        def interrupt_claimed_turn(identity: tuple[str, str, Any]) -> None:
+            thread_id, turn_id, handle = identity
+            if not interrupt_live_codex_turn(thread_id, turn_id):
+                # The worker can observe closure and unregister before this
+                # dispatch runs. Retain its authenticated exact handle so that
+                # registry cleanup cannot discard the interruption obligation.
+                handle.interrupt()
 
         def emit(kind: str, payload: Any) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
 
+        def safe_event_type(value: Any) -> str:
+            # Notification methods are protocol identifiers, never payload text.
+            candidate = str(value or "")
+            if 0 < len(candidate) <= 80 and all(
+                char.isascii() and (char.isalnum() or char in "/._-")
+                for char in candidate
+            ):
+                return candidate
+            return "unavailable"
+
         def worker() -> None:
+            nonlocal current_turn_id, registered_turn, last_raw_event, raw_event_count
+            nonlocal reasoning_summary_event_count, reasoning_summary_part_count
+            nonlocal reasoning_summary_orphan_count
+            nonlocal active_reasoning_item_id
             from openai_codex import (
                 ApprovalMode,
                 CodexConfig,
@@ -1361,6 +1433,8 @@ class CodexThread:
             final_disposition: str | None = None
 
             with shared_codex(config) as codex:
+                if consumer_closed.is_set():
+                    return
                 thread_options = {
                     # The only pre-approved tools belong to DramaClaw's
                     # project-scoped MCP server. Keep the global policy at
@@ -1380,27 +1454,98 @@ class CodexThread:
                     thread_options,
                 )
                 self.id = thread.id
+                if consumer_closed.is_set():
+                    return
                 turn = _start_codex_turn(
                     thread, prompt, self._turn_metadata, self._output_schema
                 )
-                nonlocal current_turn_id
                 current_turn_id = turn.id
                 register_live_codex_turn(self.id, turn.id, turn)
-                emit(
-                    "event",
-                    ChatBackendEvent(
-                        type="thread_started", thread_id=self.id, turn_id=turn.id
-                    ),
-                )
-                emit(
-                    "event",
-                    ChatBackendEvent(
-                        type="egress_submitted", thread_id=self.id, turn_id=turn.id
-                    ),
-                )
+                # Publish only after registration. If closure raced registration,
+                # the worker claims interruption; otherwise the consumer does.
+                with registration_lock:
+                    registered_turn = (self.id, turn.id, turn)
                 try:
+                    late_interrupt = claim_close_interrupt()
+                    if late_interrupt:
+                        interrupt_claimed_turn(late_interrupt)
+                    if consumer_closed.is_set():
+                        return
+                    emit(
+                        "event",
+                        ChatBackendEvent(
+                            type="thread_started", thread_id=self.id, turn_id=turn.id
+                        ),
+                    )
+                    emit(
+                        "event",
+                        ChatBackendEvent(
+                            type="egress_submitted", thread_id=self.id, turn_id=turn.id
+                        ),
+                    )
                     for event in turn.stream():
+                        if consumer_closed.is_set():
+                            return
+                        method = safe_event_type(getattr(event, "method", None))
                         payload = event.payload
+                        diagnostic = _codex_event_diagnostic(method, payload)
+                        with raw_event_lock:
+                            last_raw_event = (
+                                loop.time(), method
+                            )
+                            raw_event_count += 1
+                            raw_event_history.append(diagnostic)
+                            if method == "item/reasoning/summaryPartAdded":
+                                reasoning_summary_part_count += 1
+                            elif method == "item/reasoning/summaryTextDelta":
+                                reasoning_summary_event_count += 1
+                        item = getattr(payload, "item", None)
+                        item_type = getattr(item, "type", None)
+                        item_type = getattr(item_type, "value", item_type)
+                        item_id = str(getattr(item, "id", "") or "").strip() or None
+                        if method == "item/started" and item_type == "reasoning":
+                            active_reasoning_item_id = item_id
+                        elif method == "item/completed" and item_type == "reasoning":
+                            if active_reasoning_item_id == item_id:
+                                active_reasoning_item_id = None
+                        if method in {
+                            "item/reasoning/summaryPartAdded",
+                            "item/reasoning/summaryTextDelta",
+                        }:
+                            summary_count = (
+                                reasoning_summary_event_count
+                                + reasoning_summary_part_count
+                            )
+                            summary_item_id = str(
+                                getattr(payload, "item_id", "") or ""
+                            ).strip() or None
+                            turn_id_match = getattr(payload, "turn_id", None) == turn.id
+                            active_item_match = (
+                                active_reasoning_item_id is not None
+                                and active_reasoning_item_id == summary_item_id
+                            )
+                            if not active_item_match:
+                                reasoning_summary_orphan_count += 1
+                            if (
+                                summary_count <= 5
+                                or summary_count % 100 == 0
+                            ):
+                                level = logging.INFO if active_item_match else logging.WARNING
+                                _log.log(
+                                    level,
+                                    "Codex reasoning summary event: thread_id=%s "
+                                    "turn_id=%s %s turn_id_match=%s "
+                                    "active_item_id=%s active_item_match=%s "
+                                    "summary_event_count=%d summary_part_count=%d",
+                                    self.id,
+                                    turn.id,
+                                    diagnostic,
+                                    turn_id_match,
+                                    active_reasoning_item_id or "none",
+                                    active_item_match,
+                                    reasoning_summary_event_count,
+                                    reasoning_summary_part_count,
+                                )
                         raw = _codex_raw_notification(event)
                         if (
                             isinstance(payload, TurnStartedNotification)
@@ -1770,6 +1915,10 @@ class CodexThread:
                             final_disposition = "completed"
                 finally:
                     unregister_live_codex_turn(self.id, turn.id)
+                    with registration_lock:
+                        registered_turn = None
+                    if consumer_closed.is_set():
+                        consume_interrupted_codex_turn(self.id, turn.id)
 
                 if final_response is not None and final_disposition is not None:
                     emit(
@@ -1825,6 +1974,11 @@ class CodexThread:
         saw_runtime_progress = False
         user_input_calls: set[str] = set()
         timed_out = False
+        stream_completed = False
+        last_mapped_event_type = "unavailable"
+        last_tool_call_id = "unavailable"
+        event_count = 0
+        last_progress_at = started_at
 
         try:
             while True:
@@ -1857,19 +2011,41 @@ class CodexThread:
                         timeout_kind = "idle"
                     else:
                         timeout_kind = "first-progress"
+                    with raw_event_lock:
+                        raw_snapshot = last_raw_event
+                        raw_count_snapshot = raw_event_count
+                        raw_history_snapshot = list(raw_event_history)
                     _log.warning(
-                        "Codex App Server stream timed out: kind=%s thread=%s turn=%s",
+                        "Codex App Server stream timed out: kind=%s thread=%s turn=%s "
+                        "last_raw_event_type=%s last_mapped_event_type=%s "
+                        "last_tool_call_id=%s time_since_raw_event=%s "
+                        "time_since_progress=%.3f queue_depth=%d event_count=%d "
+                        "raw_event_count=%d reasoning_summary_event_count=%d "
+                        "reasoning_summary_part_count=%d reasoning_summary_orphan_count=%d "
+                        "raw_event_trace=%s",
                         timeout_kind,
                         self.id,
                         current_turn_id,
+                        raw_snapshot[1] if raw_snapshot else "unavailable",
+                        last_mapped_event_type,
+                        last_tool_call_id,
+                        f"{max(0.0, now - raw_snapshot[0]):.3f}" if raw_snapshot else "unavailable",
+                        max(0.0, now - last_progress_at),
+                        queue.qsize(),
+                        event_count,
+                        raw_count_snapshot,
+                        reasoning_summary_event_count,
+                        reasoning_summary_part_count,
+                        reasoning_summary_orphan_count,
+                        " | ".join(raw_history_snapshot),
                     )
-                    if self.id and current_turn_id:
+                    timeout_interrupt = claim_close_interrupt(close_consumer=True)
+                    if timeout_interrupt:
                         try:
                             await asyncio.wait_for(
                                 asyncio.to_thread(
-                                    interrupt_live_codex_turn,
-                                    self.id,
-                                    current_turn_id,
+                                    interrupt_claimed_turn,
+                                    timeout_interrupt,
                                 ),
                                 timeout=CODEX_INTERRUPT_GRACE_TIMEOUT,
                             )
@@ -1916,8 +2092,13 @@ class CodexThread:
                 if kind == "error":
                     raise RuntimeError(str(payload))
                 event = payload
+                event_count += 1
+                last_mapped_event_type = safe_event_type(event.type)
+                if event.call_id:
+                    last_tool_call_id = safe_event_type(event.call_id)
                 if event.type not in _CODEX_LIFECYCLE_ONLY_EVENTS:
                     saw_runtime_progress = True
+                    last_progress_at = loop.time()
                     idle_deadline = min(
                         total_deadline,
                         loop.time() + CODEX_STREAM_IDLE_TIMEOUT,
@@ -1935,30 +2116,32 @@ class CodexThread:
                         "running",
                     }:
                         user_input_calls.discard(call_key)
-                yield event
                 if event.type == "complete":
+                    stream_completed = True
+                yield event
+                if stream_completed:
                     break
         finally:
-            current_task = asyncio.current_task()
-            if (
-                current_task is not None
-                and current_task.cancelling()
-                and self.id
-                and current_turn_id
-            ):
-                await asyncio.to_thread(
-                    interrupt_live_codex_turn, self.id, current_turn_id
-                )
-            if timed_out:
+            interrupted_close = not stream_completed and not timed_out
+            close_interrupt = claim_close_interrupt(close_consumer=interrupted_close or timed_out)
+            if close_interrupt:
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(
+                        interrupt_claimed_turn, close_interrupt
+                    ), timeout=CODEX_INTERRUPT_GRACE_TIMEOUT)
+                except Exception:
+                    _log.warning("Failed to interrupt closing Codex turn: thread=%s turn=%s",
+                                 self.id, current_turn_id, exc_info=True)
+            if timed_out or interrupted_close:
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(worker_task),
                         timeout=CODEX_INTERRUPT_GRACE_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    # Cancelling a to_thread wrapper cannot stop the underlying
-                    # thread, but it prevents this request from waiting forever.
-                    # The App Server interrupt above owns terminating the turn.
+                    # The authenticated interrupt owns terminating the runtime.
+                    # Cancelling this wrapper only bounds the request's wait;
+                    # it cannot stop the underlying blocking worker thread.
                     worker_task.cancel()
                 finally:
                     if self.id and current_turn_id:

@@ -8,12 +8,105 @@ import pytest
 
 from novelvideo.ports.authz import AdmissionContext, BillingPrincipal
 from novelvideo.ports.model_credentials import CredentialReference
+from novelvideo.ports.model_credentials import ModelCredentialError, RequestCredential
 from novelvideo.project_context import ProjectContext
 from novelvideo.task_backend.consumer import VerifiedTaskDelivery
 from novelvideo.task_backend.envelope import InvalidTaskEnvelope
 
 # 「这个关键字压根没传进来」的哨兵——与「传了但值是 None」是两件事。
 _NOT_PASSED = object()
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_mismatched_resolved_credential_before_submit(monkeypatch):
+    from novelvideo import model_gateway_runtime as runtime
+    from novelvideo.egress_context import TrustedEgressContext
+    from novelvideo.ports.egress_operations import OperationClaimResult, OperationSnapshot, OperationState
+
+    context = TrustedEgressContext(
+        envelope_id="envelope-1", project_id="project-1", task_type="gateway-test",
+        requester_user_id="user-1", root_task_id="task-1", admission_id="admission-1",
+        admitted_at="2026-10-12T00:00:00Z", membership_id="membership-1", authz_version=1,
+        billing_principal=BillingPrincipal(kind="organization", id="org-1"),
+        credential=CredentialReference(source="organization", credential_id="expected", key_version=1, org_id="org-1"),
+    )
+    events = []
+
+    class Operations:
+        async def claim(self, *, spec):
+            events.append("claim")
+            return OperationClaimResult(True, OperationSnapshot("op-1", spec.operation_key, OperationState.DISPATCHING, 1), "token-1")
+
+        async def mark_rejected_before_submit(self, **kwargs):
+            events.append("rejected")
+
+        async def mark_unknown(self, **kwargs):
+            events.append("unknown")
+
+    class Credentials:
+        async def resolve(self, admission):
+            events.append("resolve")
+            return RequestCredential(
+                reference=CredentialReference(source="organization", credential_id="borrowed", key_version=1, org_id="org-1"),
+                api_key="borrowed-secret", base_url="https://example.invalid/v1",
+            )
+
+    monkeypatch.setattr(runtime, "get_egress_operation_port", lambda: Operations())
+    monkeypatch.setattr(runtime, "get_model_credentials", lambda: Credentials())
+
+    async def submit(_credential):
+        events.append("submit")
+
+    with runtime.model_gateway_request_scope(context), pytest.raises(ModelCredentialError) as error:
+        await runtime.execute_organization_gateway_request(
+            capability="test.gateway", business_task_id="business-1", request_digest="digest-1", submit=submit,
+        )
+    assert error.value.code == "ORG_CREDENTIAL_VERSION_MISMATCH"
+    assert events == ["claim", "resolve", "rejected"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_invalid_resolved_url_before_submit(monkeypatch):
+    from novelvideo import model_gateway_runtime as runtime
+    from novelvideo.egress_context import TrustedEgressContext
+    from novelvideo.ports.egress_operations import OperationClaimResult, OperationSnapshot, OperationState
+
+    reference = CredentialReference(source="organization", credential_id="expected", key_version=1, org_id="org-1")
+    context = TrustedEgressContext(
+        envelope_id="envelope-1", project_id="project-1", task_type="gateway-test",
+        requester_user_id="user-1", root_task_id="task-1", admission_id="admission-1",
+        admitted_at="2026-10-12T00:00:00Z", membership_id="membership-1", authz_version=1,
+        billing_principal=BillingPrincipal(kind="organization", id="org-1"), credential=reference,
+    )
+    events = []
+
+    class Operations:
+        async def claim(self, *, spec):
+            events.append("claim")
+            return OperationClaimResult(True, OperationSnapshot("op-1", spec.operation_key, OperationState.DISPATCHING, 1), "token-1")
+
+        async def mark_rejected_before_submit(self, **kwargs):
+            events.append("rejected")
+
+        async def mark_unknown(self, **kwargs):
+            events.append("unknown")
+
+    class Credentials:
+        async def resolve(self, admission):
+            events.append("resolve")
+            return RequestCredential(reference=reference, api_key="secret", base_url="not-an-http-url")
+
+    monkeypatch.setattr(runtime, "get_egress_operation_port", lambda: Operations())
+    monkeypatch.setattr(runtime, "get_model_credentials", lambda: Credentials())
+
+    async def submit(_credential):
+        events.append("submit")
+
+    with runtime.model_gateway_request_scope(context), pytest.raises(ModelCredentialError):
+        await runtime.execute_organization_gateway_request(
+            capability="test.gateway", business_task_id="business-1", request_digest="digest-1", submit=submit,
+        )
+    assert events == ["claim", "resolve", "rejected"]
 
 
 class _TaskManager:

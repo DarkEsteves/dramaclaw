@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { correctedTimeline, sourceMediaForTranscript, sourceScriptForTranscript, transcriptPlaybackParts, transcriptSrt, timelineWords } from './transcriptModel';
+import { correctedTimeline, readableTranscript, sourceMediaForTranscript, sourceScriptForTranscript, transcriptPlaybackParts, transcriptSrt, timelineWords } from './transcriptModel';
 
 const timeline = {
   schema: 'word_timeline.v1', media_hash: 'hash', language: 'zh', status: 'completed', transcript: '你好',
@@ -10,6 +10,27 @@ const timeline = {
 };
 
 describe('transcript node model', () => {
+  it('restores spaces for an existing collapsed English transcript without altering Chinese or complete prose', () => {
+    const words = [
+      { text: 'Okay', startUs: 0, endUs: 300_000, startChar: 0, endChar: 4 },
+      { text: 'Sarah', startUs: 400_000, endUs: 700_000, startChar: 4, endChar: 9 },
+      { text: 'so', startUs: 800_000, endUs: 900_000, startChar: 9, endChar: 11 },
+    ];
+    const restored = readableTranscript('OkaySarahso', words);
+    expect(restored).toBe('Okay Sarah so');
+    expect(transcriptPlaybackParts(restored, words)).toEqual([
+      { text: 'Okay', startUs: 0, endUs: 300_000 }, { text: ' ' },
+      { text: 'Sarah', startUs: 400_000, endUs: 700_000 }, { text: ' ' },
+      { text: 'so', startUs: 800_000, endUs: 900_000 },
+    ]);
+    expect(readableTranscript('Okay, Sarah, so', words)).toBe('Okay, Sarah, so');
+    expect(readableTranscript('你好', [
+      { text: '你', startUs: 0, endUs: 100_000 },
+      { text: '好', startUs: 100_000, endUs: 200_000 },
+    ])).toBe('你好');
+    expect(readableTranscript('flour', ['f', 'l', 'o', 'u', 'r'].map((text, index) => ({ text, startUs: index * 100_000, endUs: (index + 1) * 100_000 })))).toBe('flour');
+  });
+
   it('preserves separators and repeated words when preparing playback links', () => {
     expect(transcriptPlaybackParts('go, go!', [
       { text: 'go', startUs: 100_000, endUs: 200_000 },
@@ -120,4 +141,25 @@ describe('transcript node model', () => {
   it('exports playable SRT timing', () => {
     expect(transcriptSrt(timelineWords(timeline))).toBe('1\n00:00:00,000 --> 00:00:00,500\n你\n\n2\n00:00:00,500 --> 00:00:01,000\n好\n');
   });
+});
+
+
+it('plays a restored native transcript from its immutable source without remix metadata', () => {
+  const data = {sourceProjectId:'demo',sourceMediaPath:'video.mp4',sourceMediaHash:'genuine-hash',sourceVideoUrl:'/static/projects/demo/video.mp4',words:[{text:'hello'}]};
+  const nodes: Array<{id:string;data:Record<string,unknown>}> = [{id:'source',data:{videoUrl:'/static/projects/demo/video.mp4'}},{id:'words',data}];
+  const edges = [{source:'source',target:'words'}];
+  expect(sourceMediaForTranscript('words',nodes,edges)).toEqual({path:'video.mp4',url:'/static/projects/demo/video.mp4',kind:'video'});
+  nodes[0].data.videoUrl = '/changed.mp4';
+  expect(sourceMediaForTranscript('words',nodes,edges)).toBeNull();
+});
+
+
+it.each([
+  ['../outside.mp4','/static/projects/demo/video.mp4'],
+  ['/etc/video.mp4','/static/projects/demo/video.mp4'],
+  ['video.mp4','https://other.example/static/projects/demo/video.mp4'],
+  ['video.mp4','/static/projects/peer/video.mp4'],
+])('rejects a restored transcript playback source outside its original project: %s', (path,url) => {
+  const nodes = [{id:'source',data:{videoUrl:url}},{id:'words',data:{sourceProjectId:'demo',sourceMediaPath:path,sourceMediaHash:'hash',sourceVideoUrl:url}}];
+  expect(sourceMediaForTranscript('words',nodes,[{source:'source',target:'words'}])).toBeNull();
 });

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanvasEdge, CanvasNode } from '@/features/canvas/domain/canvasNodes';
 
-const api = vi.hoisted(() => ({ fetchRemixArtifact: vi.fn(), createRemixArtifact: vi.fn() }));
+const api = vi.hoisted(() => ({ fetchRemixArtifact: vi.fn(), createRemixArtifact: vi.fn(), compileProductionPlan: vi.fn() }));
 vi.mock('@/api/remix', () => api);
 import { operationReusableForNode, prepareNodeRemix, remixGraphFingerprint } from './prepareNodeRemix';
 
@@ -23,7 +23,48 @@ describe('prepareNodeRemix', () => {
     expect(operationReusableForNode({ ...exact, input_media_hashes: [`sha256:${'a'.repeat(64)}`] }, artifact, 7)).toBe(false);
     expect(operationReusableForNode(exact, artifact, 8)).toBe(false);
   });
-  beforeEach(() => { api.fetchRemixArtifact.mockReset(); api.createRemixArtifact.mockReset(); });
+  beforeEach(() => { api.fetchRemixArtifact.mockReset(); api.createRemixArtifact.mockReset(); api.compileProductionPlan.mockReset(); });
+
+  it('compiles a saved production plan from connected exact-version media', async () => {
+    const ref = { artifactId: 'plan', revision: 2 };
+    const still = { ...media('image', 'c'), url: '/static/projects/demo/input/image' };
+    const plan = { schema_version: 1, goal: '短片', output: { width: 1080, height: 1920, fps: 30 }, beats: [
+      { id: 'beat', purpose: '展示', duration_frames: 90, turns: [], visuals: [{ id: 'picture', role: 'primary', description: '静物', media: {
+        node_id: 'still', media_hash: still.media_hash, media_path: still.media_path, media_kind: 'image', duration_us: still.duration_us, has_audio: false,
+      } }], audio: [] },
+    ] };
+    const nodes = [node('still', 'imageGenNode', { imageUrl: still.url, remixMedia: still }),
+      node('plan-node', 'scriptNode', { remixRole: 'production_plan', productionPlanRef: ref, productionPlanDraft: plan, productionPlanDirty: false }),
+      node('compose', 'videoComposeNode', {})];
+    const edges = [edge('still', 'plan-node'), edge('plan-node', 'compose')];
+    api.fetchRemixArtifact.mockResolvedValue({ schema: 'production_plan.v1', payload: plan });
+    api.compileProductionPlan.mockResolvedValue({ manifest_version: 3, layers: [], audio_events: [], subtitle_events: [], media_bindings: [], manual_overrides: [] });
+    api.createRemixArtifact.mockResolvedValue({ id: 'manifest', revision: 1 });
+    expect(await prepareNodeRemix('demo', nodes, edges, 'compose')).toEqual({
+      manifestRef: { artifactId: 'manifest', revision: 1 }, events: [], selections: [], unresolvedRequiredEvents: [],
+    });
+    expect(api.compileProductionPlan).toHaveBeenCalledWith('demo', ref);
+    nodes[0].data.imageUrl = '/static/projects/demo/input/new-image';
+    await expect(prepareNodeRemix('demo', nodes, edges, 'compose')).rejects.toThrow(/已变化/);
+  });
+
+  it('uses the confirmed production timeline manifest as the compose input', async () => {
+    const planRef = { artifactId: 'plan', revision: 2 };
+    const manifestRef = { artifactId: 'arranged', revision: 1 };
+    const plan = { schema_version: 1, goal: '短片', output: { width: 1080, height: 1920, fps: 30 }, beats: [] };
+    const nodes = [node('plan', 'scriptNode', { remixRole: 'production_plan', productionPlanRef: planRef,
+      productionPlanDraft: plan, productionPlanDirty: false }),
+    node('timeline', 'semanticTimelineNode', { productionPlanNodeId: 'plan', compiledProductionPlanRef: planRef,
+      artifactRef: manifestRef, remixTimingSchema: 'composition_manifest.v1' }),
+    node('compose', 'videoComposeNode', { remixRole: 'production_compose' })];
+    const edges = [edge('plan', 'timeline'), edge('timeline', 'compose')];
+    api.fetchRemixArtifact.mockResolvedValue({ schema: 'composition_manifest.v1', revision: 1,
+      upstream_refs: [{ artifact_id: 'plan', revision: 2 }], payload: { layers: [], subtitle_events: [], audio_events: [], manual_overrides: [] } });
+    expect(await prepareNodeRemix('demo', nodes, edges, 'compose')).toMatchObject({ manifestRef, unresolvedRequiredEvents: [] });
+    expect(api.compileProductionPlan).not.toHaveBeenCalled();
+    nodes[0].data.productionPlanRef = { artifactId: 'plan', revision: 3 };
+    await expect(prepareNodeRemix('demo', nodes, edges, 'compose')).rejects.toThrow(/方案已变化/);
+  });
 
   it('builds a versioned composition from native speaking video sound without narration', async () => {
     const scriptRef = { artifactId: 'script', revision: 2 };

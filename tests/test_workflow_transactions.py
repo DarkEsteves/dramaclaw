@@ -686,3 +686,36 @@ def test_revised_node_mode_confirmation_survives_later_revisions():
     video = again["compiled"]["plan"]["nodes"][1]["data"]
     assert video["genMode"] == "firstLastFrame"
     assert _mode_codes(again["compiled"]) == []
+
+
+def test_compiler_recovery_fields_survive_transaction_boundary(monkeypatch):
+    from novelvideo.freezone import workflow_transactions
+
+    diagnostics = {
+        "field_path": "external_inputs", "allowed_fields": ["external_inputs"],
+        "compact_example": {"external_inputs": [{"node_id": "analysis"}]},
+        "errors": [{"path": "external_inputs", "message": "binding required"}],
+        "agent_instruction": "Read the saved analysis binding.",
+        "next_action": "read_current_analysis_reference",
+        "operation_status": "failed", "requires_new_operation": True,
+    }
+    monkeypatch.setattr(workflow_transactions, "compile_workflow_intent", lambda _: {
+        "ok": False, "status": "reference_analysis_binding_required",
+        "error": "binding required", **diagnostics, "private_debug": "excluded",
+    })
+    with pytest.raises(WorkflowOperationError) as caught:
+        prepare_workflow_source({"intent": {"skill_id": "reference-video-remix"}}, username="alice")
+    assert {key: caught.value.result.get(key) for key in diagnostics} == diagnostics
+    assert "private_debug" not in caught.value.result
+    assert caught.value.result["retryable"] is False
+
+
+def test_recovery_details_cannot_replace_error_envelope():
+    error = WorkflowOperationError("bad input", code="invalid_workflow_intent", detail={
+        "ok": True, "code": "success", "retryable": True,
+        "next_action": "read_current_reference", "field_path": "external_inputs",
+    })
+    assert error.result["ok"] is False
+    assert error.result["code"] == "invalid_workflow_intent"
+    assert error.result["retryable"] is False
+    assert error.result["next_action"] == "read_current_reference"

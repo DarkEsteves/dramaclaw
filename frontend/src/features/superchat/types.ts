@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
+import type { ReferenceAnalysisRun } from '@/api/referenceAnalysisRuns';
+
 export type ClientFrame =
   | {
       type: "chat.message";
@@ -196,6 +198,11 @@ export type ServerFrame =
       turn_id?: string;
     }
   | {
+      type: "reference.remix.status";
+      scope?: ChatScope;
+      run: ReferenceAnalysisRun;
+    }
+  | {
       type: "agent.thought.delta";
       scope?: ChatScope;
       turn_id?: string;
@@ -265,6 +272,7 @@ export type ServerFrame =
     }
   | {
       type: "canvas.command";
+      request_id?: string;
       turn_id?: string;
       bridge_key?: string;
       project_id?: string | null;
@@ -280,6 +288,7 @@ export type ServerFrame =
     }
   | {
       type: "canvas.context.request";
+      request_id?: string;
       turn_id?: string;
       bridge_key?: string;
       project_id?: string | null;
@@ -301,6 +310,7 @@ export type ServerFrame =
   | { type: "chat.done"; turn_id?: string; scope?: ChatScope; message?: unknown }
   | {
       type: "skill_studio.event";
+      request_id?: string;
       turn_id?: string;
       scope?: ChatScope;
       bridge_key?: string;
@@ -312,6 +322,7 @@ export type ServerFrame =
     }
   | {
       type: "assistant.clarification.event";
+      request_id?: string;
       turn_id?: string;
       scope?: ChatScope;
       bridge_key?: string;
@@ -358,6 +369,7 @@ export type ChatMessagePart =
         | "clarification"
         | "canvas_approval"
         | "canvas_feedback"
+        | "reference_production"
         | "canvas_context"
         | "tool_status"
         | "agent_plan"

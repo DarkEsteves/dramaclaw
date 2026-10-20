@@ -36,14 +36,35 @@ describe('story media import', () => {
     ]);
 
     expect(storyMediaCounts(source)).toEqual({ keyframes: 2, clips: 0 });
-    expect(importStoryKeyframes('story-1')).toEqual({ imported: 2, skipped: 0 });
+    const selected = importStoryKeyframes('story-1', { shotNumbers: ['2'] });
+    expect(selected.imported).toBe(1);
+    expect(selected.skipped).toBe(0);
+    expect(selected.createdNodeIds).toHaveLength(1);
+    expect(selected.skippedNodeIds).toEqual([]);
+    expect(selected.frames).toEqual([
+      expect.objectContaining({ shot: '2', url: '/static/two.png', status: 'created', nodeId: selected.createdNodeIds[0] }),
+    ]);
+
+    const imported = importStoryKeyframes('story-1');
+    expect(imported.imported).toBe(1);
+    expect(imported.skipped).toBe(1);
+    expect(imported.createdNodeIds).toHaveLength(1);
+    expect(imported.skippedNodeIds).toEqual([selected.createdNodeIds[0]]);
+    expect(imported.frames).toEqual([
+      expect.objectContaining({ shot: '1', url: '/static/one.png', status: 'created', nodeId: imported.createdNodeIds[0] }),
+      expect.objectContaining({ shot: '2', url: '/static/two.png', status: 'skipped', nodeId: selected.createdNodeIds[0] }),
+    ]);
     const images = useCanvasStore.getState().nodes.filter((node) => node.type === CANVAS_NODE_TYPES.upload);
     expect(images).toHaveLength(2);
-    expect(images.map((node) => node.data)).toEqual([
+    expect(images.map((node) => node.data).sort((left, right) => String(left.imageUrl).localeCompare(String(right.imageUrl)))).toEqual([
       expect.objectContaining({ imageUrl: '/static/one.png', aspectRatio: '9:16', imageOnly: true, sourceStoryNodeId: 'story-1' }),
       expect.objectContaining({ imageUrl: '/static/two.png', aspectRatio: '9:16', imageOnly: true, sourceStoryNodeId: 'story-1' }),
     ]);
-    expect(importStoryKeyframes('story-1')).toEqual({ imported: 0, skipped: 2 });
+    const repeated = importStoryKeyframes('story-1', { shotNumbers: ['2', 'missing'] });
+    expect(repeated).toMatchObject({ imported: 0, skipped: 1, createdNodeIds: [], skippedNodeIds: [selected.createdNodeIds[0]] });
+    expect(repeated.frames).toEqual([
+      expect.objectContaining({ shot: '2', url: '/static/two.png', status: 'skipped', nodeId: selected.createdNodeIds[0] }),
+    ]);
   });
 
   it('cuts each valid reference event with its own source interval and skips imported clips on retry', async () => {

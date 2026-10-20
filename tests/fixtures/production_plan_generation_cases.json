@@ -1,0 +1,11 @@
+[
+  {"name":"free_creation","topic":"制作一条无参考的短片","event_count":0,"requirements":null,"locked_turns":null},
+  {"name":"silent_source","topic":"参考无对白短片的视觉节奏","event_count":1,"requirements":{"primary_shots":{"min":1}},"locked_turns":null},
+  {"name":"preserve_dialogue","topic":"保留原片台词并更换场景","event_count":3,"requirements":{"dialogue":{"mode":"preserve_source"}},"locked_turns":[{"speaker":"甲","text":"原始问句"},{"speaker":"乙","text":"原始回答"}]},
+  {"name":"confirmed_chinese","topic":"用已确认中文台词制作新片","event_count":3,"requirements":{"dialogue":{"mode":"use_confirmed_text"}},"locked_turns":[{"speaker":"旁白","text":"今天从这里开始"}]},
+  {"name":"rewrite_dialogue","topic":"改写对白并保留节奏","event_count":3,"requirements":{"dialogue":{"mode":"rewrite"}},"locked_turns":null},
+  {"name":"multiple_shots","topic":"同段安排三个连续镜头","event_count":3,"requirements":{"primary_shots":{"min":3,"max":3}},"locked_turns":null},
+  {"name":"graphic_text","topic":"加入一段屏幕文字强调","event_count":3,"requirements":{"semantic":[{"id":"screen_text","text":"屏幕文字独立于台词"}]},"locked_turns":null},
+  {"name":"nine_events","topic":"按原片事件调整叙事","event_count":9,"requirements":{"primary_shots":{"min":3}},"locked_turns":null},
+  {"name":"oversize_rejected","topic":"分析较长的参考片","event_count":40,"requirements":{"primary_shots":{"min":5}},"locked_turns":null,"long_detail":true}
+]

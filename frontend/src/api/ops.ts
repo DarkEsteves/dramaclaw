@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Elastic-2.0
 // Copyright (c) 2026 ClaymoreLab
 import { apiCall, apiCallEnvelope, apiClient } from "./client";
-import { workflowProductOperation } from "@/features/canvas/application/workflowExecutionActivity";
+import {
+  workflowGenerationContext,
+  workflowProductOperation,
+} from "@/features/canvas/application/workflowExecutionActivity";
 import { readReferenceMediaLimits, type ReferenceMediaLimits } from "./referenceMediaLimits";
 
 // Per-node generation history -------------------------------------------- //
@@ -17,6 +20,7 @@ export interface FreezoneNodeContext {
   canvasId?: string | null;
   /** Id of the node that triggered the generation. */
   nodeId?: string | null;
+  workflowRunId?: string | null;
   modelParams?: Record<string, unknown>;
 }
 
@@ -251,6 +255,11 @@ function nodeContextBody(ctx: FreezoneNodeContext): Record<string, unknown> {
   if (ctx.canvasId) out.canvas_id = ctx.canvasId;
   if (ctx.nodeId) out.node_id = ctx.nodeId;
   if (ctx.modelParams) out.model_params = ctx.modelParams;
+  const generation = workflowGenerationContext(ctx.nodeId);
+  if (generation?.workflowRunId) {
+    out.workflow_run_id = generation.workflowRunId;
+    out.generation_attempt_id = generation.generationAttemptId;
+  }
   const operation = workflowProductOperation(ctx.nodeId);
   if (operation?.generationAttemptId) {
     out.product_operation_id = operation.operationId;

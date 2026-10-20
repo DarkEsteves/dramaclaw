@@ -2,35 +2,47 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Annotated, Literal
+from contextlib import nullcontext
+from typing import Any, Annotated, Awaitable, Callable, Literal
 import hashlib
-import importlib.util
 import json
+import logging
 import os
 import subprocess
-import sys
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from novelvideo.api.auth import get_api_user
 from novelvideo.freezone import canvas_store
 from novelvideo.freezone.canvas_lock import CanvasLockBusy
 from novelvideo.freezone.remix.store import RemixArtifactConflict, RemixArtifactStore
+from novelvideo.freezone.remix.production_store import production_store
 from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_errors
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.freezone.remix.script_draft import generate_script_draft
+from novelvideo.freezone.remix.production_plan import compile_production_plan
+from novelvideo.freezone.remix.production_plan_v2 import compile_production_plan_v2, migrate_production_plan_v1, project_production_plan_v2
+from novelvideo.freezone.remix.production_commands import (
+    ProductionCommandConflict, apply_production_command, preflight_production_command,
+)
 from novelvideo.freezone.remix.broll_plan import generate_broll_plan
-from novelvideo.project_context import require_project_home_node, resolve_project_context
-from novelvideo.ports import get_task_backend
+from novelvideo.freezone.remix.broll_plan import validated_broll_events
+from novelvideo.freezone.recipe_runtime import get_recipe_for_runtime
+from novelvideo.llm_instrumentation import production_plan_diagnostic_context
+from novelvideo.project_context import ProjectContext, require_project_home_node, resolve_project_context
+from novelvideo.ports import get_preview_render_capacity, get_task_backend, get_usage_meter
+from novelvideo.ports.preview_capacity import PreviewBusy, PreviewUnavailable
 from novelvideo.task_identity import project_task_state_key
 from novelvideo.task_state import get_task_manager
 
 
 router = APIRouter(prefix="/projects/{project}/freezone/remix", tags=["freezone-remix"])
+logger = logging.getLogger(__name__)
 MAX_RENDER_INPUT_FINGERPRINT_CHARS = 5 * 1024 * 1024
 
 
@@ -71,8 +83,10 @@ class OperationTransitionBody(BaseModel):
 
 class ProcessActionBody(BaseModel):
     action: Literal[
-        "transcribe_media", "align_script", "compile_semantic_timeline", "compile_take_timeline",
-        "analyze_reference_video", "render_manifest", "plan_broll", "generate_script_draft",
+        "transcribe_media", "align_script", "align_production_speech", "compile_semantic_timeline", "compile_take_timeline",
+        "analyze_material_speech", "adopt_source_observation", "analyze_reference_video", "render_manifest", "plan_broll", "generate_script_draft",
+        "generate_production_plan_draft", "generate_production_plan_arrangement",
+        "compile_production_plan",
     ]
     payload: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
@@ -84,24 +98,145 @@ class ScriptDraftBody(BaseModel):
     new_topic: str = Field(min_length=1, max_length=2_000)
 
 
+class LockedPlanTurnBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speaker: str = Field(max_length=80)
+    text: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("text")
+    @classmethod
+    def nonblank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("locked turn text must not be blank")
+        return value
+
+
+class ProductionPlanDraftBody(BaseModel):
+    topic: str = Field(min_length=1, max_length=2_000)
+    blueprint_ref: dict[str, Any] | None = None
+    analysis_context: dict[str, Any] | None = None
+    locked_turns: list[LockedPlanTurnBody] | None = Field(default=None, min_length=1, max_length=80)
+
+
+class CompileProductionPlanBody(BaseModel):
+    plan_ref: dict[str, Any]
+
+
+class PreviewProductionFrameBody(CompileProductionPlanBody):
+    frame: int = Field(ge=0, strict=True)
+
+
 class BrollPlanBody(BaseModel):
     script_ref: dict[str, Any]
 
 
 _PROCESS_TASK_TYPES = {
+    "analyze_material_speech": "remix_analyze_material_speech",
+    "adopt_source_observation": "remix_adopt_source_speech",
     "transcribe_media": "remix_transcribe_media",
     "align_script": "remix_align_script",
+    "align_production_speech": "remix_align_production_speech",
     "compile_semantic_timeline": "remix_compile_semantic_timeline",
     "compile_take_timeline": "remix_compile_take_timeline",
     "analyze_reference_video": "remix_analyze_reference_video",
+    "joint_reference_analysis": "remix_joint_reference_analysis",
     "render_manifest": "remix_render",
     "plan_broll": "remix_plan_broll",
     "generate_script_draft": "remix_generate_script_draft",
+    "generate_production_plan_draft": "remix_generate_production_plan_draft",
+    "generate_production_plan_arrangement": "remix_generate_production_plan_arrangement",
+    "compile_production_plan": "remix_compile_production_plan",
 }
+_PREVIEW_CACHE_FRAMES_PER_PROJECT = 40
 
 
-def _speech_engine_ready() -> bool:
-    return bool(_speech_engine_readiness()["ready"])
+def _prune_preview_frames(cache_dir: Path) -> None:
+    """Keep click-to-review frames bounded within this one project's cache."""
+    frames = []
+    for path in cache_dir.glob("*.png"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                frames.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    frames.sort(reverse=True)
+    for _, path in frames[_PREVIEW_CACHE_FRAMES_PER_PROJECT:]:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("preview cache pruning failed", exc_info=True)
+
+
+def _validate_preview_budget(plan: dict, frame: int) -> None:
+    """Reject implausible FFmpeg jobs before hashing any project media."""
+    try:
+        output = plan["output"]
+        width, height = output["width"], output["height"]
+        fps_num, fps_den = output["fps_num"], output["fps_den"]
+        beats = plan["beats"]
+        resources, placements = plan["resources"], plan["placements"]
+        too_large = (
+            any(type(value) is not int or value <= 0 for value in
+                (width, height, fps_num, fps_den))
+            or width > 4096 or height > 4096 or width * height > 8_847_360
+            or fps_num > 60 * fps_den
+            or len(beats) > 1000 or len(resources) > 256 or len(placements) > 2000
+            or sum(beat["duration_frames"] for beat in beats) > 432_000
+            or frame >= 432_000
+        )
+    except (KeyError, TypeError, OverflowError):
+        too_large = True
+    if too_large:
+        raise HTTPException(422, "Production plan exceeds the preview resource budget")
+
+
+def _transcription_engine_ready() -> bool:
+    from novelvideo.config import get_newapi_runtime_credentials
+
+    api_key, base_url = get_newapi_runtime_credentials()
+    return bool(api_key and base_url)
+
+
+async def _transcription_engine_ready_for_context(context) -> bool:
+    """Inspect the credential for this admitted organization, never platform state."""
+    if context is None or not context.is_organization:
+        return await run_in_threadpool(_transcription_engine_ready)
+    from novelvideo.ports import get_model_credentials
+    from novelvideo.ports.authz import AdmissionContext
+    from novelvideo.ports.model_credentials import ModelCredentialError
+    from novelvideo.model_gateway_runtime import _validate_organization_credential
+
+    if (context.credential.source != "organization"
+            or context.credential.org_id != context.billing_principal.id):
+        return False
+    admission = AdmissionContext(
+        requester_user_id=context.requester_user_id,
+        billing_principal=context.billing_principal,
+        credential=context.credential,
+        admission_id=context.admission_id,
+        root_task_id=context.root_task_id,
+        admitted_at=context.admitted_at,
+        membership_id=context.membership_id,
+        authz_version=context.authz_version,
+    )
+    try:
+        credential = await get_model_credentials().resolve(admission)
+        _validate_organization_credential(credential, context)
+    except ModelCredentialError:
+        return False
+    return True
+
+
+async def _request_transcription_context(project: str, user: dict, role: str):
+    from novelvideo.api.egress_binding import build_request_egress_context
+
+    project_context = await resolve_project_context(user=user, project_id=project, required_role=role)
+    return await build_request_egress_context(
+        requester_user_id=project_context.requester_user_id,
+        project_id=project_context.project_id,
+        task_type="remix_transcribe_media",
+    )
 
 
 def _input_media_hashes(payload: dict[str, Any]) -> list[str]:
@@ -124,132 +259,104 @@ def _input_media_hashes(payload: dict[str, Any]) -> list[str]:
     return sorted(hashes)
 
 
-def _complete_model_snapshot(root: Path, required: tuple[str, ...]) -> bool:
-    return any(
-        all(
-            (snapshot / name).is_file() and (snapshot / name).stat().st_size > 0
-            for name in required
-        )
-        for snapshot in root.glob("snapshots/*")
-        if snapshot.is_dir()
-    )
-
-
-def _cached_speech_models_ready(cache: Path) -> bool:
-    model_name = os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small").strip()
-    asr = cache / f"models--Systran--faster-whisper-{model_name}"
-    chinese = (
-        cache
-        / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
-    )
-    english = cache / "wav2vec2_fairseq_base_ls960_asr_ls960.pth"
-    return (
-        _complete_model_snapshot(
-            asr, ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt")
-        )
-        and _complete_model_snapshot(
-            chinese, ("pytorch_model.bin", "config.json", "vocab.json")
-        )
-        and english.is_file()
-        and english.stat().st_size > 0
-    )
-
-
-def _probe_whisperx_import(python: Path) -> tuple[str | None, str | None]:
-    environment = {
-        **os.environ,
-        "HF_HUB_OFFLINE": "1",
-        "TRANSFORMERS_OFFLINE": "1",
-        "HF_DATASETS_OFFLINE": "1",
-    }
-    try:
-        worker = Path(__file__).parents[2] / "freezone" / "remix" / "whisperx_worker.py"
-        result = subprocess.run(
-            [str(python), str(worker)],
-            input=json.dumps({"action": "probe"}),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=environment,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None, "WhisperX worker runtime probe could not complete"
-    if result.returncode:
-        return None, "WhisperX worker runtime cannot start in offline mode"
-    try:
-        payload = json.loads(result.stdout)
-        version = str(payload["whisperx_version"])
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None, "WhisperX worker runtime probe returned invalid JSON"
-    return version, None
-
-
-def _speech_engine_readiness() -> dict[str, Any]:
-    """Verify the configured local speech runtime without loading model weights."""
-    engine = os.getenv("DRAMACLAW_REMIX_SPEECH_ENGINE", "").strip()
-    cache_value = os.getenv("DRAMACLAW_REMIX_MODEL_CACHE", "").strip()
-    python_value = os.getenv("DRAMACLAW_REMIX_WHISPERX_PYTHON", "").strip()
-    cache = Path(cache_value) if cache_value else None
-    python = Path(python_value) if python_value else None
-    external_python = python is not None
-
-    if python is not None:
-        python_status = (
-            "external"
-            if python.is_file() and os.access(python, os.X_OK)
-            else "missing"
-        )
-    else:
-        python = Path(sys.executable)
-        python_status = "in-process" if importlib.util.find_spec("whisperx") else "missing"
-    if not cache or not cache.is_dir():
-        cache_status = "missing"
-    elif _cached_speech_models_ready(cache):
-        cache_status = "available"
-    else:
-        cache_status = "incomplete"
-
-    error = None
-    whisperx_version = None
-    if engine != "whisperx":
-        error = "DRAMACLAW_REMIX_SPEECH_ENGINE must be set to whisperx"
-    elif not cache or not cache.is_dir():
-        error = (
-            f"WhisperX model cache directory is missing: {cache}"
-            if cache is not None
-            else "DRAMACLAW_REMIX_MODEL_CACHE must name an existing local directory"
-        )
-    elif not _cached_speech_models_ready(cache):
-        model_name = os.getenv("DRAMACLAW_REMIX_WHISPER_MODEL", "small").strip()
-        error = f"WhisperX cached model files are incomplete for {model_name} ASR plus English and Chinese alignment"
-    elif python_status == "missing":
-        error = (
-            f"WhisperX Python executable is missing or not executable: {python}"
-            if external_python
-            else "WhisperX is not installed in the API Python environment"
-        )
-    else:
-        whisperx_version, error = _probe_whisperx_import(python)
-    return {
-        "ready": error is None,
-        "engine": engine or "disabled",
-        "python": python_status,
-        "model_cache": cache_status,
-        "whisperx_version": whisperx_version,
-        "downloads_allowed": False,
-        "error": error,
-    }
+async def _store_with_context(
+    project: str, user: dict, role: str,
+) -> tuple[RemixArtifactStore, ProjectContext]:
+    ctx = await resolve_project_context(user=user, project_id=project, required_role=role)
+    require_project_home_node(ctx, operation="access remix artifact files")
+    store = production_store(ctx)
+    return store, ctx
 
 
 async def _store(project: str, user: dict, role: str) -> RemixArtifactStore:
-    ctx = await resolve_project_context(user=user, project_id=project, required_role=role)
-    require_project_home_node(ctx, operation="access remix artifact files")
-    return RemixArtifactStore(
-        Path(ctx.output_dir),
-        project_id=ctx.project_id,
-        created_by=str(user.get("username") or ""),
-    )
+    store, _ = await _store_with_context(project, user, role)
+    return store
+
+
+async def _run_billed_remix_plan(
+    *,
+    context: ProjectContext,
+    task_type: str,
+    endpoint: str,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Charge one fixed plan fee around a synchronous model delivery."""
+    from novelvideo.api.egress_binding import request_egress_scope
+
+    user_id = context.requester_user_id
+    project_id = context.project_id
+    operation_id = f"remix-sync-{uuid.uuid4().hex}"
+    metadata = {"source": "sync_api", "endpoint": endpoint, "operation_id": operation_id}
+    async with request_egress_scope(
+        requester_user_id=user_id, project_id=project_id, task_type=task_type,
+    ):
+        meter = get_usage_meter()
+        reservation = await meter.reserve_feature_start_credits(
+            user_id=user_id,
+            feature_key="freezone.remix_plan",
+            product_surface="freezone",
+            project_id=project_id,
+            resource_kind="script",
+            task_id=operation_id,
+            task_type=task_type,
+            metadata=metadata,
+            quantity=1,
+            require_price_rule=True,
+            require_positive_cost=True,
+        )
+        reservation_id = str(reservation.get("id") or "")
+        billing_metadata: dict[str, Any] = {
+            "model_call_credit_policy": "feature_included",
+            "feature_key": "freezone.remix_plan",
+            "source": "sync_api",
+        }
+        if reservation_id:
+            billing_metadata.update({
+                "feature_credit_reservation_id": reservation_id,
+                "feature_credit_charge_id": reservation_id,
+                "feature_credit_cost": str(reservation.get("cost") or 0),
+            })
+        started = False
+        try:
+            meter.set_llm_usage_context(
+                user_id,
+                project_id=project_id,
+                resource_kind="script",
+                billing_metadata=billing_metadata,
+            )
+            started = True
+            diagnostic_scope = (
+                production_plan_diagnostic_context(task_id=operation_id, project_id=project_id)
+                if task_type == "remix_generate_production_plan_draft" else nullcontext()
+            )
+            with diagnostic_scope:
+                result = await operation()
+        except BaseException as exc:
+            if reservation_id:
+                try:
+                    if started:
+                        await meter.mark_feature_credit_settlement_for_review(
+                            reservation_id,
+                            metadata={**metadata, "business_outcome": "unknown", "error_type": type(exc).__name__},
+                        )
+                    else:
+                        await meter.settle_cancelled_feature_credit_reservation(
+                            reservation_id,
+                            metadata={**metadata, "business_outcome": "not_started", "error_type": type(exc).__name__},
+                        )
+                except Exception:
+                    logger.exception("Could not record Remix plan billing settlement after failure")
+            raise
+        finally:
+            meter.clear_llm_usage_context()
+        if reservation_id:
+            try:
+                await meter.settle_feature_credit_reservation(
+                    reservation_id, action="confirm", metadata=metadata,
+                )
+            except Exception:
+                logger.exception("Remix plan delivered but billing confirmation remains pending")
+        return result
 
 
 async def _call(fn, *args, **kwargs):
@@ -265,18 +372,79 @@ async def _call(fn, *args, **kwargs):
         raise HTTPException(503, "Artifact storage temporarily unavailable; retry after reloading") from exc
 
 
+def _validate_v2_canvas_bindings(
+    canvas: dict[str, Any] | None,
+    manifest: dict[str, Any],
+    manifest_ref: dict[str, Any],
+    plan: dict[str, Any],
+    compose_node_id: str,
+    project_id: str,
+) -> None:
+    """Reject a saved v2 render when its current canvas no longer binds the exact media."""
+    if not isinstance(canvas, dict):
+        raise ValueError("Canvas must be saved before rendering this production plan")
+    nodes = {item.get("id"): item for item in canvas.get("nodes", []) if isinstance(item, dict)}
+    edges = {(item.get("source"), item.get("target")) for item in canvas.get("edges", []) if isinstance(item, dict)}
+    compose = nodes.get(compose_node_id)
+    compose_data = compose.get("data", {}) if isinstance(compose, dict) else {}
+    plan_id = compose_data.get("productionPlanNodeId") if isinstance(compose_data, dict) else None
+    versions = manifest.get("source_versions")
+    plan_ref = versions[0] if isinstance(versions, list) and versions else None
+    if not isinstance(plan_ref, dict):
+        raise ValueError("Manifest has no exact production plan revision")
+    if not isinstance(plan_id, str) or not plan_id or (plan_id, compose_node_id) not in edges:
+        raise ValueError("Production plan is not directly connected to this compose node")
+    if compose_data.get("productionPlanV2Ref") != {"artifactId": plan_ref.get("artifact_id"), "revision": plan_ref.get("revision")}:
+        raise ValueError("Compose node no longer references the rendered plan revision")
+    if compose_data.get("remixManifestRef") != {"artifactId": manifest_ref["artifact_id"], "revision": manifest_ref["revision"]}:
+        raise ValueError("Compose node no longer references this manifest revision")
+    plan_node = nodes.get(plan_id)
+    plan_data = plan_node.get("data", {}) if isinstance(plan_node, dict) else {}
+    if not isinstance(plan_data, dict) or plan_data.get("productionPlanV2Ref") != compose_data.get("productionPlanV2Ref"):
+        raise ValueError("Canvas plan revision changed after compilation")
+    resources = {item["id"]: item for item in plan.get("resources", [])}
+    # Speech takes own their original audio even after their visual placement is
+    # removed, so they remain resource consumers for the canvas binding gate.
+    used = {item.get("resource_id") for item in [*plan.get("placements", []), *plan.get("speech_takes", [])]
+            if item.get("resource_id")}
+    for resource_id in used:
+        resource = resources[resource_id]
+        node_id = resource["node_id"]
+        source = nodes.get(node_id)
+        source_data = source.get("data", {}) if isinstance(source, dict) else {}
+        media = source_data.get("remixMedia") if isinstance(source_data, dict) else None
+        if (node_id, plan_id) not in edges or not isinstance(media, dict) or source_data.get("workflowResultStale") is True or source_data.get("remixVisualOutputCurrent") is False:
+            raise ValueError(f"Canvas media {node_id} is no longer connected or current")
+        for field in ("media_hash", "media_path", "media_kind", "duration_us", "has_audio"):
+            if media.get(field) != resource[field]:
+                raise ValueError(f"Canvas media {node_id} changed after binding")
+        url_field = {"image": "imageUrl", "video": "videoUrl", "audio": "audioUrl"}[resource["media_kind"]]
+        source_url = source_data.get(url_field)
+        if url_field == "imageUrl" and not source_url:
+            source_url = source_data.get("previewImageUrl")
+        if not isinstance(source_url, str):
+            raise ValueError(f"Canvas media {node_id} has no current source")
+        path = urlsplit(source_url).path
+        prefixes = (f"/api/v1/projects/{quote(project_id, safe='')}/media/",
+                    f"/static/projects/{quote(project_id, safe='')}/")
+        relative = next((unquote(path[len(prefix):]) for prefix in prefixes if path.startswith(prefix)), None)
+        if relative != resource["media_path"]:
+            raise ValueError(f"Canvas media {node_id} source changed after binding")
+
+
 def _data(value: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "data": value}
 
 
-@router.get("/speech-readiness")
-async def read_speech_readiness(user: dict = Depends(get_api_user)):
-    return _data(await run_in_threadpool(_speech_engine_readiness))
+@router.get("/transcription-readiness")
+async def read_transcription_readiness(project: str, user: dict = Depends(get_api_user)):
+    context = await _request_transcription_context(project, user, "viewer")
+    return _data({"ready": await _transcription_engine_ready_for_context(context), "engine": "newapi", "model": "audio-transcribe"})
 
 
 @router.post("/script-drafts")
 async def create_script_draft(project: str, body: ScriptDraftBody, user: dict = Depends(get_api_user)):
-    store = await _store(project, user, "editor")
+    store, context = await _store_with_context(project, user, "editor")
     topic = body.new_topic.strip()
     if not topic:
         raise HTTPException(422, "new_topic must not be blank")
@@ -294,28 +462,307 @@ async def create_script_draft(project: str, body: ScriptDraftBody, user: dict = 
             422, "blueprint is not script-ready: " + "; ".join(readiness_errors)
         )
     try:
-        draft = await generate_script_draft(
-            blueprint=artifact["payload"], topic=topic, username=str(user.get("username") or "")
+        get_recipe_for_runtime(
+            username=str(user.get("username") or ""), recipe_id="reference-remix-script",
+        )
+        draft = await _run_billed_remix_plan(
+            context=context, task_type="remix_generate_script_draft", endpoint="script-drafts",
+            operation=lambda: generate_script_draft(
+                blueprint=artifact["payload"], topic=topic, username=str(user.get("username") or "")
+            ),
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return _data(draft)
 
 
+@router.post("/production-plan-drafts")
+async def create_production_plan_draft(
+    project: str, body: ProductionPlanDraftBody, user: dict = Depends(get_api_user)
+):
+    await _store(project, user, "editor")
+    raise HTTPException(422, {
+        "code": "production_plan_canvas_action_required",
+        "message": "请在作品方案节点分别提交结构与台词、画面与声音任务。",
+        "action": "generate_production_plan_draft",
+    })
+
+
+@router.post("/production-plans/project")
+async def project_saved_production_plan(project: str, body: CompileProductionPlanBody, user: dict = Depends(get_api_user)):
+    """Read exact author data as editable tracks, including incomplete media."""
+    store = await _store(project, user, "viewer")
+    ref = body.plan_ref
+    if not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
+        raise HTTPException(422, "plan_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] != "production_plan.v2":
+        raise HTTPException(422, "plan_ref must reference a saved production_plan.v2")
+    projection = await _call(project_production_plan_v2, artifact["payload"], project_dir=store.project_dir)
+    return _data({"plan_ref": ref, **projection})
+
+
+@router.post("/production-plans/commands")
+async def apply_saved_production_command(project: str, body: dict[str, Any], user: dict = Depends(get_api_user)):
+    """Apply one bounded production edit against an exact saved revision."""
+    store = await _store(project, user, "editor")
+    try:
+        return _data(await run_in_threadpool(apply_production_command, store, body))
+    except ProductionCommandConflict as exc:
+        raise HTTPException(409, {"message": str(exc), "current_revision": exc.current_revision}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Artifact or revision not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (CanvasLockBusy, OSError) as exc:
+        raise HTTPException(503, "Artifact storage temporarily unavailable; retry after reloading") from exc
+
+
+@router.post("/production-plans/commands/preflight")
+async def preflight_saved_production_command(
+    project: str, body: dict[str, Any], user: dict = Depends(get_api_user),
+):
+    """Check a saved plan command before presenting the existing canvas approval."""
+    store = await _store(project, user, "editor")
+    try:
+        return _data(await run_in_threadpool(preflight_production_command, store, body))
+    except ProductionCommandConflict as exc:
+        raise HTTPException(409, {"message": str(exc), "current_revision": exc.current_revision}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Artifact or revision not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (CanvasLockBusy, OSError) as exc:
+        raise HTTPException(503, "Artifact storage temporarily unavailable; reload before checking") from exc
+
+
+def _production_placement_summary(placement: dict[str, Any]) -> dict[str, Any]:
+    """Expose saved creative content without expanding layers or media bindings."""
+    description = placement.get("description", "")
+    summary = {key: placement.get(key) for key in
+               ("id", "kind", "role", "resource_id", "track_id", "turn_id", "start", "end")}
+    summary.update(description=description[:512], description_truncated=len(description) > 512)
+    graphic = placement.get("graphic")
+    if graphic:
+        preview = {"template": graphic["template"]}
+        for key in ("text", "emphasis"):
+            value = graphic.get(key)
+            if value is not None:
+                preview[key] = value[:512]
+                preview[f"{key}_truncated"] = len(value) > 512
+        summary["graphic"] = preview
+    return summary
+
+
+@router.get("/production-plans/{artifact_id}/state")
+async def read_saved_production_state(
+    project: str, artifact_id: str, revision: int | None = Query(default=None, ge=1),
+    entity_id: str | None = Query(default=None, min_length=1, max_length=128),
+    include_words: bool = False,
+    user: dict = Depends(get_api_user),
+):
+    """Return compact state for an agent without sending the whole author document."""
+    store = await _store(project, user, "viewer")
+    artifact = await _call(store.read, artifact_id, revision) if revision is not None else await _call(store.read_latest, artifact_id)
+    if artifact["schema"] != "production_plan.v2":
+        raise HTTPException(422, "production state requires production_plan.v2")
+    plan = artifact["payload"]
+    if include_words and entity_id is None:
+        raise HTTPException(422, "include_words requires entity_id")
+    entity = None
+    if entity_id is not None:
+        groups = [("beat", plan["beats"]),
+                  ("turn", [turn for beat in plan["beats"] for turn in beat.get("turns", [])]),
+                  ("resource", plan.get("resources", [])), ("placement", plan.get("placements", [])),
+                  ("selection", plan.get("selections", [])), ("take", plan.get("speech_takes", [])),
+                  ("cue", plan.get("speech_cues", []))]
+        matches = [(kind, item) for kind, items in groups for item in items if item["id"] == entity_id]
+        if not matches:
+            raise HTTPException(404, "Production entity not found")
+        if len(matches) > 1:
+            raise HTTPException(409, "Entity ID is shared by multiple entity kinds")
+        kind, item = matches[0]
+        detail = dict(item)
+        if kind == "turn":
+            detail["word_count"] = len(detail.pop("words", []))
+            if detail.get("speech_timing"):
+                timing = dict(detail["speech_timing"])
+                words = timing.pop("words", [])
+                timing["word_count"] = len(words)
+                if include_words:
+                    timing["words"] = words[:500]
+                    timing["words_truncated"] = len(words) > 500
+                detail["speech_timing"] = timing
+        elif kind == "beat":
+            detail["turns"] = [{"id": turn["id"], "speaker": turn.get("speaker", ""), "text": turn["text"]}
+                               for turn in detail.get("turns", [])]
+        entity = {"kind": kind, "data": detail}
+    return _data({
+        "plan_ref": {"artifact_id": artifact_id, "revision": artifact["revision"]},
+        "goal": plan["goal"], "output": plan["output"],
+        "beats": [{"id": beat["id"], "purpose": beat["purpose"], "turn_count": len(beat.get("turns", [])),
+                   "duration_frames": beat["duration_frames"], "timing_mode": beat["timing_mode"]}
+                  for beat in plan["beats"]],
+        "turns": [{"id": turn["id"], "beat_id": beat["id"], "speaker": turn.get("speaker", ""),
+                   "text": turn["text"], "timing_status": turn.get("timing_basis", "estimated")}
+                  for beat in plan["beats"] for turn in beat.get("turns", [])],
+        "placements": [_production_placement_summary(placement) for placement in plan.get("placements", [])],
+        "resources": [{"id": resource["id"], "node_id": resource["node_id"],
+                       "media_kind": resource["media_kind"], "media_hash": resource["media_hash"]}
+                      for resource in plan.get("resources", [])],
+        "speech_takes": [{"id": take["id"], "beat_id": take["beat_id"], "resource_id": take["resource_id"],
+                          "turn_ids": take["turn_ids"]} for take in plan.get("speech_takes", [])],
+        "speech_cues": [{"id": cue["id"], "turn_id": cue["turn_id"], "take_id": cue["take_id"],
+                         "timing_status": cue["timing_status"]} for cue in plan.get("speech_cues", [])],
+        "resource_count": len(plan.get("resources", [])),
+        "placement_count": len(plan.get("placements", [])),
+        "unbound_placement_ids": [placement["id"] for placement in plan.get("placements", [])
+                                  if placement["kind"] in {"visual", "audio"} and not placement.get("resource_id")],
+        "speech_cues_pending": [cue["id"] for cue in plan.get("speech_cues", [])
+                                if cue["timing_status"] != "ready"],
+        **({"entity": entity} if entity is not None else {}),
+    })
+
+
+@router.post("/production-plans/compile")
+async def compile_saved_production_plan(project: str, body: CompileProductionPlanBody, user: dict = Depends(get_api_user)):
+    store = await _store(project, user, "editor")
+    ref = body.plan_ref
+    if not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
+        raise HTTPException(422, "plan_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] not in {"production_plan.v1", "production_plan.v2"}:
+        raise HTTPException(422, "plan_ref must reference a saved production plan")
+    try:
+        compiler = compile_production_plan_v2 if artifact["schema"] == "production_plan.v2" else compile_production_plan
+        manifest = await _call(compiler, artifact["payload"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    manifest["source_versions"] = [ref]
+    return _data(manifest)
+
+
+@router.post("/production-plans/preview-frame")
+async def preview_saved_production_frame(
+    project: str, body: PreviewProductionFrameBody, user: dict = Depends(get_api_user)
+):
+    """Render one exact saved frame after checking every bound project media hash."""
+    store = await _store(project, user, "viewer")
+    ref = body.plan_ref
+    if (not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"}
+            or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int):
+        raise HTTPException(422, "plan_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] != "production_plan.v2":
+        raise HTTPException(422, "plan_ref must reference a saved production_plan.v2")
+    _validate_preview_budget(artifact["payload"], body.frame)
+    temporary = None
+    try:
+        capacity = get_preview_render_capacity()
+        async with capacity.slot() as lease:
+            projection = await _call(
+                project_production_plan_v2, artifact["payload"], project_dir=store.project_dir
+            )
+            if not projection["ready"]:
+                raise HTTPException(409, "Bound media or plan timing has changed; check the production plan")
+            manifest = await _call(compile_production_plan_v2, artifact["payload"])
+            manifest["source_versions"] = [ref]
+            active_layers = [layer for layer in manifest["layers"]
+                             if layer["start_frame"] <= body.frame < layer["end_frame"]]
+            if (manifest["output_spec"]["duration_frames"] > 432_000
+                    or len(active_layers) > 8):
+                raise HTTPException(422, "Production plan exceeds the preview resource budget")
+            if body.frame >= manifest["output_spec"]["duration_frames"]:
+                raise HTTPException(422, "preview frame is outside the manifest duration")
+            media_paths = {}
+            for binding in manifest["media_bindings"]:
+                path = (store.project_dir / binding["project_path"]).resolve()
+                if not path.is_relative_to(store.project_dir):
+                    raise HTTPException(422, "Media path escapes the authorized project")
+                media_paths[binding["media_id"]] = path
+            cache_dir = store.project_dir / "freezone" / ".preview_frames"
+            if cache_dir.is_symlink() or not cache_dir.resolve().is_relative_to(store.project_dir):
+                raise HTTPException(503, "Preview cache is unavailable")
+            cache_key = hashlib.sha256(("production-preview-v1\0" + str(body.frame) + "\0" +
+                json.dumps(manifest, sort_keys=True, separators=(",", ":"))).encode()).hexdigest()
+            cached = cache_dir / f"{cache_key}.png"
+            if cached.is_symlink():
+                raise HTTPException(503, "Preview cache is unavailable")
+            try:
+                image = await run_in_threadpool(cached.read_bytes)
+            except FileNotFoundError:
+                temporary = cache_dir / f".{cache_key}.{uuid.uuid4().hex}.png"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                await capacity.render_frame(
+                    lease, manifest, media_paths=media_paths,
+                    frame=body.frame, output_path=temporary,
+                )
+                await lease.ensure_current()
+                image = await run_in_threadpool(temporary.read_bytes)
+                os.replace(temporary, cached)
+                # Cache maintenance must never turn a successful render into 503.
+                try:
+                    await run_in_threadpool(_prune_preview_frames, cache_dir)
+                except OSError:
+                    logger.warning("preview cache pruning failed", exc_info=True)
+            return Response(image, media_type="image/png", headers={"Cache-Control": "private, no-store"})
+    except PreviewBusy as exc:
+        raise HTTPException(429, "Preview renderer is busy; try again shortly") from exc
+    except PreviewUnavailable as exc:
+        raise HTTPException(503, "Preview renderer is temporarily unavailable") from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise HTTPException(503, "Preview frame could not be rendered") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("preview temporary cleanup failed", exc_info=True)
+
+
+@router.post("/production-plans/migrate")
+async def migrate_saved_production_plan(project: str, body: CompileProductionPlanBody, user: dict = Depends(get_api_user)):
+    """Publish an explicit v2 copy while retaining the exact v1 source revision."""
+    store = await _store(project, user, "editor")
+    ref = body.plan_ref
+    if not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
+        raise HTTPException(422, "plan_ref must be an exact artifact reference")
+    artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
+    if artifact["schema"] != "production_plan.v1":
+        raise HTTPException(422, "plan_ref must reference a saved v1 production plan")
+    try:
+        migrated = migrate_production_plan_v1(artifact["payload"])
+        migrated["provenance"]["source_plan_ref"] = ref
+        return _data(await _call(store.create, "production_plan.v2", migrated, [ref]))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/broll-plans")
 async def create_broll_plan(project: str, body: BrollPlanBody, user: dict = Depends(get_api_user)):
-    store = await _store(project, user, "editor")
+    store, context = await _store_with_context(project, user, "editor")
     ref = body.script_ref
     if set(ref) != {"artifact_id", "revision"} or not isinstance(ref.get("artifact_id"), str) or type(ref.get("revision")) is not int:
         raise HTTPException(422, "script_ref must be an exact artifact reference")
     artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
     if artifact["schema"] != "remix_script.v1":
         raise HTTPException(422, "script_ref must reference a saved remix script")
-    try:
+
+    async def generate_and_publish():
         payload = await generate_broll_plan(
             script=artifact["payload"], username=str(user.get("username") or "")
         )
-        published = await _call(store.create, "remix_script.v1", payload, [ref])
+        return await _call(store.create, "remix_script.v1", payload, [ref])
+
+    try:
+        validated_broll_events(artifact["payload"])
+        get_recipe_for_runtime(
+            username=str(user.get("username") or ""), recipe_id="reference-broll-plan",
+        )
+        published = await _run_billed_remix_plan(
+            context=context, task_type="remix_plan_broll", endpoint="broll-plans",
+            operation=generate_and_publish,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return _data(published)
@@ -358,6 +805,14 @@ async def record_enqueue_exception(
     error: Exception,
 ) -> None:
     """Release only definite pre-accept rejections; preserve ambiguous submissions."""
+    from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+    if isinstance(error, InvalidTaskEnvelope):
+        await run_in_threadpool(
+            operations.reject_submission, operation_id, owner=owner,
+            fencing_token=fencing_token, reason="TASK_ENVELOPE_INVALID",
+        )
+        return
     if isinstance(error, ValueError):
         await run_in_threadpool(
             operations.release_submission,
@@ -379,6 +834,7 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
     expected = {
         "transcribe_media": ({"media_path", "language"}, set()),
         "align_script": ({"media_path", "script_ref"}, set()),
+        "align_production_speech": ({"media_path", "plan_ref", "turn_id"}, {"placement_id", "take_id"}),
         "compile_semantic_timeline": (
             {"media_path", "script_ref", "word_timeline_ref", "blueprint_ref", "edit_map", "overrides", "fps"},
             set(),
@@ -388,9 +844,12 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "render_manifest": ({"manifest_ref"}, set()),
         "plan_broll": ({"script_ref"}, set()),
         "generate_script_draft": ({"blueprint_ref", "new_topic"}, set()),
+        "generate_production_plan_draft": ({"topic"}, {"blueprint_ref", "analysis_context", "locked_turns", "output_preferences", "requirements", "requirements_fingerprint", "requirements_provenance"}),
+        "generate_production_plan_arrangement": ({"plan_ref"}, set()),
+        "compile_production_plan": ({"plan_ref"}, set()),
     }
     required, optional = expected[action]
-    if set(payload) != required | optional:
+    if not required <= set(payload) or not set(payload) <= required | optional:
         raise ValueError(f"{action} requires exactly {', '.join(sorted(required))}")
     refs: list[dict[str, Any]] = []
     media_hash = None
@@ -415,11 +874,41 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         or len(payload["new_topic"]) > 2_000
     ):
         raise ValueError("new_topic must be a non-blank string of at most 2000 characters")
+    if action == "generate_production_plan_draft":
+        topic = payload["topic"]
+        if not isinstance(topic, str) or not topic.strip() or len(topic) > 2_000:
+            raise ValueError("topic must be a non-blank string of at most 2000 characters")
+        if "blueprint_ref" in payload and "analysis_context" in payload:
+            raise ValueError("choose either blueprint_ref or analysis_context")
+        context = payload.get("analysis_context")
+        if "analysis_context" in payload and (not isinstance(context, dict) or len(json.dumps(context, ensure_ascii=False)) > 65_536):
+            raise ValueError("analysis_context must be an object of at most 65536 characters")
+        if "output_preferences" in payload:
+            preferences = payload["output_preferences"]
+            allowed = {"aspect_ratio", "video_aspect_ratio", "source_clip_duration_seconds"}
+            if not isinstance(preferences, dict) or set(preferences) - allowed:
+                raise ValueError("output_preferences contains unsupported fields")
+            for field in ("aspect_ratio", "video_aspect_ratio"):
+                value = preferences.get(field)
+                if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 32):
+                    raise ValueError(f"output_preferences.{field} must be a short ratio")
+            duration = preferences.get("source_clip_duration_seconds")
+            if duration is not None and (type(duration) not in (int, float) or not 0 < duration <= 60):
+                raise ValueError("output_preferences.source_clip_duration_seconds must be between 0 and 60")
+        if "locked_turns" in payload:
+            try:
+                payload["locked_turns"] = [turn.model_dump() for turn in ProductionPlanDraftBody.model_validate({"topic": topic, "locked_turns": payload["locked_turns"]}).locked_turns or []]
+            except Exception as exc:
+                raise ValueError("locked_turns must contain 1 to 80 valid speaker/text pairs") from exc
+    if action == 'generate_production_plan_draft':
+        from novelvideo.freezone.remix.production_requirements import validate_native_requirements
+        validate_native_requirements(store, payload)
     schema_by_ref = {
         "script_ref": "remix_script.v1",
         "word_timeline_ref": "word_timeline.v1",
-        "manifest_ref": "composition_manifest.v1",
+        "manifest_ref": ("composition_manifest.v1", "composition_manifest.v2"),
         "blueprint_ref": "reference_blueprint.v1",
+        "plan_ref": "production_plan.v2",
     }
     for key, schema in schema_by_ref.items():
         if key not in payload:
@@ -428,14 +917,29 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         if not isinstance(ref, dict) or set(ref) != {"artifact_id", "revision"}:
             raise ValueError(f"{key} must be an exact artifact reference")
         artifact = store.read(ref["artifact_id"], ref["revision"])
-        if artifact["schema"] != schema:
+        allowed_schemas = schema if isinstance(schema, tuple) else (schema,)
+        if artifact["schema"] not in allowed_schemas:
             raise ValueError(f"{key} must reference {schema}")
         if key == "manifest_ref":
+            if action == "render_manifest" and artifact["payload"].get("manifest_version") == 4:
+                raise ValueError("v2 production manifests must use the canvas-bound render endpoint")
             bindings = artifact["payload"].get("media_bindings")
             if not isinstance(bindings, list) or not all(isinstance(item, dict) for item in bindings):
                 raise ValueError("composition manifest media bindings are invalid")
             manifest_media_bindings = [dict(item) for item in bindings]
         refs.append(ref)
+    if action == "generate_production_plan_arrangement":
+        from novelvideo.freezone.remix.production_task_inputs import read_arrangement_plan
+        read_arrangement_plan(store, payload["plan_ref"])
+    if action == "align_production_speech":
+        from novelvideo.freezone.remix.production_plan_v2 import production_speech_source
+        plan_ref = payload["plan_ref"]
+        plan = store.read(plan_ref["artifact_id"], plan_ref["revision"])
+        if not payload.get("placement_id") and not payload.get("take_id"):
+            raise ValueError("speech alignment requires placement_id or take_id")
+        turn, placement, resource = production_speech_source(plan["payload"], payload["turn_id"], payload.get("placement_id"), payload.get("take_id"))
+        if resource.media_path != payload["media_path"] or resource.media_hash != media_hash:
+            raise ValueError("speech source differs from the saved plan resource")
     if action == "compile_semantic_timeline":
         if not isinstance(payload["edit_map"], list) or not isinstance(payload["overrides"], list) or type(payload["fps"]) is not int or payload["fps"] <= 0:
             raise ValueError("compile action requires edit_map, overrides, and positive fps")
@@ -486,9 +990,16 @@ def prepare_registered_action(
     """Validate one registered deterministic action and build its task envelope."""
     if action not in _PROCESS_TASK_TYPES:
         raise ValueError(f"unsupported registered processing action: {action}")
+    from copy import deepcopy
+    payload = deepcopy(payload)
     refs, parameters = _action_inputs(store, action, payload)
     task_type = _PROCESS_TASK_TYPES[action]
-    task_payload = dict(payload)
+    if action == "generate_production_plan_draft":
+        from novelvideo.freezone.remix.production_task_inputs import production_plan_task_payload
+
+        task_payload = production_plan_task_payload(payload)
+    else:
+        task_payload = dict(payload)
     if "media_sha256" in parameters:
         task_payload["media_sha256"] = parameters["media_sha256"]
     if "take_media_bindings" in parameters:
@@ -511,7 +1022,7 @@ def prepare_registered_action(
         }
     else:
         scope = ""
-        queue_kind = "speech" if action in {"transcribe_media", "align_script", "compile_take_timeline"} else "default"
+        queue_kind = "default"
         producer_version = "remix-process.v1"
     task_payload["node_revision"] = node_revision
     return {
@@ -529,15 +1040,46 @@ def prepare_registered_action(
 @router.post("/actions")
 async def enqueue_process_action(project: str, body: ProcessActionBody, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "editor")
-    if body.action in {"transcribe_media", "align_script", "compile_take_timeline"} and not await run_in_threadpool(
-        _speech_engine_ready
-    ):
-        raise HTTPException(503, "Speech alignment engine is not configured")
+    if body.action == "generate_production_plan_arrangement":
+        raise HTTPException(422, {
+            "code": "production_plan_canvas_action_required",
+            "message": "请通过作品方案节点提交画面与声音任务，沿用画布动作确认流程。",
+        })
+    if body.action in {"transcribe_media", "align_script", "align_production_speech", "compile_take_timeline"}:
+        context = await _request_transcription_context(project, user, "editor")
+        if not await _transcription_engine_ready_for_context(context):
+            raise HTTPException(503, "NewAPI audio-transcribe is not configured")
     try:
-        prepared = await run_in_threadpool(
-            prepare_registered_action, store, body.action, body.payload,
-            idempotency_key=body.idempotency_key, node_revision=body.node_revision,
-        )
+        if body.action == "adopt_source_observation":
+            required = {"canvas_id", "plan_ref", "take_id", "observation_ref", "work_ref"}
+            if not required <= set(body.payload) or set(body.payload) - required - {"correction_ref"}:
+                raise ValueError("adopt_source_observation requires only current plan/take/work/source references")
+            from .reference_director import _context
+            from novelvideo.freezone.remix.source_speech_adoption import prepare_source_observation_adoption
+            from novelvideo.freezone.remix.production_advancement import enqueue_source_observation_adoption
+            ctx, canvas, store = await _context(project, body.payload["canvas_id"], user)
+            prepared = await run_in_threadpool(prepare_source_observation_adoption, store, ctx, canvas, **body.payload)
+            result = await enqueue_source_observation_adoption(ctx, store, prepared,
+                command_id=body.idempotency_key, node_revision=body.payload["plan_ref"]["revision"])
+            return _data({"action": body.action, **result})
+        elif body.action == "analyze_material_speech":
+            if set(body.payload) != {"canvas_id", "work_ref", "step_id", "node_id", "language"}:
+                raise ValueError("analyze_material_speech requires only canvas/work/step/current-node references and language")
+            from .reference_director import _context
+            from novelvideo.api.egress_binding import request_egress_scope
+            from novelvideo.freezone.remix.source_speech import prepare_material_speech
+            ctx, canvas, store = await _context(project, body.payload["canvas_id"], user)
+            async with request_egress_scope(
+                requester_user_id=ctx.requester_user_id, project_id=ctx.project_id,
+                task_type="remix_analyze_material_speech",
+            ):
+                prepared = await run_in_threadpool(prepare_material_speech, store, ctx, canvas, **body.payload)
+            prepared["task_payload"] = {**prepared["task_payload"], "node_revision": body.node_revision}
+        else:
+            prepared = await run_in_threadpool(
+                prepare_registered_action, store, body.action, body.payload,
+                idempotency_key=body.idempotency_key, node_revision=body.node_revision,
+            )
         refs, parameters = prepared["input_refs"], prepared["normalized_parameters"]
     except FileNotFoundError as exc:
         raise HTTPException(404, "Artifact or revision not found") from exc
@@ -560,7 +1102,7 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
     task_type = prepared["task_type"]
     scope = prepared["scope"] or operation["operation_id"]
     task_key = project_task_state_key(task_type, ctx.project_id, 0, scope=scope)
-    if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale"}:
+    if operation["task_id"] or operation["status"] in {"needs_confirmation", "pending_reconciliation", "cancelled", "completed", "stale", "failed"}:
         return _data({"action": body.action, "task_type": task_type, "task_id": operation["task_id"], "task_key": task_key, "operation_id": operation["operation_id"], "operation_status": operation["status"], "output_refs": operation["output_refs"]})
     owner = uuid.uuid4().hex
     fencing_token = await run_in_threadpool(operations.claim_submission, operation["operation_id"], owner=owner)
@@ -577,6 +1119,12 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
             operations, operation["operation_id"], owner=owner,
             fencing_token=fencing_token, error=exc,
         )
+        from novelvideo.task_backend.envelope import InvalidTaskEnvelope
+
+        if isinstance(exc, InvalidTaskEnvelope):
+            raise HTTPException(
+                500, detail={"code": "TASK_ENVELOPE_INVALID", "operation_id": operation["operation_id"]},
+            ) from exc
         raise
     await run_in_threadpool(
         operations.bind_task, operation["operation_id"], task_id=queued.task_state.task_id,
@@ -587,8 +1135,26 @@ async def enqueue_process_action(project: str, body: ProcessActionBody, user: di
 
 @router.post("/artifacts")
 async def create_artifact(project: str, body: CreateArtifactBody, user: dict = Depends(get_api_user)):
+    if body.schema_name in {"source_speech_observation.v1", "candidate_speech_correction.v1", "reference_commission.v1", "reference_analysis.v1", "production_review.v1", "material_work_package.v1", "material_review.v1", "reference_decision.v1", "production_output_review.v1", "speech_correction_preview.v1", "speech_correction_review.v1"}:
+        raise HTTPException(422, "Use the authenticated director operation for this evidence")
     store = await _store(project, user, "editor")
     return _data(await _call(store.create, body.schema_name, body.payload, body.upstream_refs))
+
+
+async def _authorize_source_speech_artifact(project: str, artifact: dict, user: dict):
+    producers = {'source_speech_observation.v1': 'remix-source-speech.v1',
+                 'candidate_speech_correction.v1': 'remix-candidate-speech-correction.v1'}
+    expected_producer = producers.get(artifact['schema'])
+    if artifact['schema'] == 'word_timeline.v1' and artifact['producer_version'] == 'remix-adopt-source-speech.v1':
+        expected_producer = 'remix-adopt-source-speech.v1'
+    if expected_producer is None:
+        return
+    from .reference_director import _context
+    from novelvideo.freezone.remix.source_speech import candidate_scope
+    scope = artifact["payload"]["authorization_scope"]
+    ctx, canvas, _ = await _context(project, scope.get("canvas_id", ""), user, "viewer")
+    if artifact["producer_version"] != expected_producer or candidate_scope(ctx, canvas, scope["canvas_id"], require_write=False) != scope:
+        raise HTTPException(403, "source observation authorization differs")
 
 
 @router.get("/artifacts/{artifact_id}")
@@ -599,7 +1165,18 @@ async def read_artifact(
     user: dict = Depends(get_api_user),
 ):
     store = await _store(project, user, "viewer")
-    return _data(await _call(store.read, artifact_id, revision))
+    artifact = await _call(store.read, artifact_id, revision)
+    await _authorize_source_speech_artifact(project, artifact, user)
+    return _data(artifact)
+
+
+@router.get("/artifacts/{artifact_id}/latest")
+async def read_latest_artifact(project: str, artifact_id: str, user: dict = Depends(get_api_user)):
+    """Read the newest authorized revision for conflict comparison."""
+    store = await _store(project, user, "viewer")
+    artifact = await _call(store.read_latest, artifact_id)
+    await _authorize_source_speech_artifact(project, artifact, user)
+    return _data(artifact)
 
 
 @router.put("/artifacts/{artifact_id}")
@@ -610,13 +1187,23 @@ async def revise_artifact(
     user: dict = Depends(get_api_user),
 ):
     store = await _store(project, user, "editor")
-    return _data(await _call(
+    current = await _call(store.read_latest, artifact_id)
+    if current["schema"] == "word_timeline.v1" and current["producer_version"] == "remix-adopt-source-speech.v1":
+        await _authorize_source_speech_artifact(project, current, user)
+        raise HTTPException(422, "Use the authenticated source adoption operation for this evidence")
+    if current["schema"] in {"source_speech_observation.v1", "candidate_speech_correction.v1", "reference_commission.v1", "reference_analysis.v1", "production_review.v1", "material_work_package.v1", "material_review.v1", "reference_decision.v1", "production_output_review.v1", "speech_correction_preview.v1", "speech_correction_review.v1"}:
+        raise HTTPException(422, "Use the authenticated director operation for this evidence")
+    saved = await _call(
         store.revise,
         artifact_id,
         body.expected_revision,
         body.payload,
         body.upstream_refs,
-    ))
+    )
+    if saved["schema"] == "production_plan.v2":
+        from novelvideo.chat.reference_production_observer import wake_local_observers
+        wake_local_observers()
+    return _data(saved)
 
 
 @router.post("/artifacts/{artifact_id}/render")
@@ -628,7 +1215,7 @@ async def render_artifact(
 ):
     store = await _store(project, user, "editor")
     artifact = await _call(store.read, artifact_id, body.revision)
-    if artifact["schema"] != "composition_manifest.v1":
+    if artifact["schema"] not in {"composition_manifest.v1", "composition_manifest.v2"}:
         raise HTTPException(422, "Artifact is not a composition manifest")
     try:
         from novelvideo.freezone.remix.render import validate_manifest
@@ -644,6 +1231,22 @@ async def render_artifact(
     operations = RemixOperationStore(store.project_dir, store.project_id)
     if bool(body.canvas_id) != bool(body.input_fingerprint):
         raise HTTPException(422, "Bound render requires the exact input fingerprint")
+    if artifact["payload"].get("manifest_version") == 4:
+        if not body.canvas_id or not body.node_id:
+            raise HTTPException(422, "Production plan render requires a saved canvas and compose node")
+        source_versions = artifact["payload"].get("source_versions")
+        source_ref = source_versions[0] if isinstance(source_versions, list) and source_versions else None
+        if not isinstance(source_ref, dict):
+            raise HTTPException(422, "Production plan source revision is missing")
+        source = await _call(store.read, source_ref.get("artifact_id"), source_ref.get("revision"))
+        if source["schema"] != "production_plan.v2":
+            raise HTTPException(422, "Production plan source revision is invalid")
+        canvas = await _call(canvas_store.read_canvas, Path(ctx.state_dir), body.canvas_id)
+        try:
+            _validate_v2_canvas_bindings(canvas, artifact["payload"],
+                {"artifact_id": artifact_id, "revision": body.revision}, source["payload"], body.node_id, store.project_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     manifest_media_bindings = [dict(item) for item in artifact["payload"]["media_bindings"]]
     try:
         operation = await run_in_threadpool(
@@ -718,6 +1321,17 @@ async def render_artifact(
     })
 
 
+async def _authorize_material_speech_operation(project: str, record: dict, user: dict, role: str = "viewer"):
+    from novelvideo.freezone.remix.source_speech import PRODUCER, candidate_scope
+    if record.get("producer_version") not in {PRODUCER, "remix-adopt-source-speech.v1"}:
+        return
+    from .reference_director import _context
+    payload = record["normalized_parameters"]["payload"]
+    ctx, canvas, _ = await _context(project, payload["canvas_id"], user, role)
+    if candidate_scope(ctx, canvas, payload["canvas_id"], require_write=role == "editor") != payload["scope"]:
+        raise HTTPException(403, "candidate operation authorization differs")
+
+
 @router.get("/operations")
 async def list_operations(
     project: str,
@@ -727,13 +1341,24 @@ async def list_operations(
     store = await _store(project, user, "viewer")
     operations = RemixOperationStore(store.project_dir, store.project_id)
     records = await _call(operations.list, limit=limit)
-    return _data({"items": [_operation_view(record) for record in records]})
+    permitted = []
+    for record in records:
+        try:
+            await _authorize_material_speech_operation(project, record, user)
+        except HTTPException as exc:
+            if exc.status_code in {403, 404}:
+                continue
+            raise
+        permitted.append(_operation_view(record))
+    return _data({"items": permitted})
 
 
 @router.get("/operations/{operation_id}")
 async def read_operation(project: str, operation_id: str, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "viewer")
-    return _data(_operation_view(await _call(RemixOperationStore(store.project_dir, store.project_id).get, operation_id)))
+    record = await _call(RemixOperationStore(store.project_dir, store.project_id).get, operation_id)
+    await _authorize_material_speech_operation(project, record, user)
+    return _data(_operation_view(record))
 
 
 @router.post("/operations/{operation_id}/confirm")
@@ -767,6 +1392,7 @@ async def confirm_operation(
 async def transition_operation(project: str, operation_id: str, body: OperationTransitionBody, user: dict = Depends(get_api_user)):
     store = await _store(project, user, "editor")
     operations = RemixOperationStore(store.project_dir, store.project_id)
+    await _authorize_material_speech_operation(project, await _call(operations.get, operation_id), user, "editor")
     try:
         if body.outcome == "unknown":
             result = await _call(operations.provider_outcome_unknown, operation_id, provider_task_id=body.provider_task_id)
@@ -820,6 +1446,26 @@ async def reconcile_operation(project: str, operation_id: str, user: dict = Depe
         record = await _call(operations.get, operation_id)
     except FileNotFoundError as exc:
         raise HTTPException(404, "Operation not found") from exc
+    await _authorize_material_speech_operation(project, record, user, "editor")
+    if record.get("producer_version") == "remix-source-speech.v1":
+        from novelvideo.freezone.remix.source_speech import reconcile_material_speech
+        from novelvideo.model_gateway_runtime import model_gateway_request_scope
+        ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+        try:
+            context = await _request_transcription_context(project, user, "editor")
+            with model_gateway_request_scope(context):
+                recovered = await _call(reconcile_material_speech, ctx, record)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return _data(_operation_view(recovered or record))
+    if record.get("producer_version") == "remix-adopt-source-speech.v1":
+        from novelvideo.freezone.remix.source_speech_adoption import reconcile_source_speech_adoption
+        ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
+        try:
+            recovered = await _call(reconcile_source_speech_adoption, ctx, record)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return _data(_operation_view(recovered or record))
     if record["status"] == "confirming":
         ctx = await resolve_project_context(user=user, project_id=project, required_role="editor")
         canvas = await _call(canvas_store.read_canvas, Path(ctx.state_dir), record.get("canvas_id", ""))

@@ -1596,7 +1596,7 @@ async def test_canvas_command_union_error_names_missing_type_without_echoing_htm
     assert raw_payload["path"] == "commands[0].type"
     assert payload["message"] == "commands[0].type: field is required"
     assert html not in json.dumps(raw_payload, ensure_ascii=False)
-def test_successful_canvas_tool_instructs_json_final_response():
+def test_successful_canvas_tool_keeps_natural_language_instruction_and_receipt():
     from novelvideo.chat import dramaclaw_mcp
 
     result = json.loads(dramaclaw_mcp._adapt_external_agent_tool_result(
@@ -1605,6 +1605,269 @@ def test_successful_canvas_tool_instructs_json_final_response():
                     "bridge_key": "receipt-a", "agent_instruction": "Report success briefly."}),
     ))
     instruction = result["agent_instruction"]
-    assert "JSON object" in instruction
-    assert "canvas_receipts" in instruction
-    assert "message field" in instruction
+    assert instruction == "Report success briefly."
+    assert result["bridge_key"] == "receipt-a"
+    assert result["applied"] is True
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload,batch,expected', [
+    ({'turn': {'id': 'turn-a', 'text': 'private dialogue', 'beat_id': 'beat-a', 'timing_status': 'pending'}}, False, 'missing required payload keys: beat_id, index'),
+    ({'turn': {}}, False, 'missing required payload keys: beat_id, index'),
+    ({'turn': {}}, True, 'missing required payload keys: beat_id, index'),
+    ({'beat_id': 'beat-a', 'index': 0, 'turn': {'id': 'turn-a', 'text': 'private dialogue', 'timing_status': 'pending'}}, False, 'extra_forbidden'),
+])
+async def test_production_schema_failure_reports_native_repair_without_execution(monkeypatch, payload, batch, expected):
+    monkeypatch.setenv('DRAMACLAW_TOOL_MODE', 'freezone_canvas')
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema for name, schema, handler in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    calls = []
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {'freezone_prepare_production_edit': (schema, lambda args: calls.append(args))})
+    child = {'kind': 'insert_turn', 'target_id': 'turn-a', 'payload': payload}
+    command = {**child, 'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1}}
+    if batch:
+        command.update(kind='batch', target_id='plan', payload={'commands': [child]})
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_production_edit', {'node_id': 'node-a', 'command': command})
+    assert result.isError
+    assert expected in result.structuredContent['message']
+    assert 'private dialogue' not in result.structuredContent['message']
+    assert len(result.structuredContent['message']) <= 1600
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_production_schema_rejection_carries_prewrite_field_details(monkeypatch):
+    monkeypatch.setenv('DRAMACLAW_TOOL_MODE', 'freezone_canvas')
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema for name, schema, _ in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    calls = []
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_production_edit': (schema, lambda args: calls.append(args))
+    })
+    command = {'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1},
+               'kind': 'batch', 'target_id': 'plan', 'payload': {'commands': [
+                   {'kind': 'insert_turn', 'target_id': 'new', 'payload': {'beat_id': 'intro', 'index': 0}}
+               ]}}
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_production_edit', {
+        'node_id': 'node-a', 'command': command,
+    })
+    assert result.isError
+    assert calls == []
+    for payload in (result.structuredContent, json.loads(result.content[0].text)):
+        assert payload['error_path'] == 'payload.commands[0].payload.turn'
+        assert payload['expected_branch'] == 'insert_turn'
+        assert payload['missing_fields'] == ['turn']
+        assert payload['side_effects'] == 'none'
+
+
+@pytest.mark.asyncio
+async def test_mcp_unrelated_outer_error_keeps_existing_diagnostic(monkeypatch):
+    monkeypatch.setenv('DRAMACLAW_TOOL_MODE', 'freezone_canvas')
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema for name, schema, _ in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_production_edit': (schema, lambda args: pytest.fail('outer error reached handler'))
+    })
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_production_edit', {
+        'node_id': '', 'command': {'kind': 'insert_turn'},
+    })
+    assert result.isError
+    assert result.structuredContent['error'] == 'tool_arguments_invalid'
+    assert 'side_effects' not in result.structuredContent
+
+@pytest.mark.parametrize('outer,command,expected', [
+    ({'unexpected': True}, {'kind': 'insert_turn'}, None),
+    ({'node_id': ''}, {'kind': 'insert_turn'}, None),
+    ({}, {'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1}, 'kind': 'batch', 'target_id': 'plan', 'payload': {'commands': [{'kind': 'insert_turn', 'payload': {}}]}}, 'exact child keys'),
+    ({}, {'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1}, 'kind': 'insert_turn', 'target_id': 'turn-a', 'payload': {'beat_id': 'beat-a', 'index': 0, 'turn': {'id': 'turn-a', 'text': 'hello'}}}, None),
+    ({}, {'kind': 'insert_turn', 'payload': {'turn': {'text': 'x' * 5000}}}, None),
+])
+def test_production_native_diagnostic_preserves_outer_errors_and_bounds(monkeypatch, outer, command, expected):
+    from jsonschema.exceptions import ValidationError, SchemaError
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema['parameters'] for name, schema, handler in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    arguments = {'node_id': 'node-a', 'command': command, **outer}
+    error = next(Draft202012Validator(schema).iter_errors(arguments), ValidationError('synthetic metadata restriction'))
+    diagnostic = dramaclaw_mcp._production_validation_diagnostic('freezone_prepare_production_edit', arguments, schema, error)
+    if expected:
+        assert expected in diagnostic[1]
+    else:
+        assert diagnostic is None
+    assert dramaclaw_mcp._production_validation_diagnostic('other_tool', arguments, schema, error) is None
+    assert dramaclaw_mcp._production_validation_diagnostic('freezone_prepare_production_edit', arguments, schema, SchemaError('invalid schema')) is None
+
+@pytest.mark.asyncio
+async def test_valid_production_insert_reaches_normal_handler_unchanged(monkeypatch):
+    monkeypatch.setenv('DRAMACLAW_TOOL_MODE', 'freezone_canvas')
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema for name, schema, handler in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    calls = []
+    def handler(args):
+        calls.append(args)
+        return json.dumps({'ok': False, 'status': 'failed', 'error': 'approval bridge unavailable'})
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {'freezone_prepare_production_edit': (schema, handler)})
+    arguments = {'node_id': 'node-a', 'command': {'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1}, 'kind': 'insert_turn', 'target_id': 'turn-a', 'payload': {'beat_id': 'beat-a', 'index': 0, 'turn': {'id': 'turn-a', 'text': 'hello'}}}}
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_production_edit', arguments)
+    assert calls == [arguments]
+    assert result.structuredContent['error'] == 'approval bridge unavailable'
+
+@pytest.mark.asyncio
+async def test_batch_native_direct_model_error_does_not_echo_private_inputs(monkeypatch):
+    monkeypatch.setenv('DRAMACLAW_TOOL_MODE', 'freezone_canvas')
+    plugin = dramaclaw_mcp._plugin('freezone')
+    schema = next(schema for name, schema, handler in plugin.TOOLS if name == 'freezone_prepare_production_edit')
+    calls = []
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {'freezone_prepare_production_edit': (schema, lambda args: calls.append(args))})
+    command = {'command_id': 'edit-a', 'plan_ref': {'artifact_id': 'plan-a', 'revision': 1}, 'kind': 'batch', 'target_id': 'plan', 'payload': {'commands': [
+        {'kind': 'upsert_placement', 'target_id': 'p-a', 'payload': {'placement': {'id': 'p-a', 'private': 'SECRET_DIALOGUE_MARKER'}}},
+        {'kind': 'insert_turn', 'target_id': 'turn-a', 'payload': {'turn': {}}},
+    ]}}
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_production_edit', {'node_id': 'node-a', 'command': command})
+    message = result.structuredContent['message']
+    assert result.isError
+    assert 'SECRET_DIALOGUE_MARKER' not in message
+    assert 'input_value' not in message
+    assert 'must match the native model' in message
+    assert 'missing' in message
+    assert 'insert_turn payload.turn must match TurnV2' not in message
+    assert calls == []
+
+
+def _material_diagnostic_schema():
+    return next(schema for name, schema, _ in dramaclaw_mcp._plugin('freezone').TOOLS
+                if name == 'freezone_prepare_material_work')
+
+
+def _material_diagnostic_arguments():
+    return {'commission_ref': {'artifact_id': 'commission-a', 'revision': 1},
+            'plan_ref': {'artifact_id': 'plan-a', 'revision': 25}, 'command_id': 'work-a',
+            'requirements': [{'kind': 'video', 'placement_id': 'placement-a',
+                              'acceptance': 'private requirement text'}],
+            'steps': [{'id': 'step-a', 'recipe': 'general-video',
+                       'roles': ['private role text'], 'prompt': 'private prompt text'}]}
+
+
+@pytest.mark.asyncio
+async def test_material_schema_diagnostic_reports_multiple_paths_without_execution(monkeypatch):
+    schema = _material_diagnostic_schema()
+    calls = []
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_material_work': (schema, lambda args: calls.append(args))})
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_material_work', _material_diagnostic_arguments())
+    message = result.structuredContent['message']
+    for path in ['requirements[0].id', 'requirements[0].description',
+                 'requirements[0].media_kind', 'requirements[0].final_step_id',
+                 'requirements[0].acceptance', 'steps[0].label', 'steps[0].source']:
+        assert path in message
+    for guide in ['plan_ref={artifact_id,revision}', 'placement_ids/take_ids/turn_ids',
+                  'recipe_id', 'references', 'generation_inputs', 'nonblank prompt',
+                  'saved plan', 'shared intermediate', 'material dependency graph']:
+        assert guide in message
+    assert 'private' not in json.dumps(json.loads(result.content[0].text))
+    assert len(message) <= 2200
+    assert result.isError and calls == []
+
+
+@pytest.mark.parametrize('variant', ['direct', 'nested', 'wide', 'deep', 'long', 'secret_key'])
+def test_material_diagnostic_is_bounded_and_does_not_echo_arguments(variant):
+    from jsonschema.exceptions import ValidationError
+    schema = _material_diagnostic_schema()['parameters']
+    arguments = _material_diagnostic_arguments()
+    if variant == 'nested':
+        arguments['steps'][0]['references'] = [{'role': {'secret': 'private nested text'}}]
+    elif variant == 'wide':
+        arguments['steps'] *= 3000
+    elif variant == 'deep':
+        value = 'private deep text'
+        for _ in range(20):
+            value = [value]
+        arguments['steps'][0]['generation_inputs'] = {'custom': value}
+    elif variant == 'long':
+        arguments['steps'][0]['prompt'] = 'private' * 10000
+    elif variant == 'secret_key':
+        arguments['steps'][0]['private-key'] = 'private value'
+    error = next(Draft202012Validator(schema).iter_errors(arguments))
+    path, message = dramaclaw_mcp._material_validation_diagnostic(
+        'freezone_prepare_material_work', arguments, schema, error)
+    assert path in {'requirements', 'requirements[0].acceptance'}
+    assert 'private' not in message
+    assert len(message) <= 2200
+    assert dramaclaw_mcp._material_validation_diagnostic('other', arguments, schema, error) is None
+    assert dramaclaw_mcp._material_validation_diagnostic(
+        'freezone_prepare_material_work', arguments, schema, ValidationError('secret')) is not None
+
+
+@pytest.mark.asyncio
+async def test_material_diagnostic_preserves_outer_errors_and_valid_dispatch(monkeypatch):
+    schema = _material_diagnostic_schema()
+    calls = []
+    def handler(args):
+        calls.append(args)
+        return json.dumps({'ok': False, 'error': 'approval bridge unavailable', 'status': 'failed'})
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_material_work': (schema, handler)})
+    arguments = _material_diagnostic_arguments()
+    arguments['command_id'] = ''
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_material_work', arguments)
+    assert 'native material' not in result.structuredContent['message']
+    assert calls == []
+    arguments = _material_diagnostic_arguments()
+    arguments['requirements'] = [{'id': 'req-a', 'description': 'final video', 'media_kind': 'video',
+                                  'final_step_id': 'step-a', 'acceptance': ['real video']}]
+    arguments['steps'] = [{'id': 'step-a', 'label': 'final video', 'media_kind': 'video',
+                           'source': 'generate', 'recipe_id': 'general-video', 'prompt': 'real prompt'}]
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_material_work', arguments)
+    assert calls == [arguments]
+    assert result.structuredContent['error'] == 'approval bridge unavailable'
+
+
+@pytest.mark.parametrize('outer', [
+    {'command_id': ''}, {'commission_ref': {'artifact_id': 'commission-a', 'revision': 0}},
+    {'project_id': 3}, {'unexpected': True},
+])
+def test_material_diagnostic_does_not_replace_unrelated_outer_failures(outer):
+    from jsonschema.exceptions import SchemaError
+    schema = _material_diagnostic_schema()['parameters']
+    arguments = {**_material_diagnostic_arguments(), **outer}
+    error = next(Draft202012Validator(schema).iter_errors(arguments))
+    assert dramaclaw_mcp._material_validation_diagnostic(
+        'freezone_prepare_material_work', arguments, schema, error) is None
+    assert dramaclaw_mcp._material_validation_diagnostic(
+        'freezone_prepare_material_work', arguments, schema, SchemaError('invalid schema')) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant', ['wide', 'nested'])
+async def test_material_diagnostic_large_graph_keeps_guide_and_private_keys_out_of_envelope(monkeypatch, variant):
+    schema = _material_diagnostic_schema()
+    calls = []
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_material_work': (schema, lambda args: calls.append(args))})
+    arguments = _material_diagnostic_arguments()
+    if variant == 'wide':
+        arguments['steps'] = [{'private key': 'private value'}] * 3000
+    else:
+        arguments['steps'][0]['references'] = [{'role': {'private key': 'private value'}}]
+        arguments['steps'][0]['generation_inputs'] = {'private key': 'private value'}
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_material_work', arguments)
+    raw = json.loads(result.content[0].text)
+    assert result.isError and not calls
+    assert 'private' not in json.dumps(raw)
+    if variant == 'wide':
+        assert 'diagnostic limit reached' in raw['message']
+    assert 'native approval and acceptance' in raw['message']
+    assert len(raw['message']) <= 2200
+
+
+@pytest.mark.asyncio
+async def test_material_diagnostic_bypasses_unbounded_workflow_error_collection(monkeypatch):
+    from novelvideo.freezone import workflow_schema
+    schema = _material_diagnostic_schema()
+    monkeypatch.setattr(dramaclaw_mcp, '_agent_tools', lambda: {
+        'freezone_prepare_material_work': (schema, lambda args: pytest.fail('must not execute'))})
+    monkeypatch.setattr(workflow_schema, 'workflow_plan_schema_diagnostics',
+                        lambda *args: pytest.fail('unbounded workflow error collection'))
+    arguments = _material_diagnostic_arguments()
+    arguments['steps'] *= 3000
+    result = await dramaclaw_mcp.call_tool('freezone_prepare_material_work', arguments)
+    assert result.isError
+    assert 'diagnostic limit reached' in result.structuredContent['message']

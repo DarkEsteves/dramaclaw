@@ -502,6 +502,11 @@ async def _exercise_mcp(
                     report.check(error is None, error or "")
                     if intent is None:
                         continue
+                    if available_by_id[recipe_id].get("execution") == "native_production_planner":
+                        native = (package.get("planning_contract") or {}).get("native_production") or {}
+                        intent = json.loads(json.dumps(native.get("intent_example") or {}))
+                        # Compile only: this fixture ID is never dispatched to a live canvas.
+                        intent["external_inputs"] = [{"id": "analysis", "node_id": "diagnostic-completed-analysis", "media_kind": "reference_analysis"}]
                     intent["inputs"] = _required_diagnostic_inputs(skill)
                     compiled = _json_payload_from_tool(
                         await session.call_tool("workflow_intent_compile", {"intent": intent})

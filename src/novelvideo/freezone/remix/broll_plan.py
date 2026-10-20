@@ -38,7 +38,8 @@ def _planning_event_batches(events: list[Any]) -> list[list[dict[str, str]]]:
     return batches
 
 
-async def generate_broll_plan(*, script: dict[str, Any], username: str) -> dict[str, Any]:
+def validated_broll_events(script: dict[str, Any]) -> tuple[list[Any], set[str]]:
+    """Check saved events before a paid model request is admitted."""
     events = script.get("events")
     if not isinstance(events, list):
         raise ValueError("script events are required for B-roll planning")
@@ -51,6 +52,11 @@ async def generate_broll_plan(*, script: dict[str, Any], username: str) -> dict[
     event_ids = set(event_id_list)
     if len(event_ids) != len(event_id_list):
         raise ValueError("script event_id must be unique")
+    return events, event_ids
+
+
+async def generate_broll_plan(*, script: dict[str, Any], username: str) -> dict[str, Any]:
+    events, event_ids = validated_broll_events(script)
     recipe = get_recipe_for_runtime(username=username, recipe_id="reference-broll-plan")
 
     async def request_plan(batch: list[dict[str, str]], node_prompt: str) -> tuple[list[dict[str, Any]], set[str]]:

@@ -11,6 +11,17 @@ import { RemixScriptPanel } from './RemixScriptPanel';
 describe('RemixScriptPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('offers explicit conversion without changing the current legacy dialogue', () => {
+    const onConvertToPlan = vi.fn();
+    const onDraftChange = vi.fn();
+    render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '女：喝什么？', selections: [] }}
+      existingRef={null} blueprintRef={null} visualNodes={[]} sfxNodes={[]}
+      onConvertToPlan={onConvertToPlan} onDraftChange={onDraftChange} onSave={() => {}} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: '转为作品方案' }));
+    expect(onConvertToPlan).toHaveBeenCalledOnce();
+    expect(onDraftChange).not.toHaveBeenCalled();
+  });
+
   it('shows A-roll before B-roll with local status and keeps B-roll planning available', () => {
     const onPlanBroll = vi.fn();
     render(<RemixScriptPanel project="demo" initialDraft={{ dialogue: '男：你好', selections: [

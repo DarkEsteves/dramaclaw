@@ -12,6 +12,7 @@ import contextlib
 import inspect
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from dataclasses import replace
@@ -33,8 +34,10 @@ from novelvideo.api.egress_binding import request_egress_scope
 from novelvideo.chat import service as chat_service
 from novelvideo.chat.execution_context import AgentExecutionContext
 from novelvideo.chat.hermes_egress import EgressBoundaryError
+from novelvideo.chat.hermes_fork_requirement import HermesForkMissing
 from novelvideo.chat.hermes_pool import canvas_bridge_dir_for_profile
 from novelvideo.chat.director_auto import coordinator as director_auto_coordinator
+from novelvideo.chat.canvas_tool_session import dispatch_pending_bridge_messages, validate_bridge_receipt
 from novelvideo.chat.live_events import (
     register_chat_websocket,
     unregister_chat_websocket,
@@ -46,6 +49,7 @@ from novelvideo.chat.hermes_workspace import (
 from novelvideo.chat.store import ChatScope, chat_store
 from novelvideo.freezone.canvas_command_bridge import (
     BRIDGE_PENDING_TTL_SECONDS,
+    canonical_bridge_key,
     bridge_message_exists,
     list_pending_bridge_messages,
     mark_bridge_message_delivered,
@@ -96,6 +100,15 @@ _REASONING_REQUIRED_ERROR_MESSAGE = (
 
 def _user_facing_chat_error(exc: BaseException) -> str:
     """Turn provider/runtime failures into stable, safe chat copy."""
+
+    if isinstance(exc, HermesForkMissing):
+        return (
+            "Hermes 运行环境不匹配：当前安装版本无法支持虾导运行。"
+            "请安装 DramaClaw 所需的 Hermes 配套版本后重试。"
+        )
+
+    if isinstance(exc, sqlite3.Error):
+        return "聊天存储读写失败，请检查磁盘空间和数据库状态后重试。"
 
     raw = safe_exception_message(exc).strip()
     lowered = raw.lower()
@@ -151,6 +164,7 @@ async def cancel_chat_turn(
     except Exception:
         return {"ok": True, "data": {"cancelled": False}}
     codex_target: tuple[str, str] | None = None
+    production_stop = None
     if backend_name == "codex":
         if payload is None or payload.scope is None:
             raise HTTPException(status_code=400, detail="scope is required")
@@ -163,7 +177,15 @@ async def cancel_chat_turn(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _enforce_agent_chat_scope(user, scope, require_write=True)
         if scope.kind in {"project", "freezone"}:
-            await _project_context_for_scope(user, scope)
+            project_ctx = await _project_context_for_scope(user, scope)
+            if (isinstance(project_ctx, ProjectContext) and _is_freezone_scope(scope) and scope.canvas_id
+                    and project_ctx.effective_role in {'owner', 'admin', 'editor'}):
+                from novelvideo.chat.reference_remix_continuation import coordinator as reference_coordinator
+                async def production_stop():
+                    # service resolves the exact live business turn before this
+                    # callback. Persist the scoped stop before runtime interruption.
+                    await reference_coordinator.stop_automation_scope(ctx=project_ctx,
+                        canvas_id=scope.canvas_id, agent_id=scope.agent_id or 'main')
         agent_profile = (
             _freezone_agent_profile(scope) if _is_freezone_scope(scope) else "main"
         )
@@ -178,9 +200,14 @@ async def cancel_chat_turn(
     try:
         if backend_name == "codex":
             assert codex_target is not None
-            cancelled = await chat_service.interrupt_active_codex_turn(
-                username, codex_target[0], codex_target[1]
-            )
+            if production_stop is not None:
+                cancelled = await chat_service.interrupt_active_codex_turn(
+                    username, codex_target[0], codex_target[1], before_interrupt=production_stop
+                )
+            else:
+                cancelled = await chat_service.interrupt_active_codex_turn(
+                    username, codex_target[0], codex_target[1]
+                )
         else:
             from novelvideo.chat.hermes_pool import pool as hermes_pool
 
@@ -348,6 +375,15 @@ class PendingCanvasCommandsIn(BaseModel):
     seen_keys: list[str] = []
 
 
+class PendingInteractionsIn(BaseModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    canvas_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
+    agent_id: str = Field(default="main", pattern=r"^[A-Za-z0-9_-]+$")
+    browser_id: str = Field(pattern=r"^[A-Za-z0-9_-]{16,128}$")
+    cursor: int = Field(default=0, ge=0)
+    event_cursor: str = Field(default="", max_length=128)
+
+
 class CanvasCommandToolResultIn(BaseModel):
     turn_id: str | None = None
     bridge_key: str
@@ -370,6 +406,12 @@ class CanvasCommandToolResultIn(BaseModel):
     message: str | None = None
     user_message: str | None = None
     agent_hint: str | None = None
+    workflow_run_id: str | None = None
+    operation_id: str | None = None
+    task_id: str | None = None
+    node_id: str | None = None
+    action: str | None = None
+    completion_owner: str | None = None
 
 
 class CanvasContextToolResultIn(BaseModel):
@@ -875,7 +917,7 @@ def _candidate_canvas_bridge_dirs(
 def _bridge_dir_for_pending_key(
     username: str, payload: Any, *, project_state_dir: Any = None
 ) -> Any:
-    key = str(getattr(payload, "bridge_key", "") or "").strip()
+    key = canonical_bridge_key(str(getattr(payload, "bridge_key", "") or "").strip())
     candidates = _candidate_canvas_bridge_dirs(
         username, payload, project_state_dir=project_state_dir
     )
@@ -941,13 +983,230 @@ def _pending_workflow_draft_receipt(
     return {"draft_id": draft_id, "revision": revision, "task_id": task_id}
 
 
+_NATIVE_PROCESSING_ACTIONS = {
+    "generate_production_plan_draft", "generate_production_plan_arrangement",
+    "compile_production_plan", "align_production_speech",
+}
+
+
+def _bridge_approves_native_action(
+    commands: list[dict[str, Any]], canvas: dict[str, Any], *, node_id: str, action: str,
+) -> bool:
+    """Resolve approved graph aliases against the saved canvas, once at admission."""
+    nodes = [node for node in canvas.get("nodes", []) if isinstance(node, dict)]
+    if not any(node.get("id") == node_id for node in nodes):
+        return False
+    aliases: dict[str, str] = {}
+    for command in commands:
+        if command.get("type") != "create_node":
+            continue
+        alias = command.get("client_id")
+        data = command.get("data")
+        if not isinstance(alias, str) or not isinstance(data, dict):
+            continue
+        workflow_id = data.get("workflowInstanceId")
+        plan_id = data.get("workflowPlanNodeId")
+        if not workflow_id or not plan_id:
+            continue
+        matches = [node for node in nodes if isinstance(node.get("data"), dict)
+                   and node["data"].get("workflowInstanceId") == workflow_id
+                   and node["data"].get("workflowPlanNodeId") == plan_id]
+        if len(matches) == 1:
+            aliases[alias] = str(matches[0]["id"])
+    for command in commands:
+        if (command.get("type") == "run_node_action"
+                and command.get("node_id") == node_id
+                and command.get("action") == action):
+            return True
+        if command.get("type") == "run_workflow" and isinstance(command.get("node_ids"), list):
+            for approved_id in command["node_ids"]:
+                if aliases.get(approved_id, approved_id) == node_id:
+                    return True
+    return False
+
+
+def _pending_native_processing_commands(
+    username: str, payload: CanvasCommandToolResultIn, project_state_dir: Any = None,
+) -> list[dict[str, Any]]:
+    directory = _bridge_dir_for_pending_key(
+        username, payload, project_state_dir=project_state_dir,
+    )
+    key = payload.bridge_key.strip()
+    pending = _load_pending_canvas_command(directory / f"{key}.pending.json")
+    if pending is None:
+        pending = read_bridge_message(key, bridge_dir=directory)
+    envelope = pending.get("envelope") if isinstance(pending, dict) else None
+    commands = envelope.get("commands") if isinstance(envelope, dict) else None
+    if not isinstance(commands, list) and isinstance(pending, dict):
+        commands = pending.get("commands")
+    if not isinstance(commands, list):
+        return []
+    return [command for command in commands if isinstance(command, dict)]
+
+
+def _approved_native_processing_receipt_command(
+    commands: list[dict[str, Any]], canvas: dict[str, Any], *, node_id: str, action: str,
+) -> dict[str, str] | None:
+    if action not in _NATIVE_PROCESSING_ACTIONS or not _bridge_approves_native_action(
+        commands, canvas, node_id=node_id, action=action,
+    ):
+        return None
+    return {"type": "run_node_action", "node_id": node_id, "action": action}
+
+
+def _validate_native_workflow_receipt(
+    ctx: ProjectContext,
+    payload: CanvasCommandToolResultIn,
+    approved_commands: list[dict[str, Any]],
+    claimed_actions: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Validate one host-owned run against every native action in its bridge."""
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.workflow_runs import read_workflow_run
+
+    if (payload.canvas_apply_status != "accepted"
+            or payload.completion_owner != "host"
+            or not payload.workflow_run_id):
+        raise HTTPException(409, "native workflow acceptance is missing a durable run")
+    run = read_workflow_run(
+        project_dir=ctx.state_dir, canvas_id=str(payload.canvas_id),
+        run_id=payload.workflow_run_id,
+    )
+    metadata = run.get("metadata") if isinstance(run, dict) else None
+    if (not run or run.get("project_id") != ctx.project_id
+            or run.get("canvas_id") != payload.canvas_id
+            or run.get("actor_id") != ctx.requester_user_id
+            or run.get("status") not in {"running", "completed"}
+            or not isinstance(metadata, dict)
+            or metadata.get("canvas_bridge_key") != canonical_bridge_key(payload.bridge_key)
+            or metadata.get("native_completion_owner") != "host"):
+        raise HTTPException(409, "native workflow approval or ownership differs")
+    if not any(command.get("type") == "run_workflow" or (
+        command.get("type") == "run_node_action"
+        and command.get("action") in _NATIVE_PROCESSING_ACTIONS
+    ) for command in approved_commands):
+        raise HTTPException(409, "native workflow approval has no run action")
+    actions = run.get("actions") or []
+    if not actions or any(not isinstance(item, dict) or item.get("action") not in _NATIVE_PROCESSING_ACTIONS
+                          for item in actions):
+        raise HTTPException(409, "native workflow has an unowned action")
+    expected = {(item["node_id"], item["action"]) for item in actions}
+    if len(expected) != len(actions):
+        raise HTTPException(409, "native workflow contains duplicate actions")
+    if claimed_actions is not None and claimed_actions:
+        claimed = {(item.get("node_id") or item.get("nodeId"), item.get("action"))
+                   for item in claimed_actions}
+        if claimed != expected:
+            raise HTTPException(409, "native workflow receipt omits an action")
+    recorded_approval = {
+        (item.get("node_id"), item.get("action"))
+        for item in metadata.get("native_approved_actions", [])
+        if isinstance(item, dict)
+    }
+    if recorded_approval != expected:
+        raise HTTPException(409, "native workflow approved targets differ")
+    operation_store = RemixOperationStore(ctx.output_dir, ctx.project_id)
+    for item in actions:
+        node_id, action = item["node_id"], item["action"]
+        operation_id = item.get("processing_operation_id")
+        if (item.get("status") not in {"running", "completed"}
+                or not isinstance(operation_id, str) or not operation_id
+                or not item.get("task_key")):
+            raise HTTPException(409, "native workflow action is not durably submitted")
+        try:
+            operation = operation_store.get(operation_id)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(409, "native workflow operation is unavailable") from exc
+        parameters = operation.get("normalized_parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        if (operation.get("canvas_id") != payload.canvas_id
+                or operation.get("node_id") != node_id
+                or operation.get("status") in {"failed", "cancelled", "cancelling", "stale"}
+                or (item.get("node_revision") is not None
+                    and operation.get("node_revision") != item.get("node_revision"))
+                or (isinstance(item.get("payload"), dict)
+                    and (parameters.get("action") != action
+                         or parameters.get("payload") != item["payload"]))):
+            raise HTTPException(409, "native workflow operation identity differs")
+    return {"workflow_run_id": payload.workflow_run_id, "completion_owner": "host"}
+
+
+def _validate_native_processing_receipt(
+    ctx: ProjectContext, payload: CanvasCommandToolResultIn, pending_command: dict[str, Any],
+) -> dict[str, str]:
+    """Prove browser acceptance against the server's run and submitted task."""
+    from novelvideo.freezone.remix.operations import RemixOperationStore
+    from novelvideo.freezone.workflow_runs import read_workflow_run
+
+    fields = (payload.workflow_run_id, payload.operation_id, payload.task_id,
+              payload.node_id, payload.action)
+    if (payload.canvas_apply_status != "accepted" or payload.completion_owner != "host"
+            or not all(isinstance(value, str) and value.strip() for value in fields)
+            or payload.action not in _NATIVE_PROCESSING_ACTIONS):
+        raise HTTPException(409, "native processing acceptance is missing a durable task receipt")
+    if (pending_command.get("node_id") != payload.node_id
+            or pending_command.get("action") != payload.action):
+        raise HTTPException(409, "native processing receipt differs from the approved command")
+    run = read_workflow_run(project_dir=ctx.state_dir, canvas_id=str(payload.canvas_id),
+                            run_id=str(payload.workflow_run_id))
+    if (not run or run.get("project_id") != ctx.project_id
+            or run.get("canvas_id") != payload.canvas_id
+            or run.get("actor_id") != ctx.requester_user_id
+            or run.get("status") in {"failed", "cancelled", "interrupted"}):
+        raise HTTPException(409, "native processing workflow is unavailable or stopped")
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if metadata.get("canvas_bridge_key") != canonical_bridge_key(payload.bridge_key):
+        raise HTTPException(409, "native processing receipt belongs to another approval")
+    actions = [item for item in run.get("actions", []) if item.get("node_id") == payload.node_id
+               and item.get("action") == payload.action]
+    if len(actions) != 1:
+        raise HTTPException(409, "native processing action is not in the workflow")
+    action = actions[0]
+    if (action.get("processing_operation_id") != payload.operation_id
+            or not action.get("task_key") or action.get("status") in {"failed", "blocked", "skipped"}):
+        raise HTTPException(409, "native processing action has no accepted task")
+    try:
+        operation = RemixOperationStore(ctx.output_dir, ctx.project_id).get(str(payload.operation_id))
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, "native processing operation is unavailable") from exc
+    if (operation.get("canvas_id") != payload.canvas_id
+            or operation.get("node_id") != payload.node_id
+            or operation.get("task_id") != payload.task_id
+            or operation.get("status") in {"failed", "cancelled"}):
+        raise HTTPException(409, "native processing task identity differs")
+    return {"workflow_run_id": str(payload.workflow_run_id),
+            "operation_id": str(payload.operation_id), "task_id": str(payload.task_id),
+            "node_id": str(payload.node_id), "action": str(payload.action),
+            "completion_owner": "host"}
+
+
+def _saved_workflow_graph_matches_receipt(
+    payload: CanvasCommandToolResultIn, draft: dict[str, Any], canvas: dict[str, Any],
+) -> bool:
+    """A failed or pending action cannot undo an independently saved graph."""
+    from novelvideo.freezone.workflow_delivery import inspect_workflow_graph_delivery
+
+    return inspect_workflow_graph_delivery(
+        receipt=payload.model_dump(), draft=draft, canvas=canvas,
+    )["state"] == "delivered"
+
+
+def _claimed_native_run_actions(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only the current admitted stage belongs to the durable host run."""
+    return [item for item in steps
+            if item.get("type") == "run_node_action" and item.get("status") == "pending"
+            and isinstance(item.get("output"), dict)
+            and item["output"].get("reason") == "native_action_accepted"]
+
+
 async def _record_workflow_draft_canvas_result(
     *,
     user: dict[str, Any],
     payload: CanvasCommandToolResultIn,
     draft_receipt: dict[str, Any] | None,
     resolved: dict[str, Any],
-) -> None:
+    strict: bool = False,
+) -> dict[str, Any] | None:
     if not draft_receipt:
         return
     draft_id = draft_receipt["draft_id"]
@@ -957,10 +1216,11 @@ async def _record_workflow_draft_canvas_result(
         return
     try:
         from novelvideo.freezone.workflow_drafts import (
-            finish_workflow_draft_confirmation,
             read_workflow_draft,
+            record_workflow_delivery_receipt,
+            settle_workflow_draft_delivery,
         )
-        from novelvideo.task_state import ACTIVE_PROJECT_TASK_STATUSES, get_task_manager
+        from novelvideo.task_state import get_task_manager
 
         scope = ChatScope(
             kind="project",
@@ -979,14 +1239,20 @@ async def _record_workflow_draft_canvas_result(
             draft_id=draft_id,
         )
         if draft is None:
-            return
+            if strict:
+                raise ValueError("workflow draft is unavailable")
+            return None
         task_id = str(draft.get("task_id") or "")
         revision = int(draft.get("revision") or 0)
         attempt_started_at = draft.get("confirmation_started_at")
         if task_id != draft_receipt["task_id"] or revision != draft_receipt["revision"]:
-            return
+            if strict:
+                raise ValueError("workflow draft confirmation identity changed")
+            return None
         if attempt_started_at is None:
-            return
+            if strict:
+                raise ValueError("workflow draft has no active confirmation")
+            return None
         task_manager = get_task_manager()
         task_state = None
         for task_scope in (
@@ -1003,31 +1269,49 @@ async def _record_workflow_draft_canvas_result(
             )
             if task_state is not None:
                 break
-        if (
-            task_state is None
-            or str(task_state.task_id) != task_id
-            or task_state.status not in ACTIVE_PROJECT_TASK_STATUSES
-        ):
+        if task_state is not None and str(task_state.task_id) != task_id:
             logger.info(
-                "ignored late workflow canvas result without active task draft_id=%s",
+                "ignored workflow canvas result for another task draft_id=%s",
                 draft_id,
             )
-            return
+            if strict:
+                raise ValueError("workflow draft confirmation task changed")
+            return None
+        from novelvideo.freezone import canvas_store
+        from novelvideo.freezone.workflow_delivery import inspect_workflow_graph_delivery
+
+        saved_canvas = await asyncio.to_thread(
+            canvas_store.read_canvas, project_ctx.state_dir, canvas_id,
+        )
+        proof = inspect_workflow_graph_delivery(
+            receipt=payload.model_dump(), draft=draft, canvas=saved_canvas or {},
+        )
         await asyncio.to_thread(
-            finish_workflow_draft_confirmation,
+            record_workflow_delivery_receipt,
+            project_dir=project_ctx.state_dir, canvas_id=canvas_id, draft_id=draft_id,
+            revision=revision, task_id=task_id, attempt=attempt_started_at,
+            bridge_key=payload.bridge_key, receipt=payload.model_dump(), proof=proof,
+        )
+        await asyncio.to_thread(
+            settle_workflow_draft_delivery,
             project_dir=project_ctx.state_dir,
             canvas_id=canvas_id,
             draft_id=draft_id,
-            outcome="confirmed" if resolved.get("ok") else "ready",
-            expected_task_id=task_id,
-            expected_revision=revision,
-            expected_confirmation_started_at=attempt_started_at,
+            task_id=task_id,
+            revision=revision,
+            attempt=attempt_started_at,
+            proof=proof,
+            canvas=saved_canvas or {},
         )
+        return proof
     except Exception:
         logger.exception(
             "failed to record durable workflow canvas outcome draft_id=%s",
             draft_id,
         )
+        if strict:
+            raise
+        return None
 
 
 async def _close_freezone_agent_worker(username: str, agent_id: str | None) -> bool:
@@ -1068,6 +1352,11 @@ def _resolve_canvas_command_tool_result_payload(
     username: str,
     project_state_dir: Any = None,
 ) -> dict[str, Any]:
+    execution_token = validate_bridge_receipt(payload.bridge_key.strip(),
+        bridge_dir=_bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir),
+        username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+        agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id)
+    payload.bridge_key = canonical_bridge_key(payload.bridge_key)
     key = payload.bridge_key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="bridge_key is required")
@@ -1167,7 +1456,16 @@ def _resolve_canvas_command_tool_result_payload(
         "agent_instruction": agent_instruction,
         "agent_hint": payload.agent_hint,
         "requires_canvas_refresh": requires_canvas_refresh,
+        **({
+            "workflow_run_id": payload.workflow_run_id,
+            "operation_id": payload.operation_id,
+            "task_id": payload.task_id,
+            "node_id": payload.node_id,
+            "action": payload.action,
+            "completion_owner": payload.completion_owner,
+        } if payload.canvas_apply_status == "accepted" and payload.completion_owner == "host" else {}),
     }
+    result["_bridge_execution_token"] = execution_token
     return resolve_canvas_command(
         key,
         result,
@@ -1183,6 +1481,11 @@ def _resolve_canvas_context_tool_result_payload(
     username: str,
     project_state_dir: Any = None,
 ) -> dict[str, Any]:
+    execution_token = validate_bridge_receipt(payload.bridge_key.strip(),
+        bridge_dir=_bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir),
+        username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+        agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id)
+    payload.bridge_key = canonical_bridge_key(payload.bridge_key)
     key = payload.bridge_key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="bridge_key is required")
@@ -1196,11 +1499,14 @@ def _resolve_canvas_context_tool_result_payload(
             else "failed"
         ),
         "responses": payload.responses,
+        "source": "current_browser",
+        "read_consistency": "current_browser",
         "errors": payload.errors,
         "project_id": payload.project_id,
         "canvas_id": payload.canvas_id,
         "message": payload.message or "Frontend returned requested canvas context.",
     }
+    result["_bridge_execution_token"] = execution_token
     return resolve_canvas_context(
         key,
         result,
@@ -1277,6 +1583,11 @@ def _resolve_skill_studio_tool_result_payload(
     username: str,
     project_state_dir: Any = None,
 ) -> dict[str, Any]:
+    execution_token = validate_bridge_receipt(payload.bridge_key.strip(),
+        bridge_dir=_bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir),
+        username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+        agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id)
+    payload.bridge_key = canonical_bridge_key(payload.bridge_key)
     key = payload.bridge_key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="bridge_key is required")
@@ -1417,6 +1728,7 @@ def _resolve_skill_studio_tool_result_payload(
         "agent_instruction": agent_instruction,
         "client_debug": payload.client_debug,
     }
+    result["_bridge_execution_token"] = execution_token
     return resolve_skill_studio_result(
         key,
         result,
@@ -1456,12 +1768,20 @@ def _skill_studio_result_log_fields(
     }
 
 
-def _resolve_clarification_tool_result_payload(
+def _prepare_clarification_tool_result_payload(
     payload: ClarificationToolResultIn,
     *,
     username: str,
     project_state_dir: Any = None,
+    credential_kind: str | None = None,
 ) -> dict[str, Any]:
+    if credential_kind in {"agent_session", "local_trusted_agent"}:
+        raise HTTPException(status_code=403, detail="clarification answers require an authenticated human user")
+    execution_token = validate_bridge_receipt(payload.bridge_key.strip(),
+        bridge_dir=_bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir),
+        username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+        agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id)
+    payload.bridge_key = canonical_bridge_key(payload.bridge_key)
     key = payload.bridge_key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="bridge_key is required")
@@ -1495,7 +1815,16 @@ def _resolve_clarification_tool_result_payload(
         "message": message,
         "agent_instruction": agent_instruction,
     }
-    return resolve_clarification_result(
+    result["_bridge_execution_token"] = execution_token
+    return result
+
+
+def _deliver_clarification_tool_result_payload(
+    payload: ClarificationToolResultIn, result: dict[str, Any], *,
+    username: str, project_state_dir: Any = None,
+) -> dict[str, Any]:
+    key = payload.bridge_key.strip()
+    resolved = resolve_clarification_result(
         key,
         result,
         bridge_dir=_canvas_bridge_dir(
@@ -1507,6 +1836,52 @@ def _resolve_clarification_tool_result_payload(
                 else "director"
             ),
         ),
+    )
+
+    if resolved.get("ok") and str(payload.turn_id or "").startswith("reference-remix-") and payload.project_id and payload.canvas_id:
+        from novelvideo.chat.reference_remix_continuation import coordinator
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return resolved
+        task = loop.create_task(coordinator.wake_clarification(
+            username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+            agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id, bridge_key=key))
+        task.add_done_callback(lambda done: logger.error("reference clarification wake failed", exc_info=done.exception()) if not done.cancelled() and done.exception() else None)
+    return resolved
+
+
+def _resolve_clarification_tool_result_payload(
+    payload: ClarificationToolResultIn, *, username: str,
+    project_state_dir: Any = None, credential_kind: str | None = None,
+) -> dict[str, Any]:
+    result = _prepare_clarification_tool_result_payload(
+        payload, username=username, project_state_dir=project_state_dir,
+        credential_kind=credential_kind,
+    )
+    return _deliver_clarification_tool_result_payload(
+        payload, result, username=username, project_state_dir=project_state_dir,
+    )
+
+
+async def _resolve_clarification_with_reference_persistence(
+    *, payload: ClarificationToolResultIn, user: dict[str, Any], username: str,
+    project_state_dir: Any,
+) -> dict[str, Any]:
+    result = _prepare_clarification_tool_result_payload(
+        payload, username=username, credential_kind=user.get("credential_kind"),
+        project_state_dir=project_state_dir,
+    )
+    try:
+        await _persist_reference_parameter_submission(
+            user=user, payload=payload, result=result,
+            project_state_dir=project_state_dir,
+        )
+    except Exception:
+        logger.exception("failed to persist verified reference parameters")
+        raise
+    return _deliver_clarification_tool_result_payload(
+        payload, result, username=username, project_state_dir=project_state_dir,
     )
 
 
@@ -1618,6 +1993,16 @@ async def _persist_clarification_result_ui_event(
     if not turn_id or scope is None:
         return
     project_ctx = await _project_context_for_interaction_result(user, scope)
+    pending_status = payload.clarification_status in {
+        "pending_user_input",
+        "waiting_user",
+    }
+    # A result can be persisted while the bridge is still waiting (for
+    # example when a stale client echoes the tool payload). That is not a
+    # human submission and must not turn the request into an "answered 0"
+    # summary. Cancellation is terminal even though it intentionally carries
+    # ok=False so the pending bridge can be settled.
+    submitted = not pending_status and (payload.ok or payload.action == "cancel")
     await chat_store.append_ui_event_async(
         username,
         _chat_store_scope_for_project_context(scope, project_ctx),
@@ -1628,7 +2013,7 @@ async def _persist_clarification_result_ui_event(
             "project_id": payload.project_id,
             "canvas_id": payload.canvas_id,
             "agent_id": payload.agent_id,
-            "submitted": True,
+            "submitted": submitted,
             "action": payload.action,
             "clarification_status": payload.clarification_status,
             "answers": payload.answers,
@@ -1636,6 +2021,195 @@ async def _persist_clarification_result_ui_event(
             "used_recommended": payload.used_recommended,
             "anchor_text_prefix": payload.anchor_text_prefix,
         },
+    )
+
+
+async def _current_reference_parameter_owner(
+    ctx: Any, *, canvas_id: str, agent_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Resolve one current production commission from authenticated run history."""
+    from novelvideo.chat.reference_remix_continuation import coordinator
+    from novelvideo.freezone.remix.reference_commission import read_reference_commission
+    from novelvideo.freezone.remix.reference_parameter_receipts import generation_requirements_digest
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+
+    runs = await asyncio.to_thread(coordinator.store.list_for_actor, ctx, canvas_id, agent_id)
+    eligible = [run for run in runs if run.get("commission_ref")
+                and run.get("project_id") == ctx.project_id
+                and run.get("canvas_id") == canvas_id
+                and run.get("agent_id") == agent_id
+                and run.get("requester_user_id") == ctx.requester_user_id
+                and run.get("status") not in
+                {"cancelled", "analysis_failed", "failed", "superseded", "stale"}]
+    by_commission: dict[str, list[dict[str, Any]]] = {}
+    for run in eligible:
+        commission_id = (run.get("commission_ref") or {}).get("artifact_id")
+        if isinstance(commission_id, str) and commission_id:
+            by_commission.setdefault(commission_id, []).append(run)
+    if not by_commission:
+        return None
+    store = RemixArtifactStore(ctx.output_dir, ctx.project_id, created_by=ctx.requester_user_id)
+    current: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for commission_id, candidates in by_commission.items():
+        commission = await asyncio.to_thread(
+            read_reference_commission, store, candidates[0]["commission_ref"], latest=True,
+        )
+        if ((commission.get("commission_ref") or {}).get("artifact_id") != commission_id
+                or commission.get("phase") == "completed"):
+            continue
+        current.append((commission, candidates))
+    if len(current) != 1:
+        return None
+    commission, candidates = current[0]
+    if len({generation_requirements_digest(
+        commission, item.get("inputs") or {}) for item in candidates}) != 1:
+        return None
+    return commission, candidates[0]
+
+
+async def _pending_reference_run_for_bridge(
+    ctx: Any, owner: tuple[dict[str, Any], dict[str, Any]] | None,
+    *, bridge_key: str,
+) -> dict[str, Any] | None:
+    """Return the current commission run that owns this parameter card."""
+    if owner is None:
+        return None
+    _commission, run = owner
+    pending = run.get("pending_interaction")
+    if isinstance(pending, dict) and pending.get("bridge_key") != bridge_key:
+        return None
+    if (run.get("project_id") != ctx.project_id
+            or run.get("requester_user_id") != ctx.requester_user_id):
+        return None
+    return run
+
+
+def _verified_generation_interaction(
+    *, run: dict[str, Any], pending: dict[str, Any], result: dict[str, Any],
+    project_id: str, canvas_id: str, requester_user_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Bind a host-created generation card to one authenticated material run."""
+    from novelvideo.freezone.remix.reference_parameter_receipts import _parameter_receipt
+
+    commission_id = (run.get("commission_ref") or {}).get("artifact_id")
+    agent_id = run.get("agent_id")
+    requirements_digest = run.get("generation_requirements_digest")
+    run_pending = run.get("pending_interaction")
+    if not isinstance(run_pending, dict):
+        run_pending = {}
+    if (not isinstance(commission_id, str) or not commission_id
+            or not isinstance(agent_id, str) or not agent_id
+            or not isinstance(requirements_digest, str) or not requirements_digest
+            or not isinstance(pending, dict)
+            or (run_pending and pending.get("bridge_key") != run_pending.get("bridge_key"))
+            or (run_pending and pending.get("clarification_id") != run_pending.get("clarification_id"))
+            or result.get("ok") is not True
+            or result.get("status") != "clarification_frontend_result"):
+        return None
+    scope = {
+        "project_id": project_id,
+        "canvas_id": canvas_id,
+        "agent_id": agent_id,
+        "requester_user_id": requester_user_id,
+        "commission_id": commission_id,
+    }
+    pending_scope = pending.get("scope")
+    if isinstance(pending_scope, dict) and pending_scope != scope:
+        return None
+    event = pending.get("event")
+    if not isinstance(event, dict) or not event.get("clarification_id"):
+        return None
+    interaction = {
+        "bridge_key": pending["bridge_key"],
+        "clarification_id": pending["clarification_id"],
+        "scope": scope,
+        "generation_requirements_digest": requirements_digest,
+        "requirements_snapshot": pending.get("requirements_snapshot"),
+        "event": event,
+        "result": result,
+    }
+    if _parameter_receipt(interaction, require_complete_media=False) is None:
+        return None
+    return scope, interaction
+
+
+async def _persist_reference_parameter_submission(
+    *, user: dict[str, Any], payload: ClarificationToolResultIn,
+    result: dict[str, Any], project_state_dir: Any,
+) -> None:
+    """Share a verified browser answer with the current production commission.
+
+    A chat turn is not the ownership boundary: the authenticated project actor,
+    current commission, and confirmed requirements are. Ambiguous ownership is
+    intentionally left unbound.
+    """
+    if (result.get("ok") is not True or result.get("status") != "clarification_frontend_result"
+            or not payload.project_id or not payload.canvas_id or project_state_dir is None):
+        return
+    scope = _scope_from_interaction_payload(payload)
+    if scope is None:
+        return
+    ctx = await _project_context_for_interaction_result(user, scope)
+    from pathlib import Path
+    if (ctx is None or ctx.project_id != payload.project_id
+            or Path(ctx.state_dir).resolve() != Path(project_state_dir).resolve()):
+        return
+    from novelvideo.freezone.remix.reference_parameter_receipts import generation_requirements_digest
+    from novelvideo.freezone.workflow_drafts import record_reference_parameter_submission
+
+    owner = await _current_reference_parameter_owner(
+        ctx, canvas_id=payload.canvas_id, agent_id=scope.agent_id,
+    )
+    run = await _pending_reference_run_for_bridge(
+        ctx, owner, bridge_key=payload.bridge_key,
+    )
+    if run is None:
+        return
+    commission, _ = owner
+    if not run.get("generation_requirements_digest"):
+        run = {
+            **run,
+            "generation_requirements_digest": generation_requirements_digest(
+                commission, run.get("inputs") or {},
+            ),
+        }
+    pending = run.get("pending_interaction")
+    had_pending = isinstance(pending, dict)
+    bridge: dict[str, Any] = {}
+    if not had_pending or not isinstance(pending.get("event"), dict):
+        username = str(user.get("username") or user.get("requester_username") or "").strip()
+        directory = _canvas_bridge_dir(
+            username, project_state_dir=ctx.state_dir,
+            profile=f"freezone:{scope.agent_id}",
+        )
+        bridge = read_bridge_message(payload.bridge_key, bridge_dir=directory) or {}
+    if not isinstance(bridge, dict):
+        bridge = {}
+    event = bridge.get("event") if isinstance(bridge, dict) else None
+    if not had_pending:
+        if bridge.get("key") != payload.bridge_key:
+            return
+        if not isinstance(event, dict):
+            return
+        pending = {
+            "bridge_key": payload.bridge_key,
+            "clarification_id": event.get("clarification_id"),
+            "event": event,
+        }
+    elif not isinstance(pending.get("event"), dict) and isinstance(event, dict):
+        pending = {**pending, "event": event}
+    receipt = _verified_generation_interaction(
+        run=run, pending=pending, result=result,
+        project_id=ctx.project_id, canvas_id=payload.canvas_id,
+        requester_user_id=ctx.requester_user_id,
+    )
+    if receipt is None:
+        return
+    receipt_scope, interaction = receipt
+    await asyncio.to_thread(
+        record_reference_parameter_submission, project_dir=ctx.state_dir,
+        scope=receipt_scope, requirements_digest=run["generation_requirements_digest"],
+        interaction=interaction,
     )
 
 
@@ -1660,11 +2234,56 @@ def _canvas_context_ui_event(
     }
 
 
+@router.post("/chat/canvas-command-graph-delivery")
+async def checkpoint_canvas_command_graph_delivery(
+    payload: CanvasCommandToolResultIn,
+    user: dict = Depends(get_api_user),
+) -> dict[str, Any]:
+    """Confirm the saved graph without resolving the command bridge or Agent turn."""
+    if user.get("credential_kind") == "agent_session":
+        raise HTTPException(403, "canvas graph receipts must come from the browser session")
+    if payload.canvas_apply_status != "applied" or payload.followup or payload.cancelled:
+        raise HTTPException(400, "graph delivery requires a nonterminal applied receipt")
+    username = str(user["username"])
+    project_state_dir = await _bridge_project_state_dir(user, payload)
+    validate_bridge_receipt(
+        payload.bridge_key.strip(),
+        bridge_dir=_bridge_dir_for_pending_key(
+            username, payload, project_state_dir=project_state_dir,
+        ),
+        username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+        agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id,
+    )
+    draft_receipt = _pending_workflow_draft_receipt(
+        username, payload, project_state_dir=project_state_dir,
+    )
+    if draft_receipt is None:
+        raise HTTPException(409, "approved workflow draft binding is unavailable")
+    try:
+        proof = await _record_workflow_draft_canvas_result(
+            user=user, payload=payload, draft_receipt=draft_receipt,
+            resolved={}, strict=True,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if proof is None:
+        raise HTTPException(409, "workflow graph delivery was not recorded")
+    return {"ok": True, "data": {
+        "graph_state": proof["state"],
+        "draft_id": draft_receipt["draft_id"],
+        "revision": draft_receipt["revision"],
+        "task_id": draft_receipt["task_id"],
+        "canvas_revision": proof.get("canvas_revision"),
+    }}
+
+
 @router.post("/chat/canvas-command-tool-result")
 async def resolve_canvas_command_tool_result(
     payload: CanvasCommandToolResultIn,
     user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
+    from novelvideo.freezone import canvas_store
+
     if user.get("credential_kind") == "agent_session":
         raise HTTPException(
             403, "canvas execution receipts must come from the browser session"
@@ -1672,6 +2291,11 @@ async def resolve_canvas_command_tool_result(
     username = str(user["username"])
     project_state_dir = await _bridge_project_state_dir(user, payload)
     if payload.followup:
+        validate_bridge_receipt(payload.bridge_key.strip(),
+            bridge_dir=_bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir),
+            username=username, project_id=payload.project_id, canvas_id=payload.canvas_id,
+            agent_id=_freezone_agent_id_from_payload(payload), turn_id=payload.turn_id)
+        payload.bridge_key = canonical_bridge_key(payload.bridge_key)
         project_id = str(payload.project_id or "").strip()
         canvas_id = str(payload.canvas_id or "").strip()
         turn_id = str(payload.turn_id or "").strip()
@@ -1719,6 +2343,35 @@ async def resolve_canvas_command_tool_result(
     workflow_draft_receipt = _pending_workflow_draft_receipt(
         username, payload, project_state_dir=project_state_dir
     )
+    native_commands = _pending_native_processing_commands(
+        username, payload, project_state_dir=project_state_dir,
+    )
+    if payload.canvas_apply_status == "accepted" and payload.completion_owner == "host":
+        scope = ChatScope(
+            kind="project", id=str(payload.project_id or ""), surface="freezone",
+            canvas_id=str(payload.canvas_id or ""),
+            agent_id=_freezone_agent_id_from_payload(payload),
+        )
+        project_ctx = await _project_context_for_scope(user, scope)
+        if project_ctx is None:
+            raise HTTPException(409, "native processing project context is unavailable")
+        if payload.workflow_run_id and not payload.operation_id and not payload.task_id:
+            claimed_actions = _claimed_native_run_actions(payload.command_results)
+            _validate_native_workflow_receipt(
+                project_ctx, payload, native_commands,
+                claimed_actions=claimed_actions or None,
+            )
+        else:
+            saved_canvas = await asyncio.to_thread(
+                canvas_store.read_canvas, project_ctx.state_dir, str(payload.canvas_id),
+            )
+            native_command = _approved_native_processing_receipt_command(
+                native_commands, saved_canvas or {"nodes": []},
+                node_id=str(payload.node_id or ""), action=str(payload.action or ""),
+            )
+            if native_command is None:
+                raise HTTPException(409, "native processing command is unavailable")
+            _validate_native_processing_receipt(project_ctx, payload, native_command)
     resolved = _resolve_canvas_command_tool_result_payload(
         payload, username=username, project_state_dir=project_state_dir
     )
@@ -1728,6 +2381,22 @@ async def resolve_canvas_command_tool_result(
         draft_receipt=workflow_draft_receipt,
         resolved=resolved,
     )
+    if resolved.get('ok') and any(
+        item.get('type') == 'production_plan_command' for item in resolved.get('command_results', [])
+    ):
+        from novelvideo.freezone.remix.plan_revision_settlement import receive_canvas_plan_revisions
+        from novelvideo.freezone.canvas_command_bridge import record_plan_revision_sync
+        scope = ChatScope(kind='project', id=str(payload.project_id or ''), surface='freezone',
+                          canvas_id=str(payload.canvas_id or ''), agent_id=_freezone_agent_id_from_payload(payload))
+        project_ctx = await _project_context_for_scope(user, scope)
+        if project_ctx is not None:
+            directory = _bridge_dir_for_pending_key(username, payload, project_state_dir=project_state_dir)
+            statuses = await asyncio.to_thread(receive_canvas_plan_revisions, project_ctx,
+                bridge_key=payload.bridge_key, bridge_dir=directory, username=username,
+                agent_id=scope.agent_id, turn_id=payload.turn_id)
+            if statuses:
+                resolved = await asyncio.to_thread(record_plan_revision_sync, payload.bridge_key,
+                                                    statuses, bridge_dir=directory) or resolved
     if payload.cancelled or payload.canvas_apply_status == "cancelled_by_user":
         await _close_canvas_command_worker(username, payload)
     return {"ok": True, "data": resolved}
@@ -1831,10 +2500,10 @@ async def resolve_clarification_tool_result(
     user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
     username = str(user["username"])
-    resolved = _resolve_clarification_tool_result_payload(
-        payload,
-        username=username,
-        project_state_dir=await _bridge_project_state_dir(user, payload),
+    project_state_dir = await _bridge_project_state_dir(user, payload)
+    resolved = await _resolve_clarification_with_reference_persistence(
+        payload=payload, user=user, username=username,
+        project_state_dir=project_state_dir,
     )
     try:
         await _persist_clarification_result_ui_event(
@@ -1907,10 +2576,10 @@ async def _receive_bridge_results_during_turn(
 
         if event_type == "assistant.clarification.result":
             payload = ClarificationToolResultIn.model_validate(raw)
-            _resolve_clarification_tool_result_payload(
-                payload,
-                username=username,
-                project_state_dir=await _bridge_project_state_dir(user, payload),
+            project_state_dir = await _bridge_project_state_dir(user, payload)
+            resolved = await _resolve_clarification_with_reference_persistence(
+                payload=payload, user=user, username=username,
+                project_state_dir=project_state_dir,
             )
             try:
                 await _persist_clarification_result_ui_event(
@@ -1994,6 +2663,20 @@ async def _close_ws_unauthorized(websocket: WebSocket) -> None:
         websocket, {"type": "error", "message": "unauthorized"}
     )
     await websocket.close(code=1008)
+
+
+async def _close_ws_setup_error(websocket: WebSocket, exc: Exception) -> None:
+    if isinstance(exc, HTTPException) and exc.status_code in (401, 403):
+        await _close_ws_unauthorized(websocket)
+        return
+    logger.error("chat websocket setup failed error_type=%s", type(exc).__name__)
+    message = (
+        "聊天服务暂时不可用，请稍后重试。"
+        if isinstance(exc, HTTPException)
+        else _user_facing_chat_error(exc)
+    )
+    await _send_json_best_effort(websocket, {"type": "error", "message": message})
+    await websocket.close(code=1011)
 
 
 def _scope_from_model(model: ChatScopePayload | None) -> ChatScope:
@@ -2181,6 +2864,7 @@ async def _prewarm_chat_scope_if_available(
         project=scope.id if scope.kind in {"project", "freezone"} else None,
         surface="freezone" if _is_freezone_scope(scope) else None,
         agent_id=scope.agent_id if _is_freezone_scope(scope) else None,
+        canvas_id=scope.canvas_id if _is_freezone_scope(scope) else None,
     )
     return True
 
@@ -2408,6 +3092,123 @@ def _pending_canvas_command_allows_external_poll(envelope: dict[str, Any]) -> bo
     return envelope.get("external_mcp_command") is True
 
 
+@router.post("/chat/pending-interactions")
+async def pull_pending_interactions(
+    payload: PendingInteractionsIn, user: dict = Depends(get_api_user)
+):
+    """Authenticated browser recovery; request claims and receipts stay durable."""
+    if user.get("credential_kind", "browser_session") not in {
+        "browser_session",
+        "user_session",
+    }:
+        raise HTTPException(403, "interaction claims require a human browser session")
+    from novelvideo.api.routes.reference_director import _context
+    from novelvideo.freezone.canvas_command_bridge import (
+        heartbeat_bridge_browser,
+        renew_browser_owned_messages,
+        list_browser_owned_messages,
+        list_scope_bridge_receipts,
+    )
+    from novelvideo.chat.canvas_tool_session import _FRAMES
+
+    ctx, _, _ = await _context(
+        payload.project_id, payload.canvas_id, user, role="viewer"
+    )
+    require_project_home_node(ctx, operation="browser interaction recovery")
+    username = str(user["username"])
+    scope = ChatScope(
+        "project",
+        ctx.project_id,
+        "freezone",
+        payload.canvas_id,
+        payload.agent_id,
+        str(ctx.state_dir),
+    )
+    binding = {
+        "username": username,
+        "project_id": ctx.project_id,
+        "canvas_id": payload.canvas_id,
+        "agent_id": payload.agent_id,
+    }
+    # Browser IDs cannot collide between actors/scopes in a shared bridge directory.
+    from novelvideo.chat.live_events import browser_consumer_id
+
+    consumer = browser_consumer_id(
+        username=username, scope=scope, browser_id=payload.browser_id
+    )
+    frames = []
+    receipts = []
+    for directory in _candidate_canvas_bridge_dirs_for_scope(username, scope):
+        receipts.extend(
+            list_scope_bridge_receipts(binding=binding, bridge_dir=directory)
+        )
+        heartbeat_bridge_browser(
+            consumer_id=consumer, binding=binding, bridge_dir=directory
+        )
+        renew_browser_owned_messages(consumer_id=consumer, bridge_dir=directory)
+        owned = list_browser_owned_messages(consumer_id=consumer, bridge_dir=directory)
+        owned_keys = {message["key"] for message in owned}
+        for pending in owned + list_pending_bridge_messages(
+            project_id=ctx.project_id, canvas_id=payload.canvas_id, bridge_dir=directory, producer_binding=binding
+        ):
+            origin = pending.get("producer_binding")
+            if (
+                not isinstance(origin, dict)
+                or {k: origin.get(k) for k in binding} != binding
+                or not origin.get("turn_id")
+            ):
+                continue
+            key, kind = pending["key"], pending["kind"]
+            if kind not in _FRAMES:
+                continue
+            token = (
+                pending.get("execution_token")
+                if key in owned_keys
+                else uuid.uuid4().hex
+            )
+            if key not in owned_keys and not mark_bridge_message_delivered(
+                key,
+                consumer_id=consumer,
+                binding=origin,
+                execution_token=token,
+                bridge_dir=directory,
+            ):
+                continue
+            content_key = (
+                "envelope" if kind in {"canvas_command", "canvas_context"} else "event"
+            )
+            frame = {
+                "type": _FRAMES[kind],
+                "scope": scope.to_dict(),
+                "project_id": ctx.project_id,
+                "canvas_id": payload.canvas_id,
+                "agent_id": payload.agent_id,
+                "turn_id": origin["turn_id"],
+                "bridge_key": f"{key}.executor.{token}",
+                "request_id": key,
+                content_key: pending[content_key],
+            }
+            frames.append(frame)
+            if content_key == "event" and key not in owned_keys:
+                await chat_store.append_ui_event_async(
+                    username,
+                    scope,
+                    origin["turn_id"],
+                    {**pending[content_key], **origin, "bridge_key": key},
+                )
+    try:
+        recovery = await asyncio.to_thread(
+            chat_store.pull_recovery,
+            username,
+            scope,
+            cursor=payload.cursor,
+            event_cursor=payload.event_cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "data": {**recovery, "frames": frames, "receipts": receipts}}
+
+
 @router.post("/chat/pending-canvas-commands")
 async def list_pending_canvas_commands(
     payload: PendingCanvasCommandsIn,
@@ -2459,6 +3260,12 @@ async def list_pending_canvas_commands(
         except Exception:
             durable_pending = []
         for pending in durable_pending:
+            origin = pending.get("producer_binding")
+            if origin and (origin.get("username") != username or origin.get("agent_id") != agent_id):
+                continue
+            if pending.get("execution_token"):
+                # Owned browser requests cannot be claimed by external polling.
+                continue
             key = str(pending.get("key") or "")
             if not key or key in seen_keys:
                 continue
@@ -2786,47 +3593,12 @@ async def _watch_pending_canvas_commands(
     bridge_dirs = _candidate_canvas_bridge_dirs_for_scope(username, scope)
     while True:
         await asyncio.sleep(0.4)
-        for bridge_dir in bridge_dirs:
-            try:
-                durable_pending = list_pending_bridge_messages(
-                    project_id=str(scope.id or ""),
-                    canvas_id=str(scope.canvas_id or ""),
-                    kinds={"canvas_command"},
-                    limit=100,
-                    bridge_dir=bridge_dir,
-                )
-            except Exception:
-                durable_pending = []
-            for pending in durable_pending:
-                key = str(pending.get("key") or "")
-                envelope = pending.get("envelope")
-                if (
-                    not key
-                    or key in emitted_bridge_keys
-                    or not isinstance(envelope, dict)
-                ):
-                    continue
-                if not mark_bridge_message_delivered(
-                    key,
-                    consumer_id=f"websocket:{username}:{turn_id}",
-                    bridge_dir=bridge_dir,
-                ):
-                    continue
-                emitted_bridge_keys.add(key)
-                sent = await _send_json_best_effort(
-                    websocket,
-                    {
-                        "type": "canvas.command",
-                        "turn_id": turn_id,
-                        "canvas_id": envelope.get("canvas_id"),
-                        "agent_id": scope.agent_id or "main",
-                        "bridge_key": key,
-                        "envelope": envelope,
-                    },
-                    send_lock,
-                )
-                if not sent:
-                    return
+        await dispatch_pending_bridge_messages(
+            username=username, scope=scope, turn_id=turn_id, bridge_dirs=bridge_dirs,
+            kinds={"canvas_command"}, emitted_bridge_keys=emitted_bridge_keys, started_at=started_at, scoped_executor=True, executor_websocket=websocket,
+            store_scope=scope,
+            send=lambda frame: _send_json_best_effort(websocket, frame, send_lock),
+        )
         pending_items = []
         for bridge_dir in bridge_dirs:
             try:
@@ -2915,60 +3687,12 @@ async def _watch_pending_skill_studio_events(
     )
     while True:
         await asyncio.sleep(0.4)
-        try:
-            durable_pending = list_pending_bridge_messages(
-                project_id=str(scope.id or ""),
-                canvas_id=str(scope.canvas_id or ""),
-                kinds={"skill_studio_event"},
-                limit=100,
-                bridge_dir=bridge_dir,
-            )
-        except Exception:
-            durable_pending = []
-        for pending in durable_pending:
-            key = str(pending.get("key") or "")
-            event = pending.get("event")
-            if not key or key in emitted_bridge_keys or not isinstance(event, dict):
-                continue
-            if not mark_bridge_message_delivered(
-                key,
-                consumer_id=f"websocket:{username}:{turn_id}",
-                bridge_dir=bridge_dir,
-            ):
-                continue
-            emitted_bridge_keys.add(key)
-            ui_event = {
-                **event,
-                "bridge_key": key,
-                "project_id": pending.get("project_id") or scope.id,
-                "canvas_id": pending.get("canvas_id") or scope.canvas_id,
-                "agent_id": scope.agent_id or "main",
-                "turn_id": turn_id,
-            }
-            try:
-                await chat_store.append_ui_event_async(
-                    username,
-                    store_scope or scope,
-                    turn_id,
-                    ui_event,
-                )
-            except Exception:
-                logger.exception("failed to persist skill_studio.event ui event")
-            sent = await _send_json_best_effort(
-                websocket,
-                {
-                    "type": "skill_studio.event",
-                    "scope": scope.to_dict(),
-                    "turn_id": turn_id,
-                    "canvas_id": pending.get("canvas_id"),
-                    "agent_id": scope.agent_id or "main",
-                    "bridge_key": key,
-                    "event": event,
-                },
-                send_lock,
-            )
-            if not sent:
-                return
+        await dispatch_pending_bridge_messages(
+            username=username, scope=scope, turn_id=turn_id, bridge_dirs=[bridge_dir],
+            kinds={"skill_studio_event"}, emitted_bridge_keys=emitted_bridge_keys, started_at=started_at, scoped_executor=True, executor_websocket=websocket,
+            store_scope=store_scope,
+            send=lambda frame: _send_json_best_effort(websocket, frame, send_lock),
+        )
         try:
             pending_paths = sorted(
                 bridge_dir.glob("*.pending.json"),
@@ -3062,60 +3786,12 @@ async def _watch_pending_clarification_events(
     )
     while True:
         await asyncio.sleep(0.4)
-        try:
-            durable_pending = list_pending_bridge_messages(
-                project_id=str(scope.id or ""),
-                canvas_id=str(scope.canvas_id or ""),
-                kinds={"clarification_event"},
-                limit=100,
-                bridge_dir=bridge_dir,
-            )
-        except Exception:
-            durable_pending = []
-        for pending in durable_pending:
-            key = str(pending.get("key") or "")
-            event = pending.get("event")
-            if not key or key in emitted_bridge_keys or not isinstance(event, dict):
-                continue
-            if not mark_bridge_message_delivered(
-                key,
-                consumer_id=f"websocket:{username}:{turn_id}",
-                bridge_dir=bridge_dir,
-            ):
-                continue
-            emitted_bridge_keys.add(key)
-            ui_event = {
-                **event,
-                "bridge_key": key,
-                "project_id": pending.get("project_id") or scope.id,
-                "canvas_id": pending.get("canvas_id") or scope.canvas_id,
-                "agent_id": scope.agent_id or "main",
-                "turn_id": turn_id,
-            }
-            try:
-                await chat_store.append_ui_event_async(
-                    username,
-                    store_scope or scope,
-                    turn_id,
-                    ui_event,
-                )
-            except Exception:
-                logger.exception("failed to persist assistant.clarification ui event")
-            sent = await _send_json_best_effort(
-                websocket,
-                {
-                    "type": "assistant.clarification.event",
-                    "scope": scope.to_dict(),
-                    "turn_id": turn_id,
-                    "canvas_id": pending.get("canvas_id"),
-                    "agent_id": scope.agent_id or "main",
-                    "bridge_key": key,
-                    "event": event,
-                },
-                send_lock,
-            )
-            if not sent:
-                return
+        await dispatch_pending_bridge_messages(
+            username=username, scope=scope, turn_id=turn_id, bridge_dirs=[bridge_dir],
+            kinds={"clarification_event"}, emitted_bridge_keys=emitted_bridge_keys, started_at=started_at, scoped_executor=True, executor_websocket=websocket,
+            store_scope=store_scope,
+            send=lambda frame: _send_json_best_effort(websocket, frame, send_lock),
+        )
         try:
             pending_paths = sorted(
                 bridge_dir.glob("*.pending.json"),
@@ -3203,47 +3879,12 @@ async def _watch_pending_canvas_context_requests(
     bridge_dirs = _candidate_canvas_bridge_dirs_for_scope(username, scope)
     while True:
         await asyncio.sleep(0.4)
-        for bridge_dir in bridge_dirs:
-            try:
-                durable_pending = list_pending_bridge_messages(
-                    project_id=str(scope.id or ""),
-                    canvas_id=str(scope.canvas_id or ""),
-                    kinds={"canvas_context"},
-                    limit=100,
-                    bridge_dir=bridge_dir,
-                )
-            except Exception:
-                durable_pending = []
-            for pending in durable_pending:
-                key = str(pending.get("key") or "")
-                envelope = pending.get("envelope")
-                if (
-                    not key
-                    or key in emitted_bridge_keys
-                    or not isinstance(envelope, dict)
-                ):
-                    continue
-                if not mark_bridge_message_delivered(
-                    key,
-                    consumer_id=f"websocket:{username}:{turn_id}",
-                    bridge_dir=bridge_dir,
-                ):
-                    continue
-                emitted_bridge_keys.add(key)
-                sent = await _send_json_best_effort(
-                    websocket,
-                    {
-                        "type": "canvas.context.request",
-                        "turn_id": turn_id,
-                        "canvas_id": envelope.get("canvas_id"),
-                        "agent_id": scope.agent_id or "main",
-                        "bridge_key": key,
-                        "envelope": envelope,
-                    },
-                    send_lock,
-                )
-                if not sent:
-                    return
+        await dispatch_pending_bridge_messages(
+            username=username, scope=scope, turn_id=turn_id, bridge_dirs=bridge_dirs,
+            kinds={"canvas_context"}, emitted_bridge_keys=emitted_bridge_keys, started_at=started_at, scoped_executor=True, executor_websocket=websocket,
+            store_scope=scope,
+            send=lambda frame: _send_json_best_effort(websocket, frame, send_lock),
+        )
         pending_items = []
         for bridge_dir in bridge_dirs:
             try:
@@ -3336,6 +3977,104 @@ def _skill_studio_status_frame(
     }
 
 
+async def _reference_user_confirmation_context(
+    *, user: dict[str, Any], scope: ChatScope, message: dict[str, Any], agent_text: str,
+    project_id: str | None = None, username: str | None = None,
+    turn_id: str | None = None, ownership: dict | None = None,
+) -> str:
+    """Expose the current saved proposal to the main Agent.
+
+    Natural-language interpretation belongs to the main Agent. This hook only
+    performs deterministic lookup of the one plan that was actually presented
+    in this chat and gives the Agent its exact references and allowed next
+    actions. Confirmation is recorded only by the explicit host action.
+    """
+    if not _is_freezone_scope(scope) or scope.kind not in {"project", "freezone"}:
+        return agent_text
+    credential_kind = str(user.get("credential_kind") or "browser_session")
+    if credential_kind not in {"browser_session", "user_session"}:
+        return agent_text
+    from novelvideo.api.routes.reference_director import _context
+    from novelvideo.chat.reference_decision_ingress import pending_user_decision
+    try:
+        # Freezone chat history is stored under the local project name, while
+        # remix artifacts and authenticated project scope use the project ID.
+        # Resolve both from the already-authorized project context.
+        canonical_scope = replace(scope, id=project_id) if project_id else scope
+        ctx, _, artifacts = await _context(str(canonical_scope.id), str(canonical_scope.canvas_id or ""), user)
+        decision = await asyncio.to_thread(
+            pending_user_decision, artifacts, scope=canonical_scope,
+            requester_user_id=ctx.requester_user_id,
+            credential_kind=credential_kind, message=message,
+        )
+        if decision is None or decision['kind'] != 'plan':
+            return agent_text
+        from novelvideo.freezone.remix.reference_commission import read_reference_commission
+        commission = await asyncio.to_thread(
+            read_reference_commission, artifacts, decision['commission_ref'], latest=True,
+        )
+        host_context = {
+            'phase': 'awaiting_plan_confirmation',
+            'confirmation_applied': False,
+            'decision_ref': decision['decision_ref'],
+            'commission_ref': commission['commission_ref'],
+            'plan_ref': commission.get('plan_ref'),
+            'review_ref': commission.get('review_ref'),
+            'allowed_actions': [
+                'discuss_current_plan',
+                'edit_current_plan',
+                'confirm_exact_presented_plan',
+            ],
+            'confirmation_rule': (
+                'Only call freezone_confirm_reference_plan after the user clearly '
+                'approves this exact presented plan. Do not infer approval from '
+                'this context, a keyword, or an assistant message.'
+            ),
+        }
+        return (agent_text + '\n\n[HOST_REFERENCE_DECISION_CONTEXT]\n'
+                + json.dumps(host_context, ensure_ascii=False)
+                + '\n[/HOST_REFERENCE_DECISION_CONTEXT]')
+
+    except Exception:
+        logger.exception("reference director confirmation ingress failed project=%s canvas=%s message=%s",
+                         scope.id, scope.canvas_id, message.get("id"))
+        return agent_text
+
+
+async def _current_reference_parameter_answers(
+    ctx: Any, *, canvas_id: str, agent_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Load parameters owned by the one current commission for an ordinary turn."""
+    if not canvas_id:
+        return None
+    from novelvideo.freezone.remix.reference_parameter_receipts import (
+        generation_requirements_digest, generation_requirements_snapshot,
+        merged_reference_parameter_answers,
+    )
+    from novelvideo.freezone.workflow_drafts import read_reference_parameter_submissions
+
+    owner = await _current_reference_parameter_owner(
+        ctx, canvas_id=canvas_id, agent_id=agent_id,
+    )
+    if owner is None:
+        return None
+    commission, run = owner
+    commission_id = commission["commission_ref"]["artifact_id"]
+    scope = {"project_id": ctx.project_id, "canvas_id": canvas_id,
+             "agent_id": agent_id, "requester_user_id": ctx.requester_user_id,
+             "commission_id": commission_id}
+    digest = generation_requirements_digest(commission, run.get("inputs") or {})
+    interactions = await asyncio.to_thread(
+        read_reference_parameter_submissions, project_dir=ctx.state_dir,
+        scope=scope, requirements_digest=digest, include_prior_requirements=True,
+    )
+    answers = merged_reference_parameter_answers(
+        interactions, scope, digest,
+        current_requirements=generation_requirements_snapshot(commission, run.get("inputs") or {}),
+    )
+    return (commission_id, answers) if answers else None
+
+
 async def _stream_project_turn(
     *,
     websocket: WebSocket,
@@ -3372,14 +4111,22 @@ async def _stream_project_turn(
     )
     agent_text = _text_with_attachment_context(text, attachments)
     display_text = str(user_text or text).strip()
+    reference_ownership: dict = {}
     if storage_scope is not None:
-        await chat_store.append_message_async(
+        user_message = await chat_store.append_message_async(
             username,
             storage_scope,
             "user",
             display_text,
             media=_attachment_payloads(attachments),
             turn_id=turn_id,
+        )
+        logger.info("reference_flow.message_received project_id=%s canvas_id=%s turn_id=%s message_id=%s",
+                    project_ctx.project_id, storage_scope.canvas_id, turn_id, user_message['id'])
+        agent_text = await _reference_user_confirmation_context(
+            user=user, scope=storage_scope, message=user_message, agent_text=agent_text,
+            project_id=project_ctx.project_id, username=username,
+            turn_id=turn_id, ownership=reference_ownership,
         )
     else:
         await asyncio.to_thread(
@@ -3419,6 +4166,12 @@ async def _stream_project_turn(
             websocket=websocket, user=user, username=username
         )
     )
+    from novelvideo.freezone.canvas_command_bridge import register_bridge_producer_turn, release_bridge_producer_turn
+    producer_binding = {"username":username,"project_id":scope.id,"canvas_id":scope.canvas_id,
+                        "agent_id":scope.agent_id or "main","turn_id":turn_id}
+    producer_dirs = _candidate_canvas_bridge_dirs_for_scope(username,scope)
+    for directory in producer_dirs:
+        register_bridge_producer_turn(binding=producer_binding,bridge_dir=directory)
     emitted_bridge_keys: set[str] = set()
     pending_canvas_task = asyncio.create_task(
         _watch_pending_canvas_commands(
@@ -3668,6 +4421,14 @@ async def _stream_project_turn(
             )
 
     try:
+        trusted_reference = None
+        if scope.canvas_id:
+            try:
+                trusted_reference = await _current_reference_parameter_answers(
+                    project_ctx, canvas_id=scope.canvas_id, agent_id=scope.agent_id or "main",
+                )
+            except (ValueError, FileNotFoundError):
+                logger.exception("reference parameter receipt lookup failed canvas_id=%s", scope.canvas_id)
         # 请求路径上唯一的出网身份绑定点。放在这里而不是分发块，是为了复用
         # `_project_context_for_scope` 已经解出的 `ProjectContext`——身份取值只走
         # registry 校验过的 `project_ctx`，不用客户端输入的 `scope.id`，也不新增
@@ -3681,13 +4442,30 @@ async def _stream_project_turn(
             project_id=project_ctx.project_id,
             task_type=HERMES_TEXT_EGRESS_TASK_TYPE,
         ) as egress_context:
-            await chat_service.stream_assistant_reply(
+            from novelvideo.freezone.canvas_context_reader import saved_context_execution
+            from contextlib import nullcontext
+
+            human_binding = (
+                saved_context_execution(
+                    execution_context=execution_context, turn_id=turn_id,
+                    state_dir=project_state_dir, human_message_id=user_message['id'],
+                    chat_scope_id=str(storage_scope.id),
+                )
+                if execution_context.surface == 'freezone' and storage_scope is not None
+                else nullcontext()
+            )
+            with human_binding:
+                if execution_context.surface == 'freezone':
+                    logger.info("reference_flow.main_agent_started project_id=%s canvas_id=%s turn_id=%s",
+                                project_ctx.project_id, scope.canvas_id, turn_id)
+                await chat_service.stream_assistant_reply(
                 username,
                 project,
                 agent_text,
                 on_event,
                 project_dir=project_dir,
                 project_state_dir=project_state_dir,
+                trusted_reference_turn_owner=reference_ownership or None,
                 egress_context=egress_context,
                 requester_user_id=project_ctx.requester_user_id,
                 surface=surface,
@@ -3697,7 +4475,9 @@ async def _stream_project_turn(
                 route_prompt=display_text,
                 backend=runtime_backend,
                 execution_context=execution_context,
-            )
+                trusted_reference_commission_id=trusted_reference[0] if trusted_reference else None,
+                trusted_reference_parameter_answers=trusted_reference[1] if trusted_reference else None,
+                )
     finally:
         heartbeat_task.cancel()
         disconnect_task.cancel()
@@ -3720,6 +4500,8 @@ async def _stream_project_turn(
             await pending_skill_studio_task
         with contextlib.suppress(asyncio.CancelledError):
             await pending_clarification_task
+        for directory in producer_dirs:
+            release_bridge_producer_turn(binding=producer_binding,bridge_dir=directory)
         if not done_sent:
             await _send_json_best_effort(
                 websocket,
@@ -4402,11 +5184,11 @@ async def chat_ws(websocket: WebSocket) -> None:
     logger.info("chat websocket accepted client=%s", websocket.client)
     try:
         user = await _authenticate_ws(websocket)
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "chat websocket authentication failed client=%s", websocket.client
         )
-        await _close_ws_unauthorized(websocket)
+        await _close_ws_setup_error(websocket, exc)
         return
 
     username = str(user["username"])
@@ -4416,8 +5198,8 @@ async def chat_ws(websocket: WebSocket) -> None:
         current_scope = await _send_scope_changed(
             websocket, user, username, current_scope
         )
-    except Exception:
-        await _close_ws_unauthorized(websocket)
+    except Exception as exc:
+        await _close_ws_setup_error(websocket, exc)
         return
     if current_scope is None:
         return
@@ -4427,7 +5209,9 @@ async def chat_ws(websocket: WebSocket) -> None:
         current_scope.kind,
         current_scope.id or "",
     )
-    await register_chat_websocket(websocket, username=username, scope=current_scope)
+    await register_chat_websocket(websocket, username=username, scope=current_scope,
+                                  browser_id=websocket.query_params.get("browser_id"),
+                                  can_execute=user.get("credential_kind", "browser_session") in {"browser_session", "user_session"})
     # Do not pre-warm the default home scope on connect. The React client often
     # immediately sends scope.set for the active project; warming home first
     # creates a worker that is then rotated and logs a noisy initialize timeout.
@@ -4460,8 +5244,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                         scope=requested_scope,
                         require_write=False,
                     )
-                except Exception:
-                    await _close_ws_unauthorized(websocket)
+                except Exception as exc:
+                    await _close_ws_setup_error(websocket, exc)
                     return
                 current_scope = await _send_scope_changed(
                     websocket, user, username, requested_scope
@@ -4472,6 +5256,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                     websocket,
                     username=username,
                     scope=current_scope,
+                    browser_id=websocket.query_params.get("browser_id"),
+                    can_execute=user.get("credential_kind", "browser_session") in {"browser_session", "user_session"},
                 )
                 await _sync_running_agent_scope(username, current_scope)
                 # Switching project rotates the worker; warm the new scope now so
@@ -4529,10 +5315,10 @@ async def chat_ws(websocket: WebSocket) -> None:
 
             if event_type == "assistant.clarification.result":
                 payload = ClarificationToolResultIn.model_validate(raw)
-                _resolve_clarification_tool_result_payload(
-                    payload,
-                    username=username,
-                    project_state_dir=await _bridge_project_state_dir(user, payload),
+                project_state_dir = await _bridge_project_state_dir(user, payload)
+                resolved = await _resolve_clarification_with_reference_persistence(
+                    payload=payload, user=user, username=username,
+                    project_state_dir=project_state_dir,
                 )
                 try:
                     await _persist_clarification_result_ui_event(
@@ -4576,8 +5362,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                     scope=scope,
                     require_write=True,
                 )
-            except Exception:
-                await _close_ws_unauthorized(websocket)
+            except Exception as exc:
+                await _close_ws_setup_error(websocket, exc)
                 return
 
             try:

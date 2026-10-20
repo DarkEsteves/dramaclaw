@@ -13,6 +13,7 @@ import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import { createComposeFromTimeline } from '@/features/canvas/remix/spawnRemixDownstream';
 import { selectedPerformanceTakes } from '@/features/canvas/remix/takeCanvasBinding';
 import { toast } from 'sonner';
+import { ProductionTimelineNode } from './ProductionTimelineNode';
 
 type TimelineData = SemanticTimelineNodeData & {
   eventOverrides?: Record<string, TimelineEventOverride>;
@@ -75,7 +76,7 @@ function readScriptPresentation(draft: unknown, selectionId: string, fallbackLab
   return { label, dialogue: characters.slice(start, end).join('').trim() };
 }
 
-export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { id: string; data: TimelineData; selected?: boolean }) => {
+const LegacySemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { id: string; data: TimelineData; selected?: boolean }) => {
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const upstreamNodes = useUpstreamNodes(id);
@@ -344,7 +345,12 @@ export const SemanticTimelineNode = memo(({ id, data, selected }: NodeProps & { 
       })}
       {!takeMode && data.events.length === 0 && <div className="rounded-[10px] border border-dashed border-white/10 px-3 py-6 text-center text-[12px] text-text-muted">还没有可计算的片段，请先在脚本节点添加语义事件。</div>}
       </div>
+      <div className="shrink-0 border-t border-[var(--ui-border-soft)] px-4 py-2 text-[11px] text-text-muted">
+        下一步：{busy || data.compileOperationId ? '等待时间计算' : error || data.compileError ? '处理时间轴错误' : data.artifactRef ? '进入成片编排' : '按实际素材排时间'}
+      </div>
     </div>
   </div>;
 });
+export const SemanticTimelineNode = memo((props: NodeProps & { id: string; data: TimelineData; selected?: boolean }) =>
+  props.data.productionPlanNodeId ? <ProductionTimelineNode {...props} /> : <LegacySemanticTimelineNode {...props} />);
 SemanticTimelineNode.displayName = 'SemanticTimelineNode';

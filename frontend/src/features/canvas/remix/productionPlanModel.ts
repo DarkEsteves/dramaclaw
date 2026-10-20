@@ -1,6 +1,7 @@
 import { CANVAS_NODE_TYPES, type CanvasEdge, type CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import type { RemixUploadedMedia } from '@/api/remix';
 import { projectMediaPathFromUrl } from './remixMediaPath';
+import type { NativeGraphicEffect } from './nativeGraphicEffects';
 
 export interface PlanMediaRef {
   node_id: string;
@@ -13,8 +14,9 @@ export interface PlanMediaRef {
 export interface PlanTurn { speaker: string; text: string; start_frame?: number | null; end_frame?: number | null }
 export interface PlanCue {
   id: string;
-  role: 'primary' | 'overlay' | 'speech' | 'narration' | 'bgm' | 'sfx';
+  role: 'primary' | 'overlay' | 'graphic' | 'speech' | 'narration' | 'bgm' | 'sfx';
   description: string;
+  graphic?: NativeGraphicEffect | null;
   media?: PlanMediaRef | null;
   start_frame?: number | null;
   end_frame?: number | null;
@@ -61,9 +63,10 @@ export function planMediaCandidates(project: string, nodes: CanvasNode[], planNo
     const media = node.data.remixMedia as RemixUploadedMedia | undefined;
     const sourceUrl = kind === 'audio' ? node.data.audioUrl : kind === 'video' ? node.data.videoUrl : node.data.imageUrl ?? node.data.previewImageUrl;
     const currentPath = typeof sourceUrl === 'string' ? projectMediaPathFromUrl(project, sourceUrl) : null;
-    if (!currentPath && !media) return [];
+    if (typeof sourceUrl !== 'string' || !sourceUrl.trim()) return [];
+    const stale = node.data.workflowResultStale === true || node.data.remixVisualOutputCurrent === false;
     return [{ node, kind, label: String(node.data.displayName || node.id), currentPath,
-      media: media && (!currentPath || media.media_path === currentPath) ? media : null }];
+      media: media && !stale && (currentPath ? media.media_path === currentPath : media.url === sourceUrl) ? media : null }];
   });
 }
 

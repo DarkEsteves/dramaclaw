@@ -72,7 +72,7 @@ export const CANVAS_ADD_NODE_TYPES: readonly CanvasNodeType[] = [
 const CANVAS_ADD_MENU_ENTRIES = [
   ...CANVAS_ADD_NODE_TYPES.flatMap((type) => {
     const definition = nodeCatalog.getDefinition(type);
-    return definition ? [{ ...definition, id: type, entryType: "node" as const }] : [];
+    return definition?.visibleInMenu ? [{ ...definition, id: type, entryType: "node" as const }] : [];
   }),
   ...canvasCreationActions.map((action) => ({ ...action, entryType: "action" as const })),
 ];

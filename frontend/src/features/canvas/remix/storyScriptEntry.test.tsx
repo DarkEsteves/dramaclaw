@@ -57,6 +57,15 @@ describe('story script entry', () => {
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();
   });
 
+  it('shows the next step on the story card without adding a second creation button', () => {
+    const base = { id: 'story-1', type: 'videoStoryNode', zIndex: 0, draggable: true, dragging: false, selected: false, selectable: true, deletable: true, isConnectable: true, positionAbsoluteX: 0, positionAbsoluteY: 0 };
+    const { rerender } = render(<VideoStoryNode {...base} data={{ rows: [], referenceEvents: [{ event_id: 'event-1', review_state: 'needs_review', start_us: 0, end_us: 1_000_000 }] }} />);
+    expect(screen.getByText('下一步：新建作品方案')).toBeVisible();
+    rerender(<VideoStoryNode {...base} data={{ rows: [], referenceEvents: [{ event_id: 'event-1', review_state: 'reviewed', start_us: 0, end_us: 1_000_000 }] }} />);
+    expect(screen.getByText('下一步：新建作品方案')).toBeVisible();
+    expect(screen.queryByRole('button', { name: '新建作品方案' })).not.toBeInTheDocument();
+  });
+
   it('keeps the user on the story node when creating the child fails', async () => {
     createScriptFromBlueprint.mockImplementationOnce(() => { throw new Error('改编脚本连线失败'); });
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [{ start_us: 0, end_us: 1_000_000, narrative_inference: '引出问题' }] }} />);
@@ -65,23 +74,16 @@ describe('story script entry', () => {
     expect(screen.queryByRole('dialog', { name: '改编脚本设置' })).toBeNull();
   });
 
-  it('marks every pending reference event reviewed with one canvas update', () => {
+  it('does not ask for review acknowledgements or rewrite nine historical event states', () => {
+    const events = Array.from({ length: 9 }, (_, index) => ({ event_id: `pending-${index}`, start_us: index * 1_000_000, end_us: (index + 1) * 1_000_000, review_state: 'needs_review' as const }));
     render(<VideoStoryNode id="story-1" type="videoStoryNode" zIndex={0} draggable dragging={false} selected={false} selectable deletable isConnectable positionAbsoluteX={0} positionAbsoluteY={0} data={{ displayName: '原片拆解', rows: [], referenceEvents: [
-      { event_id: 'pending-1', start_us: 0, end_us: 1_000_000 },
-      { event_id: 'uncertain-1', start_us: 1_000_000, end_us: 2_000_000, review_state: 'reviewed_uncertain' },
-      { event_id: 'pending-2', start_us: 2_000_000, end_us: 3_000_000, review_state: 'needs_review' },
+      ...events,
     ] }} />);
-
-    fireEvent.click(screen.getByRole('button', { name: '全部标记为已核对' }));
-    expect(updateNodeData).toHaveBeenCalledWith('story-1', {
-      referenceEvents: [
-        expect.objectContaining({ event_id: 'pending-1', review_state: 'reviewed' }),
-        expect.objectContaining({ event_id: 'uncertain-1', review_state: 'reviewed_uncertain' }),
-        expect.objectContaining({ event_id: 'pending-2', review_state: 'reviewed' }),
-      ],
-      referenceBlueprintRef: null,
-      blueprintDirty: true,
-    });
+    expect(screen.queryByRole('button', { name: '全部标记为已核对' })).toBeNull();
+    expect(screen.getByText('下一步：新建作品方案')).toBeVisible();
+    act(() => canvasEventBus.publish('remix-node/action', { nodeId: 'story-1', action: 'continue_story' }));
+    expect(createScriptFromBlueprint).toHaveBeenCalledWith('story-1');
+    expect(updateNodeData).not.toHaveBeenCalled();
   });
 
   it('shows the complete reference-event review UI in fullscreen', async () => {
@@ -110,11 +112,8 @@ describe('story script entry', () => {
       referenceEvents: [expect.objectContaining({ event_id: 'event-1', user_visual_observation: '人物举着产品，没有展示', review_state: 'needs_review' })],
       referenceBlueprintRef: null,
     }));
-    fireEvent.change(within(dialog).getByLabelText('事件 1 核对状态'), { target: { value: 'reviewed' } });
-    expect(updateNodeData).toHaveBeenCalledWith('story-1', expect.objectContaining({
-      referenceEvents: [expect.objectContaining({ event_id: 'event-1', review_state: 'reviewed' })],
-      blueprintDirty: true,
-    }));
+    expect(within(dialog).queryByLabelText('事件 1 核对状态')).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '全部标记为已核对' })).toBeNull();
   });
 
   it('previews a keyframe and exports that image to a reusable canvas node', () => {

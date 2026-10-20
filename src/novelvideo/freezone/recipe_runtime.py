@@ -21,6 +21,12 @@ from novelvideo.brainclaw_contract import (
 )
 from novelvideo.freezone.agent_config_store import list_user_agent_config_items
 from novelvideo.config import OUTPUT_DIR
+from novelvideo.llm_instrumentation import (
+    _extract_provider_ids,
+    has_production_plan_diagnostic_context,
+    log_production_plan_diagnostic,
+    production_plan_diagnostic_context,
+)
 
 RecipeNodeKind = Literal["image", "video", "audio", "text"]
 RecipePromptStrategy = Literal[
@@ -410,6 +416,14 @@ def get_recipe_for_runtime(
         raise RecipeRuntimeError(
             f"recipe version mismatch: requested {requested_version}, found {actual_version or 'unversioned'}"
         )
+    if checked_id == "reference-production-plan" and recipe.get("schema_version") == "dramaclaw.recipe.v2":
+        from novelvideo.freezone.remix.production_plan_v2 import production_plan_draft_json_schema
+
+        schema = production_plan_draft_json_schema()
+        custom = recipe.get("output_schema")
+        if isinstance(custom, dict) and custom:
+            schema["allOf"] = [custom]
+        return {**recipe, "output_schema": schema}
     return recipe
 
 
@@ -561,6 +575,7 @@ def build_recipe_compiler_task(
     node_prompt: str,
     user_goal: str = "",
     upstream_text: str = "",
+    structured_upstream: dict[str, Any] | None = None,
     reference_media: list[dict[str, str]] | None = None,
     confirmed_inputs: dict[str, Any] | None = None,
     skill_constraints: dict[str, Any] | None = None,
@@ -576,9 +591,19 @@ def build_recipe_compiler_task(
     system_prompt = str(recipe.get("system_prompt") or "").strip()
     if not system_prompt:
         raise RecipeRuntimeError("recipe system_prompt is empty")
-    prompt = _limit_model_context(node_prompt, _MAX_NODE_PROMPT_CHARS)
-    upstream = _limit_model_context(upstream_text, _MAX_UPSTREAM_CHARS)
-    goal = _limit_model_context(user_goal, _MAX_GOAL_CHARS)
+    if structured_upstream is None:
+        prompt = _limit_model_context(node_prompt, _MAX_NODE_PROMPT_CHARS)
+        upstream = _limit_model_context(upstream_text, _MAX_UPSTREAM_CHARS)
+        goal = _limit_model_context(user_goal, _MAX_GOAL_CHARS)
+    else:
+        from .remix.production_plan_context import plan_context_char_budget, serialize_plan_context
+        prompt = str(node_prompt or "").strip()
+        goal = str(user_goal or "").strip()
+        if len(prompt) > _MAX_NODE_PROMPT_CHARS:
+            raise ValueError("production_plan_intent_budget_exceeded")
+        if len(goal) > _MAX_GOAL_CHARS:
+            raise ValueError("production_plan_goal_budget_exceeded")
+        upstream = serialize_plan_context(structured_upstream, max_chars=plan_context_char_budget())
     if not any((prompt, upstream, goal)):
         raise RecipeRuntimeError("node prompt or workflow context is required")
 
@@ -804,12 +829,36 @@ async def generate_recipe_text(**compile_args: Any) -> str:
             skill_version=str(compile_args.get("skill_version") or ""),
             recipe_id=str(supplemental_recipe.get("id") or ""),
         )
+    override_contract = compile_args.get("structured_output_contract")
+    plan_stage = compile_args.get("production_plan_stage")
+    if plan_stage is not None:
+        if (plan_stage not in {"outline", "arrangement"}
+                or recipe.get("id") != "reference-production-plan"
+                or compile_args.get("plan_deadline") is None
+                or override_contract is not None):
+            raise RecipeRuntimeError("invalid production plan stage")
+    effective_recipe = _combined_recipe(recipes)
+    task_recipe = ({**effective_recipe, "system_prompt": (
+        "修复现有作品方案的指定字段。只返回允许路径上的替换值及 base_digest，"
+        "保留其他创作内容和已确认台词；不要重写整份方案。")}
+        if override_contract is not None else effective_recipe)
+    if plan_stage is not None:
+        stage_instruction = (
+            "当前只确定全片叙事结构、台词和输出规格；只填写本阶段 JSON Schema，"
+            "无需画面安排、声音素材或正式方案字段。"
+            if plan_stage == "outline" else
+            "当前只根据已确定的段落、台词和标识安排画面、必要的声音、字幕与图形；"
+            "只填写本阶段 JSON Schema，不重写段落或台词。"
+        )
+        task_recipe = {**effective_recipe, "system_prompt":
+                       str(effective_recipe.get("system_prompt") or "") + "\n" + stage_instruction}
     task = build_recipe_compiler_task(
-        recipe=_combined_recipe(recipes),
+        recipe=task_recipe,
         node_kind="text",
         node_prompt=str(compile_args.get("node_prompt") or ""),
         user_goal=str(compile_args.get("user_goal") or ""),
         upstream_text=str(compile_args.get("upstream_text") or ""),
+        structured_upstream=compile_args.get("structured_upstream"),
         reference_media=compile_args.get("reference_media"),
         confirmed_inputs=compile_args.get("confirmed_inputs"),
         skill_constraints=_skill_constraints(skill),
@@ -817,7 +866,40 @@ async def generate_recipe_text(**compile_args: Any) -> str:
         skill_version=str(skill.get("version") or "") if skill else "",
     )
     task += "\n\nExecution requirement:\nProduce the final text deliverable now."
-    task = append_structured_output_contract(task, _combined_recipe(recipes))
+    output_recipe = effective_recipe
+    if override_contract is not None:
+        if not isinstance(override_contract, dict) or not compile_args.get("plan_deadline"):
+            raise RecipeRuntimeError("internal structured output contract requires plan deadline")
+        output_recipe = {**output_recipe, "output_schema": override_contract}
+    if plan_stage is not None:
+        from .remix.production_plan_draft_stages import draft_stage_schema
+
+        output_recipe = {**output_recipe, "output_schema": draft_stage_schema(plan_stage)}
+        from pydantic_ai import NativeOutput, StructuredDict
+        from .remix.production_plan_draft_stages import draft_stage_native_schema
+
+        outline = (compile_args.get("structured_upstream") or {}).get("draft_outline") or {}
+        turn_ids = [turn["id"] for beat in outline.get("beats", [])
+                    for turn in beat.get("turns", []) if isinstance(turn.get("id"), str)]
+        native_schema = draft_stage_native_schema(plan_stage, turn_ids=turn_ids)
+        output_type = NativeOutput(
+            StructuredDict(native_schema, name=f"production_plan_{plan_stage}"),
+            strict=True, template=False,
+        )
+    else:
+        task = append_structured_output_contract(task, output_recipe)
+        output_type = str
+
+    plan_deadline = compile_args.get("plan_deadline")
+    plan_policy = compile_args.get("plan_policy")
+    if plan_deadline is not None:
+        from .remix.production_plan_execution import plan_execution_policy
+        plan_policy = plan_policy or plan_execution_policy()
+        remaining = float(plan_deadline) - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("production_plan_deadline_exceeded")
+    else:
+        remaining = _recipe_text_generation_timeout_seconds()
 
     from novelvideo.config import get_newapi_text_pydantic_model
 
@@ -825,7 +907,7 @@ async def generate_recipe_text(**compile_args: Any) -> str:
     # Screenplay-sized output must not occupy the short compiler route.
     model = get_newapi_text_pydantic_model(
         "FREEZONE_TEXT_WRITER_MODEL",
-        timeout_seconds_override=_recipe_text_generation_timeout_seconds(),
+        timeout_seconds_override=min(_recipe_text_generation_timeout_seconds(), remaining),
         brainclaw_profile=BrainClawProfile.FREEZONE_RECIPE_TEXT_GENERATION,
         brainclaw_profile_variant=builtin_text_recipe_profile_variant(
             recipe,
@@ -833,15 +915,102 @@ async def generate_recipe_text(**compile_args: Any) -> str:
         ),
         capability="freezone.text.generate",
     )
+    if plan_deadline is not None:
+        known_output_limit = getattr(model, "max_output_tokens", None)
+        if type(known_output_limit) is int and plan_policy.max_output_tokens > known_output_limit:
+            log_production_plan_diagnostic(
+                "production_plan.model_configuration_failed", stage="requesting",
+                error_code="production_plan_output_budget_exceeds_model_limit",
+                model=str(getattr(model, "model_name", "") or ""),
+                requested_output_tokens=plan_policy.max_output_tokens,
+                available_tokens=known_output_limit,
+            )
+            raise ValueError("production_plan_output_budget_exceeds_model_limit")
     agent = Agent(
         model,
         system_prompt=_TEXT_EXECUTOR_SYSTEM_PROMPT,
-        output_type=str,
+        output_type=output_type,
         name="Freezone Recipe Text Executor",
+        **({"retries": 0} if plan_deadline is not None else {}),
     )
-    response = await agent.run(task)
-    content = str(response.output or "").strip()
+    if has_production_plan_diagnostic_context():
+        model_name = str(getattr(model, "model_name", "") or getattr(model, "name", "") or "")
+        timeout_seconds = min(_recipe_text_generation_timeout_seconds(), remaining)
+        with production_plan_diagnostic_context(model_call_id=uuid.uuid4().hex):
+            started = time.monotonic()
+            log_production_plan_diagnostic(
+                "production_plan.model_request_started", stage="requesting",
+                model=model_name, route_profile="freezone_recipe_text_generation",
+                timeout_seconds=timeout_seconds, input_characters=len(task),
+                context_characters=len(str(compile_args.get("upstream_text") or "")),
+                schema_characters=len(json.dumps(output_recipe.get("output_schema") or {},
+                                                 ensure_ascii=False)),
+                available_tokens=getattr(model, "available_tokens", None),
+                requested_output_tokens=plan_policy.max_output_tokens
+                    if plan_deadline is not None else None,
+            )
+            try:
+                if plan_deadline is not None:
+                    from .remix.production_plan_execution import run_plan_text
+                    response = await run_plan_text(agent, task, policy=plan_policy,
+                                                   deadline=float(plan_deadline))
+                else:
+                    response = await agent.run(task)
+            except BaseException as exc:
+                response_info = getattr(exc, "info", None)
+                log_production_plan_diagnostic(
+                    "production_plan.model_request_failed", stage="requesting",
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    timeout_seconds=timeout_seconds, error=exc,
+                    error_code="model_output_limit" if response_info is not None else None,
+                    finish_reason=getattr(response_info, "finish_reason", None),
+                    output_tokens=getattr(response_info, "output_tokens", None),
+                    total_output_tokens=getattr(response_info, "total_output_tokens", None),
+                    reasoning_tokens=getattr(response_info, "reasoning_tokens", None),
+                )
+                raise
+            if plan_deadline is None:
+                try:
+                    usage_getter = getattr(response, "usage", None)
+                    usage = usage_getter() if callable(usage_getter) else usage_getter
+                except Exception:
+                    usage = None
+                provider_request_id, _, _ = _extract_provider_ids(response)
+                messages_getter = getattr(response, "all_messages", None)
+                messages = messages_getter() if callable(messages_getter) else []
+                last_response = next((message for message in reversed(messages)
+                                      if getattr(message, "model_name", None)), None)
+                usage_details = getattr(usage, "details", None)
+                log_production_plan_diagnostic(
+                    "production_plan.model_request_returned", stage="requesting",
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    output_characters=len(str(response.output or "")), response_received=True,
+                    input_tokens=getattr(usage, "input_tokens", None),
+                    output_tokens=getattr(usage, "output_tokens", None),
+                    reasoning_tokens=usage_details.get("reasoning_tokens")
+                        if isinstance(usage_details, dict) else None,
+                    response_model=getattr(last_response, "model_name", None),
+                    finish_reason=getattr(last_response, "finish_reason", None),
+                    sdk_retry_count=getattr(response, "retry_count", None),
+                    provider_request_id=provider_request_id,
+                )
+    else:
+        if plan_deadline is not None:
+            from .remix.production_plan_execution import run_plan_text
+            response = await run_plan_text(agent, task, policy=plan_policy,
+                                           deadline=float(plan_deadline))
+        else:
+            response = await agent.run(task)
+    if plan_stage is not None and isinstance(response.output, dict):
+        from .remix.production_plan_draft_stages import compact_native_stage_output
+
+        content = json.dumps(compact_native_stage_output(plan_stage, response.output),
+                             ensure_ascii=False, separators=(",", ":"))
+    else:
+        content = str(response.output or "").strip()
     if not content:
+        if plan_deadline is not None:
+            return content
         raise RuntimeError("Recipe text executor returned empty content")
     _validate_text_result_fidelity(
         content,

@@ -1,5 +1,6 @@
 import type { TranscriptWord } from '@/features/canvas/domain/canvasNodes';
 import type { RemixArtifactRef } from '@/api/remix';
+import { projectMediaPathFromUrl } from './remixMediaPath';
 
 export interface TranscriptSource {
   path: string;
@@ -16,7 +17,18 @@ export function sourceMediaForTranscript(nodeId: string, nodes: SourceNode[] = [
   const connected = nodes.filter((node) => sources.has(node.id)).map((node) => node.data.remixMedia).filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object'));
   const media = connected.find((item) => item.media_kind === 'audio' && typeof item.media_path === 'string')
     ?? connected.find((item) => item.media_kind === 'video' && item.has_audio === true && typeof item.media_path === 'string');
-  if (!media) return null;
+  if (!media) {
+    const saved = nodes.find(node => node.id === nodeId)?.data;
+    if (typeof saved?.sourceMediaPath === 'string' && saved.sourceMediaPath
+      && typeof saved.sourceMediaHash === 'string' && saved.sourceMediaHash
+      && typeof saved.sourceVideoUrl === 'string' && saved.sourceVideoUrl
+      && typeof saved.sourceProjectId === 'string' && saved.sourceProjectId
+      && projectMediaPathFromUrl(saved.sourceProjectId, saved.sourceVideoUrl) === saved.sourceMediaPath
+      && nodes.some(node => sources.has(node.id) && node.data.videoUrl === saved.sourceVideoUrl)) {
+      return { path: saved.sourceMediaPath, url: saved.sourceVideoUrl, kind: 'video' };
+    }
+    return null;
+  }
   return { path: media.media_path as string, url: typeof media.url === 'string' ? media.url : undefined, kind: media.media_kind as 'audio' | 'video' };
 }
 
@@ -93,6 +105,22 @@ export function timelineWords(payload: TranscriptTimeline): TranscriptWord[] {
       startChar: Number.isInteger(word.start_char) ? Number(word.start_char) : undefined,
       endChar: Number.isInteger(word.end_char) ? Number(word.end_char) : undefined,
       confidence: typeof word.confidence === 'number' ? word.confidence : null }));
+}
+
+/** Recover visible word boundaries in transcripts saved by the old NewAPI adapter. */
+export function readableTranscript(text: string, words: TranscriptWord[]): string {
+  if (words.length < 2 || text !== words.map((word) => word.text).join('')) return text;
+  if (!words.some((word) => /^[A-Za-z0-9][A-Za-z0-9'’\-]+$/u.test(word.text))) return text;
+  let result = words[0].text;
+  for (let index = 1; index < words.length; index += 1) {
+    const previous = words[index - 1];
+    const current = words[index];
+    const bothSingleLetters = /^[A-Za-z0-9]$/u.test(previous.text) && /^[A-Za-z0-9]$/u.test(current.text);
+    const sameCharacterRun = bothSingleLetters && current.startUs - previous.endUs <= 50_000;
+    if (!sameCharacterRun && /[A-Za-z0-9,.;:!?]$/u.test(previous.text) && /^[A-Za-z0-9]/u.test(current.text)) result += ' ';
+    result += current.text;
+  }
+  return result;
 }
 
 /** Keep the transcript's punctuation and spaces while making matched words seekable. */
