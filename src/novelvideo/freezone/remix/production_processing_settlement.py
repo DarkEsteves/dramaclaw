@@ -347,9 +347,12 @@ def _publish_plan(ctx: Any, *, canvas_id: str, action: dict, artifact: dict,
         for key in ('requirements', 'requirements_fingerprint', 'requirements_provenance', 'locked_turns'):
             if key in action.get('payload', {}) and artifact['payload'].get('provenance', {}).get(key) != action['payload'][key]:
                 return {'status': 'conflict'}
+        from .production_goal import plan_goal_matches
         target = artifact['payload'].get('provenance', {}).get('node_target')
-        if action['action'] == 'generate_production_plan_draft' and target and (target.get('canvas_id'), target.get('node_id'), target.get('node_revision'), target.get('goal')) != (
-            canvas_id, action['node_id'], action.get('node_revision'), action.get('payload', {}).get('topic')):
+        if action['action'] == 'generate_production_plan_draft' and target and (
+                (target.get('canvas_id'), target.get('node_id'), target.get('node_revision')) != (
+                    canvas_id, action['node_id'], action.get('node_revision'))
+                or not plan_goal_matches(target.get('goal'), action.get('payload', {}).get('topic'))):
             return {'status': 'conflict'}
         operations.claim_confirmation(operation_id, canvas_id=canvas_id, node_id=action['node_id'])
         confirmation_claimed = True

@@ -52,6 +52,16 @@ NATIVE_PRODUCTION_CONTRACT = {
 }
 
 
+def _is_declared_default(skill: dict[str, Any], field: str, value: Any) -> bool:
+    """True when the resolved value is only the skill input's default."""
+    for parameter in skill.get("input_parameters") or []:
+        if not isinstance(parameter, dict) or parameter.get("id") != field:
+            continue
+        default = parameter.get("default")
+        return default is not None and default == value
+    return False
+
+
 def supports_native_production(skill: dict[str, Any]) -> bool:
     return (
         skill.get("id") == "reference-video-remix"
@@ -80,13 +90,16 @@ def compile_reference_production_plan(
     planner = intent.get("planner")
     if planner not in (None, {}, {"mode": "standard"}):
         return {"ok": False, "status": "invalid_workflow_intent", "error": "Native production uses inputs.plan_count and production_scope; omit generic media planner fields."}
-    topic = str(inputs.get("new_topic") or user_goal).strip()
-    guidance = [topic]
-    if topic != user_goal:
+    goal = str(inputs.get("new_topic") or user_goal).strip()
+    guidance = [goal]
+    if goal != user_goal:
         guidance.append(f"完整创作要求：{user_goal}")
     for field, label in (("preserve_replace", "保留与改变"), ("speech_mode", "声音方式")):
         value = inputs.get(field)
-        if value:
+        # Resolved inputs carry declared defaults too. A default choice is not a
+        # creative instruction, and appending one would make the canvas target
+        # differ from the signed task goal for the same request.
+        if value and not _is_declared_default(skill, field, value):
             guidance.append(f"{label}：{value}")
     topic = "\n".join(guidance)
     output_preferences = {

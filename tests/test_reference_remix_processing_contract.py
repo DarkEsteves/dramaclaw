@@ -104,6 +104,29 @@ def test_native_plan_topic_contains_creative_request_not_generation_controls() -
     assert catalog.validate_agent_workflow_plan(result["plan"])["ok"] is True
 
 
+def test_native_plan_keeps_default_speech_mode_out_of_the_creative_goal() -> None:
+    """A resolved default is not creative input; the signed goal must stay exact."""
+    from novelvideo.freezone.agent_workflows.reference_production import compile_reference_production_plan
+
+    skill = {"id": "reference-video-remix", "version": "2.1.0", "name": "复刻",
+             "input_parameters": [
+                 {"id": "speech_mode", "label": "声音方式", "type": "single_select",
+                  "default": "自动判断", "options": ["自动判断", "视频原声"]}]}
+    intent = {"external_inputs": [{"id": "analysis", "node_id": "real-analysis",
+                                   "media_kind": "reference_analysis"}]}
+    goal = "保持原片叙事，产品换成咖啡"
+    defaulted = compile_reference_production_plan(
+        intent, skill, {"plan_count": 1, "new_topic": goal, "speech_mode": "自动判断"}, goal)
+    assert defaulted["ok"] is True, defaulted
+    assert defaulted["plan"]["nodes"][0]["data"]["processingPayload"]["topic"] == goal
+
+    chosen = compile_reference_production_plan(
+        intent, skill, {"plan_count": 1, "new_topic": goal, "speech_mode": "视频原声"}, goal)
+    payload = chosen["plan"]["nodes"][0]["data"]["processingPayload"]
+    assert payload["topic"].startswith(goal)
+    assert "声音方式：视频原声" in payload["topic"]
+
+
 @pytest.mark.parametrize(("extra", "expected_path"), [
     ({"planner": {"mode": "standard", "deliverable": "video"}}, "planner.deliverable"),
     ({"inputs": {"final_video_duration_seconds": 5}}, "inputs.final_video_duration_seconds"),

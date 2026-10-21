@@ -570,6 +570,7 @@ async def confirm_decision(project: str, canvas_id: str, artifact_id: str, body:
 def _review_plan_on_current_canvas(ctx, store, canvas_id, commission, plan_ref, findings):
     """Keep the canvas target fixed through plan review publication."""
     from novelvideo.freezone.remix.plan_review_settlement import submit_plan_review
+    from novelvideo.freezone.remix.production_goal import plan_goal_matches
 
     with canvas_store.get_canvas_write_mutex().write_mutex(ctx.state_dir, canvas_id) as guard:
         canvas = canvas_store.read_canvas(ctx.state_dir, canvas_id)
@@ -616,7 +617,7 @@ def _review_plan_on_current_canvas(ctx, store, canvas_id, commission, plan_ref, 
             if (task_target.get('canvas_id') != canvas_id
                     or task_target.get('node_id') != plan_node['id']
                     or task_target.get('node_revision') != (node_data.get('remixNodeRevision') or 1)
-                    or str(node_payload.get('topic') or '').strip() != task_target.get('goal')
+                    or not plan_goal_matches(node_payload.get('topic'), task_target.get('goal'))
                     or (node_data.get('remixDirectionEdited') is True
                         and node_payload.get('requirements') != provenance.get('requirements'))):
                 raise HTTPException(409, {'code': 'plan_target_changed',

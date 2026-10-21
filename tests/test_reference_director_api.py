@@ -261,6 +261,39 @@ def test_task_plan_review_rejects_removed_provenance_and_stale_node(setup_api, m
     assert getattr(stale.value, 'status_code', None) == 409
 
 
+def test_plan_review_accepts_guidance_line_that_the_signed_goal_omits(setup_api, monkeypatch):
+    """A node topic carrying host guidance still names the same creative goal."""
+    from novelvideo.api.routes import reference_director as routes
+    from novelvideo.freezone import canvas_store
+    from novelvideo.freezone.remix import plan_review_settlement
+
+    _, store, commission, _ = setup_api
+    ctx = SimpleNamespace(project_id='p', state_dir=store.project_dir,
+                          requester_user_id='u')
+    goal = '产品介绍'
+    payload = {'schema_version': 2, 'goal': goal,
+        'output': {'width': 1280, 'height': 720, 'fps_num': 24, 'fps_den': 1},
+        'beats': [], 'provenance': {'node_target': {
+            'canvas_id': 'c', 'node_id': 'plan', 'node_revision': 1, 'goal': goal}}}
+    plan = store.create('production_plan.v2', payload, [])
+    canvas = canvas_store.read_canvas(store.project_dir, 'c')
+    canvas['nodes'].append({'id': 'plan', 'type': 'scriptNode', 'position': {'x': 100, 'y': 0},
+        'data': {'remixRole': 'production_plan', 'remixNodeRevision': 1,
+                 'processingPayload': {'topic': goal + '\n声音方式：自动判断'},
+                 'productionPlanV2Ref': {'artifactId': plan['id'], 'revision': 1}}})
+    canvas['edges'].append({'id': 'analysis-plan', 'source': 'analysis', 'target': 'plan'})
+    canvas_store.save_canvas(store.project_dir, 'c', base_revision=canvas['revision'],
+                             build_payload=lambda _: canvas)
+    captured = {}
+    def submit(*args, **kwargs):
+        captured.update(kwargs)
+        return {'review_ref': {'artifact_id': 'review', 'revision': 1}}
+    monkeypatch.setattr(plan_review_settlement, 'submit_plan_review', submit)
+    routes._review_plan_on_current_canvas(ctx, store, 'c', commission,
+        {'artifact_id': plan['id'], 'revision': 1}, [])
+    assert captured['plan_ref']['artifact_id'] == plan['id']
+
+
 @pytest.mark.parametrize('delivered', [False, True])
 def test_generated_plan_review_saves_with_task_evidence_and_waits_for_user(setup_api, delivered):
     from novelvideo.freezone import canvas_store

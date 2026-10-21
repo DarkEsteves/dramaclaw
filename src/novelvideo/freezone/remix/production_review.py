@@ -248,6 +248,7 @@ def _verified_task_target(store, payload: dict, commission: dict,
         raise ValueError('edited plan target requires a production plan')
     original_provenance = original['payload'].get('provenance') or {}
     current_provenance = payload.get('provenance') or {}
+    from .production_goal import plan_goal_matches
     fields = ('operation_id', 'node_target', 'requirements',
               'requirements_fingerprint', 'requirements_provenance', 'locked_turns')
     if any(current_provenance.get(key) != original_provenance.get(key) for key in fields):
@@ -275,7 +276,7 @@ def _verified_task_target(store, payload: dict, commission: dict,
             or target.get('canvas_id') != operation.get('canvas_id')
             or target.get('node_id') != operation.get('node_id')
             or target.get('node_revision') != operation.get('node_revision')
-            or target.get('goal') != str(snapshot.get('topic') or '').strip()
+            or not plan_goal_matches(target.get('goal'), snapshot.get('topic'))
             or original_provenance.get('requirements') != snapshot.get('requirements')
             or original_provenance.get('requirements_fingerprint') != snapshot.get('requirements_fingerprint')
             or original_provenance.get('locked_turns') != snapshot.get('locked_turns')):
@@ -286,6 +287,7 @@ def _verified_task_target(store, payload: dict, commission: dict,
 def evaluate_saved_production_review(store, payload: dict, commission: dict,
                                      findings: list[dict], *, plan_ref: dict | None = None) -> dict:
     """Use exact saved direction evidence both before and at review publication."""
+    from .production_goal import plan_goal_matches
     direction = commission['payload'].get('direction') or {}
     provenance = payload.get('provenance') or {}
     node_target = provenance.get('node_target') or {}
@@ -293,7 +295,7 @@ def evaluate_saved_production_review(store, payload: dict, commission: dict,
     target_constraints = provenance.get('requirements')
     if (isinstance(node_target, dict) and isinstance(node_target.get('goal'), str)
             and confirmed_goal is not None
-            and (node_target['goal'] != confirmed_goal
+            and (not plan_goal_matches(node_target['goal'], confirmed_goal)
                  or target_constraints != direction.get('requirements'))):
         # A confirmed canvas edit changes the native node's input version. The
         # immutable commission remains audit evidence for the original goal.
