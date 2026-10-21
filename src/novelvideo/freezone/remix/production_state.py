@@ -125,13 +125,17 @@ def build_production_state(*, scope: dict, commission: dict, plan: dict | None,
         if action.get('owner') not in {'system', 'agent', 'user'} or not isinstance(action.get('kind'), str):
             raise ValueError('pending action requires owner and kind')
         current_actions.append({**{key: deepcopy(action.get(key)) for key in
-                                ('action_id', 'kind', 'owner', 'step_id', 'status')}, 'basis_ref': basis})
+                                ('action_id', 'kind', 'owner', 'step_id', 'status')},
+                                **{key: deepcopy(action[key]) for key in ('tool', 'draft_id', 'revision', 'request_id') if key in action}, 'basis_ref': basis})
     actions = _pending(current_actions)
+    if active_work is None and any(action['kind'] in {'prepare_materials', 'work_selection_required'} for action in actions):
+        blockers = [row for row in blockers if row['kind'] != 'work_selection_required']
     for blocker in execution.get('blockers', []):
         if blocker.get('owner') not in {'system', 'agent', 'user'} or not isinstance(blocker.get('kind'), str):
             raise ValueError('blocker requires owner and kind')
         blockers.append({key: deepcopy(blocker.get(key)) for key in ('owner', 'kind', 'action_id')})
-    blockers.extend({'owner': action['owner'], 'kind': action['kind'], 'action_id': action['action_id']} for action in actions)
+    blockers.extend({key: deepcopy(action[key]) for key in
+                     ('owner', 'kind', 'action_id', 'tool', 'draft_id', 'revision', 'request_id') if key in action} for action in actions)
     blockers = sorted(blockers, key=lambda row: json.dumps(row, sort_keys=True))
     status = execution.get('status', 'idle')
     if status not in EXECUTION_STATUSES:

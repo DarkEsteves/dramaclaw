@@ -77,7 +77,8 @@ export interface ReferenceProductionState {
   progress: { materials_total: number; materials_available: number; materials_accepted: number;
     final_materials_total: number; final_materials_accepted: number; user_action_count: number };
   blockers: Array<{ owner: 'user' | 'agent' | 'system'; kind: string; action_id?: string | null }>;
-  next_action: { owner: 'user' | 'agent' | 'system'; kind: string; action_id?: string | null } | null;
+  next_action: { owner: 'user' | 'agent' | 'system'; kind: string; action_id?: string | null;
+    tool?: string; draft_id?: string; revision?: number; request_id?: string } | null;
   director_state: ReferenceDirectorState;
   candidate_work_refs?: DirectorArtifactRef[];
   suggested_work_ref?: DirectorArtifactRef | null;

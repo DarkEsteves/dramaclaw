@@ -307,7 +307,7 @@ def _action(identity, kind, owner, basis, step_id=None):
     }
 
 
-def _material_evidence(store, work, canvas, canvas_id, state_dir):
+def _material_evidence(store, work, canvas, canvas_id, state_dir, agent_id='main'):
     """Resolve actual media and original reviews before deriving each unique action."""
     discovered = read_material_state(
         store,
@@ -315,6 +315,8 @@ def _material_evidence(store, work, canvas, canvas_id, state_dir):
         canvas=canvas,
         canvas_id=canvas_id,
         include_workflow_intent=False,
+        workflow_state_dir=state_dir,
+        agent_id=agent_id,
     )
     reviews = [
         r
@@ -474,13 +476,12 @@ def _material_evidence(store, work, canvas, canvas_id, state_dir):
                 else None,
             }
         )
-    return (
-        facts,
-        actions,
-        pending_reviews,
-        steps,
-        discovered.get("material_reviews_truncated", False),
-    )
+    evidence = discovered.get('material_execution') or {}
+    draft_actions = [row['next_action'] for row in evidence.get('drafts', []) if row.get('next_action')]
+    if draft_actions:
+        actions = [row for row in actions if row['kind'] != 'prepare_materials']
+        actions.extend({**action, 'basis_ref': basis, 'status': 'pending'} for action in draft_actions)
+    return facts, actions, pending_reviews, steps, discovered.get('material_reviews_truncated', False)
 
 
 def _details(store, heads, c, work, canvas, *, pending_material_reviews=()):
@@ -715,6 +716,18 @@ def _execution(
     status = run.get("status") if run else None
     if status in {"stopped", "cancelled", "canceled"}:
         return {"status": "stopped", "blockers": []}
+    if run and run.get('manual_resume_required'):
+        return {'status': 'failed', 'blockers': [{'owner': 'user', 'kind': 'resume_execution', 'action_id': run.get('run_id')}]}
+    if work and c['phase'] == 'preparing_materials':
+        from .material_execution import read_material_execution_evidence
+        evidence = read_material_execution_evidence(work['payload'], project_id=store.project_id,
+            canvas_id=canvas_id, state_dir=state_dir, requester_user_id=requester, agent_id=agent_id)
+        if any(row['status'] == 'cancelled' for row in evidence['drafts']):
+            return {'status': 'stopped', 'blockers': []}
+        if evidence['problems']:
+            return {'status': 'failed', 'blockers': [
+                {'owner': 'agent', 'kind': row['kind'], 'action_id': row['draft_id']}
+                for row in evidence['problems']], 'problems': evidence['problems']}
     workflow_states, native_problems = [], []
     if work:
         from novelvideo.freezone.workflow_runs import read_workflow_run
@@ -748,7 +761,7 @@ def _execution(
     if any(s in {"cancelled", "stopped"} for s in workflow_states):
         return {"status": "stopped", "blockers": []}
     if not native_problems and (
-        status in {"submitting", "analyzing", "analysis_ready", "resuming"}
+        (c['phase'] != 'preparing_materials' and status in {"submitting", "analyzing", "analysis_ready", "resuming"})
         or any(s in {"running", "queued", "pending"} for s in workflow_states)
     ):
         return {"status": "running", "blockers": []}
@@ -875,13 +888,18 @@ def read_current_production(
                 except (ValueError, FileNotFoundError, PermissionError):
                     work = None
             facts, actions, pending_reviews, steps, review_truncated = (
-                _material_evidence(store, work, canvas, canvas_id, state_dir)
+                _material_evidence(store, work, canvas, canvas_id, state_dir, agent_id)
                 if work
                 else ([], [], [], [], False)
             )
             details = _details(
+                # Candidate suggestions remain observations, never adoption.
                 store, heads, c, work, canvas, pending_material_reviews=pending_reviews
             )
+            if c['phase'] == 'preparing_materials' and not c.get('work_ref'):
+                actions.append(_action('select-work:' + c['commission_ref']['artifact_id'],
+                    'work_selection_required' if candidates else 'prepare_materials',
+                    'user' if candidates else 'agent', c['commission_ref']))
             # Keep original review provenance while supplying the current work
             # identity for candidate inspection/explicit batch actions. Compact
             # material-state rows are not the browser's full review contract.

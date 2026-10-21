@@ -167,3 +167,26 @@ def test_completed_commission_is_terminal_even_without_a_continuation_row():
     state = build_production_state(**args)
     assert state['execution_status'] == 'completed'
     assert state['next_action'] is None
+
+
+def test_material_coordinator_resuming_is_not_native_running(tmp_path):
+    from types import SimpleNamespace
+    from novelvideo.freezone.remix.production_inventory import _execution
+    c = {'commission_ref': {'artifact_id': 'commission', 'revision': 1}, 'phase': 'preparing_materials'}
+    runs = [{'project_id':'p', 'canvas_id':'c', 'agent_id':'main', 'requester_user_id':'u',
+             'commission_ref':c['commission_ref'], 'status':'resuming'}]
+    assert _execution(c, [], runs, 'c', 'main', 'u', SimpleNamespace(project_id='p'), None, tmp_path)['status'] != 'running'
+
+
+def test_projection_preserves_exact_submit_action():
+    from novelvideo.freezone.remix.production_state import build_production_state
+    args = inputs()
+    args['pending_actions'] = [{'owner':'agent', 'kind':'submit_canvas_approval',
+        'action_id':'submit:d:1', 'tool':'freezone_confirm_workflow_draft', 'draft_id':'d', 'revision':1,
+        'status':'pending', 'basis_ref':args['active_work']['work_ref']}]
+    args['execution'] = {'status':'waiting_agent'}
+    state = build_production_state(**args)
+    assert state['next_action']['tool'] == 'freezone_confirm_workflow_draft'
+    assert state['next_action']['draft_id'] == 'd'
+    assert state['next_action']['revision'] == 1
+    assert state['progress']['user_action_count'] == 0

@@ -314,7 +314,7 @@ def test_branches_are_isolated_and_require_explicit_choice(selection_api):
         ("stopped", "stopped"),
         ("cancelled", "stopped"),
         ("resume_failed", "waiting_user"),
-        ("resuming", "running"),
+        ("resuming", "waiting_user"),
     ],
 )
 def test_execution_uses_durable_status_and_old_failure_cannot_override_review(
@@ -963,3 +963,30 @@ def test_current_native_failure_remains_visible_alongside_another_material_revie
             }
         ]
     assert {str(p): p.read_bytes() for p in store.root.rglob("*.json")} == before
+
+
+def test_selected_ready_material_draft_exposes_exact_submit_action(selection_api):
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft
+    from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
+    from novelvideo.freezone.remix.material_work import material_workflow_intent
+    client, store, c, _, work_ref, _ = selection_api
+    saved = store.read(work_ref['artifact_id'], work_ref['revision'])
+    saved['payload']['steps'][0].update(source='generate', recipe_id='general-image', prompt='Reference image')
+    saved = store.revise(saved['id'], saved['revision'], saved['payload'], saved['upstream_refs'])
+    work_ref = {'artifact_id': saved['id'], 'revision': saved['revision']}
+    c = select(client, c, work_ref)
+    intent = material_workflow_intent(saved['payload'])
+    draft = create_workflow_draft(project_dir=store.project_dir, project_id='p', canvas_id='c',
+        intent=intent, compiled={'ok':True, 'plan':{'nodes':[]}})
+    attached = attach_material_execution_draft(store, work_ref, canvas_id='c',
+        draft_id=draft['draft_id'], draft_revision=1)
+    from novelvideo.freezone.remix.material_execution import read_material_state
+    observed = read_material_state(store, attached['work_ref'], canvas_id='c', include_workflow_intent=False)
+    assert observed['material_execution']['drafts'], observed
+    state = get_state(client, c).json()['data']
+    assert state['work_ref']['revision'] == attached['work_ref']['revision']
+    assert state['execution_status'] == 'waiting_agent'
+    assert state['next_action'] == {'owner':'agent', 'kind':'submit_canvas_approval',
+        'action_id':'submit:' + draft['draft_id'] + ':1', 'tool':'freezone_confirm_workflow_draft',
+        'draft_id':draft['draft_id'], 'revision':1}
+    assert state['progress']['user_action_count'] == 0

@@ -181,6 +181,8 @@ def _production_instruction(data):
     if "branches" in data:
         return "Use the actual branches to identify the user's requested commission. If ambiguous, ask for the specific choice; never select the most recent plan or work. Read that commission with freezone_get_production_progress."
     action = data.get("next_action") or {}
+    if action.get('kind') == 'await_canvas_receipt':
+        return 'End this turn and await the existing canvas delivery event. Keep the current draft and task references; do not resubmit confirmation or prepare another draft.'
     if action.get("owner") == "system":
         return "Call freezone_advance_production with this exact commission_ref and expected_projection_revision=projection_revision plus a stable command_id. The host rechecks current evidence; this does not approve user decisions or paid generation."
     if action.get("owner") == "agent":
@@ -498,6 +500,7 @@ def build_director_tools(host: dict):
                     if not attached.get("ok"):
                         return result({"ok": False, "status": "material_draft_attachment_failed", "work_ref": data["work_ref"], "draft_id": draft["draft_id"], "material_lifecycle": material_lifecycle_status(data.get("work") or {}, workflow_draft=draft), "error": attached.get("error") or attached.get("detail") or "Execution draft could not be attached; preserve the draft and report the error; do not auto-retry"})
                     data["work_ref"] = (attached.get("data") or {}).get("work_ref", data["work_ref"])
+                    data['work'] = (attached.get('data') or {}).get('work', data.get('work') or {})
                 if draft.get("ok"):
                     lifecycle = material_lifecycle_status(
                         data.get("work") or {}, workflow_draft=draft,
@@ -505,11 +508,11 @@ def build_director_tools(host: dict):
                     draft["material_lifecycle"] = lifecycle
                     # Name the exact next call: a bare lifecycle word leaves the
                     # Agent with no tool to invoke, so it reports success early.
-                    draft["next_tool"] = {
-                        "tool": "freezone_confirm_workflow_draft",
-                        "draft_id": draft.get("draft_id"),
-                        "revision": draft.get("revision"),
-                    }
+                    from novelvideo.freezone.remix.material_execution import material_submit_action
+                    action = material_submit_action(draft)
+                    draft['next_action'] = action
+                    draft['next_tool'] = ({key: action[key] for key in ('tool', 'draft_id', 'revision')}
+                                          if action else None)
                     draft["agent_instruction"] = (
                         "素材工作包已保存，工作流草稿已准备（workflow_draft_status=ready），"
                         "但画布尚未交付，实际素材也尚未生成。"

@@ -321,3 +321,42 @@ async def test_rejected_actual_review_is_recorded_without_auto_retry(tmp_path, m
     assert state['payload']['steps'][0]['status'] == before['payload']['steps'][0]['status']
     assert result['data']['review']['content']['status'] == 'rejected'
     assert result['data']['requires_user_review'] is False
+
+
+def test_material_evidence_is_read_only_and_requires_exact_draft_revision(tmp_path):
+    from novelvideo.freezone.remix.material_execution import read_material_execution_evidence
+    # No database must stay absent on a read.
+    assert read_material_execution_evidence({}, project_id='p', canvas_id='c', state_dir=tmp_path)['drafts'] == []
+    assert not (tmp_path / 'data.db').exists()
+
+
+def test_material_evidence_rejects_stale_approval_and_reads_current_request(tmp_path, monkeypatch):
+    import json
+    import time
+    from novelvideo.freezone.workflow_drafts import (create_workflow_draft, claim_workflow_draft_confirmation, bind_workflow_draft_task)
+    from novelvideo.freezone.remix.material_execution import read_material_execution_evidence
+    bridge = tmp_path / 'bridge'
+    monkeypatch.setenv('DRAMACLAW_CANVAS_COMMAND_BRIDGE_DIR', str(bridge))
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='p', canvas_id='c',
+        intent={}, compiled={'ok':True, 'plan': {'nodes':[]}})
+    work = {'steps':[{'id':'image', 'source':'generate', 'status':'submitted', 'execution':{
+        'draft_id':draft['draft_id'], 'draft_revision':1, 'workflow_instance_id':draft['draft_id'], 'canvas_id':'c'}}]}
+    result = read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)
+    assert result['drafts'][0]['next_action']['tool'] == 'freezone_confirm_workflow_draft'
+    claim_workflow_draft_confirmation(project_dir=tmp_path, canvas_id='c', draft_id=draft['draft_id'], revision=1)
+    bind_workflow_draft_task(project_dir=tmp_path, canvas_id='c', draft_id=draft['draft_id'], task_id='task', root_task_id='task')
+    root = bridge / 'mcp_canvas_approvals'
+    root.mkdir(parents=True)
+    approval = {'approval_id':'approval', 'project_id':'p', 'canvas_id':'c', 'expires_at_ms':(time.time()+60)*1000,
+        'commands':[{'type':'create_node', 'data':{'workflowInstanceId':draft['draft_id'],
+                    'workflowDraftRevision':1, 'workflowConfirmationTaskId':'old-task'}}]}
+    (root/'approval.json').write_text(json.dumps(approval))
+    result = read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)
+    assert result['drafts'][0]['material_lifecycle']['canvas_delivery_status'] == 'pending'
+    approval['commands'][0]['data']['workflowConfirmationTaskId'] = 'task'
+    (root/'approval.json').write_text(json.dumps(approval))
+    result = read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)
+    assert result['drafts'][0]['next_action']['request_id'] == 'approval'
+    assert result['drafts'][0]['material_lifecycle']['canvas_delivery_status'] == 'awaiting_confirmation'
+    work['steps'][0]['execution']['draft_revision'] = 2
+    assert read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)['drafts'] == []

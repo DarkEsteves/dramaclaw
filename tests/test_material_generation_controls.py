@@ -190,8 +190,8 @@ def test_unconfirmed_draft_returns_to_pending_so_the_whole_wave_is_replanned(tmp
         draft_revision=1, workflow_state_dir=tmp_path)
     state = read_material_state(store, attached['work_ref'], canvas_id='canvas',
                                 workflow_state_dir=tmp_path)
-    assert state['material_lifecycle']['canvas_delivery_status'] == 'awaiting_confirmation'
-    assert state['material_lifecycle']['generation_status'] == 'awaiting_confirmation'
+    assert state['material_lifecycle']['canvas_delivery_status'] == 'ready_to_submit'
+    assert state['material_lifecycle']['generation_status'] == 'not_started'
     assert state['reopenable_step_ids'] == ['image', 'video']
     assert [item['id'] for item in state['workflow_intent']['items']] == ['image', 'video']
     replanned = material_workflow_intent(state['work'], reopenable_step_ids=state['reopenable_step_ids'])

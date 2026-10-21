@@ -479,7 +479,7 @@ def prepare_material_work(store, plan_ref: dict, requirements: list[dict], steps
         ) from exc
 
 
-def _prepare_material_work(store, plan_ref: dict, requirements: list[dict], steps: list[dict], command_id: str, *, canvas: dict | None = None, direction: dict | None = None, confirmed_choices: dict | None = None) -> dict:
+def _prepare_material_work(store, plan_ref: dict, requirements: list[dict], steps: list[dict], command_id: str, *, canvas: dict | None = None, direction: dict | None = None, confirmed_choices: dict | None = None, _artifact_guard=None) -> dict:
     """Reserve an immutable work package under the project artifact mutex."""
     plan_ref = _exact_ref(plan_ref)
     steps = _apply_confirmed_material_choices(steps, confirmed_choices)
@@ -487,7 +487,8 @@ def _prepare_material_work(store, plan_ref: dict, requirements: list[dict], step
         if (step.get("status", "planned") not in {"planned", "awaiting_upload"} or step.get("candidates")
                 or any(step.get(key) for key in ("accepted_resource", "review_ref", "execution", "task_id"))):
             raise ValueError("initial material execution and acceptance are server owned")
-    with store._locked() as guard:
+    from contextlib import nullcontext
+    with (nullcontext(_artifact_guard) if _artifact_guard is not None else store._locked()) as guard:
         plan = store._read(plan_ref["artifact_id"], plan_ref["revision"])
         if plan["schema"] != "production_plan.v2":
             raise ValueError("material work requires production plan")
@@ -559,6 +560,8 @@ def material_lifecycle_status(
     *,
     workflow_draft: dict[str, Any] | None = None,
     delivery_receipts: list[dict[str, Any]] | None = None,
+    pending_approval: bool = False,
+    native_statuses: list[str] | None = None,
 ) -> dict[str, str]:
     """Project material progress without conflating persistence with execution."""
     saved = isinstance(work, dict) and isinstance(work.get("steps"), list)
@@ -586,8 +589,10 @@ def material_lifecycle_status(
         canvas_delivery_status = "not_requested"
     elif "rejected" in graph_states:
         canvas_delivery_status = "failed"
-    elif draft_status == "ready":
+    elif pending_approval and draft_status in {"confirming", "submitted"}:
         canvas_delivery_status = "awaiting_confirmation"
+    elif draft_status == "ready" and not workflow_draft.get("confirmation_started_at"):
+        canvas_delivery_status = "ready_to_submit"
     else:
         canvas_delivery_status = "pending"
 
@@ -607,12 +612,7 @@ def material_lifecycle_status(
         generation_status = "completed"
     elif result_steps:
         generation_status = "candidate_ready"
-    elif (any(step.get("status") == "submitted" for step in generated_steps)
-          and canvas_delivery_status != "delivered" and draft_status in {"ready", "confirming"}):
-        # Steps attached to a draft that still waits for the canvas
-        # confirmation have not been submitted for generation: nothing ran.
-        generation_status = "awaiting_confirmation"
-    elif any(step.get("status") == "submitted" for step in generated_steps):
+    elif any(status in {"queued", "pending", "running"} for status in (native_statuses or [])):
         generation_status = "submitted"
     else:
         generation_status = "not_started"

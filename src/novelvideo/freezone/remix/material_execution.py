@@ -76,8 +76,130 @@ def reopenable_material_step_ids(project_dir, canvas_id, work) -> list[str]:
             and str((step.get('execution') or {}).get('draft_id') or '').strip() in reopenable]
 
 
+def material_submit_action(draft: dict) -> dict | None:
+    revision = draft.get('revision') or draft.get('draft_revision')
+    if ((draft.get('draft_status') or draft.get('status')) != 'ready'
+            or draft.get('confirmation_started_at') is not None
+            or not draft.get('draft_id') or type(revision) is not int):
+        return None
+    return {'owner': 'agent', 'kind': 'submit_canvas_approval',
+            'action_id': 'submit:%s:%s' % (draft['draft_id'], revision),
+            'tool': 'freezone_confirm_workflow_draft',
+            'draft_id': draft['draft_id'], 'revision': revision}
+
+
+def _material_approval_requests(draft, *, bridge_dirs=()):
+    """Read current native requests without pruning or creating bridge state."""
+    import json
+    import os
+    import sqlite3
+    import time
+    from novelvideo.freezone.canvas_command_bridge import _bridge_db_path
+    task_id = draft.get('task_id')
+    if not task_id or draft.get('confirmation_started_at') is None:
+        return []
+
+    def matches(payload):
+        if (payload.get('project_id'), payload.get('canvas_id')) != (draft['project_id'], draft['canvas_id']):
+            return False
+        return any(isinstance(command, dict) and command.get('type') == 'create_node'
+                   and (command.get('data') or {}).get('workflowInstanceId') == draft['draft_id']
+                   and (command.get('data') or {}).get('workflowDraftRevision') == draft['revision']
+                   and (command.get('data') or {}).get('workflowConfirmationTaskId') == task_id
+                   for command in payload.get('commands', []))
+
+    requests = []
+    roots = list(dict.fromkeys([_bridge_db_path().parent, *map(Path, bridge_dirs)]))
+    for directory in roots:
+        path = _bridge_db_path(directory)
+        if not path.is_file():
+            continue
+        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='canvas_command_messages'").fetchone():
+                rows = conn.execute("SELECT bridge_key,payload_json FROM canvas_command_messages WHERE project_id=? AND canvas_id=? AND kind='canvas_command' AND status IN ('pending','delivered') AND created_at+600>?",
+                                    (draft['project_id'], draft['canvas_id'], time.time())).fetchall()
+                for identity, raw in rows:
+                    payload = json.loads(raw)
+                    if matches(payload) and not (payload.get('envelope') or {}).get('external_mcp_command'):
+                        requests.append({'request_id': identity, 'kind': 'canvas_command'})
+    roots.append(Path(os.environ.get('DRAMACLAW_CANVAS_COMMAND_BRIDGE_DIR') or '/tmp/dramaclaw_canvas_command_bridge'))
+    for directory in dict.fromkeys(roots):
+        root = directory / 'mcp_canvas_approvals'
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob('*.json'))[:1000]:
+            if path.is_symlink():
+                continue
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if payload.get('expires_at_ms', 0) > time.time() * 1000 and matches(payload):
+                requests.append({'request_id': payload['approval_id'], 'kind': 'canvas_approval'})
+    return requests
+
+
+def read_material_execution_evidence(work: dict, *, project_id: str, canvas_id: str,
+                                     state_dir, requester_user_id=None, agent_id='main') -> dict:
+    """Observe only saved step bindings using read-only database connections."""
+    import json
+    import sqlite3
+    from novelvideo.freezone.workflow_drafts import _payload_from_row
+    result = {'drafts': [], 'native_runs': [], 'problems': []}
+    path = Path(state_dir) / 'data.db'
+    if not path.is_file():
+        return result
+    with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        bindings = {}
+        for step in work.get('steps', []):
+            execution = step.get('execution') or {}
+            if execution.get('canvas_id', canvas_id) != canvas_id:
+                continue
+            draft_id = execution.get('draft_id')
+            if draft_id:
+                bindings.setdefault(draft_id, []).append(execution)
+            run_id = execution.get('run_id')
+            if run_id and 'workflow_runs' in tables:
+                row = conn.execute('SELECT run_id,status FROM workflow_runs WHERE run_id=? AND project_id=? AND canvas_id=?', (run_id, project_id, canvas_id)).fetchone()
+                if row and dict(row) not in result['native_runs']:
+                    result['native_runs'].append(dict(row))
+        for draft_id, executions in bindings.items():
+            row = conn.execute('SELECT * FROM workflow_drafts WHERE draft_id=? AND project_id=? AND canvas_id=?', (draft_id, project_id, canvas_id)).fetchone() if 'workflow_drafts' in tables else None
+            if not row or any(execution.get('draft_revision') != row['revision']
+                              or execution.get('workflow_instance_id') != draft_id for execution in executions):
+                result['problems'].append({'draft_id': draft_id, 'kind': 'material_draft_binding_conflict'})
+                continue
+            draft = _payload_from_row(row)
+            receipts = []
+            if 'workflow_delivery_receipts' in tables:
+                rows = conn.execute('SELECT summary_json FROM workflow_delivery_receipts WHERE canvas_id=? AND draft_id=? AND revision=? AND task_id=? AND attempt=? ORDER BY id',
+                                    (canvas_id, draft_id, draft['revision'], draft.get('task_id'), draft.get('confirmation_started_at'))).fetchall()
+                receipts = [json.loads(row[0]) for row in rows]
+            from novelvideo.chat.hermes_pool import canvas_bridge_dir_for_profile
+            home = Path(state_dir) / 'agents' / 'hermes' / 'freezone'
+            bridge_dirs = [canvas_bridge_dir_for_profile(home, 'freezone:' + agent_id),
+                           canvas_bridge_dir_for_profile(home, 'freezone')]
+            approvals = _material_approval_requests(draft, bridge_dirs=bridge_dirs) if draft['status'] in {'confirming', 'submitted'} else []
+            action = material_submit_action(draft)
+            if approvals:
+                action = {'owner': 'user', 'kind': 'await_user_confirmation', 'action_id': approvals[0]['request_id'], 'request_id': approvals[0]['request_id']}
+            elif draft['status'] in {'confirming', 'submitted'} and not any(r.get('graph_state') == 'delivered' for r in receipts):
+                task = conn.execute("SELECT status FROM task_states WHERE task_id=? AND project_id=? AND task_type='freezone_workflow_confirm'", (draft.get('task_id'), project_id)).fetchone() if 'task_states' in tables else None
+                if task and task['status'] in {'queued', 'pending', 'running'}:
+                    action = {'owner': 'system', 'kind': 'await_canvas_receipt', 'action_id': draft['task_id']}
+                else:
+                    result['problems'].append({'draft_id': draft_id, 'revision': draft['revision'], 'kind': 'material_delivery_unverified'})
+            lifecycle = material_lifecycle_status(work, workflow_draft=draft, delivery_receipts=receipts,
+                pending_approval=bool(approvals), native_statuses=[r['status'] for r in result['native_runs']])
+            result['drafts'].append({'draft_id': draft_id, 'revision': draft['revision'], 'status': draft['status'],
+                                     'material_lifecycle': lifecycle, 'next_action': action})
+    return result
+
+
 def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, canvas_id: str | None = None,
-                        include_workflow_intent: bool = True, workflow_state_dir=None) -> dict:
+                        include_workflow_intent: bool = True, workflow_state_dir=None, agent_id='main') -> dict:
     _exact_ref(work_ref)
     saved = store.read_latest(work_ref['artifact_id'])
     if saved['schema'] != 'material_work_package.v1':
@@ -85,10 +207,11 @@ def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, ca
     work = saved['payload']
     lifecycle = material_lifecycle_status(work)
     drafts_dir = Path(workflow_state_dir) if workflow_state_dir is not None else store.project_dir
+    evidence = read_material_execution_evidence(work, project_id=store.project_id,
+        canvas_id=canvas_id, state_dir=drafts_dir, requester_user_id=store.created_by, agent_id=agent_id) if canvas_id else None
     reopenable_step_ids: list[str] = []
     if canvas_id:
-        from novelvideo.freezone.workflow_drafts import list_workflow_delivery_receipts
-        drafts = _attached_material_drafts(drafts_dir, canvas_id, work)
+        drafts = {row['draft_id']: row for row in (evidence or {}).get('drafts', [])}
         reopenable_draft_ids = {draft_id for draft_id, draft in drafts.items()
                                 if str(draft.get('status') or '') in {'ready', 'cancelled'}}
         reopenable_step_ids = [step['id'] for step in work.get('steps', [])
@@ -98,21 +221,15 @@ def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, ca
         lifecycle_by_draft: list[dict] = []
         pending_draft_ids: list[str] = []
         for draft_id in sorted(drafts):
-            state = material_lifecycle_status(
-                work,
-                workflow_draft=drafts[draft_id],
-                delivery_receipts=list_workflow_delivery_receipts(
-                    project_dir=drafts_dir, canvas_id=canvas_id, draft_id=draft_id,
-                ),
-            )
-            if state['canvas_delivery_status'] == 'awaiting_confirmation':
+            state = drafts[draft_id]['material_lifecycle']
+            if state['canvas_delivery_status'] in {'ready_to_submit', 'awaiting_confirmation'}:
                 pending_draft_ids.append(draft_id)
             lifecycle_by_draft.append(state)
         if lifecycle_by_draft:
             # Report the draft that still needs host action first: a delivered
             # earlier wave must not hide a later draft that is waiting for the
             # canvas confirmation.
-            precedence = {'awaiting_confirmation': 4, 'pending': 3, 'delivered': 2,
+            precedence = {'ready_to_submit': 5, 'awaiting_confirmation': 4, 'pending': 3, 'delivered': 2,
                           'failed': 1, 'not_requested': 0}
             lifecycle = max(lifecycle_by_draft,
                             key=lambda state: precedence.get(state['canvas_delivery_status'], 0))
@@ -121,7 +238,7 @@ def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, ca
     return {'work_ref': {'artifact_id': saved['id'], 'revision': saved['revision']}, 'work': work,
             'ready_step_ids': ready_material_steps(work, reopenable_step_ids),
             'reopenable_step_ids': reopenable_step_ids,
-            'material_lifecycle': lifecycle,
+            'material_lifecycle': lifecycle, 'material_execution': evidence,
             **({'workflow_intent': material_workflow_intent(
                 work, canvas=canvas, store=store, reopenable_step_ids=reopenable_step_ids)}
                if include_workflow_intent else {}),
