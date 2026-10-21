@@ -10235,7 +10235,7 @@ _RESULT_FIELDS: dict[str, tuple[str, ...]] = {
     "freezone_get_production_state": (
         "plan_ref", "goal", "output", "beats", "turns", "placements", "resources",
         "speech_takes", "speech_cues", "resource_count", "placement_count",
-        "unbound_placement_ids", "speech_cues_pending", "entity",
+        "unbound_placement_ids", "speech_cues_pending", "speech_turns_pending", "entity",
     ),
     "freezone_get_workflow_skill": (
         "schema_version", "skill_id", "user_goal", "source", "skill", "recipes",

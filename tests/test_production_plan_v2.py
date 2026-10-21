@@ -479,7 +479,7 @@ def test_stale_speech_evidence_does_not_block_non_word_edits() -> None:
     }
     assert compile_production_plan_v2(plan)["subtitle_events"]
     plan["selections"] = [{"id": "spoken", "label": "说话时", "start": {"kind": "word", "ref_id": "spoken-why", "edge": "start"}, "end": {"kind": "word", "ref_id": "spoken-why", "edge": "end"}}]
-    with pytest.raises(ValueError, match="speech timing|word"):
+    with pytest.raises(ValueError, match="speech_needs_review"):
         compile_production_plan_v2(plan)
 
 
@@ -745,7 +745,7 @@ def test_v1_migration_uses_one_full_main_video_take_for_both_speakers(speaker_na
     assert all(cue["take_id"] == take["id"] and cue["timing_status"] == "draft"
                for cue in migrated["speech_cues"])
     assert next(row for row in migrated["placements"] if row["kind"] == "visual")["speech_take_id"] == take["id"]
-    with pytest.raises(ValueError, match="needs accepted timing"):
+    with pytest.raises(ValueError, match="speech_needs_review"):
         compile_production_plan_v2(migrated)
 
 
@@ -1026,8 +1026,38 @@ def test_draft_speech_cues_block_export_and_are_projection_issues(tmp_path: Path
     projection = project_production_plan_v2(plan, project_dir=tmp_path)
     assert not projection["ready"]
     assert any(row["code"] == "unresolved_speech_timing" for row in projection["issues"])
-    with pytest.raises(ValueError, match="accepted timing"):
+    with pytest.raises(ValueError, match="speech_needs_review"):
         compile_production_plan_v2(plan)
+
+
+@pytest.mark.parametrize("mutation", ["ready", "draft_cue", "unassigned_turn"])
+def test_state_and_compile_agree_on_speech_readiness(mutation: str) -> None:
+    """The /state projection and export must never disagree about a plan."""
+    from novelvideo.freezone.remix.production_plan_v2 import (
+        compile_failure_message, production_speech_readiness,
+    )
+
+    plan = _mainline_fixture()
+    if mutation == "draft_cue":
+        plan["speech_cues"][1].update(timing_status="draft", source_start_us=None, source_end_us=None)
+    elif mutation == "unassigned_turn":
+        plan["beats"][0]["turns"].append({"id": "extra", "speaker": "guest", "text": "More"})
+    readiness = production_speech_readiness(plan)
+    blocked = bool(readiness["speech_cues_pending"] or readiness["speech_turns_pending"])
+    assert blocked is (mutation != "ready")
+    if blocked:
+        with pytest.raises(ValueError) as raised:
+            compile_production_plan_v2(plan)
+        assert str(raised.value) == "speech_needs_review"
+        assert "语音校准" in compile_failure_message(raised.value)
+    else:
+        assert compile_production_plan_v2(plan)["output_spec"]["duration_frames"] == 402
+
+
+def test_compile_failure_message_keeps_unknown_errors_verbatim() -> None:
+    from novelvideo.freezone.remix.production_plan_v2 import compile_failure_message
+
+    assert compile_failure_message(ValueError("placement visual has no bound media")) == "placement visual has no bound media"
 
 
 def test_take_audio_origin_is_not_mixed_twice() -> None:
@@ -1070,7 +1100,7 @@ def test_explicit_origin_visual_uses_take_owned_trim_and_speed(tmp_path: Path) -
 def test_unassigned_turn_in_auto_take_beat_blocks_export() -> None:
     plan = _mainline_fixture()
     plan["beats"][0]["turns"].append({"id": "new", "speaker": "guest", "text": "More"})
-    with pytest.raises(ValueError, match="assigned take"):
+    with pytest.raises(ValueError, match="speech_needs_review"):
         compile_production_plan_v2(plan)
     plan["beats"][0].update(timing_mode="fixed", duration_frames=192)
     compile_production_plan_v2(plan)

@@ -39,9 +39,18 @@ export function generateProductionPlanDraft(project: string, topic: string, blue
     method: 'POST', json: { topic, ...(blueprintRef ? { blueprint_ref: exactRef(blueprintRef) } : analysisContext ? { analysis_context: analysisContext } : {}) }, timeout: false,
   });
 }
-export interface ProductionPlanProjection { plan_ref: { artifact_id: string; revision: number }; output_spec: Record<string, unknown>; beats: Record<string, unknown>[]; selections?: Record<string, unknown>[]; resources: Record<string, unknown>[]; placements: Record<string, unknown>[]; issues: Record<string, unknown>[]; ready: boolean }
+export interface ProductionPlanProjection { plan_ref: { artifact_id: string; revision: number }; output_spec: Record<string, unknown>; beats: Record<string, unknown>[]; selections?: Record<string, unknown>[]; resources: Record<string, unknown>[]; placements: Array<Record<string, unknown> & { id?: string; resource_status?: string }>; speech_cues?: Record<string, unknown>[]; issues: Record<string, unknown>[]; ready: boolean }
 export function projectProductionPlan(project: string, planRef: RemixArtifactRef) {
  return apiCall<ProductionPlanProjection>(`projects/${project}/freezone/remix/production-plans/project`, { method: 'POST', json: { plan_ref: exactRef(planRef) } });
+}
+export interface ProductionPlanState {
+  plan_ref: { artifact_id: string; revision: number };
+  speech_cues_pending: string[];
+  speech_turns_pending: string[];
+  unbound_placement_ids: string[];
+}
+export function fetchProductionPlanState(project: string, ref: RemixArtifactRef) {
+  return apiCall<ProductionPlanState>(`projects/${project}/freezone/remix/production-plans/${ref.artifactId}/state?revision=${ref.revision}`);
 }
 export interface ProductionCommandResult { plan_ref: { artifact_id: string; revision: number }; changed_ids: string[]; invalidated: string[]; blockers: string[]; speech_estimates?: Record<string, unknown>[]; plan_diagnostics?: Record<string, unknown>[] }
 export interface ProductionCommandPreflightResult {

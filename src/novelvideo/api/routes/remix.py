@@ -26,7 +26,10 @@ from novelvideo.freezone.remix.contracts import reference_blueprint_readiness_er
 from novelvideo.freezone.remix.operations import RemixOperationStore
 from novelvideo.freezone.remix.script_draft import generate_script_draft
 from novelvideo.freezone.remix.production_plan import compile_production_plan
-from novelvideo.freezone.remix.production_plan_v2 import compile_production_plan_v2, migrate_production_plan_v1, project_production_plan_v2
+from novelvideo.freezone.remix.production_plan_v2 import (
+    compile_failure_message, compile_production_plan_v2, migrate_production_plan_v1,
+    production_speech_readiness, project_production_plan_v2,
+)
 from novelvideo.freezone.remix.production_commands import (
     ProductionCommandConflict, apply_production_command, preflight_production_command,
 )
@@ -616,10 +619,9 @@ async def read_saved_production_state(
                          "timing_status": cue["timing_status"]} for cue in plan.get("speech_cues", [])],
         "resource_count": len(plan.get("resources", [])),
         "placement_count": len(plan.get("placements", [])),
-        "unbound_placement_ids": [placement["id"] for placement in plan.get("placements", [])
-                                  if placement["kind"] in {"visual", "audio"} and not placement.get("resource_id")],
-        "speech_cues_pending": [cue["id"] for cue in plan.get("speech_cues", [])
-                                if cue["timing_status"] != "ready"],
+        # Speech readiness comes from the same projection export uses, so a plan
+        # that reads "pending" here cannot compile and vice versa.
+        **production_speech_readiness(plan),
         **({"entity": entity} if entity is not None else {}),
     })
 
@@ -633,11 +635,15 @@ async def compile_saved_production_plan(project: str, body: CompileProductionPla
     artifact = await _call(store.read, ref["artifact_id"], ref["revision"])
     if artifact["schema"] not in {"production_plan.v1", "production_plan.v2"}:
         raise HTTPException(422, "plan_ref must reference a saved production plan")
+    compiler = compile_production_plan_v2 if artifact["schema"] == "production_plan.v2" else compile_production_plan
     try:
-        compiler = compile_production_plan_v2 if artifact["schema"] == "production_plan.v2" else compile_production_plan
         manifest = await _call(compiler, artifact["payload"])
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    except HTTPException as exc:
+        # _call already turns ValueError into a 422; translate only stable codes
+        # so the author sees an actionable sentence instead of an internal key.
+        if exc.status_code != 422 or not isinstance(exc.detail, str):
+            raise
+        raise HTTPException(422, compile_failure_message(ValueError(exc.detail))) from exc
     manifest["source_versions"] = [ref]
     return _data(manifest)
 
@@ -665,7 +671,12 @@ async def preview_saved_production_frame(
             )
             if not projection["ready"]:
                 raise HTTPException(409, "Bound media or plan timing has changed; check the production plan")
-            manifest = await _call(compile_production_plan_v2, artifact["payload"])
+            try:
+                manifest = await _call(compile_production_plan_v2, artifact["payload"])
+            except HTTPException as exc:
+                if exc.status_code != 422 or not isinstance(exc.detail, str):
+                    raise
+                raise HTTPException(422, compile_failure_message(ValueError(exc.detail))) from exc
             manifest["source_versions"] = [ref]
             active_layers = [layer for layer in manifest["layers"]
                              if layer["start_frame"] <= body.frame < layer["end_frame"]]

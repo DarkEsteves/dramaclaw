@@ -13,6 +13,7 @@ import { flushProductionPlanV2AutoSave, productionPlanUpstreamRefs, scheduleProd
 import { upgradeMigratedPlanAnchors } from '@/features/canvas/remix/productionPlanV2Upgrade';
 import { acceptRemoteDifference, planDifferences } from '@/features/canvas/remix/productionPlanV2Conflict';
 import { applyProductionPlanHistory, productionPlanHistoryEntry, type ProductionPlanHistoryEntry } from '@/features/canvas/remix/productionPlanEditHistory';
+import { cachedProductionReadiness, loadProductionPlanReadiness } from '@/features/canvas/remix/productionWorkflowRuntime';
 import { submitProductionComposeRender } from './productionComposeRender';
 import { canvasBindingIssues, movePlacement, projectProductionTimeline, resizePlacement, splitPlacement, type ProjectedPlacement } from './productionComposeModel';
 import { ProductionTrackMedia } from './ProductionTrackMedia';
@@ -98,6 +99,11 @@ export function ProductionComposeWorkspace({ project, canvasId, planNodeId, comp
     : typeof composeData?.remixPreviousVideoUrl === 'string' ? composeData.remixPreviousVideoUrl : null;
   const renderRef = composeData?.productionPlanRenderedRef as RemixArtifactRef | undefined;
   const currentVideo = Boolean(oldVideoUrl && savedRef && refKey(renderRef) === refKey(savedRef) && !planData?.productionPlanV2Dirty && !canvasIssues.length);
+  const speechPending = useMemo(() => {
+    const node = nodes.find((item) => item.id === planNodeId);
+    const readiness = node ? cachedProductionReadiness(node) : null;
+    return Boolean(readiness && (readiness.speech_cues_pending.length || readiness.speech_turns_pending.length));
+  }, [nodes, planNodeId, planData?.productionPlanV2Ref, planData?.productionPlanReadiness]);
   const conflictDifferences = useMemo(() => plan && remotePlan ? planDifferences(plan, remotePlan.draft) : [], [plan, remotePlan]);
   useEffect(() => () => { if (reviewFrame) URL.revokeObjectURL?.(reviewFrame.url); }, [reviewFrame]);
   useEffect(() => { setReviewFrame(null); }, [playhead, currentRefKey, planData?.productionPlanV2Dirty]);
@@ -142,7 +148,10 @@ export function ProductionComposeWorkspace({ project, canvasId, planNodeId, comp
     if (projectionRef === refKey(savedRef)) return;
     let cancelled = false;
     void projectProductionPlan(project, savedRef).then((result) => {
-      if (!cancelled) { setProjection(result); setProjectionRef(refKey(savedRef)); }
+      if (cancelled) return;
+      setProjection(result); setProjectionRef(refKey(savedRef));
+      // Cache the server's compile verdict so the Agent repeats it, not a guess.
+      void loadProductionPlanReadiness(project, planNodeId, savedRef);
     }).catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); });
     return () => { cancelled = true; };
   }, [project, currentRefKey, projectionRef, planData?.productionPlanV2Dirty, planData?.productionPlanV2Conflict]);
@@ -356,6 +365,7 @@ export function ProductionComposeWorkspace({ project, canvasId, planNodeId, comp
       if (!saved) throw new Error('作品方案尚未保存');
       const result = await projectProductionPlan(project, saved);
       setProjection(result); setProjectionRef(refKey(saved));
+      await loadProductionPlanReadiness(project, planNodeId, saved);
       const store = useCanvasStore.getState();
       const latest = store.nodes.find((node) => node.id === planNodeId)?.data.productionPlanV2Draft as ProductionPlanV2 | undefined;
       const graphIssues = latest ? canvasBindingIssues(latest, store.edges, planNodeId, planMediaCandidates(project, store.nodes, planNodeId)) : [];
@@ -482,6 +492,7 @@ export function ProductionComposeWorkspace({ project, canvasId, planNodeId, comp
       </div>{reviewFrame && <div className="flex h-full max-w-[48%] flex-col items-center justify-center gap-2"><img src={reviewFrame.url} alt="导出渲染帧" className="min-h-0 max-h-[90%] max-w-full rounded-xl object-contain shadow-2xl" /><span className="text-xs text-text-muted">方案版本 {reviewFrame.revision} · 第 {reviewFrame.frame} 帧 · 导出渲染</span></div>}</div><div className="flex w-full max-w-md items-center gap-3"><button className={button} aria-label={playing ? '暂停' : '播放'} onClick={() => setPlaying(!playing)}>{playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}</button><span className="font-mono text-xs text-text-muted">{plan ? frameLabel(Math.floor(playhead), plan) : '0s'}</span><input aria-label="播放位置" type="range" min="0" max={Math.max(1, duration - 1)} value={Math.floor(playhead)} onChange={(event) => { const frame = Number(event.target.value); setPlayhead(frame); if (currentVideo && previewVideoRef.current) previewVideoRef.current.currentTime = frame / fps; }} className="min-w-0 flex-1 accent-primary" /><span className="font-mono text-xs text-text-muted">{durationSec.toFixed(2)}s</span></div></main>
       <aside className={`w-[280px] shrink-0 overflow-y-auto p-4 ${panel}`}><div className="mb-3 flex items-center justify-between gap-2"><strong className="text-sm">{selected ? '条目属性' : '作品设置'}</strong>{selected && <button className={button} onClick={openPlanEntry}>在作品方案中查看</button>}</div>{plan && selected ? <Inspector plan={plan} placement={selected} issues={issuesFor(selected.id)} onChange={(edit) => changePlan((next) => { const row = next.placements.find((item) => item.id === selected.id); if (row) edit(row); })} onChangeTake={(takeId, edit) => changePlan((next) => { editPlanSpeechTakeSource(next, takeId, edit); })} onDelete={() => { changePlan((next) => { next.placements = next.placements.filter((item) => item.id !== selected.id); }); setSelectedId(null); }} onSplit={() => changePlan((next) => splitPlacement(next, selected.id, Math.round(playhead), crypto.randomUUID()))} /> : plan ? <div className="space-y-3 text-xs"><label className="block">目标<input className={`${input} mt-1 w-full`} value={plan.goal} onChange={(event) => changePlan((next) => { next.goal = event.target.value; })} /></label><div className="grid grid-cols-2 gap-2">{(['width', 'height', 'fps_num', 'fps_den'] as const).map((key) => <label key={key}>{({ width: '宽', height: '高', fps_num: '帧率分子', fps_den: '帧率分母' })[key]}<input className={`${input} mt-1 w-full`} type="number" min="1" value={plan.output[key]} onChange={(event) => changePlan((next) => { next.output[key] = Number(event.target.value); })} /></label>)}</div><p className="text-text-muted">尺寸和帧率由作品方案决定，导出不会自动裁剪时长。</p></div> : <p className="text-xs text-text-muted">读取方案中…</p>}
         {Boolean(planData?.productionPlanV2Conflict) && <div role="alert" className="mt-4 space-y-2 rounded-lg border border-red-400/40 p-3 text-xs text-red-200"><p>方案在另一处更新。当前修改保留在本地，自动保存已暂停；仍可继续调整。</p>{remotePlan ? <><p>远端版本 {remotePlan.ref.revision} · {remotePlan.draft.goal}</p><p>本地版本 {savedRef?.revision ?? '—'} · {plan?.goal}</p><p>远端 {remotePlan.draft.beats.length} 段、{remotePlan.draft.placements.length} 项；本地 {plan?.beats.length ?? 0} 段、{plan?.placements.length ?? 0} 项。</p><div className="max-h-44 space-y-1 overflow-y-auto rounded border border-white/10 p-2">{conflictDifferences.map((difference) => <div key={difference.label} className="border-b border-white/10 pb-1 last:border-0"><div className="flex items-center justify-between gap-2"><strong className="truncate">{difference.label}</strong><button className={button} disabled={Boolean(busy)} onClick={() => changePlan((current) => acceptRemoteDifference(current, remotePlan.draft, difference.path))}>此项采用远端</button></div><p className="truncate">本地：{difference.local}</p><p className="truncate">远端：{difference.remote}</p></div>)}{!conflictDifferences.length && <p>两份内容一致，可接受远端修订。</p>}</div><div className="flex flex-wrap gap-2"><button className={button} disabled={Boolean(busy)} onClick={acceptRemotePlan}>接受远端版本</button><button className={button} disabled={Boolean(busy)} onClick={() => void branchLocalPlan()}>保留本地为新方案</button></div></> : <p>正在读取远端版本…</p>}</div>}
+        {speechPending && <div className="mt-4 rounded-lg border border-amber-400/30 p-3 text-xs text-amber-200">有台词还没有确认的发声时间。请先在作品方案里完成语音校准，再回到这里导出。</div>}
         {issues.length > 0 && <div className="mt-4 rounded-lg border border-amber-400/30 p-3 text-xs"><div className="mb-2 text-amber-200">待处理 {issues.length} 项</div>{issues.slice(0, 20).map((issue, index) => { const selectionId = 'selection_id' in issue && typeof issue.selection_id === 'string' ? issue.selection_id : null; const placementId = typeof issue.placement_id === 'string' ? issue.placement_id : null; return <button key={`${selectionId ?? placementId}:${index}`} className="block w-full truncate py-1 text-left text-text-muted hover:text-primary" onClick={() => selectionId ? openPlanRange(selectionId) : placementId && setSelectedId(placementId)}>{selectionId ? `范围 ${selectionId}` : placementId ?? '方案'} · {String(issue.message)}</button>; })}</div>}
         {Boolean(error || planData?.productionPlanV2SaveError) && <p role="alert" className="mt-4 break-words text-xs text-red-300">{error || String(planData?.productionPlanV2SaveError)}</p>}
         <p role="status" className="mt-4 text-[11px] text-text-muted">{planData?.productionPlanV2Conflict ? '版本冲突' : planData?.productionPlanV2Dirty ? '正在自动保存…' : `已保存方案版本 ${savedRef?.revision ?? '—'}`}</p>

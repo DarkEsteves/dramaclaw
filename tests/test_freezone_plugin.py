@@ -96,7 +96,7 @@ def test_production_state_tool_is_scoped_read_only(monkeypatch):
     monkeypatch.setattr(plugin, "_request", lambda method, path, **kwargs: captured.append((method, path, kwargs)) or {
         "ok": True,
         "data": {"plan_ref": {"artifact_id": "plan-1", "revision": 2}, "goal": "复刻",
-                 "beats": [], "unbound_placement_ids": [], "speech_cues_pending": []},
+                 "beats": [], "unbound_placement_ids": [], "speech_cues_pending": [], "speech_turns_pending": []},
     })
     result = plugin._handle_get_production_state({"artifact_id": "plan-1", "revision": 2})
     assert result["ok"] is True

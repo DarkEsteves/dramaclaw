@@ -310,6 +310,29 @@ def test_production_plan_draft_and_compile_reject_incomplete_inputs(client):
     assert "hook-picture" in response.json()["detail"]
 
 
+def test_compile_translates_stable_refusal_codes_for_the_author(client, monkeypatch):
+    from test_production_plan_v2 import _plan
+    from novelvideo.api.routes import remix as routes
+
+    api, _ = client
+    created = api.post(BASE, json={"schema": "production_plan.v2", "payload": _plan()})
+    assert created.status_code == 200, created.text
+    artifact = created.json()["data"]
+    ref = {"artifact_id": artifact["id"], "revision": artifact["revision"]}
+    monkeypatch.setattr(routes, "compile_production_plan_v2",
+                        lambda _payload: (_ for _ in ()).throw(ValueError("speech_needs_review")))
+    response = api.post("/api/v1/projects/demo/freezone/remix/production-plans/compile", json={"plan_ref": ref})
+    assert response.status_code == 422
+    # _call turns ValueError into a 422 first; the author must still get the
+    # actionable sentence instead of the internal readiness key.
+    assert "语音校准" in response.json()["detail"]
+    assert "speech_needs_review" not in response.json()["detail"]
+    monkeypatch.setattr(routes, "compile_production_plan_v2",
+                        lambda _payload: (_ for _ in ()).throw(ValueError("placement visual has no bound media")))
+    other = api.post("/api/v1/projects/demo/freezone/remix/production-plans/compile", json={"plan_ref": ref})
+    assert other.json()["detail"] == "placement visual has no bound media"
+
+
 @pytest.mark.parametrize("inputs", [
     {"analysis_context": {"events": [{"narrative": "开场"}]}},
     {"blueprint_ref": {"artifact_id": "old-blueprint", "revision": 1}},

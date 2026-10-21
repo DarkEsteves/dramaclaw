@@ -1247,6 +1247,56 @@ def _timing_resolver(plan: ProductionPlanV2):
     return duration, resolve, selection_rows, selection_issues, aligned_turns, aligned_word_cues, beat_ranges, speech_take_ranges
 
 
+_COMPILE_FAILURE_MESSAGES = {
+    "speech_needs_review": "台词识别仍需复核：还有台词缺少确认的发声时间，请先完成语音校准再合成",
+}
+
+
+def compile_failure_message(error: BaseException) -> str:
+    """Turn a stable compile failure code into text a plan author can act on."""
+    message = _COMPILE_FAILURE_MESSAGES.get(str(error))
+    return message if message is not None else str(error)
+
+
+# Issues whose only remedy is a human confirming speech timing in the plan.
+SPEECH_TIMING_ISSUE_CODES = frozenset({"unresolved_speech_timing", "speech_exceeds_fixed_beat"})
+
+
+def production_speech_readiness(payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Project the speech facts that block export, without reading media.
+
+    ``_timing_resolver`` is the projection export itself uses, so a plan that is
+    pending here cannot compile and vice versa. Callers expose this result as-is
+    and must not derive a second readiness rule from the same payload.
+    """
+    plan = ProductionPlanV2.model_validate(payload)
+    (_duration, _resolve, _rows, selection_issues, _aligned_turns, _word_cues,
+     _beats, _takes) = _timing_resolver(plan)
+    cues_pending = [cue.id for cue in plan.speech_cues if cue.timing_status != "ready"]
+    turns_pending: list[str] = []
+    for issue in selection_issues:
+        if issue.get("code") not in SPEECH_TIMING_ISSUE_CODES:
+            continue
+        cue_id = issue.get("cue_id")
+        if isinstance(cue_id, str):
+            cues_pending.append(cue_id)
+        turn_id = issue.get("turn_id")
+        if isinstance(turn_id, str):
+            turns_pending.append(turn_id)
+    ready_cues = {(cue.take_id, cue.turn_id) for cue in plan.speech_cues
+                  if cue.timing_status == "ready"}
+    for take in plan.speech_takes:
+        turns_pending.extend(turn_id for turn_id in take.turn_ids
+                             if (take.id, turn_id) not in ready_cues)
+    return {
+        "speech_cues_pending": list(dict.fromkeys(cues_pending)),
+        "speech_turns_pending": list(dict.fromkeys(turns_pending)),
+        "unbound_placement_ids": [placement.id for placement in plan.placements
+                                  if placement.kind in {"visual", "audio"}
+                                  and not placement.resource_id],
+    }
+
+
 def compile_production_plan_v2(payload: dict[str, Any]) -> dict[str, Any]:
     """Resolve anchors against one saved author revision into an immutable frame plan."""
     from .render import validate_manifest
@@ -1255,12 +1305,14 @@ def compile_production_plan_v2(payload: dict[str, Any]) -> dict[str, Any]:
     resources = {row.id: row for row in plan.resources}
     duration, resolve, _, selection_issues, aligned_turns, aligned_word_cues, beat_ranges, speech_take_ranges = _timing_resolver(plan)
     if selection_issues:
-        raise ValueError(selection_issues[0]["message"])
-    if any(cue.timing_status != "ready" for cue in plan.speech_cues) or any(
-        not any(cue.turn_id == turn_id and cue.take_id == take.id and cue.timing_status == "ready" for cue in plan.speech_cues)
-        for take in plan.speech_takes for turn_id in take.turn_ids
-    ):
-        raise ValueError("Speech cues need current accepted timing before export")
+        # Speech timing is reported by its stable code so one readiness rule
+        # answers both /state and export; other issues keep their own message.
+        issue = selection_issues[0]
+        raise ValueError("speech_needs_review" if issue.get("code") in SPEECH_TIMING_ISSUE_CODES
+                         else issue["message"])
+    readiness = production_speech_readiness(payload)
+    if readiness["speech_cues_pending"] or readiness["speech_turns_pending"]:
+        raise ValueError("speech_needs_review")
 
     layers: list[dict[str, Any]] = []
     audio: list[dict[str, Any]] = []

@@ -8,6 +8,7 @@ import type { PlanAnchorV2, ProductionPlanV2 } from '@/features/canvas/remix/pro
 import { planMediaCandidates } from '@/features/canvas/remix/productionPlanModel';
 import { flushProductionPlanV2AutoSave, scheduleProductionPlanV2AutoSave } from '@/features/canvas/remix/productionPlanV2AutoSave';
 import { inspectProductionSpeechReadiness, sharedSpeechTakeSourceBlocker, type PendingSpeechOperation, type SpeechReviewSnapshot } from '@/features/canvas/remix/productionSpeechReadiness';
+import { loadProductionPlanReadiness, productionReadinessBlocker } from '@/features/canvas/remix/productionWorkflowRuntime';
 import { bindProductionCanvasCandidate, executeProductionCanvasCommand, type ProductionCanvasCommand } from '@/features/canvas/remix/productionCanvasCommand';
 import { upgradeMigratedPlanAnchors, upgradePlanSpeech } from '@/features/canvas/remix/productionPlanV2Upgrade';
 import { acceptPlanSpeechTimings, countIndependentAudioSources } from '@/features/canvas/remix/productionPlanV2Edits';
@@ -209,6 +210,14 @@ export function ProductionPlanV2Editor({ id, project, canvasId, data, onClose, o
   });
   return () => { cancelled = true; };
  }, [draft, project, id, data.productionPlanV2Conflict]);
+ useEffect(() => {
+  // Read the server's compile verdict once per saved revision. Local jobs keep
+  // their own progress hints, but "cannot compile" is answered by the backend.
+  if (!project || !ref || data.productionPlanV2Dirty || data.productionPlanV2Conflict) return;
+  const requested = ref;
+  void loadProductionPlanReadiness(project, id, requested);
+ }, [project, id, ref?.artifactId, ref?.revision, data.productionPlanV2Dirty, data.productionPlanV2Conflict]);
+
  useEffect(() => {
   // Autosave already keeps an in-memory draft for the saved revision. Fetching
   // it again replaces the object during an in-flight SRT evidence transaction.
@@ -428,6 +437,9 @@ export function ProductionPlanV2Editor({ id, project, canvasId, data, onClose, o
   const current = useCanvasStore.getState().nodes.find((node) => node.id === id)?.data ?? data;
   const latest = current.productionPlanV2Draft as ProductionPlanV2 | undefined ?? draft;
   if (!latest) return;
+  const currentNode = useCanvasStore.getState().nodes.find((node) => node.id === id);
+  const blocker = currentNode ? productionReadinessBlocker(currentNode) : null;
+  if (blocker) { setError(blocker); setView('speech'); return; }
   const issues = inspectProductionSpeechReadiness(latest,
    (current.productionSpeechReviews as Record<string, SpeechReviewSnapshot> | undefined) ?? {},
    (current.productionSpeechOperations as Record<string, PendingSpeechOperation> | undefined) ?? {});

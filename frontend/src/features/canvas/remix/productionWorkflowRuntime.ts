@@ -1,11 +1,10 @@
-import { fetchRemixArtifact, type RemixArtifact, type RemixArtifactRef } from '@/api/remix';
+import { fetchProductionPlanState, fetchRemixArtifact, type RemixArtifact, type RemixArtifactRef } from '@/api/remix';
 import { getFreezoneCanvas, type FreezoneWorkflowRunAction } from '@/api/canvas';
 import type { CanvasEdge, CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { acceptPlanSpeechTimings } from './productionPlanV2Edits';
 import { flushProductionPlanV2AutoSave } from './productionPlanV2AutoSave';
 import { emptyProductionPlanV2, type PlanSpeechTimingV2, type ProductionPlanV2 } from './productionPlanV2Model';
 import { identifyRecognizedWords } from './productionSpeechWordIdentity';
-import { inspectProductionSpeechReadiness } from './productionSpeechReadiness';
 import { storyAnalysisContext } from './productionPlanModel';
 import { normalizeCanvasData, useCanvasStore } from '@/stores/canvasStore';
 import { applyRemoteFreezoneCanvas, getFreezoneCanvasBaseline } from '@/features/freezone/canvasSyncRuntime';
@@ -72,23 +71,70 @@ function groupedTurnIds(plan: ProductionPlanV2, leaderId: string, placementId: s
     .map((turn) => turn.id);
   return group.includes(leaderId) ? group : [leaderId];
 }
-function reviewBlocker(planNode: CanvasNode): boolean {
+export interface ProductionPlanReadiness {
+  planRef: RemixArtifactRef;
+  speech_cues_pending: string[];
+  speech_turns_pending: string[];
+  unbound_placement_ids: string[];
+}
+
+function idList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+/** Read the server's own readiness for the exact saved revision on this node. */
+export function cachedProductionReadiness(planNode: CanvasNode): ProductionPlanReadiness | null {
+  const value = planNode.data.productionPlanReadiness;
+  if (!record(value)) return null;
+  const planRef = exactRef(value.planRef);
+  if (!planRef || !sameRef(planRef, exactRef(planNode.data.productionPlanV2Ref))) return null;
+  return { planRef, speech_cues_pending: idList(value.speech_cues_pending),
+    speech_turns_pending: idList(value.speech_turns_pending),
+    unbound_placement_ids: idList(value.unbound_placement_ids) };
+}
+
+/**
+ * The backend owns "can this plan compile". The canvas only repeats a cached
+ * verdict for the same saved revision; without a fresh verdict it submits and
+ * lets the server explain the refusal, instead of guessing from local state.
+ */
+export function productionReadinessBlocker(planNode: CanvasNode): string | null {
+  const readiness = cachedProductionReadiness(planNode);
+  if (!readiness) return null;
+  if (readiness.unbound_placement_ids.length) return '还有画面或声音未绑定素材，暂不能编译';
+  if (readiness.speech_cues_pending.length || readiness.speech_turns_pending.length) return '台词识别仍需人工复核，暂不能编译';
+  return null;
+}
+
+export function cacheProductionPlanReadiness(planNodeId: string, readiness: Omit<ProductionPlanReadiness, 'planRef'> & { planRef: RemixArtifactRef }): void {
+  useCanvasStore.getState().updateNodeData(planNodeId, { productionPlanReadiness: {
+    planRef: readiness.planRef, speech_cues_pending: readiness.speech_cues_pending,
+    speech_turns_pending: readiness.speech_turns_pending, unbound_placement_ids: readiness.unbound_placement_ids,
+  } });
+}
+
+/** Read the server verdict for one saved revision and keep it on the plan node. */
+export async function loadProductionPlanReadiness(project: string, planNodeId: string, planRef: RemixArtifactRef): Promise<void> {
+  try {
+    const state = await fetchProductionPlanState(project, planRef);
+    cacheProductionPlanReadiness(planNodeId, { planRef,
+      speech_cues_pending: state.speech_cues_pending ?? [],
+      speech_turns_pending: state.speech_turns_pending ?? [],
+      unbound_placement_ids: state.unbound_placement_ids ?? [] });
+  } catch {
+    // No verdict is not a refusal: the submit path still lets the server answer.
+  }
+}
+
+/** A recorded mismatch on the current source text still needs a human pass. */
+function reviewNeedsAttention(planNode: CanvasNode): boolean {
   const reviews = planNode.data.productionSpeechReviews;
   const plan = planNode.data.productionPlanV2Draft as ProductionPlanV2 | undefined;
   if (!record(reviews) || !plan || !Array.isArray(plan.beats)) return false;
-  const unresolved = new Set(inspectProductionSpeechReadiness(plan, {}, {}).map((issue) => issue.turnId));
   return Object.entries(reviews).some(([turnId, review]) => {
-    if (!record(review) || review.status === 'no_speech' || !unresolved.has(turnId)) return false;
-    const beat = plan.beats.find((item) => item.turns.some((turn) => turn.id === turnId));
-    const turn = beat?.turns.find((item) => item.id === turnId);
-    if (!beat || !turn || review.text !== turn.text) return false;
-    const take = plan.speech_takes?.find((item) => item.beat_id === beat.id && item.turn_ids.includes(turnId));
-    const placementId = take?.origin_placement_id ?? turn.speech_placement_id ?? turn.speech_timing?.placement_id;
-    if (!placementId || review.placementId !== placementId || review.takeId && review.takeId !== take?.id) return false;
-    const placement = take ? undefined : plan.placements.find((item) => item.id === placementId);
-    const resource = plan.resources.find((item) => item.id === (take?.resource_id ?? placement?.resource_id));
-    return Boolean(resource && review.mediaHash === resource.media_hash
-      && review.sourceInUs === 0 && review.sourceOutUs === resource.duration_us);
+    if (!record(review) || review.status === 'no_speech') return false;
+    const turn = plan.beats.flatMap((beat) => beat.turns).find((item) => item.id === turnId);
+    return Boolean(turn && review.text === turn.text);
   });
 }
 function inputSignature(node: CanvasNode): string {
@@ -151,6 +197,9 @@ export function buildProductionWorkflowAction(node: CanvasNode, nodes: CanvasNod
         }
       }
     }
+    // A reason already found above is the most specific one, so later checks
+    // only fill in a missing reason instead of overwriting it.
+    if (descriptor.blocked) return descriptor;
     if (node.data.productionPlanV2Dirty || node.data.productionPlanV2Conflict) descriptor.blocked = '作品方案有尚未保存的本地修改';
     else if (exactRef(node.data.productionPlanV2Ref) && !isEmptyPlanDraft(node.data.productionPlanV2Draft)
       && !hasCurrentProductionProcessingResult(node, action, nodes, edges)) descriptor.blocked = '作品方案已存在内容，请新建方案节点';
@@ -174,7 +223,7 @@ export function buildProductionWorkflowAction(node: CanvasNode, nodes: CanvasNod
   }
   if (action === 'compile_production_plan') {
     if (node.type !== 'videoComposeNode') descriptor.blocked = '方案编译必须在视频合成节点执行';
-    else if (reviewBlocker(planNode)) descriptor.blocked = '台词识别仍需人工复核，暂不能编译';
+    else descriptor.blocked = productionReadinessBlocker(planNode) ?? undefined;
     return descriptor;
   }
   if (node.type !== 'scriptNode' || node.data.remixRole !== 'production_plan') {
@@ -216,7 +265,7 @@ export function hasCurrentProductionProcessingResult(node: CanvasNode, action: P
     && sameRef(exactRef(node.data.productionWorkflowResultRef), exactRef(node.data.productionPlanV2Ref)));
   if (action === 'compile_production_plan') {
     const planNode = sourcePlan(node, nodes, edges);
-    return Boolean(exactRef(node.data.remixManifestRef) && planNode && sameRef(exactRef(node.data.productionPlanV2Ref), exactRef(planNode.data.productionPlanV2Ref)) && node.data.remixInputsCurrent === true && !reviewBlocker(planNode));
+    return Boolean(exactRef(node.data.remixManifestRef) && planNode && sameRef(exactRef(node.data.productionPlanV2Ref), exactRef(planNode.data.productionPlanV2Ref)) && node.data.remixInputsCurrent === true && !productionReadinessBlocker(planNode));
   }
   const turnId = requested.turn_id;
   const plan = node.data.productionPlanV2Draft as ProductionPlanV2 | undefined;
@@ -225,7 +274,7 @@ export function hasCurrentProductionProcessingResult(node: CanvasNode, action: P
   const take = plan?.speech_takes?.find((item) => item.id === takeId);
   const placementId = typeof requested.placement_id === 'string' ? requested.placement_id : '';
   const ids = turn ? groupedTurnIds(plan!, turn.id, take?.origin_placement_id ?? placementId, typeof takeId === 'string' ? takeId : '') : [];
-  return Boolean(ids.length && !node.data.productionPlanV2Dirty && !reviewBlocker(node) && ids.every((id) => {
+  return Boolean(ids.length && !node.data.productionPlanV2Dirty && ids.every((id) => {
     const currentTurn = plan?.beats.flatMap((beat) => beat.turns).find((item) => item.id === id);
     const timing = currentTurn?.speech_timing;
     const placement = plan?.placements.find((item) => item.id === timing?.placement_id);
@@ -326,7 +375,7 @@ export async function reconcileProductionWorkflowResult(project: string, descrip
   const already = currentNode(descriptor.nodeId);
   if (already?.data.productionWorkflowAction === descriptor.action
     && sameRef(exactRef(already.data.productionWorkflowResultRef), ref)) {
-    return { status: descriptor.action === 'align_production_speech' && reviewBlocker(already) ? 'review' : 'ready', artifactRef: ref };
+    return { status: descriptor.action === 'align_production_speech' && reviewNeedsAttention(already) ? 'review' : 'ready', artifactRef: ref };
   }
   guardCurrent(descriptor, isCurrent);
   const store = useCanvasStore.getState();

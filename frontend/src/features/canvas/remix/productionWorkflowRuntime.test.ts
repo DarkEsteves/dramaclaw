@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchRemixArtifact } from '@/api/remix';
+import { fetchProductionPlanState, fetchRemixArtifact } from '@/api/remix';
 import { createFreezoneWorkflowRun, getFreezoneCanvas, getFreezoneWorkflowRun, updateFreezoneWorkflowRun } from '@/api/canvas';
 import { useCanvasStore } from '@/stores/canvasStore';
 import type { CanvasNode } from '../domain/canvasNodes';
 import { emptyProductionPlanV2, type ProductionPlanV2 } from './productionPlanV2Model';
-import { buildProductionWorkflowAction, hasCurrentProductionProcessingResult, markProductionWorkflowSubmission, reconcileProductionWorkflowResult, recoverProductionWorkflowAction } from './productionWorkflowRuntime';
+import { buildProductionWorkflowAction, hasCurrentProductionProcessingResult, loadProductionPlanReadiness, markProductionWorkflowSubmission, reconcileProductionWorkflowResult, recoverProductionWorkflowAction } from './productionWorkflowRuntime';
 import { applyCanvasChatCommandsAsync, hasGeneratedResult } from '@/features/freezone/canvasChatCommands';
 import { flushProductionPlanV2AutoSave } from './productionPlanV2AutoSave';
 import { remixGraphFingerprint } from './prepareNodeRemix';
 import { applyRemoteFreezoneCanvas, flushFreezoneCanvasRuntime, getFreezoneCanvasBaseline } from '@/features/freezone/canvasSyncRuntime';
 
-vi.mock('@/api/remix', () => ({ fetchRemixArtifact: vi.fn() }));
+vi.mock('@/api/remix', () => ({ fetchRemixArtifact: vi.fn(), fetchProductionPlanState: vi.fn(async () => ({ speech_cues_pending: [], speech_turns_pending: [], unbound_placement_ids: [] })) }));
 vi.mock('@/api/canvas', () => ({ createFreezoneWorkflowRun: vi.fn(), getFreezoneCanvas: vi.fn(), getFreezoneWorkflowRun: vi.fn(), updateFreezoneWorkflowRun: vi.fn() }));
 vi.mock('@/api/tasks', () => ({ getProjectTaskLimits: vi.fn(async () => ({})) }));
 vi.mock('@/features/freezone/canvasSyncRuntime', () => ({ flushFreezoneCanvasRuntime: vi.fn(async () => true),
@@ -35,7 +35,7 @@ const plan = (): ProductionPlanV2 => ({ schema_version: 2, goal: '有台词横�
   placements: [{ id: 'visual', kind: 'visual', role: 'primary', track_id: 'visual', resource_id: 'media', start: { kind: 'beat', ref_id: 'beat', edge: 'start' }, end: { kind: 'beat', ref_id: 'beat', edge: 'end' } }],
   speech_takes: [{ id: 'take', beat_id: 'beat', resource_id: 'media', turn_ids: ['first', 'second'], origin_placement_id: 'visual', source_in_us: 0, source_out_us: 4_000_000, speed_num: 1, speed_den: 1, lead_in_frames: 0 }],
 });
-const node = (id: string, type: CanvasNode['type'], data: Record<string, unknown>): CanvasNode => ({ id, type, data, position: { x: 0, y: 0 } } as CanvasNode);
+const node = (id: string, type: CanvasNode['type'], data: Record<string, unknown>, x = 0): CanvasNode => ({ id, type, data, position: { x, y: 0 } } as CanvasNode);
 const nodes = () => [node('plan-node', 'scriptNode', { remixRole: 'production_plan', productionPlanV2Ref: ref, productionPlanV2Draft: plan(), productionPlanV2Dirty: false,
   processingAction: 'align_production_speech', processingPayload: { media_path: 'media/talk.mp4', turn_id: 'first', take_id: 'take' }, remixNodeRevision: 3 }),
   node('compose', 'videoComposeNode', { processingAction: 'compile_production_plan', productionPlanNodeId: 'plan-node', remixNodeRevision: 2 })];
@@ -242,7 +242,7 @@ describe('native production processing workflow', () => {
     expect(useCanvasStore.getState().nodes[1].data.productionPlanV2Ref).toBeUndefined();
   });
 
-  it('keeps a mismatch as review evidence and blocks automatic compile', async () => {
+  it('keeps a mismatch as review evidence without inventing a local compile block', async () => {
     const current = useCanvasStore.getState();
     const descriptor = buildProductionWorkflowAction(current.nodes[0], current.nodes, current.edges)!;
     vi.mocked(fetchRemixArtifact).mockResolvedValue({ id: 'asr', revision: 1, schema: 'word_timeline.v1', upstream_refs: [{ artifact_id: 'plan', revision: 1 }], payload: {
@@ -252,8 +252,9 @@ describe('native production processing workflow', () => {
     const outcome = await reconcileProductionWorkflowResult('project', descriptor, { artifact_id: 'asr', revision: 1 }, () => true);
     expect(outcome.status).toBe('review');
     expect(useCanvasStore.getState().nodes[0].data.productionSpeechReviews).toMatchObject({ first: { status: 'script_mismatch', artifactRef: { artifactId: 'asr', revision: 1 } } });
+    // No server verdict for this revision yet: submit and let compile answer.
     const compose = useCanvasStore.getState().nodes[1];
-    expect(buildProductionWorkflowAction(compose, useCanvasStore.getState().nodes, useCanvasStore.getState().edges)?.blocked).toMatch(/台词/);
+    expect(buildProductionWorkflowAction(compose, useCanvasStore.getState().nodes, useCanvasStore.getState().edges)?.blocked).toBeUndefined();
   });
 
   it('ignores old speech reviews after the turn is removed or its source is rebound', () => {
@@ -261,7 +262,7 @@ describe('native production processing workflow', () => {
       text: '你好', sourceInUs: 0, sourceOutUs: 4_000_000 };
     const state = useCanvasStore.getState();
     state.updateNodeData('plan-node', { productionSpeechReviews: { first: firstReview } });
-    expect(buildProductionWorkflowAction(state.nodes[1], useCanvasStore.getState().nodes, state.edges)?.blocked).toMatch(/台词/);
+    expect(buildProductionWorkflowAction(state.nodes[1], useCanvasStore.getState().nodes, state.edges)?.blocked).toBeUndefined();
 
     const rebound = plan();
     rebound.resources.push({ id: 'replacement', node_id: 'other-video', media_kind: 'video', media_path: 'media/new.mp4',
@@ -275,6 +276,49 @@ describe('native production processing workflow', () => {
     removed.speech_takes![0].turn_ids = ['second'];
     state.updateNodeData('plan-node', { productionPlanV2Draft: removed });
     expect(buildProductionWorkflowAction(useCanvasStore.getState().nodes[1], useCanvasStore.getState().nodes, state.edges)?.blocked).toBeUndefined();
+  });
+
+  it('repeats the server verdict for the exact saved revision and ignores stale ones', async () => {
+    vi.mocked(fetchProductionPlanState).mockResolvedValueOnce({ plan_ref: { artifact_id: 'plan', revision: 1 },
+      speech_cues_pending: ['cue'], speech_turns_pending: ['first'], unbound_placement_ids: [] });
+    await loadProductionPlanReadiness('project', 'plan-node', ref);
+    const cached = useCanvasStore.getState();
+    expect(buildProductionWorkflowAction(cached.nodes[1], cached.nodes, cached.edges)?.blocked).toMatch(/台词/);
+
+    useCanvasStore.getState().updateNodeData('plan-node', { productionPlanV2Ref: { artifactId: 'plan', revision: 2 } });
+    vi.mocked(fetchProductionPlanState).mockResolvedValueOnce({ plan_ref: { artifact_id: 'plan', revision: 2 },
+      speech_cues_pending: [], speech_turns_pending: [], unbound_placement_ids: ['visual'] });
+    await loadProductionPlanReadiness('project', 'plan-node', { artifactId: 'plan', revision: 2 });
+    expect(buildProductionWorkflowAction(useCanvasStore.getState().nodes[1], useCanvasStore.getState().nodes, useCanvasStore.getState().edges)?.blocked).toMatch(/未绑定/);
+
+    // A verdict read for an older revision must never block a newer saved plan.
+    useCanvasStore.getState().updateNodeData('plan-node', { productionPlanV2Ref: { artifactId: 'plan', revision: 3 } });
+    expect(buildProductionWorkflowAction(useCanvasStore.getState().nodes[1], useCanvasStore.getState().nodes, useCanvasStore.getState().edges)?.blocked).toBeUndefined();
+  });
+
+  it('leaves the compile verdict to the server when the state read fails', async () => {
+    vi.mocked(fetchProductionPlanState).mockRejectedValueOnce(new Error('offline'));
+    await loadProductionPlanReadiness('project', 'plan-node', ref);
+    const state = useCanvasStore.getState();
+    expect(state.nodes[0].data.productionPlanReadiness).toBeUndefined();
+    expect(buildProductionWorkflowAction(state.nodes[1], state.nodes, state.edges)?.blocked).toBeUndefined();
+  });
+
+  it('still blocks unsaved local edits before compile', () => {
+    useCanvasStore.getState().updateNodeData('plan-node', { productionPlanV2Dirty: true });
+    const state = useCanvasStore.getState();
+    expect(buildProductionWorkflowAction(state.nodes[1], state.nodes, state.edges)?.blocked).toMatch(/保存/);
+  });
+
+  it('still blocks a plan draft wired to several analyses', () => {
+    const planNode = { ...nodes()[0], data: { ...nodes()[0].data, processingAction: 'generate_production_plan_draft',
+      processingPayload: { topic: '新片' }, productionPlanV2Ref: undefined, productionPlanV2Draft: undefined } };
+    const stories = [node('story-a', 'videoStoryNode', { sourceVideoUrl: 'media/a.mp4' }, 1),
+      node('story-b', 'videoStoryNode', { sourceVideoUrl: 'media/b.mp4' }, 2)];
+    useCanvasStore.setState({ nodes: [planNode, ...stories], edges: stories.map((item, index) => (
+      { id: `edge-${index}`, source: item.id, target: 'plan-node', type: 'context_for' } as never)) });
+    const state = useCanvasStore.getState();
+    expect(buildProductionWorkflowAction(state.nodes[0], state.nodes, state.edges)?.blocked).toMatch(/多个原片分析/);
   });
 
   it('lets the Agent compile manually corrected ready cues despite an old ASR mismatch', async () => {

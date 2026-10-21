@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProductionPlanV2 } from '@/features/canvas/remix/productionPlanV2Model';
 import { bindPlanSpeechSource } from '@/features/canvas/remix/productionPlanV2Edits';
 
-const api = vi.hoisted(() => ({ createRemixArtifact: vi.fn(), attachRemixMedia: vi.fn(), fetchRemixArtifact: vi.fn(), fetchRemixOperation: vi.fn(), fetchRemixTaskStatus: vi.fn(), submitRemixProcessAction: vi.fn() }));
+const api = vi.hoisted(() => ({ createRemixArtifact: vi.fn(), attachRemixMedia: vi.fn(), fetchRemixArtifact: vi.fn(), fetchProductionPlanState: vi.fn(), fetchRemixOperation: vi.fn(), fetchRemixTaskStatus: vi.fn(), submitRemixProcessAction: vi.fn() }));
 const canvasApi = vi.hoisted(() => ({ listFreezoneWorkflowRuns: vi.fn(), getFreezoneWorkflowRun: vi.fn() }));
 const save = vi.hoisted(() => ({ flushProductionPlanV2AutoSave: vi.fn(), scheduleProductionPlanV2AutoSave: vi.fn() }));
 const commands = vi.hoisted(() => ({ CANVAS_CHAT_COMMANDS_SCHEMA_VERSION: 'canvas_chat_commands.v1',
