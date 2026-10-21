@@ -31,6 +31,43 @@ _SPEECH_SOURCE_ANCHOR_CODES = frozenset({
     "speech_source_interval_excludes_turn",
 })
 
+# Editing a speech carrier's binding or timing is the whole fix; every target
+# must already exist, so a repair can never invent media or rewrite dialogue.
+_SPEECH_REPAIRABLE_CODES = frozenset({
+    "speech_source_timing_invalid",
+    "speech_source_spans_beats",
+    "speech_source_turns_not_contiguous",
+    "speech_source_turn_binding_mismatch",
+    "speech_source_missing",
+    "speech_source_interval_excludes_turn",
+    "speech_source_muted",
+    "speech_source_loop_not_allowed",
+})
+# Editing a reference is the whole fix; every target must already exist.
+_REFERENCE_REPAIRABLE_CODES = frozenset({
+    "placement_anchor_missing",
+    "placement_turn_missing",
+    "selection_anchor_missing",
+})
+_REPAIRABLE_PATH_CODES = _SPEECH_REPAIRABLE_CODES | _REFERENCE_REPAIRABLE_CODES
+
+
+def repairable_plan_issue(issue: dict[str, Any]) -> bool:
+    """A one-shot repair can only change a pointer or an anchor interval."""
+    if issue.get("code") in _REPAIRABLE_PATH_CODES:
+        return True
+    return (
+        issue.get("code") == "value_error"
+        and str(issue.get("path") or "").endswith("/graphic/emphasis")
+        and "emphasis" in str(issue.get("message") or "").lower()
+    )
+
+
+def plan_repair_available(error: BaseException) -> bool:
+    """True only when every reported issue is inside the repair whitelist."""
+    issues = plan_repair_issues(error)
+    return bool(issues) and all(repairable_plan_issue(issue) for issue in issues)
+
 
 def plan_repair_issues(error: BaseException) -> list[dict[str, Any]]:
     """Extract native validation locations without parsing rendered error text."""

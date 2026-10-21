@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import time
 from dataclasses import replace
@@ -21,6 +23,7 @@ from .plan_issues import issue_error_message, issue_from_pydantic_row
 from .production_plan_repair import (
     apply_plan_repair,
     build_plan_repair_scope,
+    plan_repair_available,
     plan_repair_issues,
     plan_repair_json_schema,
 )
@@ -68,37 +71,6 @@ def validate_structured_recipe_output(recipe: dict[str, Any], content: str) -> A
     return validate(recipe, content)
 
 
-_SPEECH_REPAIRABLE_CODES = frozenset({
-    "speech_source_timing_invalid",
-    "speech_source_spans_beats",
-    "speech_source_turns_not_contiguous",
-    "speech_source_turn_binding_mismatch",
-    "speech_source_missing",
-    "speech_source_interval_excludes_turn",
-    "speech_source_muted",
-    "speech_source_loop_not_allowed",
-})
-
-
-# Editing a reference is the whole fix; every target must already exist.
-_REFERENCE_REPAIRABLE_CODES = frozenset({
-    "placement_anchor_missing",
-    "placement_turn_missing",
-    "selection_anchor_missing",
-})
-_REPAIRABLE_PATH_CODES = _SPEECH_REPAIRABLE_CODES | _REFERENCE_REPAIRABLE_CODES
-
-
-def _repairable_plan_issue(issue: dict[str, Any]) -> bool:
-    if issue.get("code") in _REPAIRABLE_PATH_CODES:
-        return True
-    return (
-        issue.get("code") == "value_error"
-        and str(issue.get("path") or "").endswith("/graphic/emphasis")
-        and "emphasis" in str(issue.get("message") or "").lower()
-    )
-
-
 def _repair_context_for_plan(draft: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
     context = scope.get("repair_context")
     result: dict[str, Any] = {
@@ -142,9 +114,9 @@ async def _repair_generated_plan_once(
     locked_turns: list[dict[str, str]] | None, timing_assumptions: list[dict[str, str]] | None,
     username: str, deadline: float, policy: Any,
 ) -> dict[str, Any] | None:
-    issues = plan_repair_issues(error)
-    if not issues or not all(_repairable_plan_issue(issue) for issue in issues):
+    if not plan_repair_available(error):
         return None
+    issues = plan_repair_issues(error)
     scope = build_plan_repair_scope(candidate, issues)
     if not scope["allowed_paths"]:
         return None
@@ -614,6 +586,7 @@ async def _generate_production_plan_stage(
     source_timing: dict[str, Any] | None = None,
     on_stage: Callable[[DraftStageEvent], Awaitable[None]] | None = None,
     deadline: float | None = None,
+    draft_stage_attempt: int = 1,
 ) -> dict[str, Any]:
     """Draft story and arrangements, then validate one native editable plan."""
     recipe = get_recipe_for_runtime(username=username, recipe_id="reference-production-plan")
@@ -695,7 +668,7 @@ async def _generate_production_plan_stage(
 
     if plan is None:
         await notify("outline", "started")
-        with production_plan_diagnostic_context(attempt=1, draft_stage="outline"):
+        with production_plan_diagnostic_context(attempt=draft_stage_attempt, draft_stage="outline"):
             outline_content = await generate_recipe_text(
                 username=username, recipe_id="reference-production-plan", node_kind="text",
                 node_prompt=("先规划叙事段落、逐句台词及成片规格。只输出结构与台词阶段 JSON。"
@@ -742,7 +715,7 @@ async def _generate_production_plan_stage(
     await notify("arrangement", "started")
     arrangement_context = {**planning_context, "draft_outline": outline}
     outline_characters = len(json.dumps(outline, ensure_ascii=False, separators=(",", ":")))
-    with production_plan_diagnostic_context(attempt=1, draft_stage="arrangement"):
+    with production_plan_diagnostic_context(attempt=draft_stage_attempt, draft_stage="arrangement"):
         arrangement_content = await generate_recipe_text(
             username=username, recipe_id="reference-production-plan", node_kind="text",
             node_prompt=prompt + "已确定段落和台词见 draft_outline；只能安排 selections、placements 和 speech_bindings，不能重写段落、台词或输出规格。",
@@ -771,7 +744,7 @@ async def _generate_production_plan_stage(
     await notify("arrangement", "completed", arrangement)
 
     await notify("finalize", "started")
-    with production_plan_diagnostic_context(attempt=1, draft_stage="finalize"):
+    with production_plan_diagnostic_context(attempt=draft_stage_attempt, draft_stage="finalize"):
         validation_input = {**assembled, "provenance": {}}
         validation_input.pop("authoring_stage", None)
         validation_input.pop("speech_takes", None)
@@ -907,17 +880,132 @@ async def generate_production_plan_draft(
         spoken_event_count=sum(bool(row.get("spoken_range")) for row in source_events),
         context_characters=len(upstream_text),
     )
-    from .production_plan_execution import plan_execution_policy
+    from .production_plan_execution import (
+        MIN_PLAN_RETRY_SECONDS, classify_plan_failure, plan_attempt_policy,
+        plan_execution_policy,
+    )
     policy = plan_execution_policy()
+    attempts = plan_attempt_policy()
     started = time.monotonic()
     deadline = min(deadline, started + policy.total_timeout_seconds) if deadline is not None else started + policy.total_timeout_seconds
-    remaining = deadline - started
-    if remaining <= 0:
+    if deadline - started <= 0:
         raise TimeoutError("production_plan_deadline_exceeded")
-    model_deadline = deadline - min(30.0, remaining * 0.1)
     if on_stage is not None:
         await on_stage(DraftStageEvent("full", "started"))
-    with production_plan_diagnostic_context(attempt=1, draft_stage="full"):
+    seen: set[str] = set()
+    failure: BaseException | None = None
+    draft: dict[str, Any] | None = None
+    calls_used = 0
+    next_strategy = "same"
+    attempt = 0
+    while True:
+        attempt += 1
+        calls_left = attempts.max_calls - calls_used
+        remaining = deadline - time.monotonic()
+        if attempt > 1:
+            if remaining < MIN_PLAN_RETRY_SECONDS or calls_left < 1:
+                log_production_plan_diagnostic(
+                    "production_plan.retry_skipped", stage="requesting",
+                    attempt=attempt, error_code="insufficient_remaining_budget",
+                )
+                break
+            log_production_plan_diagnostic(
+                "production_plan.retry_started", stage="requesting",
+                attempt=attempt, error_code=str(failure),
+            )
+        if next_strategy == "stage_split":
+            if calls_left < 2:
+                break
+            calls_used += 2
+            round_deadline = deadline
+            outline_deadline = time.monotonic() + remaining * 0.45
+            stage_attempt = attempt
+            try:
+                outline_plan = await _generate_production_plan_stage(
+                    topic=topic, blueprint=blueprint, username=username, plan=None,
+                    locked_turns=locked_turns, requirements=requirements,
+                    source_timing=source_timing, output_preferences=output_preferences,
+                    draft_stage_attempt=stage_attempt, deadline=outline_deadline,
+                )
+                draft = await _generate_production_plan_stage(
+                    topic=topic, blueprint=blueprint, username=username, plan=outline_plan,
+                    locked_turns=locked_turns, requirements=requirements,
+                    source_timing=source_timing, output_preferences=output_preferences,
+                    draft_stage_attempt=stage_attempt, deadline=round_deadline,
+                )
+                failure = None
+                break
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                failure = exc
+                decision = classify_plan_failure(exc)
+                log_production_plan_diagnostic(
+                    "production_plan.attempt_failed", stage="requesting",
+                    attempt=attempt, error_code=decision["code"], draft_stage="arrangement",
+                )
+                break
+        # Every round gets a fair share of what is left, so one slow call cannot
+        # consume the budget a later, differently-shaped call still needs.
+        round_deadline = min(time.monotonic() + remaining / calls_left,
+                             deadline - min(30.0, remaining * 0.1))
+        calls_used += 1
+        try:
+            content = await _generate_full_plan_candidate(
+                topic=topic, username=username, prompt=prompt,
+                planning_context=planning_context, upstream_text=upstream_text,
+                policy=policy, model_deadline=round_deadline, on_stage=on_stage,
+                attempt=attempt,
+            )
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if digest in seen:
+                log_production_plan_diagnostic(
+                    "production_plan.retry_skipped", stage="requesting",
+                    attempt=attempt, error_code="identical_candidate",
+                )
+                break
+            try:
+                draft = await _validate_full_plan_candidate(
+                    content, topic=topic, recipe=recipe, requirements=requirements,
+                    locked_turns=locked_turns, timing_assumptions=timing_assumptions,
+                    username=username, deadline=round_deadline, policy=policy, attempt=attempt,
+                )
+            except ValueError:
+                # Only a candidate that actually produced output can be "seen";
+                # otherwise a dead request would be recorded as a duplicate.
+                seen.add(digest)
+                raise
+            seen.add(digest)
+            failure = None
+            break
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            failure = exc
+            decision = classify_plan_failure(exc)
+            log_production_plan_diagnostic(
+                "production_plan.attempt_failed", stage="requesting",
+                attempt=attempt, error_code=decision["code"],
+            )
+            if decision["action"] != "retry":
+                break
+            next_strategy = decision["strategy"]
+    if draft is None:
+        raise failure if failure is not None else TimeoutError("production_plan_deadline_exceeded")
+    draft["authoring_stage"] = "arranged"
+    if on_stage is not None:
+        await on_stage(DraftStageEvent("full", "completed", draft))
+    return draft
+
+
+async def _generate_full_plan_candidate(
+    *, topic: str, username: str, prompt: str,
+    planning_context: dict[str, Any], upstream_text: str, policy: Any,
+    model_deadline: float, on_stage: Callable[[DraftStageEvent], Awaitable[None]] | None,
+    attempt: int,
+) -> str:
+    """One complete draft request; the caller owns deadlines and retry bounds."""
+    with production_plan_diagnostic_context(attempt=attempt, draft_stage="full"):
         content = await generate_recipe_text(
             username=username,
             recipe_id="reference-production-plan",
@@ -929,13 +1017,24 @@ async def generate_production_plan_draft(
             plan_policy=policy,
             plan_deadline=model_deadline,
         )
-        if on_stage is not None:
-            await on_stage(DraftStageEvent("finalize", "started"))
+    if on_stage is not None:
+        await on_stage(DraftStageEvent("finalize", "started"))
+    return content
+
+
+async def _validate_full_plan_candidate(
+    content: str, *, topic: str, recipe: dict[str, Any],
+    requirements: dict[str, Any] | None, locked_turns: list[dict[str, str]] | None,
+    timing_assumptions: list[dict[str, str]] | None, username: str, deadline: float,
+    policy: Any, attempt: int,
+) -> dict[str, Any]:
+    """Parse, validate and, when the whitelist allows, repair one response."""
+    with production_plan_diagnostic_context(attempt=attempt, draft_stage="finalize"):
         candidate: dict[str, Any] | None = None
         try:
             parsed_candidate = _parse_stage_json(content)
             candidate = parsed_candidate if isinstance(parsed_candidate, dict) else None
-            draft = validate_generated_production_plan(
+            return validate_generated_production_plan(
                 parsed_candidate, topic=topic, recipe=recipe,
                 requirements=requirements, locked_turns=locked_turns,
                 timing_assumptions=timing_assumptions,
@@ -950,11 +1049,7 @@ async def generate_production_plan_draft(
             )
             if repaired is None:
                 raise
-            draft = repaired
-        draft["authoring_stage"] = "arranged"
-    if on_stage is not None:
-        await on_stage(DraftStageEvent("full", "completed", draft))
-    return draft
+            return repaired
 
 
 async def generate_production_plan_arrangement(

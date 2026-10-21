@@ -18,7 +18,7 @@ from novelvideo.freezone.agent_catalog_schema import validate_agent_recipe_confi
 
 
 @pytest.mark.asyncio
-async def test_plan_invalid_json_stops_after_one_attempt_without_content(monkeypatch, caplog):
+async def test_plan_invalid_json_retries_once_without_leaking_content(monkeypatch, caplog):
     from novelvideo.freezone.remix import production_plan
     from test_production_plan import native_plan
 
@@ -33,17 +33,19 @@ async def test_plan_invalid_json_stops_after_one_attempt_without_content(monkeyp
     monkeypatch.setattr(production_plan, "validate_structured_recipe_output", lambda *_args: None)
     with caplog.at_level(logging.INFO, logger="novelvideo.llm_instrumentation"):
         with llm_instrumentation.production_plan_diagnostic_context(task_id="task-1"):
-            with pytest.raises(ValueError, match="json_parse_failed"):
-                await production_plan.generate_production_plan_draft(
-                    topic="做个新故事", blueprint=None, username="alice",
-                )
+            drafted = await production_plan.generate_production_plan_draft(
+                topic="做个新故事", blueprint=None, username="alice",
+            )
     events = [json.loads(record.getMessage()) for record in caplog.records
               if record.name == "novelvideo.llm_instrumentation" and record.getMessage().startswith("{")]
-    assert len(replies) == 1
-    assert [item["attempt"] for item in events if item["event"] == "production_plan.validation_started"] == [1]
+    assert drafted["authoring_stage"] == "arranged"
+    assert replies == []
+    assert {item["attempt"] for item in events
+            if item["event"] == "production_plan.validation_started"} == {1, 2}
     assert any(item["event"] == "production_plan.validation_failed" and item["error_code"] == "json_parse_failed"
                and item["attempt"] == 1 for item in events)
-    assert not any(item["event"] == "production_plan.validation_succeeded" for item in events)
+    succeeded = [item for item in events if item["event"] == "production_plan.validation_succeeded"]
+    assert [item["attempt"] for item in succeeded] == [2]
     assert secret not in caplog.text
 
 

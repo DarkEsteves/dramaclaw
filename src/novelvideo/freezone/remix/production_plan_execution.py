@@ -6,8 +6,11 @@ import asyncio
 from dataclasses import dataclass
 import json
 import os
+import re
 import time
 from typing import Any
+
+from .production_plan_repair import plan_repair_available
 
 from novelvideo.llm_instrumentation import (
     _extract_provider_ids,
@@ -31,10 +34,72 @@ class PlanModelResponseInfo:
     output_characters: int
 
 
+# A second drafting call needs a usable slice of the task budget; below this
+# the retry would only race the deadline and waste a paid request.
+MIN_PLAN_RETRY_SECONDS = 60.0
+_MAX_PLAN_CALLS = 4
+_DEFAULT_PLAN_CALLS = 3
+
+
+@dataclass(frozen=True)
+class PlanAttemptPolicy:
+    max_calls: int
+
+
 class PlanOutputLimitError(ValueError):
     def __init__(self, info: PlanModelResponseInfo):
         super().__init__("model_output_limit")
         self.info = info
+
+
+def plan_attempt_policy() -> PlanAttemptPolicy:
+    """One drafting task may re-ask the model, but never without a hard bound."""
+    raw = os.getenv("FREEZONE_PRODUCTION_PLAN_MAX_CALLS", str(_DEFAULT_PLAN_CALLS))
+    try:
+        max_calls = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_production_plan_max_calls") from exc
+    if max_calls < 1:
+        raise ValueError("invalid_production_plan_max_calls")
+    return PlanAttemptPolicy(min(max_calls, _MAX_PLAN_CALLS))
+
+
+_SAFE_FAILURE_CODE = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
+
+
+def classify_plan_failure(error: BaseException) -> dict[str, str]:
+    """Decide one bounded next step from an already-raised drafting failure.
+
+    Only the kind of failure decides; no model text, prompt or provider body is
+    read. Unknown failures stop, so an unrecognized error never burns a retry.
+    """
+    if isinstance(error, PlanOutputLimitError):
+        return {"action": "retry", "strategy": "stage_split", "code": "model_output_limit"}
+    if isinstance(error, TimeoutError):
+        return {"action": "stop", "strategy": "same", "code": "production_plan_deadline_exceeded"}
+    if not isinstance(error, ValueError):
+        return {"action": "stop", "strategy": "same", "code": "unknown_failure"}
+    code = str(error)
+    if code not in {
+        "json_parse_failed", "production_plan_draft_must_be_object",
+        "plan_validation_failed", "production_plan_stage_validation_failed",
+    } or not _SAFE_FAILURE_CODE.fullmatch(code):
+        return {"action": "stop", "strategy": "same", "code": "unknown_failure"}
+    if code == "plan_validation_failed" and _repairable_in_chain(error):
+        return {"action": "repair", "strategy": "same", "code": code}
+    return {"action": "retry", "strategy": "same", "code": code}
+
+
+def _repairable_in_chain(error: BaseException) -> bool:
+    """Validation wraps the rule error; either link may carry the locations."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if plan_repair_available(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def split_plan_stage_tokens(total: int) -> tuple[int, int]:

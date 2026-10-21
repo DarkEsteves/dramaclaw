@@ -99,7 +99,9 @@ async def test_signed_single_request_failure_persists_specific_issue(
     assert state is not None and state.status == "failed", state
     assert state.task_id == queued.task_state.task_id
     assert state.error == "plan_validation_failed"
-    assert len(calls) == 1
+    # A timing cycle is outside the repair whitelist: one same-mode retry, then
+    # the identical candidate stops the loop.
+    assert len(calls) == 2
     assert operations.get(operation["operation_id"])["output_refs"] == []
     persisted = TaskStateManager().get_task_for_project(
         ctx, prepared["task_type"], 0, scope=operation["operation_id"])

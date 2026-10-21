@@ -377,35 +377,37 @@ async def test_draft_does_not_record_primary_shot_mismatch_as_failure(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_invalid_json_stops_after_one_model_call(monkeypatch):
+@pytest.mark.parametrize("content", ["{invalid", ""])
+async def test_unparseable_output_is_retried_only_up_to_the_call_bound(monkeypatch, content):
     from novelvideo.freezone.remix import production_plan
     calls = []
 
     async def generate(**kwargs):
         calls.append(kwargs)
-        return "{invalid"
+        return content if len(calls) == 1 else _draft_response(native_plan(), kwargs)
 
     monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
-    with pytest.raises(ValueError, match="json_parse_failed"):
-        await _generate_reviewed_plan(
-            topic="A short film", blueprint=None, username="alice")
-    assert len(calls) == 1
+    drafted = await _generate_reviewed_plan(
+        topic="A short film", blueprint=None, username="alice")
+    assert len(calls) == 2
+    assert drafted["authoring_stage"] == "arranged"
 
 
 @pytest.mark.asyncio
-async def test_empty_model_output_is_json_parse_failure_without_retry(monkeypatch):
+@pytest.mark.parametrize("content", ["{invalid", ""])
+async def test_unparseable_output_that_repeats_stops_at_two_calls(monkeypatch, content):
     from novelvideo.freezone.remix import production_plan
     calls = []
 
     async def generate(**kwargs):
         calls.append(kwargs)
-        return ""
+        return content
 
     monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
     with pytest.raises(ValueError, match="json_parse_failed"):
         await _generate_reviewed_plan(
             topic="A short film", blueprint=None, username="alice")
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
@@ -741,7 +743,8 @@ async def test_ai_draft_rejects_rewritten_locked_dialogue(monkeypatch) -> None:
             topic="黑咖啡", blueprint=None, username="alice",
             locked_turns=[{"speaker": "女", "text": "晚上喝咖啡吗？"}],
         )
-    assert calls == 1
+    # Locked dialogue is not repairable, so the identical candidate is not re-sent.
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -919,7 +922,7 @@ def test_saved_silent_plan_compiles_and_renders(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_graphic_draft_invalid_field_stops_without_retry(monkeypatch):
+async def test_graphic_draft_invalid_field_is_not_repaired(monkeypatch):
     from novelvideo.freezone.remix import production_plan
     calls=[]
     bad=native_plan()
@@ -932,7 +935,9 @@ async def test_graphic_draft_invalid_field_stops_without_retry(monkeypatch):
     monkeypatch.setattr(production_plan,'generate_recipe_text',generate)
     with pytest.raises(ValueError, match="plan_validation_failed"):
         await _generate_reviewed_plan(topic='咖啡',blueprint=None,username='alice')
-    assert len(calls)==1
+    # One same-mode retry, never a repair of an unsupported graphic field.
+    assert len(calls)==2
+    assert all('structured_output_contract' not in row for row in calls)
 
 
 def assert_emphasis_guidance(prompt: str) -> None:

@@ -60,6 +60,11 @@ def build_plan_failure_summary(record: dict, *, task_id: str) -> dict | None:
     error_message = _field(record, "error_message", _SAFE_MESSAGE)
     if error_message:
         summary["error_message"] = error_message
+    # A bounded retry inside one task is a fact worth telling the reader: it
+    # explains why the same request already ran more than once.
+    attempt = record.get("attempt")
+    if type(attempt) is int and 2 <= attempt <= 10:
+        summary["attempt_count"] = attempt
     return summary
 
 
@@ -83,8 +88,22 @@ def read_plan_failure_summary(task: Any) -> dict | None:
     return failure
 
 
+def _with_attempts(notice: str, failure: dict) -> str:
+    attempts = failure.get("attempt_count")
+    if type(attempts) is not int or not 2 <= attempts <= 10:
+        return notice
+    suffix = "本次方案尚未保存。"
+    if not notice.endswith(suffix):
+        return notice
+    return notice[:-len(suffix)] + f"本任务内已自动重试 {attempts - 1} 次，仍未通过校验。{suffix}"
+
+
 def format_plan_failure_notice(failure: dict) -> str:
     """Render known issue codes; never quote model output or exception text."""
+    return _with_attempts(_format_plan_failure_notice(failure), failure)
+
+
+def _format_plan_failure_notice(failure: dict) -> str:
     issues = failure.get("issues")
     issue = issues[0] if isinstance(issues, list) and issues and isinstance(issues[0], dict) else {}
     if issue.get("code") == "speech_source_timing_cycle":

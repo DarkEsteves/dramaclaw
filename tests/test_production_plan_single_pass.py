@@ -206,7 +206,7 @@ async def test_model_boundary_receives_first_middle_and_last_reference_events(mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('content', ['{invalid', json.dumps({**native_plan(), 'output': {}})])
-async def test_failed_single_call_does_not_retry_or_complete(monkeypatch, content):
+async def test_repeated_failure_never_completes_or_exceeds_the_call_bound(monkeypatch, content):
     calls, events = [], []
     async def generate(**kwargs):
         calls.append(kwargs)
@@ -217,7 +217,8 @@ async def test_failed_single_call_does_not_retry_or_complete(monkeypatch, conten
     with pytest.raises(ValueError):
         await production_plan.generate_production_plan_draft(
             topic='中文咖啡短片', blueprint=None, username='alice', on_stage=on_stage)
-    assert len(calls) == 1 and 'completed' not in events
+    # The same bytes twice means a third identical request would be waste.
+    assert len(calls) == 2 and 'completed' not in events
 
 
 @pytest.mark.asyncio
@@ -263,6 +264,8 @@ async def test_full_draft_wire_uses_none_and_one_request_even_on_validation_fail
         assert result['authoring_stage'] == 'arranged'
         assert result['provenance'] == {}
         assert result['placements'][0]['id'] == 'hook-picture'
-    assert len(requests) == 1
-    assert requests[0]['reasoning_effort'] == 'none'
-    assert requests[0]['max_completion_tokens'] == 16384
+    # A schema-invalid candidate is re-asked once; the wire contract is the same
+    # for every attempt, and an identical reply stops before a third request.
+    assert len(requests) == (2 if invalid_content else 1)
+    assert {row['reasoning_effort'] for row in requests} == {'none'}
+    assert {row['max_completion_tokens'] for row in requests} == {16384}
