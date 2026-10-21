@@ -310,7 +310,7 @@ The entire system runs on a single proprietary sans, **abcNormal**, with `abcNor
 - **Uppercase reserved for two roles.** `{typography.eyebrow}` for section labels, `{typography.micro-caps}` for footer columns and small tags. Body copy is never set in uppercase.
 
 ### Note on Font Substitutes
-If `abcNormal` is unavailable, the closest open-source substitutes are **ABC Diatype** (commercial) or **Inter** at -0.02em tracking on display sizes. When using Inter, lift display sizes by ~1px and pull `letter-spacing` slightly tighter (-1.4px at 48px) to recover the compressed silhouette of the original.
+If `abcNormal` is unavailable, the closest substitutes are **ABC Diatype** (commercial) or **Inter** (free, SIL OFL) at -0.02em tracking on display sizes. When using Inter, lift display sizes by ~1px and pull `letter-spacing` slightly tighter (-1.4px at 48px) to recover the compressed silhouette of the original.
 
 ## Layout
 
