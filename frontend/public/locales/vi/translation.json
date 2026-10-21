@@ -3400,6 +3400,8 @@
       "end": "kết thúc",
       "range": "bắt đầu hoặc kết thúc",
       "speechSourceCycle": "Xác thực phương án thất bại: thời điểm {{edge}} của nguồn thoại {{placement}} phụ thuộc vào chính câu thoại {{turn}} chưa được xác định thời gian, tạo thành vòng lặp. Hãy xác định khoảng thời gian của nguồn thoại trước. Bản nháp này chưa được lưu.",
+      "speechSourceSpansBeats": "Xác thực phương án thất bại: nguồn thoại {{placement}} đang mang thoại của nhiều đoạn, gồm {{turn}} không thuộc {{beat}}. Mỗi nguồn thoại chỉ phục vụ một đoạn; hãy trỏ các câu thoại đó về nguồn của đoạn tương ứng. Bản nháp này chưa được lưu.",
+      "speechSourceNotContiguous": "Xác thực phương án thất bại: thoại do nguồn {{placement}} mang không liên tục trong đoạn {{beat}}. Hãy chuyển các câu thoại ở giữa sang nguồn khác. Bản nháp này chưa được lưu.",
       "otherIssue": "Xác thực phương án thất bại tại {{path}} ({{code}}). Bản nháp này chưa được lưu."
     },
     "taskCount": "{{count}} tác vụ",

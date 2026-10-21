@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from copy import deepcopy
 from fractions import Fraction
 import hashlib
@@ -13,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from .graphic_effects import GraphicEffect
+from .plan_issues import plan_issue
 
 
 PLACEMENT_ROLES: dict[str, frozenset[str]] = {
@@ -130,18 +130,29 @@ class BeatV2(_Value):
     @model_validator(mode="after")
     def contained_times(self) -> "BeatV2":
         if self.duration_source_placement_id is not None and (self.timing_mode != "auto" or self.turns):
-            raise ValueError("duration source requires an auto beat without dialogue")
+            raise plan_issue(
+                "duration_source_requires_silent_auto_beat",
+                "duration source requires an auto beat without dialogue",
+                beat_id=self.id, placement_id=self.duration_source_placement_id,
+            )
         for turn in self.turns:
             if turn.end_frame is not None and turn.end_frame > self.duration_frames:
-                raise PydanticCustomError(
+                raise plan_issue(
                     "turn_exceeds_beat", "turn {turn_id} exceeds beat {beat_id}",
-                    {"turn_id": turn.id, "beat_id": self.id},
+                    beat_id=self.id, turn_id=turn.id,
                 )
             for word in turn.words:
                 if turn.start_frame is None or turn.end_frame is None:
-                    raise ValueError(f"word {word.id} needs aligned turn bounds")
+                    raise plan_issue(
+                        "word_needs_aligned_turn_bounds",
+                        f"word {word.id} needs aligned turn bounds",
+                        beat_id=self.id, turn_id=turn.id,
+                    )
                 if word.start_frame < turn.start_frame or word.end_frame > turn.end_frame:
-                    raise ValueError(f"word {word.id} exceeds turn {turn.id}")
+                    raise plan_issue(
+                        "word_exceeds_turn", f"word {word.id} exceeds turn {turn.id}",
+                        beat_id=self.id, turn_id=turn.id,
+                    )
         return self
 
 
@@ -225,7 +236,11 @@ class SelectionV2(_Value):
     @model_validator(mode="after")
     def source_anchors_only(self) -> "SelectionV2":
         if self.start.kind in {"selection", "placement"} or self.end.kind in {"selection", "placement"}:
-            raise ValueError(f"selection {self.id} must anchor to the work, beat, turn, or word")
+            raise plan_issue(
+                "selection_source_anchor_invalid",
+                f"selection {self.id} must anchor to the work, beat, turn, or word",
+                selection_id=self.id,
+            )
         return self
 
 
@@ -317,96 +332,261 @@ class ProductionPlanV2(_Value):
 
     @model_validator(mode="after")
     def unique_ids_and_references(self) -> "ProductionPlanV2":
-        for label, values in (
-            ("take", [row.id for row in self.speech_takes]),
-            ("take origin", [row.origin_placement_id for row in self.speech_takes]),
-            ("cue", [row.id for row in self.speech_cues]),
-            ("beat", [row.id for row in self.beats]),
-            ("turn", [turn.id for beat in self.beats for turn in beat.turns]),
-            ("word", [word.id for beat in self.beats for turn in beat.turns for word in turn.words]
-             + [word.id for beat in self.beats for turn in beat.turns if turn.speech_timing for word in turn.speech_timing.words]),
-            ("selection", [row.id for row in self.selections]),
-            ("resource", [row.id for row in self.resources]),
-            ("placement", [row.id for row in self.placements]),
-        ):
-            duplicate = next((key for key, count in Counter(values).items() if count > 1), None)
-            if duplicate is not None:
-                raise ValueError(f"duplicate {label} id: {duplicate}")
-        resources = {row.id: row for row in self.resources}
-        placements = {row.id: row for row in self.placements}
-        for beat in self.beats:
-            if beat.duration_source_placement_id is None:
-                continue
-            placement = placements.get(beat.duration_source_placement_id)
-            if placement is None or placement.loop or placement.kind not in {"visual", "audio"}:
-                raise ValueError(f"duration source for beat {beat.id} requires a non-looping media placement")
-            if (placement.start.kind != "beat" or placement.start.ref_id != beat.id or placement.start.edge != "start"
-                    or placement.end.kind != "beat" or placement.end.ref_id != beat.id or placement.end.edge != "end"
-                    or placement.start.offset_frames or placement.end.offset_frames):
-                raise ValueError(f"duration source for beat {beat.id} must span that beat")
-            resource = resources.get(placement.resource_id)
-            if resource is not None:
-                if (placement.kind == "visual" and resource.media_kind != "video"
-                        or placement.kind == "audio" and resource.media_kind not in {"audio", "video"}):
-                    raise ValueError(f"duration source for beat {beat.id} requires video or audio media")
-                source_out = placement.source_out_us or resource.duration_us
-                if not placement.source_in_us < source_out <= resource.duration_us:
-                    raise ValueError(f"duration source for beat {beat.id} exceeds its media")
-        turns = {turn.id for beat in self.beats for turn in beat.turns}
-        refs = {
-            "take": {row.id for row in self.speech_takes}, "cue": {row.id for row in self.speech_cues},
-            "beat": {row.id for row in self.beats}, "turn": turns,
-            "text": turns,
-            "word": {word.id for beat in self.beats for turn in beat.turns for word in turn.words}
-            | {word.id for beat in self.beats for turn in beat.turns if turn.speech_timing for word in turn.speech_timing.words},
-            "selection": {row.id for row in self.selections},
-            "placement": {row.id for row in self.placements},
-        }
-        takes = {row.id: row for row in self.speech_takes}
-        for take in self.speech_takes:
-            beat = next((row for row in self.beats if row.id == take.beat_id), None)
-            resource = resources.get(take.resource_id)
-            if beat is None or resource is None or not set(take.turn_ids) <= {turn.id for turn in beat.turns}:
-                raise ValueError(f"take {take.id} references missing beat, resource, or turn")
-            if not take.source_in_us < (take.source_out_us or resource.duration_us) <= resource.duration_us:
-                raise ValueError(f"take {take.id} has invalid source interval")
-        from .speech_take_order import validate_speech_take_order
-        validate_speech_take_order(self)
-        assigned_turns = [turn_id for take in self.speech_takes for turn_id in take.turn_ids]
-        if len(assigned_turns) != len(set(assigned_turns)):
-            raise ValueError("a turn must belong to one speech take")
-        for cue in self.speech_cues:
-            take = takes.get(cue.take_id)
-            if take is None or cue.turn_id not in take.turn_ids:
-                raise ValueError(f"cue {cue.id} references missing take or turn")
-            if cue.timing_status == "ready":
-                if cue.evidence_ref is None or cue.source_start_us is None or cue.source_end_us is None:
-                    raise ValueError(f"ready cue {cue.id} needs timing evidence")
-                if not take.source_in_us <= cue.source_start_us < cue.source_end_us <= (take.source_out_us or resources[take.resource_id].duration_us):
-                    raise ValueError(f"cue {cue.id} exceeds its take")
-            if not set(cue.word_ids) <= refs["word"]:
-                raise ValueError(f"cue {cue.id} references missing words")
-        for row in self.selections:
-            for anchor in (row.start, row.end):
-                if anchor.kind != "program_frame" and anchor.ref_id not in refs[anchor.kind]:
-                    raise ValueError(f"selection {row.id} references missing {anchor.kind} {anchor.ref_id}")
-        for row in self.placements:
-            if row.speech_take_id is not None:
-                if row.speech_take_id not in takes:
-                    raise ValueError(f"placement {row.id} references missing take")
-                if row.kind != "visual" or row.resource_id != takes[row.speech_take_id].resource_id:
-                    raise ValueError(f"placement {row.id} must display its speech take resource")
-            if row.resource_id is not None and row.resource_id not in resources:
-                raise ValueError(f"placement {row.id} references missing resource {row.resource_id}")
-            if row.turn_id is not None and row.turn_id not in turns:
-                raise ValueError(f"placement {row.id} references missing turn {row.turn_id}")
-            for anchor in (row.start, row.end):
-                if anchor.kind != "program_frame" and anchor.ref_id not in refs[anchor.kind]:
-                    raise ValueError(f"placement {row.id} references missing {anchor.kind} {anchor.ref_id}")
+        _check_unique_plan_ids(self)
+        _check_duration_sources(self)
+        takes = _check_take_references(self)
+        _check_cue_references(self, takes)
+        _check_placement_references(self, takes)
         from .production_audio_sources import validate_plan_audio_sources
 
         validate_plan_audio_sources(self.model_dump(mode="json", exclude_none=True))
         return self
+
+
+_ID_FIELDS = {"take": "take_id", "take origin": "placement_id", "cue": "cue_id",
+              "beat": "beat_id", "turn": "turn_id", "word": "ref_id",
+              "selection": "selection_id", "resource": "ref_id", "placement": "placement_id"}
+
+
+def _id_rows(plan: "ProductionPlanV2") -> list[tuple[str, str, str]]:
+    """(collection label, authored id, exact authoring path) in document order."""
+    rows: list[tuple[str, str, str]] = []
+    for label, collection, values in (
+        ("take", "speech_takes", plan.speech_takes),
+        ("take origin", "speech_takes", [row.origin_placement_id for row in plan.speech_takes]),
+        ("cue", "speech_cues", plan.speech_cues),
+        ("beat", "beats", plan.beats),
+        ("selection", "selections", plan.selections),
+        ("resource", "resources", plan.resources),
+        ("placement", "placements", plan.placements),
+    ):
+        rows.extend((label, getattr(row, "id", row), f"/{collection}/{index}")
+                    for index, row in enumerate(values))
+    for beat_index, beat in enumerate(plan.beats):
+        for turn_index, turn in enumerate(beat.turns):
+            rows.append(("turn", turn.id, f"/beats/{beat_index}/turns/{turn_index}"))
+            rows.extend(("word", word.id, f"/beats/{beat_index}/turns/{turn_index}/words/{index}")
+                        for index, word in enumerate(turn.words))
+            if turn.speech_timing is not None:
+                rows.extend(("word", word.id,
+                             f"/beats/{beat_index}/turns/{turn_index}/speech_timing/words/{index}")
+                            for index, word in enumerate(turn.speech_timing.words))
+    return rows
+
+
+def _check_unique_plan_ids(plan: "ProductionPlanV2") -> None:
+    """IDs are unique per collection; the first repeat names both occurrences."""
+    seen: set[tuple[str, str]] = set()
+    for label, identifier, path in _id_rows(plan):
+        if (label, identifier) not in seen:
+            seen.add((label, identifier))
+            continue
+        field = _ID_FIELDS.get(label)
+        raise plan_issue(
+            "duplicate_plan_id", f"duplicate {label} id: {identifier}",
+            path=path, **({field: identifier} if field else {}),
+        )
+
+
+def _check_duration_sources(plan: "ProductionPlanV2") -> None:
+    resources = {row.id: row for row in plan.resources}
+    placements = {row.id: row for row in plan.placements}
+    indices = {row.id: index for index, row in enumerate(plan.placements)}
+    for beat_index, beat in enumerate(plan.beats):
+        if beat.duration_source_placement_id is None:
+            continue
+        placement = placements.get(beat.duration_source_placement_id)
+        if placement is None or placement.loop or placement.kind not in {"visual", "audio"}:
+            raise plan_issue(
+                "duration_source_placement_invalid",
+                f"duration source for beat {beat.id} requires a non-looping media placement",
+                path=f"/beats/{beat_index}/duration_source_placement_id", beat_id=beat.id,
+                placement_id=beat.duration_source_placement_id,
+            )
+        placement_path = f"/placements/{indices[placement.id]}"
+        if (placement.start.kind != "beat" or placement.start.ref_id != beat.id
+                or placement.start.edge != "start" or placement.start.offset_frames
+                or placement.end.kind != "beat" or placement.end.ref_id != beat.id
+                or placement.end.edge != "end" or placement.end.offset_frames):
+            raise plan_issue(
+                "duration_source_placement_must_span_beat",
+                f"duration source for beat {beat.id} must span that beat",
+                path=placement_path, beat_id=beat.id, placement_id=placement.id,
+            )
+        resource = resources.get(placement.resource_id)
+        if resource is None:
+            continue
+        if (placement.kind == "visual" and resource.media_kind != "video"
+                or placement.kind == "audio" and resource.media_kind not in {"audio", "video"}):
+            raise plan_issue(
+                "duration_source_media_kind_invalid",
+                f"duration source for beat {beat.id} requires video or audio media",
+                path=placement_path, beat_id=beat.id, placement_id=placement.id,
+            )
+        source_out = placement.source_out_us or resource.duration_us
+        if not placement.source_in_us < source_out <= resource.duration_us:
+            raise plan_issue(
+                "duration_source_exceeds_media",
+                f"duration source for beat {beat.id} exceeds its media",
+                path=placement_path, beat_id=beat.id, placement_id=placement.id,
+            )
+
+
+def _check_take_references(plan: "ProductionPlanV2") -> dict[str, "SpeechTakeV2"]:
+    resources = {row.id: row for row in plan.resources}
+    takes = {row.id: row for row in plan.speech_takes}
+    for take_index, take in enumerate(plan.speech_takes):
+        beat = next((row for row in plan.beats if row.id == take.beat_id), None)
+        resource = resources.get(take.resource_id)
+        if beat is None or resource is None or not set(take.turn_ids) <= {turn.id for turn in beat.turns}:
+            raise plan_issue(
+                "take_reference_missing",
+                f"take {take.id} references missing beat, resource, or turn",
+                path=f"/speech_takes/{take_index}", take_id=take.id, beat_id=take.beat_id,
+            )
+        if not take.source_in_us < (take.source_out_us or resource.duration_us) <= resource.duration_us:
+            raise plan_issue(
+                "take_source_interval_invalid", f"take {take.id} has invalid source interval",
+                path=f"/speech_takes/{take_index}", take_id=take.id,
+            )
+    from .speech_take_order import SpeechTakeOrderError, validate_speech_take_order
+
+    try:
+        validate_speech_take_order(plan)
+    except SpeechTakeOrderError as exc:
+        raise plan_issue(
+            exc.code, str(exc), path=exc.path, take_id=exc.take_id,
+            beat_id=exc.beat_id, turn_id=exc.turn_id,
+        ) from None
+    owners: dict[str, str] = {}
+    for take in plan.speech_takes:
+        for turn_id in take.turn_ids:
+            owner = owners.setdefault(turn_id, take.id)
+            if owner == take.id:
+                continue
+            raise plan_issue(
+                "turn_owned_by_multiple_takes", "a turn must belong to one speech take",
+                path=_turn_path(plan, turn_id) or "/speech_takes", turn_id=turn_id,
+                take_id=owner, beat_id=_beat_id_for_turn(plan, turn_id),
+            )
+    return takes
+
+
+def _check_cue_references(plan: "ProductionPlanV2", takes: dict[str, "SpeechTakeV2"]) -> None:
+    resources = {row.id: row for row in plan.resources}
+    word_ids = {word.id for beat in plan.beats for turn in beat.turns for word in turn.words}
+    word_ids |= {word.id for beat in plan.beats for turn in beat.turns
+                 if turn.speech_timing for word in turn.speech_timing.words}
+    for cue_index, cue in enumerate(plan.speech_cues):
+        take = takes.get(cue.take_id)
+        path = f"/speech_cues/{cue_index}"
+        if take is None or cue.turn_id not in take.turn_ids:
+            raise plan_issue(
+                "cue_reference_missing", f"cue {cue.id} references missing take or turn",
+                path=path, cue_id=cue.id, take_id=cue.take_id, turn_id=cue.turn_id,
+            )
+        if cue.timing_status == "ready":
+            if cue.evidence_ref is None or cue.source_start_us is None or cue.source_end_us is None:
+                raise plan_issue(
+                    "cue_timing_evidence_missing", f"ready cue {cue.id} needs timing evidence",
+                    path=path, cue_id=cue.id, take_id=cue.take_id, turn_id=cue.turn_id,
+                )
+            take_out = take.source_out_us or resources[take.resource_id].duration_us
+            if not take.source_in_us <= cue.source_start_us < cue.source_end_us <= take_out:
+                raise plan_issue(
+                    "cue_exceeds_take", f"cue {cue.id} exceeds its take",
+                    path=path, cue_id=cue.id, take_id=cue.take_id, turn_id=cue.turn_id,
+                )
+        if not set(cue.word_ids) <= word_ids:
+            raise plan_issue(
+                "cue_word_missing", f"cue {cue.id} references missing words",
+                path=path, cue_id=cue.id, take_id=cue.take_id, turn_id=cue.turn_id,
+            )
+
+
+def _check_placement_references(plan: "ProductionPlanV2", takes: dict[str, "SpeechTakeV2"]) -> None:
+    resources = {row.id for row in plan.resources}
+    turns = {turn.id for beat in plan.beats for turn in beat.turns}
+    refs = {
+        "take": set(takes), "cue": {row.id for row in plan.speech_cues},
+        "beat": {row.id for row in plan.beats}, "turn": turns, "text": turns,
+        "word": {word.id for beat in plan.beats for turn in beat.turns for word in turn.words}
+        | {word.id for beat in plan.beats for turn in beat.turns
+           if turn.speech_timing for word in turn.speech_timing.words},
+        "selection": {row.id for row in plan.selections},
+        "placement": {row.id for row in plan.placements},
+    }
+    for selection_index, row in enumerate(plan.selections):
+        for edge in ("start", "end"):
+            anchor = getattr(row, edge)
+            if anchor.kind != "program_frame" and anchor.ref_id not in refs[anchor.kind]:
+                raise plan_issue(
+                    "selection_anchor_missing",
+                    f"selection {row.id} references missing {anchor.kind} {anchor.ref_id}",
+                    path=f"/selections/{selection_index}/{edge}",
+                    selection_id=row.id, ref_id=anchor.ref_id,
+                )
+    for index, row in enumerate(plan.placements):
+        path = f"/placements/{index}"
+        if row.speech_take_id is not None:
+            if row.speech_take_id not in takes:
+                raise plan_issue(
+                    "placement_take_missing", f"placement {row.id} references missing take",
+                    path=f"{path}/speech_take_id", placement_id=row.id, take_id=row.speech_take_id,
+                )
+            if row.kind != "visual" or row.resource_id != takes[row.speech_take_id].resource_id:
+                raise plan_issue(
+                    "placement_must_display_take_resource",
+                    f"placement {row.id} must display its speech take resource",
+                    path=path, placement_id=row.id, take_id=row.speech_take_id,
+                )
+        if row.resource_id is not None and row.resource_id not in resources:
+            raise plan_issue(
+                "placement_resource_missing",
+                f"placement {row.id} references missing resource {row.resource_id}",
+                path=f"{path}/resource_id", placement_id=row.id, ref_id=row.resource_id,
+            )
+        if row.turn_id is not None and row.turn_id not in turns:
+            raise plan_issue(
+                "placement_turn_missing",
+                f"placement {row.id} references missing turn {row.turn_id}",
+                path=f"{path}/turn_id", placement_id=row.id, turn_id=row.turn_id,
+            )
+        for edge in ("start", "end"):
+            anchor = getattr(row, edge)
+            if anchor.kind != "program_frame" and anchor.ref_id not in refs[anchor.kind]:
+                raise plan_issue(
+                    "placement_anchor_missing",
+                    f"placement {row.id} references missing {anchor.kind} {anchor.ref_id}",
+                    path=f"{path}/{edge}", placement_id=row.id, ref_id=anchor.ref_id,
+                )
+
+
+def _turn_path(plan: "ProductionPlanV2", turn_id: str) -> str | None:
+    found = _beat_for_turn(plan, turn_id)
+    if found is None:
+        return None
+    beat_index, beat = found
+    return f"/beats/{beat_index}/turns/{_turn_index(plan, turn_id)}"
+
+
+def _beat_for_turn(plan: "ProductionPlanV2", turn_id: str) -> tuple[int, "BeatV2"] | None:
+    for index, beat in enumerate(plan.beats):
+        if any(turn.id == turn_id for turn in beat.turns):
+            return index, beat
+    return None
+
+
+def _beat_id_for_turn(plan: "ProductionPlanV2", turn_id: str) -> str | None:
+    found = _beat_for_turn(plan, turn_id)
+    return found[1].id if found else None
+
+
+def _turn_index(plan: "ProductionPlanV2", turn_id: str) -> int:
+    found = _beat_for_turn(plan, turn_id)
+    if found is None:
+        return 0
+    return next((index for index, turn in enumerate(found[1].turns) if turn.id == turn_id), 0)
 
 
 def normalize_draft_subtitle_positions(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

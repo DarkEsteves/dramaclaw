@@ -1088,3 +1088,51 @@ async def test_ai_draft_repairs_graphic_emphasis_once(monkeypatch) -> None:
     assert len(calls) == 2
     assert drafted["placements"][3]["graphic"]["emphasis"] == "咖啡"
     assert drafted["placements"][7]["graphic"]["emphasis"] == "咖啡"
+
+
+@pytest.mark.asyncio
+async def test_ai_draft_repairs_a_cross_beat_speech_source_once(monkeypatch) -> None:
+    from novelvideo.freezone.remix import production_plan
+    from novelvideo.freezone.remix.production_plan_repair import build_plan_repair_scope
+    from novelvideo.llm_instrumentation import production_plan_diagnostic_sink
+
+    bad = planned_dialogue_plan()
+    calls = []
+    records = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return _draft_response(bad, kwargs)
+        repair = json.loads(kwargs["upstream_text"])
+        assert repair["issues"][0]["code"] == "speech_source_spans_beats"
+        scope = build_plan_repair_scope(bad, repair["issues"])
+        return json.dumps({
+            "base_digest": scope["base_digest"],
+            "changes": [{"path": path, "value": None}
+                        for path in scope["allowed_paths"]
+                        if path.endswith("/speech_placement_id")],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
+    with production_plan_diagnostic_sink(records.append):
+        drafted = await _generate_reviewed_plan(
+            topic=bad["goal"], blueprint=None, username="alice")
+
+    assert len(calls) == 2
+    failed = next(row for row in records
+                  if row["event"] == "production_plan.validation_failed")
+    assert failed["validation_issues"][0]["code"] == "speech_source_spans_beats"
+    assert failed["validation_issues"][0]["turn_id"] == "later"
+    assert not any(turn.get("speech_placement_id") == "hook-picture"
+                   for beat in drafted["beats"] for turn in beat["turns"])
+
+
+def planned_dialogue_plan() -> dict:
+    plan = native_plan()
+    plan["beats"][0]["turns"] = [{"id": "line", "speaker": "甲", "text": "你好",
+                                  "speech_placement_id": "hook-picture"}]
+    plan["beats"].append({"id": "second", "purpose": "反转", "duration_frames": 60,
+                          "turns": [{"id": "later", "speaker": "乙", "text": "再见",
+                                     "speech_placement_id": "hook-picture"}]})
+    return plan

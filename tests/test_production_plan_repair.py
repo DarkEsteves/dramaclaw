@@ -162,3 +162,58 @@ def test_speech_source_timing_repair_exposes_only_target_anchors():
 
     assert scope["allowed_paths"] == ["/placements/0/end", "/placements/0/start"]
     assert scope["repair_context"] == {"beat_id": "hook", "placement_id": "hook-picture"}
+
+
+def test_cross_beat_carrier_repair_rebinds_turns_not_the_carrier():
+    from novelvideo.freezone.remix.contracts import validate_payload
+
+    original = native_plan()
+    original["beats"][0]["turns"] = [{"id": "line", "text": "你好",
+                                      "speech_placement_id": "hook-picture"}]
+    original["beats"].append({"id": "second", "purpose": "反转", "duration_frames": 60,
+                              "turns": [{"id": "later", "text": "再见",
+                                         "speech_placement_id": "hook-picture"}]})
+    with pytest.raises(ValueError) as raised:
+        validate_payload("production_plan.v2", original)
+    from novelvideo.freezone.remix.production_plan_repair import plan_repair_issues
+
+    issues = plan_repair_issues(raised.value.__cause__)
+    assert issues[0]["code"] == "speech_source_spans_beats"
+
+    scope = build_plan_repair_scope(original, issues)
+
+    assert scope["allowed_paths"] == ["/beats/0/turns/0/speech_placement_id",
+                                      "/beats/1/turns/0/speech_placement_id"]
+    fixed = apply_plan_repair(original, {"base_digest": scope["base_digest"], "changes": [
+        {"path": "/beats/1/turns/0/speech_placement_id", "value": None}]}, scope=scope)
+    assert fixed["beats"][1]["turns"][0]["speech_placement_id"] is None
+    validate_payload("production_plan.v2", fixed)
+
+
+def test_carrier_repair_refuses_confirmed_speech_turns():
+    original = native_plan()
+    original["beats"][0]["turns"] = [{"id": "line", "text": "你好",
+                                      "speech_placement_id": "hook-picture",
+                                      "timing_basis": "manual", "start_frame": 0, "end_frame": 20}]
+    scope = build_plan_repair_scope(original, [{
+        "code": "speech_source_spans_beats", "path": "/placements/0",
+        "placement_id": "hook-picture", "beat_id": "hook", "turn_id": "line"}])
+    assert scope["allowed_paths"] == []
+
+
+def test_noncontiguous_carrier_repair_opens_only_that_beats_turns():
+    original = native_plan()
+    original["beats"][0]["turns"] = [
+        {"id": "a", "text": "一", "speech_placement_id": "hook-picture"},
+        {"id": "b", "text": "二"},
+        {"id": "c", "text": "三", "speech_placement_id": "hook-picture"},
+    ]
+    original["beats"].append({"id": "second", "purpose": "反转", "duration_frames": 60,
+                              "turns": [{"id": "d", "text": "四"}]})
+    scope = build_plan_repair_scope(original, [{
+        "code": "speech_source_turns_not_contiguous", "path": "/placements/0",
+        "placement_id": "hook-picture", "beat_id": "hook", "turn_id": "c"}])
+
+    assert scope["allowed_paths"] == ["/beats/0/turns/0/speech_placement_id",
+                                      "/beats/0/turns/2/speech_placement_id"]
+    assert scope["repair_context"]["beat_id"] == "hook"

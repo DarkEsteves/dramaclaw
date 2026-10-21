@@ -10,11 +10,26 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from .plan_issues import issue_error_message, issue_from_pydantic_row
+
 
 _PATH = re.compile(r"/(?:beats|placements|selections|output)(?:/[A-Za-z0-9_-]+)*\Z")
 _HOST_FIELDS = {"resources", "provenance", "speech_takes", "speech_cues",
                 "speech_timing", "resource_id", "speech_take_id",
                 "words", "text_hash", "source_in_us", "source_out_us"}
+# A carrier rule failed; the bounded correction is choosing which authored
+# turn uses which planned source, never editing the carrier's media or text.
+_SPEECH_SOURCE_BINDING_CODES = frozenset({
+    "speech_source_spans_beats",
+    "speech_source_turns_not_contiguous",
+    "speech_source_turn_binding_mismatch",
+    "speech_source_missing",
+})
+# A carrier's own interval contradicts its turns/beat; only its anchors move.
+_SPEECH_SOURCE_ANCHOR_CODES = frozenset({
+    "speech_source_timing_invalid",
+    "speech_source_interval_excludes_turn",
+})
 
 
 def plan_repair_issues(error: BaseException) -> list[dict[str, Any]]:
@@ -25,18 +40,7 @@ def plan_repair_issues(error: BaseException) -> list[dict[str, Any]]:
     current: BaseException | None = error
     while current is not None:
         if isinstance(current, PydanticValidationError):
-            issues = []
-            for row in current.errors():
-                underlying = (row.get("ctx") or {}).get("error")
-                if hasattr(underlying, "issue") and isinstance(underlying.issue, dict):
-                    issues.append(copy.deepcopy(underlying.issue))
-                    continue
-                parts = [str(part) for part in row["loc"]]
-                if parts[-1:] == ["graphic"] and "emphasis" in row["msg"].lower():
-                    parts.append("emphasis")
-                issues.append({"path": "/" + "/".join(parts), "code": row["type"],
-                               "message": row["msg"]})
-            return issues
+            return [_pydantic_row_issue(row) for row in current.errors()]
         if isinstance(current, JsonSchemaValidationError):
             child = next((item for item in current.context if item.path), None)
             location = [*current.path, *(child.path if child is not None else [])]
@@ -50,6 +54,78 @@ def plan_repair_issues(error: BaseException) -> list[dict[str, Any]]:
         return []
     return [row for row in rows if isinstance(row, dict) and isinstance(row.get("code"), str)] \
         if isinstance(rows, list) else []
+
+
+def _pydantic_row_issue(row: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the rule's own IDs; fall back to the rendered field path."""
+    issue: dict[str, Any] = issue_from_pydantic_row(row)
+    path = issue.get("path") or "/"
+    if path.endswith("/graphic") and "emphasis" in str(row.get("msg") or "").lower():
+        issue["path"] = path + "/emphasis"
+    message = issue_error_message(row)
+    if message is not None:
+        issue["message"] = message
+    return issue
+
+
+def _eligible_speech_turn(draft: dict[str, Any], turn: Any) -> bool:
+    """Only an unconfirmed, planned source choice may be reassigned."""
+    if not isinstance(turn, dict) or turn.get("speech_timing") or turn.get("words"):
+        return False
+    if turn.get("timing_basis", "estimated") != "estimated":
+        return False
+    turn_id = turn.get("id")
+    return not (any(turn_id in take.get("turn_ids", []) for take in draft.get("speech_takes", []))
+                or any(cue.get("turn_id") == turn_id for cue in draft.get("speech_cues", [])))
+
+
+def _turn_binding_path(draft: dict[str, Any], turn_id: Any) -> str | None:
+    if not isinstance(turn_id, str):
+        return None
+    for beat_index, beat in enumerate(draft.get("beats", [])):
+        if not isinstance(beat, dict):
+            continue
+        for turn_index, turn in enumerate(beat.get("turns", [])):
+            if isinstance(turn, dict) and turn.get("id") == turn_id:
+                return f"/beats/{beat_index}/turns/{turn_index}/speech_placement_id"
+    return None
+
+
+def _speech_binding_paths(draft: dict[str, Any], issue: dict[str, Any]) -> set[str]:
+    """Open the source choice of every eligible turn the rule implicates.
+
+    A carrier may only be re-bound by re-pointing authored turns: the carrier's
+    own media, text and host bindings stay untouched. Only turns whose source
+    is still an unconfirmed estimate are eligible, so confirmed assets cannot
+    be silently re-dubbed by a repair.
+    """
+    placement_id, beat_id = issue.get("placement_id"), issue.get("beat_id")
+    wanted = {beat_id} if isinstance(beat_id, str) else set()
+    if isinstance(placement_id, str):
+        wanted.update(beat.get("id") for beat in draft.get("beats", [])
+                      if any(turn.get("speech_placement_id") == placement_id
+                             for turn in beat.get("turns", []) if isinstance(turn, dict)))
+    candidates: set[str] = set()
+    reported = issue.get("path")
+    if isinstance(reported, str) and reported.endswith("/speech_placement_id"):
+        candidates.add(reported)
+    turn_path = _turn_binding_path(draft, issue.get("turn_id"))
+    if turn_path is not None:
+        candidates.add(turn_path)
+    for beat_index, beat in enumerate(draft.get("beats", [])):
+        if not isinstance(beat, dict) or beat.get("id") not in wanted:
+            continue
+        for turn_index, _turn in enumerate(beat.get("turns", [])):
+            candidates.add(f"/beats/{beat_index}/turns/{turn_index}/speech_placement_id")
+    paths: set[str] = set()
+    for path in candidates:
+        try:
+            turn = _read_path(draft, path.rsplit("/", 1)[0])
+        except (KeyError, IndexError, ValueError, TypeError):
+            continue
+        if _eligible_speech_turn(draft, turn):
+            paths.add(path)
+    return paths
 
 
 def _digest(draft: dict[str, Any]) -> str:
@@ -84,7 +160,7 @@ def build_plan_repair_scope(
         elif code == "locked_dialogue_changed":
             for index, _beat in enumerate(draft.get("beats", [])):
                 paths.add(f"/beats/{index}/turns")
-        elif code == "speech_source_timing_invalid":
+        elif code in _SPEECH_SOURCE_ANCHOR_CODES:
             placement_id = issue.get("placement_id")
             placement_index = next(
                 (index for index, row in enumerate(draft.get("placements", []))
@@ -95,6 +171,13 @@ def build_plan_repair_scope(
                 paths.update({f"/placements/{placement_index}/start",
                               f"/placements/{placement_index}/end"})
                 repair_context = {"placement_id": placement_id, "beat_id": issue.get("beat_id")}
+        elif code in _SPEECH_SOURCE_BINDING_CODES:
+            binding_paths = _speech_binding_paths(draft, issue)
+            if binding_paths:
+                paths.update(binding_paths)
+                repair_context = {"placement_id": issue.get("placement_id"),
+                                  "beat_id": issue.get("beat_id"),
+                                  "turn_id": issue.get("turn_id")}
         else:
             path = issue.get("path")
             if isinstance(path, str) and _PATH.fullmatch(path):
@@ -105,11 +188,7 @@ def build_plan_repair_scope(
                             turn = _read_path(draft, "/" + "/".join(parts[:-1]))
                         except (KeyError, IndexError, ValueError, TypeError):
                             continue
-                        turn_id = turn.get("id") if isinstance(turn, dict) else None
-                        if (not isinstance(turn, dict) or turn.get("speech_timing") or turn.get("words")
-                                or turn.get("timing_basis", "estimated") != "estimated"
-                                or any(turn_id in take.get("turn_ids", []) for take in draft.get("speech_takes", []))
-                                or any(cue.get("turn_id") == turn_id for cue in draft.get("speech_cues", []))):
+                        if not _eligible_speech_turn(draft, turn):
                             continue
                     paths.add(path)
     # Path selection is entirely host owned. Never permit a model to repair

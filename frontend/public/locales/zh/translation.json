@@ -3514,6 +3514,8 @@
       "end": "结束",
       "range": "起止",
       "speechSourceCycle": "作品方案校验未通过：发声素材 {{placement}} 的{{edge}}时间依赖它自己承载、但尚未确定时间的台词 {{turn}}，形成循环。请先确定发声素材的段落或片段范围。本次方案尚未保存。",
+      "speechSourceSpansBeats": "作品方案校验未通过：发声素材 {{placement}} 同时承载了多处段落的台词，包括不属于 {{beat}} 的台词 {{turn}}。发声素材只能对应一个段落；请把这些台词改回各自段落的发声素材。本次方案尚未保存。",
+      "speechSourceNotContiguous": "作品方案校验未通过：发声素材 {{placement}} 承载的台词在段落 {{beat}} 中不连续。请把中间的台词移出或改指向别的发声素材。本次方案尚未保存。",
       "otherIssue": "作品方案校验未通过：字段 {{path}}，错误类型 {{code}}。本次方案尚未保存。"
     },
     "taskCount": "{{count}} 个任务",

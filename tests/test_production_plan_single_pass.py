@@ -107,7 +107,7 @@ def test_complete_draft_cycle_diagnostic_keeps_specific_issue_without_text():
     failure = next(row for row in records if row['event'] == 'production_plan.validation_failed')
     assert failure['validation_issues'][0] == {
         'code': 'speech_source_timing_cycle', 'path': '/placements/0/start',
-        'placement_id': 'demo-video', 'turn_id': 'ask',
+        'placement_id': 'demo-video', 'turn_id': 'ask', 'beat_id': 'demo',
     }
     assert '这个怎么用' not in json.dumps(failure, ensure_ascii=False)
 

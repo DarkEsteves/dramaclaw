@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .plan_issues import plan_issue
+
 SPEECH_SOURCE_TIMING_GUIDANCE = (
     "先确定发声素材的独立使用范围，再指定由它承载的台词。"
     "尚未确定时间的台词通过 speech_placement_id 引用发声素材；"
@@ -13,31 +15,6 @@ SPEECH_SOURCE_TIMING_GUIDANCE = (
     "无台词但需要环境声或动作声的画面可以保留原声，无需新建音轨。"
 )
 
-
-class SpeechSourceTimingError(ValueError):
-    """A speech carrier has an invalid relation to its authored speech beat."""
-
-    def __init__(self, *, placement_index: int, placement_id: str,
-                 turn_id: str | None = None, edge: str | None = None,
-                 beat_id: str | None = None, code: str = "speech_source_timing_cycle") -> None:
-        if code == "speech_source_timing_invalid":
-            self.issue = {
-                "code": code,
-                "path": f"/placements/{placement_index}",
-                "placement_id": placement_id,
-                "beat_id": beat_id,
-            }
-            super().__init__(
-                f"speech source placement {placement_id} must overlap the current beat {beat_id}"
-            )
-            return
-        self.issue = {
-            "code": "speech_source_timing_cycle",
-            "path": f"/placements/{placement_index}/{edge}",
-            "placement_id": placement_id,
-            "turn_id": turn_id,
-        }
-        super().__init__(f"speech source placement {placement_id} has circular turn timing")
 
 def planned_speech_sources(plan: dict) -> dict[str, list[str]]:
     """Group turn IDs by planned placement in authored dialogue order."""
@@ -111,8 +88,18 @@ def _anchor_dependent_turn(anchor: dict, *, turn_ids: set[str], placements: dict
                                    visiting=visiting | {key}) if row else None)
 
 
+def _placement_issue(placement_indices: dict[str, int], placement_id: str) -> str:
+    index = placement_indices.get(placement_id)
+    return f"/placements/{index}" if index is not None else "/placements"
+
+
 def validate_plan_audio_sources(plan: dict) -> None:
-    """Reject impossible or contradictory source intent in a validated plan."""
+    """Reject impossible or contradictory source intent in a validated plan.
+
+    Every rejection names the owning placement/turn/beat so the diagnostics,
+    repair scope and user notice can point at the object instead of the whole
+    document. Paths follow the authoring schema where one exists.
+    """
     placements = {row["id"]: row for row in plan.get("placements", [])}
     placement_indices = {row["id"]: index for index, row in enumerate(plan.get("placements", []))}
     resources = {row["id"]: row for row in plan.get("resources", [])}
@@ -123,32 +110,76 @@ def validate_plan_audio_sources(plan: dict) -> None:
     takes_by_id = {row["id"]: row for row in plan.get("speech_takes", [])}
 
     for placement in placements.values():
+        placement_id = placement["id"]
         source_audio = placement.get("source_audio")
         if source_audio is not None and placement["kind"] != "visual":
-            raise ValueError(f"source_audio applies only to visual placement {placement['id']}")
+            raise plan_issue(
+                "source_audio_requires_visual_placement",
+                f"source_audio applies only to visual placement {placement_id}",
+                path=_placement_issue(placement_indices, placement_id),
+                placement_id=placement_id,
+            )
         if source_audio is True:
             resource = resources.get(placement.get("resource_id"))
             if resource is not None and (resource["media_kind"] != "video" or not resource["has_audio"]):
-                raise ValueError(f"source_audio requires audible video at placement {placement['id']}")
+                raise plan_issue(
+                    "source_audio_requires_audible_video",
+                    f"source_audio requires audible video at placement {placement_id}",
+                    path=_placement_issue(placement_indices, placement_id),
+                    placement_id=placement_id,
+                )
             take = takes_by_id.get(placement.get("speech_take_id"))
-            if take is not None and take["origin_placement_id"] != placement["id"]:
-                raise ValueError(f"speech take window {placement['id']} cannot add source_audio")
+            if take is not None and take["origin_placement_id"] != placement_id:
+                raise plan_issue(
+                    "speech_take_window_cannot_add_source_audio",
+                    f"speech take window {placement_id} cannot add source_audio",
+                    path=_placement_issue(placement_indices, placement_id),
+                    placement_id=placement_id, take_id=take["id"],
+                )
 
     groups = planned_speech_sources(plan)
     for placement_id, turn_ids in groups.items():
         placement = placements.get(placement_id)
+        path = _placement_issue(placement_indices, placement_id)
+        first_turn = turn_ids[0] if turn_ids else None
+        first_beat = turns[first_turn][1] if first_turn in turns else None
         if placement is None:
-            raise ValueError(f"speech source placement {placement_id} is missing")
+            raise plan_issue(
+                "speech_source_missing",
+                f"speech source placement {placement_id} is missing",
+                path="/placements", placement_id=placement_id, turn_id=first_turn,
+            )
         if placement["kind"] not in {"visual", "audio"}:
-            raise ValueError(f"speech source placement {placement_id} must be visual or speech audio")
+            raise plan_issue(
+                "speech_source_kind_invalid",
+                f"speech source placement {placement_id} must be visual or speech audio",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+            )
         if placement["kind"] == "audio" and placement["role"] not in {"speech", "narration"}:
-            raise ValueError(f"speech source audio placement {placement_id} needs speech or narration role")
+            raise plan_issue(
+                "speech_source_role_invalid",
+                f"speech source audio placement {placement_id} needs speech or narration role",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+            )
         if placement.get("loop"):
-            raise ValueError(f"speech source placement {placement_id} must be nonloop")
+            raise plan_issue(
+                "speech_source_loop_not_allowed",
+                f"speech source placement {placement_id} must be nonloop",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+            )
         if placement["kind"] == "visual" and placement.get("source_audio") is False:
-            raise ValueError(f"speech source placement {placement_id} is muted")
+            raise plan_issue(
+                "speech_source_muted",
+                f"speech source placement {placement_id} is muted",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+            )
         if placement.get("turn_id") is not None and (len(turn_ids) != 1 or turn_ids[0] != placement["turn_id"]):
-            raise ValueError(f"speech source placement {placement_id} belongs to another turn, not the current turn")
+            raise plan_issue(
+                "speech_source_turn_binding_mismatch",
+                f"speech source placement {placement_id} belongs to another turn, not the current turn",
+                path=path, placement_id=placement_id, turn_id=placement["turn_id"],
+                beat_id=first_beat,
+            )
         resource = resources.get(placement.get("resource_id"))
         if resource is not None and (
             placement["kind"] == "visual" and (resource["media_kind"] != "video" or not resource["has_audio"])
@@ -157,26 +188,47 @@ def validate_plan_audio_sources(plan: dict) -> None:
                 or resource["media_kind"] == "video" and not resource["has_audio"]
             )
         ):
-            raise ValueError(f"speech source placement {placement_id} requires audible video or audio media")
+            raise plan_issue(
+                "speech_source_media_unusable",
+                f"speech source placement {placement_id} requires audible video or audio media",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+            )
 
         beat_ids = {turns[turn_id][1] for turn_id in turn_ids}
         if len(beat_ids) != 1:
-            raise ValueError(f"speech source placement {placement_id} must belong to one beat")
+            outside_turn = next((turn_id for turn_id in turn_ids
+                                 if turns[turn_id][1] != first_beat), first_turn)
+            raise plan_issue(
+                "speech_source_spans_beats",
+                f"speech source placement {placement_id} must belong to one beat, "
+                f"not {first_beat} and {turns[outside_turn][1]}",
+                path=path, placement_id=placement_id, beat_id=first_beat,
+                turn_id=outside_turn,
+            )
         beat_id = next(iter(beat_ids))
         ordered = [turn["id"] for beat in plan["beats"] if beat["id"] == beat_id
                    for turn in beat.get("turns", [])]
         start_index = ordered.index(turn_ids[0])
         if ordered[start_index:start_index + len(turn_ids)] != turn_ids:
-            raise ValueError(f"speech source placement {placement_id} needs contiguous turns")
+            expected = ordered[start_index:start_index + len(turn_ids)]
+            interrupted = next((turn_id for turn_id, other in zip(turn_ids, expected) if turn_id != other), None)
+            raise plan_issue(
+                "speech_source_turns_not_contiguous",
+                f"speech source placement {placement_id} needs contiguous turns",
+                path=path, placement_id=placement_id, beat_id=beat_id,
+                turn_id=interrupted or placement.get("turn_id"),
+            )
         for edge in ("start", "end"):
             dependent_turn = _anchor_dependent_turn(
                 placement[edge], turn_ids=set(turn_ids), placements=placements,
                 selections=selections, turns=turns, visiting=set(),
             )
             if dependent_turn is not None:
-                raise SpeechSourceTimingError(
-                    placement_index=placement_indices[placement_id], placement_id=placement_id,
-                    turn_id=dependent_turn, edge=edge,
+                raise plan_issue(
+                    "speech_source_timing_cycle",
+                    f"speech source placement {placement_id} has circular turn timing",
+                    path=f"{path}/{edge}", placement_id=placement_id,
+                    turn_id=dependent_turn, beat_id=beat_id,
                 )
         start = _anchor_frame(placement["start"], beat_ranges=beat_ranges, placements=placements,
                               selections=selections, turns=turns, visiting=set())
@@ -184,9 +236,10 @@ def validate_plan_audio_sources(plan: dict) -> None:
                             selections=selections, turns=turns, visiting=set())
         beat_start, beat_end = beat_ranges[beat_id]
         if start is not None and end is not None and (start >= beat_end or end <= beat_start):
-            raise SpeechSourceTimingError(
-                placement_index=placement_indices[placement_id], placement_id=placement_id,
-                beat_id=beat_id, code="speech_source_timing_invalid",
+            raise plan_issue(
+                "speech_source_timing_invalid",
+                f"speech source placement {placement_id} must overlap the current beat {beat_id}",
+                path=path, placement_id=placement_id, beat_id=beat_id,
             )
         if start is not None and end is not None:
             for turn_id in turn_ids:
@@ -195,4 +248,8 @@ def validate_plan_audio_sources(plan: dict) -> None:
                 if turn_start is not None and turn_end is not None and (
                     beat_start + turn_start < start or beat_start + turn_end > end
                 ):
-                    raise ValueError(f"turn {turn_id} lies outside speech source interval {placement_id}")
+                    raise plan_issue(
+                        "speech_source_interval_excludes_turn",
+                        f"turn {turn_id} lies outside speech source interval {placement_id}",
+                        path=path, placement_id=placement_id, turn_id=turn_id, beat_id=beat_id,
+                    )

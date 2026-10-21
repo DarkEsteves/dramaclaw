@@ -65,6 +65,25 @@ _PLAN_DIAGNOSTIC_NUMBERS = frozenset({
 })
 _PLAN_DIAGNOSTIC_TEXT = frozenset({"stage", "draft_stage", "error_code", "error_type", "finish_reason"})
 _PLAN_SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
+_UNSAFE_ERROR_MESSAGE = re.compile(r"[^A-Za-z0-9 _.,;:()\[\]/=_-]+")
+_ERROR_MESSAGE_WHITESPACE = re.compile(r"\s+")
+
+
+def bounded_error_message(text: Any, *, limit: int = 160) -> str | None:
+    """Keep a validator hint usable without letting draft text reach a log.
+
+    Validator messages are authored by this project, but they interpolate IDs
+    the model writes.  Strip everything outside a fixed ASCII set, collapse
+    whitespace and truncate, so logs, task metadata and notices stay bounded.
+    """
+    if not isinstance(text, str):
+        return None
+    clean = _ERROR_MESSAGE_WHITESPACE.sub(" ", _UNSAFE_ERROR_MESSAGE.sub(" ", text))
+    clean = clean.strip(" ,;:")
+    if not clean:
+        return None
+    return clean[:limit].strip() or None
+
 # Compatibility for EE releases that imported the old internal name. New code
 # must use the instrumentation-scope name: an empty billing reservation can
 # still own the single model-call log for a feature-included invocation.
@@ -168,6 +187,12 @@ def log_production_plan_diagnostic(event: str, **details: object) -> None:
         elif key in _PLAN_DIAGNOSTIC_NUMBERS and type(value) in (int, float):
             if 0 <= value <= 10_000_000:
                 record[key] = value
+        elif key == "error_message" and isinstance(value, str):
+            # Root-level rule failures have no field path; keep a bounded,
+            # ASCII-only hint so the cause is diagnosable without a repro.
+            clean = bounded_error_message(value)
+            if clean is not None:
+                record[key] = clean
         elif key in {"response_received", "partial_output_seen"} and type(value) is bool:
             record[key] = value
         elif key == "validation_issues" and isinstance(value, list):
@@ -181,7 +206,9 @@ def log_production_plan_diagnostic(event: str, **details: object) -> None:
                                        ("placement_id", r"[A-Za-z0-9_.:-]{1,64}"),
                                        ("selection_id", r"[A-Za-z0-9_.:-]{1,64}"),
                                        ("beat_id", r"[A-Za-z0-9_.:-]{1,64}"),
-                                       ("turn_id", r"[A-Za-z0-9_.:-]{1,64}")):
+                                       ("turn_id", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("take_id", r"[A-Za-z0-9_.:-]{1,64}"),
+                                       ("cue_id", r"[A-Za-z0-9_.:-]{1,64}")):
                     field_value = issue.get(field)
                     if isinstance(field_value, str) and re.fullmatch(pattern, field_value):
                         clean_issue[field] = field_value

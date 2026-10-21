@@ -39,9 +39,21 @@ function productionPlanFailureMessage(task: TaskState, t: TFunction): string | n
       edge: t(`tasks.planValidation.${edgeKey}`),
     });
   }
-  if (typeof fields.path === "string" && SAFE_PATH.test(fields.path) &&
-      typeof fields.code === "string" && SAFE_ID.test(fields.code)) {
-    return t("tasks.planValidation.otherIssue", { path: fields.path, code: fields.code });
+  const placement = typeof fields.placement_id === "string" && SAFE_ID.test(fields.placement_id)
+    ? fields.placement_id : null;
+  const beat = typeof fields.beat_id === "string" && SAFE_ID.test(fields.beat_id)
+    ? fields.beat_id : null;
+  const turn = typeof fields.turn_id === "string" && SAFE_ID.test(fields.turn_id)
+    ? fields.turn_id : null;
+  const path = typeof fields.path === "string" && SAFE_PATH.test(fields.path) ? fields.path : null;
+  if (fields.code === "speech_source_spans_beats" && placement && beat && turn) {
+    return t("tasks.planValidation.speechSourceSpansBeats", { placement, beat, turn });
+  }
+  if (fields.code === "speech_source_turns_not_contiguous" && placement && beat) {
+    return t("tasks.planValidation.speechSourceNotContiguous", { placement, beat, turn: turn ?? "" });
+  }
+  if (typeof fields.code === "string" && SAFE_ID.test(fields.code) && path) {
+    return t("tasks.planValidation.otherIssue", { path, code: fields.code });
   }
   return null;
 }

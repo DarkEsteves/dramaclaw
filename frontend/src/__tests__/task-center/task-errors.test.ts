@@ -26,6 +26,9 @@ describe("taskErrorMessage", () => {
       if (key === "tasks.planValidation.speechSourceCycle") {
         return `carrier=${options?.placement}, turn=${options?.turn}, edge=${options?.edge}`;
       }
+      if (key === "tasks.planValidation.speechSourceSpansBeats") {
+        return `spans carrier=${options?.placement}, beat=${options?.beat}, turn=${options?.turn}`;
+      }
       return options?.defaultValue ?? key;
     }) as unknown as TFunction;
     const failure = {
@@ -42,6 +45,23 @@ describe("taskErrorMessage", () => {
     );
     expect(taskErrorMessage({ ...current, task_id: "new-task" }, t)).not.toContain("carrier=carrier");
     expect(taskErrorMessage({ ...current, task_type: "build_characters" }, t)).not.toContain("carrier=carrier");
+  });
+
+  it("names the owning beat and turn for a cross-beat speech source", () => {
+    const t = vi.fn((key: string, options?: Record<string, string>) => {
+      if (key === "tasks.planValidation.speechSourceSpansBeats") {
+        return `spans carrier=${options?.placement}, beat=${options?.beat}, turn=${options?.turn}`;
+      }
+      return options?.defaultValue ?? key;
+    }) as unknown as TFunction;
+    const failure = {
+      task_id: "task_1", error_code: "plan_validation_failed",
+      issues: [{ code: "speech_source_spans_beats", path: "/placements/0",
+                 placement_id: "demo-video", beat_id: "demo", turn_id: "bye" }],
+    };
+    const current = task({ task_type: "remix_generate_production_plan_draft",
+      error: "plan_validation_failed", metadata: { production_plan_failure: failure } });
+    expect(taskErrorMessage(current, t)).toBe("spans carrier=demo-video, beat=demo, turn=bye");
   });
 
   it("uses i18n for a missing novel task error", () => {

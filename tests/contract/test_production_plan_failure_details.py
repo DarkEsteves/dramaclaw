@@ -108,7 +108,8 @@ async def test_signed_single_request_failure_persists_specific_issue(
     assert failure["operation_id"] == operation["operation_id"]
     assert failure["issues"][0] == {"code": "speech_source_timing_cycle",
                                    "path": "/placements/0/start",
-                                   "placement_id": "demo-video", "turn_id": "ask"}
+                                   "placement_id": "demo-video", "turn_id": "ask",
+                                   "beat_id": "demo"}
     from novelvideo.chat.reference_production_observer import production_event
     from novelvideo.freezone.workflow_runs import (
         bind_workflow_action_processing_operation, create_workflow_run, update_workflow_run,
@@ -153,3 +154,32 @@ async def test_signed_single_request_failure_persists_specific_issue(
     assert observed["event"] is None and observed["native_failure"] is True
     assert "demo-video" in observed["notice"] and "ask" in observed["notice"]
     assert "不得自动" in observed["notice"]
+
+
+def test_notice_and_summary_keep_a_bounded_hint_for_unlocatable_rules() -> None:
+    record = {
+        "event": "production_plan.validation_failed", "error_code": "plan_validation_failed",
+        "validation_issue_count": 1,
+        "validation_issues": [{"code": "value_error", "path": "/"}],
+        "error_message": "global model call budget exhausted, retry later",
+    }
+    summary = build_plan_failure_summary(record, task_id="task-1")
+    assert summary["error_message"] == "global model call budget exhausted, retry later"
+    assert "global model call budget exhausted" in format_plan_failure_notice(summary)
+
+    record["error_message"] = "台词：这个怎么用？<b>" + "x" * 500
+    summary = build_plan_failure_summary(record, task_id="task-1")
+    assert "error_message" not in summary
+    assert "<b>" not in format_plan_failure_notice(summary)
+
+
+def test_notice_explains_a_cross_beat_speech_source() -> None:
+    summary = {
+        "task_id": "task-1", "operation_id": "", "error_code": "plan_validation_failed",
+        "issue_count": 1, "issues": [{"code": "speech_source_spans_beats",
+                                     "path": "/placements/0", "placement_id": "carrier",
+                                     "beat_id": "beat-a", "turn_id": "line-9"}],
+    }
+    notice = format_plan_failure_notice(summary)
+    assert "carrier" in notice and "beat-a" in notice and "line-9" in notice
+    assert "一个段落" in notice

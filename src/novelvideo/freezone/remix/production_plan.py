@@ -16,7 +16,8 @@ from novelvideo.llm_instrumentation import (
     production_plan_diagnostic_context,
 )
 from .production_plan_draft_stages import DraftStageEvent
-from .production_audio_sources import SPEECH_SOURCE_TIMING_GUIDANCE, SpeechSourceTimingError
+from .production_audio_sources import SPEECH_SOURCE_TIMING_GUIDANCE
+from .plan_issues import issue_error_message, issue_from_pydantic_row
 from .production_plan_repair import (
     apply_plan_repair,
     build_plan_repair_scope,
@@ -67,8 +68,29 @@ def validate_structured_recipe_output(recipe: dict[str, Any], content: str) -> A
     return validate(recipe, content)
 
 
+_SPEECH_REPAIRABLE_CODES = frozenset({
+    "speech_source_timing_invalid",
+    "speech_source_spans_beats",
+    "speech_source_turns_not_contiguous",
+    "speech_source_turn_binding_mismatch",
+    "speech_source_missing",
+    "speech_source_interval_excludes_turn",
+    "speech_source_muted",
+    "speech_source_loop_not_allowed",
+})
+
+
+# Editing a reference is the whole fix; every target must already exist.
+_REFERENCE_REPAIRABLE_CODES = frozenset({
+    "placement_anchor_missing",
+    "placement_turn_missing",
+    "selection_anchor_missing",
+})
+_REPAIRABLE_PATH_CODES = _SPEECH_REPAIRABLE_CODES | _REFERENCE_REPAIRABLE_CODES
+
+
 def _repairable_plan_issue(issue: dict[str, Any]) -> bool:
-    if issue.get("code") == "speech_source_timing_invalid":
+    if issue.get("code") in _REPAIRABLE_PATH_CODES:
         return True
     return (
         issue.get("code") == "value_error"
@@ -145,6 +167,12 @@ async def _repair_generated_plan_once(
         "只返回符合 repair schema 的 base_digest 和 changes；不要输出完整方案。"
         "只能修改 allowed_paths 中的字段，不能修改台词、段落、产品方向、素材资源或输出规格。"
         "对于 speech_source_timing_invalid，只把发声素材的起止锚点调整到所属 beat 的有效范围内；"
+        "对于 speech_source_spans_beats，把不属于该发声素材所属 beat 的台词改回该 beat 已有的发声素材，"
+        "或把该台词的 speech_placement_id 指向本 beat 的发声素材；"
+        "对于 speech_source_turns_not_contiguous，把夹在中间的台词移出或改指向别的发声素材；"
+        "对于 placement_anchor_missing、placement_turn_missing、selection_anchor_missing，"
+        "只能把引用改成方案内已存在的 id，或把可选引用设为 null；"
+        "不允许新增素材、改写台词或移动 beat；"
         "对于 graphic emphasis 错误，只能把 emphasis 改成当前 graphic.text 的连续子串，或设为 null。"
     )
     try:
@@ -519,6 +547,19 @@ class DraftSchemaValidationErrors(ValueError):
     def __init__(self, errors: list[Any]):
         self.errors = errors
         super().__init__("draft_schema_validation_failed")
+
+
+def _root_level_error_message(issues: list[dict[str, Any]]) -> str | None:
+    """Summarize an unlocatable failure so it can be diagnosed without a repro.
+
+    Only reachable when the first issue has no field path, i.e. a cross-object
+    rule fired before any identity was attached. The text is already
+    sanitized by the issue pipeline; here we keep the debugging hint bounded.
+    """
+    if not issues or issues[0].get("path") not in {None, "/"}:
+        return None
+    message = issues[0].get("message")
+    return message if isinstance(message, str) and message else None
 
 
 def _draft_issue_identity(parsed: Any, path: Any, error_row: dict[str, Any] | None = None) -> dict[str, str]:
@@ -1085,20 +1126,23 @@ def validate_generated_production_plan(
             validation_issue_count = len(error_rows)
             validation_issues = []
             for row in error_rows[:20]:
-                underlying = (row.get("ctx") or {}).get("error")
-                if isinstance(underlying, SpeechSourceTimingError):
-                    validation_issues.append(underlying.issue)
-                else:
-                    validation_issues.append({
-                        "path": "/" + "/".join(map(str, row.get("loc", ()))),
-                        "code": str(row.get("type") or "validation"),
-                        **_draft_issue_identity(parsed, row.get("loc", ()), row),
-                    })
+                identity = _draft_issue_identity(parsed, row.get("loc", ()), row)
+                issue = issue_from_pydantic_row(row, identity)
+                if issue.get("path") in {None, "/"} and issue.get("code") == "value_error":
+                    # A plain ValueError raised by a field-level model has no
+                    # ctx path; pydantic's loc still names the exact field.
+                    location = "/" + "/".join(map(str, row.get("loc", ())))
+                    issue["path"] = location if location != "/" else "/"
+                message = issue_error_message(row)
+                if message is not None:
+                    issue["message"] = message
+                validation_issues.append(issue)
         log_production_plan_diagnostic(
             "production_plan.validation_failed", stage="validating",
             elapsed_ms=round((time.monotonic() - validation_started) * 1000),
             error_code=failure_code, error=exc, response_received=True,
             validation_issue_count=validation_issue_count,
             validation_issues=validation_issues,
+            error_message=_root_level_error_message(validation_issues),
         )
         raise ValueError(failure_code) from exc

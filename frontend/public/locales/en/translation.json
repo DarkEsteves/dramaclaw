@@ -3514,6 +3514,8 @@
       "end": "end",
       "range": "start or end",
       "speechSourceCycle": "Plan validation failed: speech source {{placement}} depends on its own untimed dialogue {{turn}} for its {{edge}} time, creating a timing cycle. Set the source interval first. This draft was not saved.",
+      "speechSourceSpansBeats": "Plan validation failed: speech source {{placement}} carries dialogue from more than one beat, including {{turn}} outside {{beat}}. A source can only serve one beat; re-point those turns to their own beat's source. This draft was not saved.",
+      "speechSourceNotContiguous": "Plan validation failed: the dialogue carried by speech source {{placement}} is not contiguous in beat {{beat}}. Move the dialogue in between to another source. This draft was not saved.",
       "otherIssue": "Plan validation failed at {{path}} ({{code}}). This draft was not saved."
     },
     "taskCount": "{{count}} tasks",
