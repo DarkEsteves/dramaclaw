@@ -71,3 +71,21 @@ def test_steps_attached_to_an_unconfirmed_draft_are_not_submitted_generation():
 
     assert state["canvas_delivery_status"] == "awaiting_confirmation"
     assert state["generation_status"] == "awaiting_confirmation"
+
+
+def test_tool_receipt_envelope_status_does_not_override_the_saved_draft_state():
+    # A prepare receipt reports transport status "workflow_draft_ready" next to
+    # the persisted draft state; reading the envelope first reported a ready
+    # draft as failed and hid its confirmation step from the Agent.
+    state = material_lifecycle_status(
+        _work("planned"),
+        workflow_draft={
+            "ok": True,
+            "status": "workflow_draft_ready",
+            "draft_status": "ready",
+            "draft_id": "workflow_draft_ready",
+        },
+    )
+
+    assert state["workflow_draft_status"] == "ready"
+    assert state["canvas_delivery_status"] == "awaiting_confirmation"

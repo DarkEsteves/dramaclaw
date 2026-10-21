@@ -849,8 +849,21 @@ def _action_inputs(store: RemixArtifactStore, action: str, payload: dict[str, An
         "compile_production_plan": ({"plan_ref"}, set()),
     }
     required, optional = expected[action]
-    if not required <= set(payload) or not set(payload) <= required | optional:
-        raise ValueError(f"{action} requires exactly {', '.join(sorted(required))}")
+    missing = sorted(required - set(payload))
+    unexpected = sorted(set(payload) - (required | optional))
+    if missing or unexpected:
+        # Name the offending keys: "requires exactly <required>" alone cannot
+        # tell a caller whether it forgot a field or smuggled an extra one
+        # (e.g. a command routing key like ``node_id`` leaked into parameters).
+        problems = []
+        if missing:
+            problems.append("missing " + ", ".join(missing))
+        if unexpected:
+            problems.append("unexpected " + ", ".join(unexpected))
+        raise ValueError(
+            f"{action} requires exactly {', '.join(sorted(required))} "
+            f"({'; '.join(problems)})"
+        )
     refs: list[dict[str, Any]] = []
     media_hash = None
     manifest_media_bindings: list[dict[str, Any]] | None = None

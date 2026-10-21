@@ -58,6 +58,22 @@ describe('native production processing workflow', () => {
     expect(Object.keys(descriptor!.payload)).toEqual(['plan_ref']);
   });
 
+  it('strips command routing keys from override parameters before building the payload', () => {
+    useCanvasStore.setState({ nodes: [node('plan-node', 'scriptNode', {
+      remixRole: 'production_plan', processingAction: 'generate_production_plan_draft',
+      processingPayload: { topic: '旧目标' },
+      productionPlanV2Draft: emptyProductionPlanV2('旧目标'), productionPlanV2Dirty: false,
+      productionPlanV2Conflict: false, remixNodeRevision: 1 })], edges: [] });
+    const current = useCanvasStore.getState();
+    const descriptor = buildProductionWorkflowAction(current.nodes[0], current.nodes, current.edges, {
+      action: 'generate_production_plan_draft',
+      parameters: { node_id: 'plan-node', action: 'generate_production_plan_draft', topic: '黑咖啡' },
+    });
+    expect(descriptor?.payload).toEqual({ topic: '黑咖啡' });
+    expect(descriptor?.payload).not.toHaveProperty('node_id');
+    expect(descriptor?.payload).not.toHaveProperty('action');
+  });
+
   it('keeps an empty plan node goal and action version aligned for canvas and Agent edits', () => {
     useCanvasStore.setState({ nodes: [node('plan-node', 'scriptNode', {
       remixRole: 'production_plan', processingAction: 'generate_production_plan_draft',

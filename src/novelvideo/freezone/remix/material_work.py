@@ -566,7 +566,10 @@ def material_lifecycle_status(
 
     raw_draft_status = None
     if isinstance(workflow_draft, dict):
-        raw_draft_status = workflow_draft.get("status") or workflow_draft.get("draft_status")
+        # A tool receipt carries the transport status ("workflow_draft_ready")
+        # alongside the persisted draft state. Only draft_status is the draft;
+        # reading the envelope status first reports a ready draft as failed.
+        raw_draft_status = workflow_draft.get("draft_status") or workflow_draft.get("status")
     draft_status = str(raw_draft_status or "not_created")
     if draft_status not in {"not_created", "ready", "confirming", "submitted", "confirmed", "cancelled"}:
         draft_status = "failed"

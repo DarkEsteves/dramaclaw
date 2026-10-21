@@ -11256,3 +11256,72 @@ def test_reference_analysis_transport_auth_diagnostic_is_bounded(monkeypatch, bo
     assert result['status_code'] == 401 and result['error'] == expected
     assert len(result['error']) <= 300
     assert 'private-test-value' not in json.dumps(result) and 'do not forward' not in json.dumps(result)
+
+
+def test_material_duration_rejection_names_the_steps_and_the_bound(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(plugin, "_request", lambda *_a, **_k: {
+        "ok": False, "status_code": 422,
+        "error": {"code": "material_duration_invalid", "message": "Unprocessable Entity",
+                  "issues": [
+                      {"step_id": "clip-b1", "minimum": 4, "maximum": 15, "actual": None,
+                       "message": "Video material step clip-b1 needs an explicit integer durationSec of 4-15 seconds"},
+                      {"step_id": "clip-b3", "minimum": 4, "maximum": 15},
+                  ]},
+    })
+    handler = next(h for n, _s, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+    result = handler({
+        "commission_ref": {"artifact_id": "commission", "revision": 1},
+        "plan_ref": {"artifact_id": "plan", "revision": 1},
+        "requirements": [{"id": "r", "description": "d", "media_kind": "video",
+                          "final_step_id": "clip-b1"}],
+        "steps": [{"id": "clip-b1", "label": "l", "media_kind": "video",
+                   "source": "generate", "recipe_id": "general-video", "prompt": "p"}],
+        "command_id": "prepare-1",
+    })
+
+    assert result["ok"] is False
+    assert result["code"] == "material_duration_invalid"
+    assert [issue["step_id"] for issue in result["issues"]] == ["clip-b1", "clip-b3"]
+    instruction = result["agent_instruction"]
+    assert "clip-b1" in instruction and "clip-b3" in instruction
+    assert "durationSec" in instruction and "4" in instruction and "15" in instruction
+    # Nothing was persisted, so the Agent must not be sent to read a work package.
+    assert "freezone_get_material_work" not in instruction
+    assert "还没有保存任何素材工作包" in instruction
+    _assert_real_mcp_output(plugin, "freezone_prepare_material_work", result)
+
+
+def test_material_speech_conflict_names_the_owning_final_step(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(plugin, "_request", lambda *_a, **_k: {
+        "ok": False, "status_code": 422,
+        "error": {
+            "code": "material_speech_source_conflict",
+            "message": "material source conflict: placement v1 turns t1 require final step clip-b1 "
+                       "to own and generate the complete planned dialogue",
+            "placement_id": "v1", "turn_ids": ["t1"], "step_ids": ["clip-b1"],
+        },
+    })
+    handler = next(h for n, _s, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+    result = handler({
+        "commission_ref": {"artifact_id": "commission", "revision": 1},
+        "plan_ref": {"artifact_id": "plan", "revision": 1},
+        "requirements": [{"id": "r", "description": "d", "media_kind": "video",
+                          "final_step_id": "clip-b1"}],
+        "steps": [{"id": "clip-b1", "label": "l", "media_kind": "video",
+                   "source": "generate", "recipe_id": "general-video", "prompt": "p"}],
+        "command_id": "prepare-2",
+    })
+
+    assert result["placement_id"] == "v1"
+    assert result["turn_ids"] == ["t1"]
+    assert result["step_ids"] == ["clip-b1"]
+    instruction = result["agent_instruction"]
+    assert "clip-b1" in instruction and "t1" in instruction
+    assert "dialogue_turn_ids" in instruction
+    _assert_real_mcp_output(plugin, "freezone_prepare_material_work", result)

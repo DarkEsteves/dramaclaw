@@ -49,6 +49,50 @@ def _material_failure_phase(name: str) -> str:
     return "executing"
 
 
+def _material_failure_instruction(failure: dict, *, ref_hint: str) -> str:
+    """Name the one correction the native rejection actually requires."""
+    if failure.get("request_id") and str(failure.get("code", "")).endswith("internal_error"):
+        return (
+            "素材工作包服务端处理失败。先记录 request_id 并停止本轮，不要原样重试；"
+            + ref_hint
+            + "等待用户或主 Agent 决定如何修正。"
+        )
+    if failure.get("issues"):
+        steps = "、".join(
+            str(issue.get("step_id")) for issue in failure["issues"] if issue.get("step_id")
+        )
+        bounds = failure["issues"][0]
+        return (
+            f"这些视频素材步骤缺少时长：{steps}。请在每个 generate 视频步骤的 generation_inputs "
+            f"里给出整数 durationSec（{bounds.get('minimum')}～{bounds.get('maximum')} 秒），"
+            "可参照已确认方案中对应 beat 的 duration_frames；"
+            + ref_hint
+            + "不要原样重试，也不要创建新的素材工作包。"
+        )
+    if failure.get("placement_id") and failure.get("step_ids"):
+        placement = str(failure["placement_id"])
+        turns = "、".join(str(turn) for turn in failure.get("turn_ids") or [])
+        owners = "、".join(str(step) for step in failure["step_ids"])
+        return (
+            f"台词归属冲突：方案要求 {placement} 的台词（{turns or '全部'}）必须由最终步骤 {owners} 亲自生成。"
+            f"请把 {owners} 的 dialogue_turn_ids 按剧本顺序补全为 {turns or '该 placement 的全部 turn'}，"
+            f"并在它对应的 requirement.turn_ids 里列出同一批 turn；生成视频的画面步骤只保留 references，不要各自带走台词。"
+            + ref_hint
+            + "不要原样重试，也不要创建新的素材工作包。"
+        )
+    if failure.get("errors"):
+        return (
+            "按 error 中的字段路径和 errors 中的约束修正当前素材请求后再提交；"
+            + ref_hint
+            + "不要原样重试，也不要创建新的素材工作包。"
+        )
+    return (
+        "按返回的 error 修正本次素材请求后再提交；"
+        + ref_hint
+        + "不要原样重试，也不要创建新的素材工作包。"
+    )
+
+
 def _safe_material_errors(value: object) -> list[dict[str, str]]:
     """Forward only bounded field diagnostics from a material request."""
     if not isinstance(value, list):
@@ -68,6 +112,53 @@ def _safe_material_errors(value: object) -> list[dict[str, str]]:
             continue
         errors.append({"path": path, "message": message})
     return errors
+
+
+def _safe_material_issues(value: object) -> list[dict[str, object]]:
+    """Forward bounded per-step material constraints from the native API."""
+    if not isinstance(value, list):
+        return []
+    issues: list[dict[str, object]] = []
+    for item in value[:8]:
+        if not isinstance(item, dict):
+            continue
+        issue: dict[str, object] = {}
+        step_id = _safe_material_ids(item.get("step_id"))
+        if not step_id:
+            continue
+        issue["step_id"] = step_id
+        for key in ("minimum", "maximum"):
+            if type(item.get(key)) is int:
+                issue[key] = item[key]
+        actual = item.get("actual")
+        if isinstance(actual, dict):
+            bounded = {
+                name: field for name, field in list(actual.items())[:4]
+                if isinstance(name, str) and len(name) <= 64
+                and (type(field) is int or isinstance(field, str) and len(field) <= 64)
+            }
+            if bounded:
+                issue["actual"] = bounded
+        message = item.get("message")
+        if isinstance(message, str):
+            message = " ".join(message.split())[:240]
+            if message and not re.search(
+                r"traceback|authorization|bearer\s|api[_-]?key|secret|password", message, re.I
+            ):
+                issue["message"] = message
+        issues.append(issue)
+    return issues
+
+
+def _safe_material_ids(value: object) -> list[str] | str | None:
+    """Keep the actual plan/step identifiers a correction must use."""
+    if isinstance(value, str):
+        return value[:128] if 0 < len(value) <= 128 else None
+    if not isinstance(value, list):
+        return None
+    ids = [item[:128] for item in value[:200]
+           if isinstance(item, str) and 0 < len(item) <= 128]
+    return ids or None
 
 
 def _session_agent_id():
@@ -332,6 +423,19 @@ def build_director_tools(host: dict):
                             errors = _safe_material_errors(source.get("errors"))
                             if errors:
                                 failure["errors"] = errors
+                        # A rejected request states which step and which planned
+                        # speech failed. Without these the Agent can only guess
+                        # and re-submit the same conflict.
+                        if "issues" not in failure:
+                            issues = _safe_material_issues(source.get("issues"))
+                            if issues:
+                                failure["issues"] = issues
+                        for key in ("placement_id", "turn_ids", "step_ids"):
+                            if key in failure or key not in source:
+                                continue
+                            value = _safe_material_ids(source[key])
+                            if value:
+                                failure[key] = value
                     current_ref: dict[str, object] = {}
                     for source in sources:
                         for key, value in _safe_current_ref(source).items():
@@ -351,26 +455,13 @@ def build_director_tools(host: dict):
                     ref_hint = (
                         "保留 current_ref 中的 work_ref 和最新 revision，"
                         if "work_ref" in current_ref else
-                        "先读取当前素材工作包并取得最新 work_ref，"
+                        # This rejection happens before any work package is
+                        # persisted, so there is nothing to read back yet.
+                        "当前还没有保存任何素材工作包，直接修正本次提交的请求；"
                     )
-                    if failure.get("errors"):
-                        failure["agent_instruction"] = (
-                            "按 error 中的字段路径和 errors 中的约束修正当前素材请求后再提交；"
-                            + ref_hint
-                            + "不要原样重试，也不要创建新的素材工作包。"
-                        )
-                    elif failure.get("request_id") and str(failure.get("code", "")).endswith("internal_error"):
-                        failure["agent_instruction"] = (
-                            "素材工作包服务端处理失败。先记录 request_id 并停止本轮，不要原样重试；"
-                            + ref_hint
-                            + "等待用户或主 Agent 决定如何修正。"
-                        )
-                    else:
-                        failure["agent_instruction"] = (
-                            "读取当前素材工作包和返回的 error 后修正请求，再提交；"
-                            + ref_hint
-                            + "不要原样重试，也不要创建新的素材工作包。"
-                        )
+                    failure["agent_instruction"] = _material_failure_instruction(
+                        failure, ref_hint=ref_hint,
+                    )
                 if (name == "freezone_accept_material_candidate" and response.get("ok") is False
                         and response.get("status_code", 422) == 422
                         and error == "material technical/content review has not passed"):
@@ -412,10 +503,20 @@ def build_director_tools(host: dict):
                         data.get("work") or {}, workflow_draft=draft,
                     )
                     draft["material_lifecycle"] = lifecycle
+                    # Name the exact next call: a bare lifecycle word leaves the
+                    # Agent with no tool to invoke, so it reports success early.
+                    draft["next_tool"] = {
+                        "tool": "freezone_confirm_workflow_draft",
+                        "draft_id": draft.get("draft_id"),
+                        "revision": draft.get("revision"),
+                    }
                     draft["agent_instruction"] = (
-                        "素材工作包已保存，工作流草稿已准备，但画布尚未交付，实际素材也尚未生成。"
-                        "请沿用返回的 draft_id 和 revision，提交现有原生画布确认流程；确认回执和真实候选出现前，"
-                        "不要声称画布节点已创建或素材已生成。完成本轮动作后等待宿主完成事件，不要轮询或自动重试。"
+                        "素材工作包已保存，工作流草稿已准备（workflow_draft_status=ready），"
+                        "但画布尚未交付，实际素材也尚未生成。"
+                        "现在调用 freezone_confirm_workflow_draft，参数使用返回的 draft_id 和 revision，"
+                        "提交现有原生画布确认流程；确认回执和真实候选出现前，"
+                        "不要声称画布节点已创建、确认卡已挂出或素材已生成。"
+                        "完成本次调用后等待宿主完成事件，不要轮询或自动重试。"
                     )
                 elif draft.get("status") == "workflow_result_admission_required":
                     draft["agent_instruction"] = _MATERIAL_ADMISSION_RECOVERY
@@ -441,6 +542,45 @@ def build_director_tools(host: dict):
                                              'registered internally. Present the actual reviewed plan in ordinary '
                                              'chat and ask for the user’s own reply. Do not create another plan '
                                              'decision or start materials before authenticated confirmation.')
+            if name == 'freezone_confirm_reference_plan' and data.get('commission'):
+                comm = data['commission']
+                phase = comm.get('phase', '')
+                prod_scope = comm.get('production_scope', '')
+                next_action = comm.get('next_action') or {}
+                if prod_scope == '仅作品方案' or phase == 'completed':
+                    data['agent_instruction'] = (
+                        'The plan has been confirmed and this commission is complete (production_scope=仅作品方案). '
+                        'Acknowledge the confirmation in ordinary chat and End this turn. '
+                        'Do not start material work or propose generation.'
+                    )
+                elif next_action.get('owner') == 'system':
+                    data['agent_instruction'] = (
+                        'The plan was confirmed successfully. A system action is queued next; '
+                        'call freezone_advance_production with the returned commission_ref and '
+                        'expected_projection_revision=projection_revision plus a stable command_id. '
+                        'Then reread freezone_get_production_progress and present the new state.'
+                    )
+                elif next_action.get('owner') == 'agent':
+                    data['agent_instruction'] = (
+                        'The plan was confirmed successfully and the commission has advanced to phase='
+                        + phase + '. Perform the returned next_action (kind=' + str(next_action.get('kind', ''))
+                        + ') using saved current references, then reread freezone_get_production_progress. '
+                        'Preserve accepted media and all pending user decisions. If the next action is '
+                        'prepare_material_work_package, read freezone_get_reference_director_state for the '
+                        'confirmed plan details and begin preparing the material work package.'
+                    )
+                elif next_action.get('owner') == 'user' or phase == 'waiting_user':
+                    data['agent_instruction'] = (
+                        'The plan was confirmed successfully. Present the actual pending user action '
+                        'and End this turn. Waiting for user review or a creative choice is normal; '
+                        'never supply approval or claim unobserved media passed.'
+                    )
+                else:
+                    data['agent_instruction'] = (
+                        'The plan was confirmed successfully. Read freezone_get_production_progress '
+                        'for the current commission to determine the actual next step. Present the '
+                        'confirmation result in ordinary chat and proceed with the saved next_action.'
+                    )
             return result({"ok": True, "status": "ready", **data})
         execute.__name__ = "_handle_" + name
         return execute
@@ -469,7 +609,7 @@ def build_director_tools(host: dict):
         ("freezone_prepare_speech_correction", "Prepare once a correction against the plan's original words while retaining raw ASR and measured timings. Corrections are [{word_id,text,reason}]. Lexical changes need audio evidence or a real user receipt; missing performed words require material repair, never fabricated SRT or evenly invented times.", "POST", "speech-correction", {"plan_ref": ref, "take_id": text, "recognition_ref": ref, "corrections": {"type": "array", "items": obj}}, ["plan_ref", "take_id", "recognition_ref", "corrections"], False, False),
         ("freezone_review_production_output", "Inspect the actual current encoded render and native operation/manifest proof. Return measured technical checks and a playable review; when content/audio inspection is unavailable the user reviews the actual file. Do not certify an old export or claim unobserved sound passed.", "POST", "output-review", {"commission_ref": ref, "compose_node_id": text}, ["commission_ref", "compose_node_id"], False, False),
     ]
-    director_fields = ("analysis_ref", "evidence_ref", "transcript_ref", "range_us", "items", "next_cursor", "coverage", "transcript_status", "limitations", "unknowns", "requested_frame_coverage", "commissions", "decisions", "material_work", "material_lifecycle", "material_reviews", "material_reviews_truncated", "output_reviews", "commission_ref", "decision_ref", "decision", "review_ref", "review", "commission", "work_ref", "current_ref", "ready_step_ids", "changed_step_ids", "affected_step_ids", "workflow_intent", "work", "generation_readiness", "binding_candidates", "resource", "preview_ref", "source_plan_ref", "recognition_ref", "take_id", "take", "target_turns", "source_duration_us", "recognized_words", "total_words", "next_offset", "audio_review_available", "actor_id", "actor_kind", "corrections", "corrected_words", "cues", "blockers", "lexical_change", "node_id", "compose_node_id", "plan_ref", "instruction", "agent_instruction", "schema_version", "project_id", "canvas_id", "requester_user_id", "analysis_node_id", "analysis_evidence", "goal", "phase", "production_scope", "direction", "direction_revision", "direction_fingerprint", "plan_ref", "review_ref", "work_ref", "manifest_ref", "output_review_ref", "next_action", "next_tool", "manifest_ref", "operation_id", "media_url", "media", "technical", "content", "findings", "errors", "decision_receipt", "message_id", "human_message_id", "turn_id", "replayed", "side_effects")
+    director_fields = ("analysis_ref", "evidence_ref", "transcript_ref", "range_us", "items", "next_cursor", "coverage", "transcript_status", "limitations", "unknowns", "requested_frame_coverage", "commissions", "decisions", "material_work", "material_lifecycle", "material_reviews", "material_reviews_truncated", "output_reviews", "commission_ref", "decision_ref", "decision", "review_ref", "review", "commission", "work_ref", "current_ref", "ready_step_ids", "changed_step_ids", "affected_step_ids", "workflow_intent", "work", "generation_readiness", "binding_candidates", "resource", "preview_ref", "source_plan_ref", "recognition_ref", "take_id", "take", "target_turns", "source_duration_us", "recognized_words", "total_words", "next_offset", "audio_review_available", "actor_id", "actor_kind", "corrections", "corrected_words", "cues", "blockers", "lexical_change", "node_id", "compose_node_id", "plan_ref", "instruction", "agent_instruction", "schema_version", "project_id", "canvas_id", "requester_user_id", "analysis_node_id", "analysis_evidence", "goal", "phase", "production_scope", "direction", "direction_revision", "direction_fingerprint", "plan_ref", "review_ref", "work_ref", "manifest_ref", "output_review_ref", "next_action", "next_tool", "manifest_ref", "operation_id", "media_url", "media", "technical", "content", "findings", "errors", "issues", "placement_id", "turn_ids", "step_ids", "decision_receipt", "message_id", "human_message_id", "turn_id", "replayed", "side_effects")
     director_fields += ("blocker", "settlement_key", "branches", "selection_required", "scope", "generation_scope", "progress", "execution_status", "execution_problem",
                         "ready_system_actions", "projection_revision", "director_state", "material_steps",
                         "candidate_work_refs", "suggested_work_ref", "inventory_truncated", "plan_review_valid",

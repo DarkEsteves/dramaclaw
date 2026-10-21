@@ -27,6 +27,17 @@ export interface ProductionWorkflowDescriptor {
 }
 
 function record(value: unknown): value is JsonRecord { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+// Command routing fields never belong in a processing action's payload. An
+// Agent that echoes `node_id`/`action` inside `parameters` would otherwise
+// submit them as generation inputs and the backend rejects the whole run.
+const COMMAND_ROUTING_KEYS = new Set(['node_id', 'nodeId', 'action', 'type', 'kind', 'command', 'command_id']);
+function payloadWithoutRoutingKeys(value: JsonRecord): JsonRecord {
+  const result: JsonRecord = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!COMMAND_ROUTING_KEYS.has(key)) result[key] = item;
+  }
+  return result;
+}
 function exactRef(value: unknown): RemixArtifactRef | null {
   if (!record(value)) return null;
   const artifactId = value.artifactId ?? value.artifact_id;
@@ -109,7 +120,7 @@ export function buildProductionWorkflowAction(node: CanvasNode, nodes: CanvasNod
   const action = override?.action ?? node.data.processingAction;
   if (!isProductionProcessingAction(action)) return null;
   const savedPayload = record(node.data.processingPayload) ? node.data.processingPayload : {};
-  const parameters = structuredClone(override ? { ...(override.parameters ?? {}) } : savedPayload);
+  const parameters = structuredClone(override ? payloadWithoutRoutingKeys({ ...(override.parameters ?? {}) }) : savedPayload);
   if (action === 'generate_production_plan_draft' && override) {
     for (const field of ['requirements', 'locked_turns', 'requirements_fingerprint', 'requirements_provenance']) {
       if (parameters[field] === undefined && savedPayload[field] !== undefined) parameters[field] = structuredClone(savedPayload[field]);

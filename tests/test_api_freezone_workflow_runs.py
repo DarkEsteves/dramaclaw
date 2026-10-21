@@ -4057,6 +4057,24 @@ def test_workflow_run_processing_action_requires_exact_registered_payload(
 
     assert response.status_code == 400
     assert "requires exactly" in response.text
+    # The message must name the offending key, not only the required ones.
+    assert "unexpected command" in response.text
+
+
+def test_workflow_run_processing_action_names_missing_payload_field(
+    workflow_run_client: TestClient,
+) -> None:
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/default/workflow-runs",
+        json={"actions": [{
+            "node_id": "audio", "action": "transcribe_media",
+            "node_revision": 1, "payload": {"media_path": "media/reference.mp4"},
+        }]},
+    )
+
+    assert response.status_code == 400
+    assert "requires exactly" in response.text
+    assert "missing language" in response.text
 
 
 def test_workflow_run_advances_registered_actions_in_dependency_order(

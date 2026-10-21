@@ -9737,6 +9737,11 @@ _RESULT_COMMON_PROPERTIES: dict[str, Any] = {
     "retryable": {"type": "boolean"},
     "next_action": {"type": ["string", "null"]},
     "agent_instruction": {"type": ["string", "null"]},
+    # The input-schema rejection already computes the exact corrections a retry
+    # needs. Every tool's result contract must be able to carry them, otherwise
+    # the host drops the one actionable instruction and the Agent can only guess.
+    "unexpected_fields": {"type": "array"},
+    "integer_string_fields": {"type": "array"},
 }
 
 _CANVAS_RESULT_FIELDS = (
@@ -9931,6 +9936,10 @@ _RESULT_STRING_FIELDS = frozenset(
 
 
 def _result_field_schema(field: str) -> dict[str, Any]:
+    if field == "unexpected_fields":
+        return {"type": "array", "items": {"type": "object"}}
+    if field == "integer_string_fields":
+        return {"type": "array", "items": {"type": "array"}}
     if field == "error_path":
         return {"type": "string"}
     if field == "expected_branch":
