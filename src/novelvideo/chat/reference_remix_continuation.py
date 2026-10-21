@@ -809,6 +809,9 @@ class ReferenceRemixStore:
             # explicit retry is the only operation that may clear it; stale
             # observer events must never inherit the old failure and resume
             # the Agent implicitly.
+            reason = run.get("manual_resume_reason") or {}
+            if reason.get("code") == "material_draft_not_submitted":
+                run["material_resume_checkpoint"] = reason
             for key in ("manual_resume_required", "manual_resume_reason", "manual_resume_event_key"):
                 run.pop(key, None)
             if verified_stale is not None:
@@ -2537,6 +2540,11 @@ class ReferenceRemixCoordinator:
             if plan_presentation_target:
                 prompt += "\n当前已审核作品方案与精确引用：\n" + json.dumps(
                     plan_presentation_target, ensure_ascii=False)
+            if commission['phase'] == 'preparing_materials' and run.get('material_resume_checkpoint'):
+                prompt += ("\n这是用户明确继续后的已保存素材断点。先读取下列准确工作包和草稿版本；"
+                           "仅 ready 且尚无提交 claim 时调用既有确认工具；已提交查询已有请求，已确认读取回执。"
+                           "版本冲突或工具失败就报告并停止，不重新准备替代草稿，不自动重试。\n"
+                           + json.dumps(run['material_resume_checkpoint'], ensure_ascii=False))
         # Saved artifact references are business input from the checked current
         # canvas. The model reads their payloads through existing artifact APIs.
         from novelvideo.freezone.canvas_context_reader import read_saved_context
@@ -2878,6 +2886,18 @@ class ReferenceRemixCoordinator:
                     raise ValueError("reference continuation lease was lost")
                 return
         if commission:
+            if commission["phase"] == "preparing_materials" and not run.get("manual_resume_required"):
+                checkpoint = await asyncio.to_thread(self._material_submission_checkpoint, ctx, run, artifact_store)
+                if checkpoint:
+                    await asyncio.to_thread(self._assert_current, ctx, run, completed=True)
+                    outcome.blocker = checkpoint
+                    run.update(outcome.finish(current_revision=saved_canvas.get("revision")),
+                               status="resume_failed", error=checkpoint["message"], message=checkpoint["message"],
+                               manual_resume_required=True, manual_resume_reason=checkpoint,
+                               manual_resume_event_key=f"material:{turn_id}")
+                    if not await asyncio.to_thread(self.store.update_owned, run, self.owner_token):
+                        raise ValueError("reference continuation lease was lost")
+                    return
             if commission["phase"] != "drafting_plan":
                 run.update(status=commission["phase"], error=None)
                 if not await asyncio.to_thread(self.store.update_owned, run, self.owner_token):
@@ -2910,6 +2930,34 @@ class ReferenceRemixCoordinator:
                     return
             if existing_receipt is None:
                 raise ValueError("Agent 未交付真实作品方案草稿，分析结果已保留")
+
+    @staticmethod
+    def _material_submission_checkpoint(ctx, run, artifact_store):
+        """Check only this turn's verified receipt; never adopt or submit work."""
+        from novelvideo.freezone.remix.material_execution import read_material_execution_evidence
+        receipt = run.get("workflow_draft_receipt") or {}
+        work_ref = receipt.get("work_ref")
+        if (run.get("commission_phase") != "preparing_materials"
+                or run.get("draft_receipt_phase") != "preparing_materials"
+                or run.get("draft_receipt_attempt") != run.get("resume_attempt", 0)
+                or not isinstance(work_ref, dict) or not receipt.get("draft_id")):
+            return None
+        work = artifact_store.read(work_ref["artifact_id"], work_ref["revision"])
+        if work["schema"] != "material_work_package.v1" or work["created_by"] != ctx.requester_user_id:
+            return None
+        evidence = read_material_execution_evidence(work["payload"], project_id=ctx.project_id,
+            canvas_id=run["canvas_id"], state_dir=ctx.state_dir, requester_user_id=ctx.requester_user_id,
+            agent_id=run.get("agent_id", "main"))
+        for draft in evidence["drafts"]:
+            action = draft.get("next_action") or {}
+            if (draft["draft_id"] == receipt["draft_id"]
+                    and draft["revision"] == run.get("workflow_draft_revision")
+                    and action.get("kind") == "submit_canvas_approval"):
+                return {"code": "material_draft_not_submitted",
+                        "message": "草稿已保存，尚未提交，等待明确继续",
+                        "work_ref": work_ref, "draft_id": draft["draft_id"],
+                        "revision": draft["revision"], "next_action": action}
+        return None
 
     @staticmethod
     def _json_objects(value: Any) -> list[dict[str, Any]]:
@@ -2964,8 +3012,16 @@ class ReferenceRemixCoordinator:
                 reason = " ".join(reason.split())[:240]
                 if reason and not re.search(r"traceback|authorization|bearer\s|api[_-]?key|secret|password", reason, re.I):
                     errors.append({"path": path, "message": reason})
+        def identifier(item):
+            return item if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", item) else None
+
         next_action = value.get("next_action")
-        if not isinstance(next_action, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", next_action):
+        if isinstance(next_action, dict):
+            next_action = {key: item for key, item in next_action.items()
+                           if key in {"owner", "kind", "action_id", "tool", "draft_id"} and identifier(item)} | (
+                               {"revision": next_action["revision"]}
+                               if type(next_action.get("revision")) is int and next_action["revision"] > 0 else {})
+        elif not identifier(next_action):
             next_action = "correct_material_request"
         result: dict[str, Any] = {
             "code": code,
@@ -2974,8 +3030,24 @@ class ReferenceRemixCoordinator:
             "errors": errors,
             "next_action": next_action,
             "retryable": value.get("retryable") if isinstance(value.get("retryable"), bool) else False,
-            "side_effects": value.get("side_effects") if isinstance(value.get("side_effects"), str) else "none",
+            "side_effects": value.get("side_effects") if value.get("side_effects") in {"none", "saved", "unknown"} else "unknown",
         }
+        work_ref = value.get("work_ref")
+        if (isinstance(work_ref, dict) and identifier(work_ref.get("artifact_id"))
+                and type(work_ref.get("revision")) is int and work_ref["revision"] > 0):
+            result["work_ref"] = {key: work_ref[key] for key in ("artifact_id", "revision")}
+        for key in ("draft_id", "operation_id"):
+            if identifier(value.get(key)):
+                result[key] = value[key]
+        if type(value.get("revision")) is int and value["revision"] > 0:
+            result["revision"] = value["revision"]
+        lifecycle = value.get("material_lifecycle")
+        if isinstance(lifecycle, dict):
+            result["material_lifecycle"] = {key: item for key, item in lifecycle.items()
+                if key in {"material_work_status", "workflow_draft_status", "canvas_delivery_status", "generation_status"}
+                and isinstance(item, str) and re.fullmatch(r"[a-z_]{1,64}", item)}
+        if result.get("work_ref") or result.get("draft_id") or result.get("operation_id") or (result.get("material_lifecycle") or {}).get("material_work_status") == "saved":
+            result["side_effects"] = "saved"
         request_id = value.get("request_id")
         if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", request_id):
             result["request_id"] = request_id

@@ -604,6 +604,8 @@ dependencies and references with identity/product/setting/composition/motion/
 voice/first_frame/last_frame roles). Use shared references where they carry
 continuity. Do not copy dialogue into a separate mutable script.
 
+When creating the actual work for the current confirmed commission, explicitly set `select_for_commission=true`. Omit it or use false for a candidate only. Association is not content approval or permission to generate. Copy the returned current commission_ref and work_ref. If association was interrupted, keep the saved work_ref and use the existing explicit selection tool after the user chooses it; never adopt a unique candidate on a read.
+
 When the confirmed direction explicitly preserves a visual identity, put its
 stable choice ID, an actual current image node ID, and the reference role in
 the final requirement's `preservation_bindings`. The final material must
@@ -722,6 +724,8 @@ again: prepare a new work package with that step as `source=existing`, its actua
 relationships. Do not copy, invent, or transfer execution receipts. Review the
 existing candidate normally: current project file, hash, media probe, and content
 acceptance remain required; obtain user confirmation if content cannot be verified.
+
+A ready draft without a live approval request is ready_to_submit, not waiting for the user. Use the exact returned next_action tool, draft_id and revision once in the current authorized turn. If the operation fails or the turn ends before submission, retain the saved references and stop for explicit continuation. Do not wake another turn, resubmit, or create a replacement draft automatically. A delivered graph alone is not proof generation has started.
 
 Read `freezone_get_production_progress` after actual completion notifications.
 When the host returns a ready system check/adopt/bind action, use

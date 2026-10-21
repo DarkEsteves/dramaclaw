@@ -485,3 +485,90 @@ def test_outline_ready_keeps_commission_out_of_full_plan_review(tmp_path):
     assert current['phase'] == 'drafting_plan'
     assert current['plan_ref']['artifact_id'] == saved['id']
     assert current['next_action']['kind'] == 'inspect_outline'
+
+def _create_current_material(store, c, p, command='create-current', select=True):
+    return commission.prepare_commission_material_work(
+        store, c['commission_ref'], {'artifact_id': p['id'], 'revision': p['revision']},
+        [{'id': 'r', 'description': 'Reference image', 'media_kind': 'image', 'final_step_id': 'image'}],
+        [{'id': 'image', 'label': 'Image', 'media_kind': 'image', 'source': 'upload'}],
+        command, select_for_commission=select,
+        host_evidence=commission.AuthenticatedMaterialCreationEvidence('p', 'c', 'u'),
+        canvas=selection_canvas(p))
+
+
+def test_create_material_explicitly_selects_and_replays_without_human_approval(tmp_path):
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    result = _create_current_material(store, c, p)
+    current = commission.read_reference_commission(store, c['commission_ref'], latest=True)
+    assert current['work_ref']['artifact_id'] == result['work_ref']['artifact_id']
+    assert current['phase'] == 'preparing_materials'
+    assert result['commission_ref'] == current['commission_ref']
+    receipt = current['decisions'][-1]
+    assert receipt['type'] == 'material_work_created_selected'
+    assert receipt['request']['select_for_commission'] is True
+    assert 'message_id' not in receipt
+    assert _create_current_material(store, c, p) == result
+    with pytest.raises(RemixArtifactConflict):
+        _create_current_material(store, c, p, select=False)
+
+
+def test_create_candidate_then_explicit_replay_requires_existing_selection_tool(tmp_path):
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    candidate = _create_current_material(store, c, p, select=False)
+    result = _create_current_material(store, c, p)
+    assert result['work_ref'] == candidate['work_ref']
+    assert result['selection_status'] == 'selection_required'
+    assert result['next_tool'] == 'freezone_select_material_work'
+    assert commission.read_reference_commission(store, c['commission_ref'], latest=True).get('work_ref') is None
+
+
+def test_create_selected_conflict_does_not_save_second_work(tmp_path):
+    import hashlib
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    result = _create_current_material(store, c, p)
+    current = commission.read_reference_commission(store, result['commission_ref'], latest=True)
+    with pytest.raises(RemixArtifactConflict):
+        _create_current_material(store, current, p, command='other-current')
+    with pytest.raises(FileNotFoundError):
+        store.read_latest(hashlib.sha256(b'material-work:other-current').hexdigest()[:32])
+
+def test_interrupted_material_association_replay_preserves_work_for_explicit_selection(tmp_path, monkeypatch):
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    original = commission._select_material_work_locked
+    def interrupted(*args, **kwargs):
+        raise OSError('interrupted after work save')
+    monkeypatch.setattr(commission, '_select_material_work_locked', interrupted)
+    with pytest.raises(commission.MaterialWorkAssociationInterrupted):
+        _create_current_material(store, c, p)
+    monkeypatch.setattr(commission, '_select_material_work_locked', original)
+    result = _create_current_material(store, c, p)
+    assert result['selection_status'] == 'selection_required'
+    assert result['next_tool'] == 'freezone_select_material_work'
+    assert commission.read_reference_commission(store, c['commission_ref'], latest=True).get('work_ref') is None
+    assert len([path for path in store.root.iterdir() if path.is_dir() and store.read_latest(path.name)['schema'] == 'material_work_package.v1']) == 1
+
+
+@pytest.mark.parametrize('field,value', [('canvas_id', 'other'), ('requester_user_id', 'other')])
+def test_create_material_rejects_foreign_host_before_save(tmp_path, field, value):
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    evidence = {'project_id': 'p', 'canvas_id': 'c', 'requester_user_id': 'u', field: value}
+    with pytest.raises(PermissionError):
+        commission.prepare_commission_material_work(store, c['commission_ref'],
+            {'artifact_id': p['id'], 'revision': p['revision']}, [], [], 'foreign-create',
+            select_for_commission=True, host_evidence=commission.AuthenticatedMaterialCreationEvidence(**evidence),
+            canvas=selection_canvas(p))
+
+def test_creation_replay_rejects_superseded_association(tmp_path):
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    created = _create_current_material(store, c, p)
+    current = commission.read_reference_commission(store, created['commission_ref'], latest=True)
+    other = selectable_work(store, p, 'other-selected')
+    select(store, current, other, selection_canvas(p), command='replace-selected')
+    with pytest.raises(RemixArtifactConflict):
+        _create_current_material(store, c, p)

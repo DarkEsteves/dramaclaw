@@ -11325,3 +11325,41 @@ def test_material_speech_conflict_names_the_owning_final_step(monkeypatch):
     assert "clip-b1" in instruction and "t1" in instruction
     assert "dialogue_turn_ids" in instruction
     _assert_real_mcp_output(plugin, "freezone_prepare_material_work", result)
+
+def test_material_create_forwards_explicit_selection_intent(monkeypatch, tmp_path):
+    plugin, handler, arguments, _, requests, _ = _ready_material_adapter(
+        monkeypatch, tmp_path, 'freezone_prepare_material_work')
+    schema = next(schema['parameters'] for name, schema, _ in plugin.TOOLS
+                  if name == 'freezone_prepare_material_work')
+    assert schema['properties']['select_for_commission']['type'] == 'boolean'
+    assert 'select_for_commission' not in schema['required']
+    arguments['select_for_commission'] = True
+    handler(arguments)
+    saved = next(body['body'] for _, path, body in requests if path.endswith('/material-work'))
+    assert saved['select_for_commission'] is True
+
+
+def test_material_selection_required_stops_before_native_draft(monkeypatch, tmp_path):
+    plugin, handler, arguments, _, requests, draft_arguments = _ready_material_adapter(
+        monkeypatch, tmp_path, 'freezone_prepare_material_work')
+    original_request = plugin._request
+
+    def request(method, path, **kwargs):
+        response = original_request(method, path, **kwargs)
+        if path.endswith('/material-work'):
+            response['data'].update(selection_status='selection_required',
+                                    next_action='select_material_work',
+                                    next_tool='freezone_select_material_work')
+        return response
+
+    monkeypatch.setattr(plugin, '_request', request)
+    arguments['operation_id'] = _MATERIAL_ADMITTED_OPERATION
+    result = json.loads(handler(arguments))
+    assert result['ok'] is True
+    assert result['status'] == 'material_work_saved'
+    assert result['work_ref']
+    assert result['next_tool'] == 'freezone_select_material_work'
+    assert result['next_action'] == 'select_material_work'
+    assert not draft_arguments
+    assert len(requests) == 1 and requests[0][1].endswith('/material-work')
+    _assert_real_mcp_output(plugin, 'freezone_prepare_material_work', result)

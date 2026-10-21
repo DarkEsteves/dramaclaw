@@ -59,7 +59,7 @@ def _material_work_internal_error(*, request_id: str | None) -> dict[str, Any]:
         "message": "素材工作包保存失败，服务端未能完成处理",
         "next_action": "inspect_request_id_and_correct_material_request",
         "retryable": False,
-        "side_effects": "none",
+        "side_effects": "unknown",
         **({"request_id": request_id} if request_id else {}),
     }
 
@@ -135,6 +135,7 @@ class MaterialWorkRequest(BaseModel):
     requirements: list[dict[str, Any]] = Field(min_length=1, max_length=200)
     steps: list[dict[str, Any]] = Field(min_length=1, max_length=200)
     command_id: str = Field(min_length=1, max_length=128)
+    select_for_commission: bool = False
 
 
 class SelectMaterialWorkRequest(BaseModel):
@@ -726,10 +727,11 @@ async def production_batch(project: str, canvas_id: str, body: ProductionBatchRe
 @router.post("/material-work")
 async def material_work(project: str, canvas_id: str, body: MaterialWorkRequest, user: dict = Depends(get_api_user)):
     from novelvideo.freezone.remix.material_work import (
-        MaterialSourceConflict, prepare_material_work, material_workflow_intent,
+        MaterialSourceConflict, material_workflow_intent,
         missing_material_parameter_choices, material_duration_issues,
         material_parameter_conflicts, material_lifecycle_status,
     )
+    from novelvideo.freezone.remix.store import RemixArtifactConflict
     ctx, canvas, store = await _context(project, canvas_id, user)
     plan, _ = await _plan_in_canvas(store, body.plan_ref, canvas)
     commission = await _commission_in_scope(store, body.commission_ref, ctx, canvas_id)
@@ -765,11 +767,34 @@ async def material_work(project: str, canvas_id: str, body: MaterialWorkRequest,
             "message": "素材步骤参数与当前用户确认的选择不一致；请先更新步骤或让用户重新选择",
         })
     try:
-        result = await asyncio.to_thread(
-            prepare_material_work, store, body.plan_ref, body.requirements, body.steps,
-            body.command_id, canvas=canvas, direction=commission.get('direction'),
-            confirmed_choices=confirmed_choices,
+        from novelvideo.freezone.remix.reference_commission import (
+            AuthenticatedMaterialCreationEvidence, MaterialWorkAssociationInterrupted, prepare_commission_material_work,
         )
+
+        def create_current():
+            with canvas_store.get_canvas_write_mutex().write_mutex(ctx.state_dir, canvas_id) as guard:
+                current_canvas = canvas_store.read_canvas(ctx.state_dir, canvas_id)
+                evidence = AuthenticatedMaterialCreationEvidence(ctx.project_id, canvas_id, ctx.requester_user_id)
+                return prepare_commission_material_work(
+                    store, body.commission_ref, body.plan_ref, body.requirements, body.steps,
+                    body.command_id, select_for_commission=body.select_for_commission, host_evidence=evidence,
+                    canvas=current_canvas, direction=commission.get('direction'),
+                    confirmed_choices=confirmed_choices, _canvas_guard=guard)
+
+        result = await asyncio.to_thread(create_current)
+    except HTTPException:
+        raise
+    except MaterialWorkAssociationInterrupted as exc:
+        raise HTTPException(500, {
+            **_material_work_internal_error(request_id=current_request_id()),
+            'code': 'material_work_association_interrupted', 'side_effects': 'saved',
+            'work_ref': exc.work_ref, 'next_action': 'select_material_work',
+            'message': '素材工作包已保存，关联未完成；保留 work_ref，明确选择后使用现有选择入口',
+        }) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RemixArtifactConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (MaterialWorkRequestError, MaterialSourceConflict, ValueError) as exc:
         raise HTTPException(
             422,
@@ -794,10 +819,11 @@ async def material_work(project: str, canvas_id: str, body: MaterialWorkRequest,
                       "missing_choices": missing_choices,
                       "ready_for_native_generation": ready_for_native_generation,
                   },
-                  "next_action": ("prepare_native_generation"
+                  "next_action": ("select_material_work" if result.get('selection_status') == 'selection_required' else "prepare_native_generation"
                                    if ready_for_native_generation
                                    else "request_user_clarification"),
-                  "agent_instruction": (
+                  "agent_instruction": ("素材工作包已保存，尚未关联。用户明确选择后调用 freezone_select_material_work；不要准备新草稿或自动重试。"
+                      if result.get("selection_status") == "selection_required" else
                       "素材工作包已保存。它只记录依赖、提示词、参考关系和每个视频步骤的 4～15 秒时长，"
                       "不会启动实际生成。请通过现有参数卡补齐缺失选择；不要重复保存工作包或自动重试。"
                       if not ready_for_native_generation else

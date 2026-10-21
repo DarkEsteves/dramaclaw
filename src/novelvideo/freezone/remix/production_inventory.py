@@ -717,7 +717,9 @@ def _execution(
     if status in {"stopped", "cancelled", "canceled"}:
         return {"status": "stopped", "blockers": []}
     if run and run.get('manual_resume_required'):
-        return {'status': 'failed', 'blockers': [{'owner': 'user', 'kind': 'resume_execution', 'action_id': run.get('run_id')}]}
+        return {'status': 'failed',
+                'blockers': [{'owner': 'user', 'kind': 'resume_execution', 'action_id': run.get('run_id')}],
+                'problems': [run['manual_resume_reason']] if run.get('manual_resume_reason') else []}
     if work and c['phase'] == 'preparing_materials':
         from .material_execution import read_material_execution_evidence
         evidence = read_material_execution_evidence(work['payload'], project_id=store.project_id,
@@ -772,6 +774,9 @@ def _execution(
         and run.get("commission_phase", status) == c["phase"]
     )
     user_required = blocker_current and blocker.get("code") == "user_required"
+    if c['phase'] == 'preparing_materials' and any(
+            action.get('kind') == 'submit_canvas_approval' for action in actions):
+        user_required = False
     if user_required:
         actions[:] = [action for action in actions if action["owner"] == "user"]
         actions.append(

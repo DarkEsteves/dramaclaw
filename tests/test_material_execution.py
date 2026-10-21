@@ -360,3 +360,17 @@ def test_material_evidence_rejects_stale_approval_and_reads_current_request(tmp_
     assert result['drafts'][0]['material_lifecycle']['canvas_delivery_status'] == 'awaiting_confirmation'
     work['steps'][0]['execution']['draft_revision'] = 2
     assert read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)['drafts'] == []
+
+def test_expired_ready_material_draft_has_no_submit_action(tmp_path):
+    import sqlite3
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft
+    from novelvideo.freezone.remix.material_execution import read_material_execution_evidence
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='p', canvas_id='c',
+        intent={}, compiled={'ok': True, 'plan': {'nodes': []}})
+    with sqlite3.connect(tmp_path / 'data.db') as conn:
+        conn.execute('UPDATE workflow_drafts SET expires_at=0 WHERE draft_id=?', (draft['draft_id'],))
+    work = {'steps': [{'id': 'one', 'source': 'generate', 'status': 'submitted', 'execution': {
+        'draft_id': draft['draft_id'], 'draft_revision': 1, 'workflow_instance_id': draft['draft_id'], 'canvas_id': 'c'}}]}
+    result = read_material_execution_evidence(work, project_id='p', canvas_id='c', state_dir=tmp_path)
+    assert not any(row.get('next_action') for row in result['drafts'])
+    assert result['problems'][0]['kind'] == 'material_draft_expired'

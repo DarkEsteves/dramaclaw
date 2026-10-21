@@ -92,7 +92,7 @@ def test_material_work_internal_error_is_safe_and_traceable():
         "message": "素材工作包保存失败，服务端未能完成处理",
         "next_action": "inspect_request_id_and_correct_material_request",
         "retryable": False,
-        "side_effects": "none",
+        "side_effects": "unknown",
         "request_id": "req-456",
     }
 

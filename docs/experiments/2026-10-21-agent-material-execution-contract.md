@@ -1,6 +1,6 @@
 # Agent 素材执行衔接修复方案
 
-日期：2026-10-21。状态：待实施。核对基线：`eeaec8f1`。本文只定义修改范围和验收，不授权生成、审批、重启服务或修复现场数据。
+日期：2026-10-21。状态：第一批已实现并完成定向回归，第二批待实施。核对基线：`eeaec8f1`。本文不授权生成、审批、重启服务或修复现场数据。
 
 ## 1. 目标与取舍
 
@@ -185,7 +185,7 @@ uv run pytest tests/test_reference_remix_continuation.py tests/test_reference_ob
 pnpm exec vitest run src/features/superchat/ReferenceProductionPanel.test.tsx
 ```
 
-最后运行 `git diff --check`，检查没有新增调度/重试调用、数据库表或审批绕过。上述是未来实施验收命令，不表示本方案已经完成实现或通过全部回归。
+最后运行 `git diff --check`，检查没有新增调度/重试调用、数据库表或审批绕过。上述为可复用的验收命令，本次实际验证范围和限制见第 9 节。
 
 ## 6. 第二批：独立的输入与错误改进
 
@@ -208,3 +208,15 @@ pnpm exec vitest run src/features/superchat/ReferenceProductionPanel.test.tsx
 本地历史设计 `docs/superpowers/specs/2026-10-20-material-state-separation-design.md` 中 ready ⇒ awaiting_confirmation 的约定由本方案细化。`docs/superpowers/` 当前被 Git 忽略；该历史文件仅供背景，不作为实施必须存在的依赖，也不为同步它修改忽略规则。
 
 沿用 `docs/superpowers/plans/2026-10-18-material-work-error-and-stop-auto-resume.md` 的失败停止边界，以及 `docs/experiments/agent-execution-boundaries.md` 的不自动重试约束。本次不通过“自动补交”“自动续办”等改名方式绕过这些边界。
+
+## 9. 第一批实施记录
+
+第一批已实现第 3 节的证据读取、状态投影、创建关联、未提交断点与失败引用保留；没有新增自动重试、补交、唤醒或调度调用，没有数据库迁移。第二批不在本次改动范围。
+
+- 后端定向回归：925 passed，2 deselected，12 个依赖及 FastAPI 既有弃用警告。覆盖第 5 节列出的测试文件，并包括 `tests/test_material_generation_controls.py`。
+- 前端 `ReferenceProductionPanel.test.tsx`：11 passed。
+- 对本批改动运行 pre-commit：gitleaks、禁用词检查通过；`git diff --check` 通过。
+- 排除 `test_canvas_read_mode_is_host_selected_and_default_clears_inherited_mode`：隔离测试环境未配置其依赖的模型网关密钥。
+- 排除 `test_observer_wakes_saved_review_when_run_still_says_plan_review`：方案版本结算不匹配，已在未修改的基线工作区独立复现。
+
+本次未重启服务、未执行在线生成、未批准或修改历史现场草稿。审批证据表示后端存在当前有效请求，不证明浏览器已经渲染该卡片。

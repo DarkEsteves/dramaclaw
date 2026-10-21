@@ -318,10 +318,12 @@ def _reconcile_native_workflow_delivery(ctx, commission: dict) -> bool:
 
 
 def _saved_work(store, canvas, commission, plan):
-    """One plan may have several work packages; ambiguity requires a decision."""
+    """Observe only explicitly associated work, matching the progress reader."""
     explicit = commission.get('work_ref')
+    if not explicit:
+        return None
     candidates = []
-    paths = [store.root / explicit['artifact_id']] if explicit else (sorted(store.root.iterdir()) if store.root.is_dir() else [])
+    paths = [store.root / explicit['artifact_id']]
     node_ids = {node.get('id') for node in canvas.get('nodes', [])}
     for path in paths[:1000]:
         if path.is_symlink() or not path.is_dir():
@@ -331,6 +333,8 @@ def _saved_work(store, canvas, commission, plan):
         except (ValueError, FileNotFoundError):
             continue
         if artifact['schema'] != 'material_work_package.v1':
+            continue
+        if artifact['revision'] < explicit['revision'] or artifact['created_by'] != commission['requester_user_id']:
             continue
         work = artifact['payload']
         if work['plan_ref']['artifact_id'] != plan['id']:

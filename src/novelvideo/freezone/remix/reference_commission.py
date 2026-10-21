@@ -22,6 +22,19 @@ class AuthenticatedDecisionEvidence:
     message_content: str | None = None
 
 
+@dataclass(frozen=True)
+class AuthenticatedMaterialCreationEvidence:
+    project_id: str
+    canvas_id: str
+    requester_user_id: str
+
+
+class MaterialWorkAssociationInterrupted(RuntimeError):
+    def __init__(self, work_ref):
+        super().__init__('material work saved; association did not complete')
+        self.work_ref = work_ref
+
+
 def _plan_approval_receipts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Find original scoped approvals; later media/timing revisions keep their receipt."""
     plan_ref = payload.get('plan_ref') or {}
@@ -479,7 +492,7 @@ def _validate_selection_canvas(store, payload: dict, plan: dict, work: dict, can
 
 
 def _validate_selection_actor(store, payload, evidence, canvas):
-    if (not isinstance(evidence, AuthenticatedDecisionEvidence)
+    if (not isinstance(evidence, (AuthenticatedDecisionEvidence, AuthenticatedMaterialCreationEvidence))
             or (evidence.project_id, evidence.canvas_id, evidence.requester_user_id) != (
                 payload['project_id'], payload['canvas_id'], payload['requester_user_id'])
             or store.created_by != payload['requester_user_id']):
@@ -520,8 +533,6 @@ def select_material_work(store: RemixArtifactStore, commission_ref: dict[str, An
     read, command replay check and publication occurs under one artifact mutex.
     Selection preserves historical material review and host approval receipts.
     """
-    from .reference_director import _MaterialPublicationGuard
-    from .store import RemixArtifactConflict
     commission_ref, work_ref = _selection_ref(store, commission_ref), _selection_ref(store, work_ref)
     if not isinstance(command_id, str) or not command_id.strip() or len(command_id) > 128:
         raise ValueError('command_id must contain 1 to 128 characters')
@@ -529,37 +540,120 @@ def select_material_work(store: RemixArtifactStore, commission_ref: dict[str, An
         raise PermissionError('Authenticated host selection evidence required')
     request = {'commission_ref': commission_ref, 'work_ref': work_ref}
     with store._locked() as artifact_guard:
-        guard = _MaterialPublicationGuard(artifact_guard, _canvas_guard)
+        return _select_material_work_locked(store, commission_ref, work_ref, command_id,
+            host_evidence=host_evidence, canvas=canvas, artifact_guard=artifact_guard,
+            _canvas_guard=_canvas_guard, request=request)
+
+
+def _select_material_work_locked(store, commission_ref, work_ref, command_id, *,
+        host_evidence, canvas, artifact_guard, _canvas_guard, request, receipt_type='material_work_selected'):
+    from .reference_director import _MaterialPublicationGuard
+    from .store import RemixArtifactConflict
+    guard = _MaterialPublicationGuard(artifact_guard, _canvas_guard)
+    current = store._read(commission_ref['artifact_id'], store._latest_revision(commission_ref['artifact_id']))
+    if current['schema'] != 'reference_commission.v1':
+        raise ValueError('reference is not a commission')
+    payload = ReferenceCommission.model_validate(current['payload']).model_dump(mode='json')
+    _validate_selection_actor(store, payload, host_evidence, canvas)
+    for receipt in payload['decisions']:
+        if receipt.get('type') == receipt_type and receipt.get('command_id') == command_id:
+            if receipt.get('request') != request:
+                raise RemixArtifactConflict('selection command_id reused with different inputs')
+            return _result(store._read(current['id'], receipt['commission_revision'] + 1))
+    if current['revision'] != commission_ref['revision']:
+        raise RemixArtifactConflict('Commission changed; reload before selecting material work')
+    if payload['phase'] != 'preparing_materials':
+        raise ValueError('material work selection requires preparing_materials phase')
+    plan, _ = _read_selectable_work(store, payload, work_ref, canvas)
+    receipt = {'type': receipt_type, 'command_id': command_id, 'request': request,
+               'commission_revision': current['revision'], 'previous_work_ref': payload['work_ref'],
+               'work_ref': work_ref, 'project_id': store.project_id, 'canvas_id': payload['canvas_id'],
+               'requester_user_id': payload['requester_user_id']}
+    payload.update(work_ref=work_ref, plan_ref={'artifact_id': plan['id'], 'revision': plan['revision'], 'project_id': store.project_id},
+                   decisions=[*payload['decisions'], receipt], manifest_ref=None, output_review_ref=None)
+    validated = ReferenceCommission.model_validate(payload).model_dump(mode='json', exclude_none=True)
+    refs = [payload[key] for key in ('plan_ref', 'review_ref', 'work_ref', 'parent_commission_ref') if payload.get(key)]
+    refs += [row['commission_ref'] for row in payload.get('plan_branches', [])]
+    refs = store._reference_list(refs, store.project_id)
+    store._validate_upstream_refs(refs)
+    store._validate_v2_lineage(current['schema'], validated, refs, target_artifact_id=current['id'], previous_plan=current)
+    guard.reassert()
+    return _result(store._publish(artifact_id=current['id'], schema=current['schema'], revision=current['revision'] + 1,
+        payload=validated, upstream_refs=refs, created_by=current['created_by'], guard=guard))
+
+
+def prepare_commission_material_work(store, commission_ref, plan_ref, requirements, steps, command_id, *,
+        select_for_commission=False, host_evidence, canvas, direction=None, confirmed_choices=None, _canvas_guard=None):
+    """Save an explicit creation command and optionally associate it, without approval.
+
+    Interrupted association is returned for explicit selection on replay. Both
+    writes use the existing canvas/artifact lock order, without nested locking.
+    """
+    from .material_work import _prepare_material_work
+    from .store import RemixArtifactConflict
+    if not isinstance(host_evidence, AuthenticatedMaterialCreationEvidence):
+        raise PermissionError('Authenticated host creation scope required')
+    if not isinstance(command_id, str) or not command_id.strip() or len(command_id) > 128:
+        raise ValueError('command_id must contain 1 to 128 characters')
+    commission_ref = _selection_ref(store, commission_ref)
+    plan_ref = _selection_ref(store, plan_ref)
+    work_id = hashlib.sha256(('material-work:' + command_id).encode()).hexdigest()[:32]
+    with store._locked() as guard:
         current = store._read(commission_ref['artifact_id'], store._latest_revision(commission_ref['artifact_id']))
         if current['schema'] != 'reference_commission.v1':
             raise ValueError('reference is not a commission')
         payload = ReferenceCommission.model_validate(current['payload']).model_dump(mode='json')
         _validate_selection_actor(store, payload, host_evidence, canvas)
-        for receipt in payload['decisions']:
-            if receipt.get('type') == 'material_work_selected' and receipt.get('command_id') == command_id:
-                if receipt.get('request') != request:
-                    raise RemixArtifactConflict('selection command_id reused with different inputs')
-                return _result(store._read(current['id'], receipt['commission_revision'] + 1))
-        if current['revision'] != commission_ref['revision']:
-            raise RemixArtifactConflict('Commission changed; reload before selecting material work')
+        receipts = [r for r in payload['decisions']
+                    if r.get('type') == 'material_work_created_selected' and r.get('command_id') == command_id]
+        work_ref = {'artifact_id': work_id, 'revision': 1, 'project_id': store.project_id}
+        request = {'commission_ref': commission_ref, 'work_ref': work_ref,
+                   'select_for_commission': select_for_commission}
+        if receipts and receipts[0].get('request') != request:
+            raise RemixArtifactConflict('material creation command_id reused with different selection inputs')
+        if receipts and (current['revision'] != receipts[0]['commission_revision'] + 1
+                         or _selection_ref(store, payload.get('work_ref')) != work_ref):
+            raise RemixArtifactConflict('material creation association changed; read current references')
+        if not receipts and current['revision'] != commission_ref['revision']:
+            raise RemixArtifactConflict('Commission changed; reload before creating material work')
         if payload['phase'] != 'preparing_materials':
-            raise ValueError('material work selection requires preparing_materials phase')
-        plan, _ = _read_selectable_work(store, payload, work_ref, canvas)
-        receipt = {'type': 'material_work_selected', 'command_id': command_id, 'request': request,
-                   'commission_revision': current['revision'], 'previous_work_ref': payload['work_ref'],
-                   'work_ref': work_ref, 'project_id': store.project_id, 'canvas_id': payload['canvas_id'],
-                   'requester_user_id': payload['requester_user_id']}
-        payload.update(work_ref=work_ref, plan_ref={'artifact_id': plan['id'], 'revision': plan['revision'], 'project_id': store.project_id},
-                       decisions=[*payload['decisions'], receipt], manifest_ref=None, output_review_ref=None)
-        validated = ReferenceCommission.model_validate(payload).model_dump(mode='json', exclude_none=True)
-        refs = [payload[key] for key in ('plan_ref', 'review_ref', 'work_ref', 'parent_commission_ref') if payload.get(key)]
-        refs += [row['commission_ref'] for row in payload.get('plan_branches', [])]
-        refs = store._reference_list(refs, store.project_id)
-        store._validate_upstream_refs(refs)
-        store._validate_v2_lineage(current['schema'], validated, refs, target_artifact_id=current['id'], previous_plan=current)
-        guard.reassert()
-        return _result(store._publish(artifact_id=current['id'], schema=current['schema'], revision=current['revision'] + 1,
-            payload=validated, upstream_refs=refs, created_by=current['created_by'], guard=guard))
+            raise RemixArtifactConflict('material creation requires preparing_materials phase')
+        if _selection_ref(store, payload['plan_ref']) != plan_ref:
+            raise RemixArtifactConflict('material plan differs from the current commission')
+        from .production_review import production_decision_fingerprint
+        plan = store._read(plan_ref['artifact_id'], store._latest_revision(plan_ref['artifact_id']))
+        review = store._read(payload['review_ref']['artifact_id'], payload['review_ref']['revision'])
+        if (plan['revision'] != plan_ref['revision'] or plan['created_by'] != store.created_by
+                or production_decision_fingerprint(plan['payload']) != review['payload']['decision_fingerprint']):
+            raise RemixArtifactConflict('current plan differs from the confirmed material basis')
+        if select_for_commission:
+            _validate_selection_canvas(store, payload, plan, {'payload': {'steps': steps}}, canvas)
+        if select_for_commission and payload.get('work_ref') and not receipts:
+            raise RemixArtifactConflict('commission already has selected material work')
+        try:
+            existing = store._read(work_id, store._latest_revision(work_id))
+        except FileNotFoundError:
+            existing = None
+        if existing and existing['revision'] != 1:
+            raise RemixArtifactConflict('material work changed; use its current reference explicitly')
+        exact_plan = {key: plan_ref[key] for key in ('artifact_id', 'revision')}
+        result = _prepare_material_work(store, exact_plan, requirements, steps, command_id,
+            canvas=canvas, direction=direction, confirmed_choices=confirmed_choices, _artifact_guard=guard)
+        if receipts:
+            selected = _result(store._read(current['id'], receipts[0]['commission_revision'] + 1))
+            return {**result, 'commission_ref': selected['commission_ref'], 'selection_status': 'selected'}
+        if not select_for_commission:
+            return result
+        if existing:
+            return {**result, 'commission_ref': _result(current)['commission_ref'],
+                    'selection_status': 'selection_required', 'next_tool': 'freezone_select_material_work'}
+        try:
+            selected = _select_material_work_locked(store, commission_ref, work_ref, command_id,
+                host_evidence=host_evidence, canvas=canvas, artifact_guard=guard, _canvas_guard=_canvas_guard,
+                request=request, receipt_type='material_work_created_selected')
+        except Exception as exc:
+            raise MaterialWorkAssociationInterrupted(result['work_ref']) from exc
+        return {**result, 'commission_ref': selected['commission_ref'], 'selection_status': 'selected'}
 
 
 def propose_material_work_selection(store: RemixArtifactStore, commission_ref: dict[str, Any],

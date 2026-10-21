@@ -2951,3 +2951,98 @@ async def test_legacy_native_projection_rejects_ambiguous_source_inputs_without_
     with pytest.raises(continuation.StaleReference, match='多个'):
         await service._save_analysis(ctx, run, result=task.result)
     assert canvas_store.canvas_path(ctx.state_dir, 'canvas').read_bytes() == before
+
+def test_material_failure_retains_saved_work_and_exact_recovery_facts():
+    value = {'ok': False, 'status': 'failed', 'code': 'admission_required',
+             'work_ref': {'artifact_id': 'saved-work', 'revision': 2},
+             'draft_id': 'draft-one', 'revision': 3, 'operation_id': 'op-one',
+             'material_lifecycle': {'material_work_status': 'saved',
+                                    'workflow_draft_status': 'ready',
+                                    'canvas_delivery_status': 'ready_to_submit',
+                                    'generation_status': 'not_started'},
+             'next_action': {'owner': 'agent', 'kind': 'submit_canvas_approval',
+                             'tool': 'freezone_confirm_workflow_draft',
+                             'draft_id': 'draft-one', 'revision': 3}}
+    result = continuation.ReferenceRemixCoordinator._material_work_failure(value, {})
+    assert result['work_ref'] == value['work_ref']
+    assert result['draft_id'] == 'draft-one' and result['revision'] == 3
+    assert result['operation_id'] == 'op-one'
+    assert result['material_lifecycle'] == value['material_lifecycle']
+    assert result['next_action'] == value['next_action']
+    assert result['side_effects'] == 'saved'
+    assert continuation.ReferenceRemixCoordinator._material_work_failure({'ok': False}, {})['side_effects'] == 'unknown'
+
+@pytest.mark.asyncio
+async def test_material_ready_turn_ends_at_manual_checkpoint_without_second_turn(service, tmp_path, monkeypatch):
+    from novelvideo.api import egress_binding
+    from novelvideo.freezone.remix import reference_commission
+    ctx = context(tmp_path)
+    run, _ = await ready_run(service, ctx, monkeypatch)
+    payload = await service._save_analysis(ctx, run, result=_.result)
+    run["result_fingerprint"] = continuation._node_fingerprint(payload["nodes"][1])
+    run.update(commission_ref={'artifact_id': 'commission', 'revision': 5},
+               commission_phase='preparing_materials')
+    assert service.store.update_owned(run, service.owner_token)
+    monkeypatch.setattr(reference_commission, 'read_reference_commission', lambda *_a, **_k: {
+        'phase': 'preparing_materials', 'commission_ref': run['commission_ref']})
+    @asynccontextmanager
+    async def egress(**_kwargs):
+        yield None
+    monkeypatch.setattr(egress_binding, 'request_egress_scope', egress)
+    calls = []
+    async def reply(*args, **_kwargs):
+        calls.append(args[2])
+        run.update(workflow_draft_receipt={'draft_id': 'saved-draft', 'work_ref': {'artifact_id': 'work', 'revision': 2}},
+                   workflow_draft_id='saved-draft', workflow_draft_revision=1,
+                   draft_receipt_attempt=run.get('resume_attempt', 0), draft_receipt_phase='preparing_materials')
+    monkeypatch.setattr(continuation.chat_service, 'stream_assistant_reply', reply)
+    action = {'owner': 'agent', 'kind': 'submit_canvas_approval', 'tool': 'freezone_confirm_workflow_draft',
+              'draft_id': 'saved-draft', 'revision': 1, 'action_id': 'submit:saved-draft:1'}
+    monkeypatch.setattr(service, '_material_submission_checkpoint', lambda *_a: {
+        'code': 'material_draft_not_submitted', 'message': '草稿已保存，尚未提交，等待明确继续',
+        'work_ref': {'artifact_id': 'work', 'revision': 2}, 'draft_id': 'saved-draft', 'revision': 1,
+        'next_action': action}, raising=False)
+    await service._resume_agent(run, ctx)
+    assert len(calls) == 1
+    assert run['status'] == 'resume_failed'
+    assert run['manual_resume_required'] is True
+    assert run['manual_resume_reason']['code'] == 'material_draft_not_submitted'
+    assert run['execution_blocker']['next_action'] == action
+    assert service.store.get(run['run_id'])['manual_resume_reason']['work_ref']['artifact_id'] == 'work'
+
+def test_material_checkpoint_uses_real_bound_draft_and_ignores_old_receipts(tmp_path):
+    from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
+    from novelvideo.freezone.remix.material_work import material_workflow_intent
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft, claim_workflow_draft_confirmation
+    from test_material_execution import setup_work
+    store, _, prepared = setup_work(tmp_path)
+    work = store.read(prepared['work_ref']['artifact_id'], 1)['payload']
+    intent = material_workflow_intent(work)
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+        intent=intent, compiled={'ok': True, 'skill_id': intent['skill_id'], 'plan': {'nodes': []}})
+    attached = attach_material_execution_draft(store, prepared['work_ref'], canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=1)
+    ctx = SimpleNamespace(project_id='project', state_dir=tmp_path, requester_user_id=store.created_by)
+    run = {'canvas_id': 'canvas', 'commission_phase': 'preparing_materials',
+           'draft_receipt_phase': 'preparing_materials', 'draft_receipt_attempt': 0, 'resume_attempt': 0,
+           'workflow_draft_revision': 1, 'workflow_draft_receipt': {
+               'draft_id': draft['draft_id'], 'work_ref': attached['work_ref']}}
+    check = continuation.ReferenceRemixCoordinator._material_submission_checkpoint
+    assert check(ctx, run, store)['next_action']['draft_id'] == draft['draft_id']
+    assert check(ctx, {**run, 'draft_receipt_attempt': -1}, store) is None
+    claim_workflow_draft_confirmation(project_dir=tmp_path, canvas_id='canvas', draft_id=draft['draft_id'], revision=1)
+    assert check(ctx, run, store) is None
+
+def test_explicit_continue_retains_exact_material_checkpoint(service, tmp_path):
+    ctx = context(tmp_path)
+    checkpoint = {'code': 'material_draft_not_submitted', 'draft_id': 'existing-draft', 'revision': 2,
+                  'work_ref': {'artifact_id': 'work', 'revision': 3},
+                  'next_action': {'kind': 'submit_canvas_approval', 'draft_id': 'existing-draft', 'revision': 2}}
+    service.store.create({'run_id': 'continue-existing', 'project_id': ctx.project_id,
+        'requester_user_id': ctx.requester_user_id, 'canvas_id': 'canvas', 'agent_id': 'main',
+        'idempotency_key': 'continue-existing', 'request_fingerprint': 'fp', 'status': 'resume_failed',
+        'commission_phase': 'preparing_materials', 'manual_resume_required': True,
+        'manual_resume_reason': checkpoint})
+    retried = service.store.retry(ctx, 'continue-existing')
+    assert retried['material_resume_checkpoint'] == checkpoint
+    assert retried.get('manual_resume_required') is not True

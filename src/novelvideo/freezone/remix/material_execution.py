@@ -144,6 +144,7 @@ def read_material_execution_evidence(work: dict, *, project_id: str, canvas_id: 
     """Observe only saved step bindings using read-only database connections."""
     import json
     import sqlite3
+    import time
     from novelvideo.freezone.workflow_drafts import _payload_from_row
     result = {'drafts': [], 'native_runs': [], 'problems': []}
     path = Path(state_dir) / 'data.db'
@@ -172,6 +173,10 @@ def read_material_execution_evidence(work: dict, *, project_id: str, canvas_id: 
                 result['problems'].append({'draft_id': draft_id, 'kind': 'material_draft_binding_conflict'})
                 continue
             draft = _payload_from_row(row)
+            if draft['status'] == 'ready' and draft.get('expires_at', 0) <= time.time():
+                result['problems'].append({'draft_id': draft_id, 'revision': draft['revision'],
+                                           'kind': 'material_draft_expired'})
+                continue
             receipts = []
             if 'workflow_delivery_receipts' in tables:
                 rows = conn.execute('SELECT summary_json FROM workflow_delivery_receipts WHERE canvas_id=? AND draft_id=? AND revision=? AND task_id=? AND attempt=? ORDER BY id',

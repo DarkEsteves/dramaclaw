@@ -990,3 +990,31 @@ def test_selected_ready_material_draft_exposes_exact_submit_action(selection_api
         'action_id':'submit:' + draft['draft_id'] + ':1', 'tool':'freezone_confirm_workflow_draft',
         'draft_id':draft['draft_id'], 'revision':1}
     assert state['progress']['user_action_count'] == 0
+
+def test_material_manual_checkpoint_preserves_refs_and_blocks_ready_submission(tmp_path):
+    from types import SimpleNamespace
+    from novelvideo.freezone.remix.production_inventory import _execution
+    checkpoint = {'code': 'material_draft_not_submitted',
+                  'work_ref': {'artifact_id': 'work', 'revision': 2},
+                  'draft_id': 'draft', 'revision': 1,
+                  'next_action': {'kind': 'submit_canvas_approval', 'draft_id': 'draft', 'revision': 1}}
+    c = {'commission_ref': {'artifact_id': 'commission', 'revision': 1}, 'phase': 'preparing_materials'}
+    run = {'project_id': 'p', 'canvas_id': 'c', 'requester_user_id': 'u', 'agent_id': 'main',
+           'commission_ref': c['commission_ref'], 'run_id': 'run', 'status': 'resume_failed',
+           'manual_resume_required': True, 'manual_resume_reason': checkpoint}
+    result = _execution(c, [], [run], 'c', 'main', 'u', SimpleNamespace(project_id='p'), None, tmp_path)
+    assert result['status'] == 'failed'
+    assert result['blockers'][0]['kind'] == 'resume_execution'
+    assert result['problems'] == [checkpoint]
+
+def test_saved_ready_action_is_not_replaced_by_coordinator_approval_prose(tmp_path):
+    from types import SimpleNamespace
+    from novelvideo.freezone.remix.production_inventory import _execution
+    c = {'commission_ref': {'artifact_id': 'commission', 'revision': 1}, 'phase': 'preparing_materials'}
+    actions = [{'owner': 'agent', 'kind': 'submit_canvas_approval', 'action_id': 'submit:d:1'}]
+    run = {'project_id': 'p', 'canvas_id': 'c', 'requester_user_id': 'u', 'agent_id': 'main',
+           'commission_ref': c['commission_ref'], 'run_id': 'run', 'status': 'preparing_materials',
+           'commission_phase': 'preparing_materials', 'execution_blocker': {'code': 'user_required'}}
+    result = _execution(c, actions, [run], 'c', 'main', 'u', SimpleNamespace(project_id='p'), None, tmp_path)
+    assert result['status'] == 'waiting_agent'
+    assert actions[0]['kind'] == 'submit_canvas_approval'

@@ -626,3 +626,13 @@ def test_observer_recovers_settlement_after_confirmed_draft_retention_cleanup(tm
     if already_scheduled:
         assert recovered['event_key'] == first['event_key']
     assert store.read_latest(ref['artifact_id']) == before
+
+def test_observer_does_not_adopt_unique_unselected_work(tmp_path):
+    from novelvideo.chat.reference_production_observer import _saved_work
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from test_reference_commission import confirmed_plan, selectable_work, selection_canvas
+    store = RemixArtifactStore(tmp_path, 'p', created_by='u')
+    c, p = confirmed_plan(store)
+    work = selectable_work(store, p)
+    assert _saved_work(store, selection_canvas(p), c, p) is None
+    assert _saved_work(store, selection_canvas(p), {**c, 'work_ref': work}, p)['id'] == work['artifact_id']
