@@ -186,7 +186,9 @@ def finalize_canvas_reply(
 
     reply, envelope_error = _parse_canvas_envelope(text)
     if reply is None:
-        return envelope_error
+        # Every attempted write already succeeded with a receipt, so a reply
+        # in the wrong format must not read as a failed operation.
+        return verified_status() if attempts and receipts else envelope_error
     message, mode, claims = reply["message"], reply["mode"], reply["canvas_receipts"]
     if write_requested and mode == "read_only" and not attempts:
         return "画布操作未完成：本轮没有可验证的画布写入回执，请重试。"
@@ -209,6 +211,12 @@ def finalize_canvas_reply(
     elif claims or attempts:
         if mode == "read_only" and not claims and attempts and receipts:
             return verified_status()
+        if mode == "blocked" and not claims:
+            # An earlier write in the turn succeeded, then a later step was
+            # refused (e.g. a scene edit failed validation). The block reason is
+            # what the user needs; the host prefix states what was really saved.
+            saved = "本轮已有画布修改保存成功，请查看画布结果。" if receipts else ""
+            return saved + message.strip()
         return _REPLY_CONTRACT_FAILURE + "操作声明与工具结果不一致，请重试。"
     return message.strip()
 

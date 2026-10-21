@@ -1693,6 +1693,11 @@ def test_codex_freezone_instructions_forbid_invented_resource_uris():
     assert "stage-guidance" in canvas_instructions
     assert "Stage confirmation itself does not generate media" in canvas_instructions
     assert "without a successful persisted" in canvas_instructions
+    previz_rule = canvas_instructions.index("预演台/previz requests")
+    assert previz_rule < canvas_instructions.index("load\n  and follow the dramaclaw-workflows")
+    assert "are previzNode scene edits, not media generation" in canvas_instructions
+    assert "the one empty previzNode of a 预演台 request" in canvas_instructions
+    assert "dry-run the same\n  {type: update_node_data" in canvas_instructions
 
 
 @pytest.mark.parametrize(
@@ -1952,6 +1957,9 @@ def test_codex_freezone_thread_advertises_exact_agent_skill_locator(
     )
     assert thread == "new-thread"
     assert match is not None
+    # Canvas turns call tools, so the schema travels only as prompt text.
+    assert captured["output_schema"] == chat_service.CANVAS_REPLY_SCHEMA
+    assert captured["native_output_schema"] is False
     assert json.loads(match.group(1)) == {
         "agent_skills": [
             {
@@ -2094,6 +2102,7 @@ def test_codex_exact_audio_planner_has_no_canvas_tools_and_uses_plan_schema(
         == chat_service._CODEX_EXACT_AUDIO_ACTION_PLANNER_INSTRUCTIONS
     )
     assert captured["output_schema"] == chat_service._CODEX_EXACT_AUDIO_ACTION_PLAN_SCHEMA
+    assert captured["native_output_schema"] is True
 
 
 def test_named_recipe_distinguishes_existing_output_from_external_media_input():
@@ -4588,7 +4597,7 @@ def test_codex_gateway_overrides_use_responses_without_embedding_secret(
     assert "features.shell_tool=false" in overrides
     assert "memories.generate_memories=false" in overrides
     assert "memories.use_memories=false" in overrides
-    assert 'model_reasoning_effort="medium"' in overrides
+    assert 'model_reasoning_effort="low"' in overrides
     assert 'web_search="disabled"' in overrides
     catalog_override = next(
         item for item in overrides if item.startswith("model_catalog_json=")
@@ -8687,6 +8696,7 @@ async def test_codex_freezone_read_only_plain_reply_is_repaired_once(
     monkeypatch.setenv("NOVELVIDEO_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("NOVELVIDEO_RUNTIME_DIR", str(tmp_path / "runtime"))
     prompts = []
+    native_flags = []
     build_kwargs = []
     events = []
     revoked = []
@@ -8702,8 +8712,9 @@ async def test_codex_freezone_read_only_plain_reply_is_repaired_once(
             revoked.append(token)
 
     class FakeThread:
-        async def stream(self, prompt):
+        async def stream(self, prompt, *, native_output_schema=None):
             prompts.append(prompt)
+            native_flags.append(native_output_schema)
             if len(prompts) == 1:
                 turn = _codex_turn_events(_READ_ONLY_ANSWER, tool=_READ_NODE_DETAIL)
             elif isinstance(repair, Exception):
@@ -8751,6 +8762,8 @@ async def test_codex_freezone_read_only_plain_reply_is_repaired_once(
     )
 
     assert prompts[1:] == [chat_service.CANVAS_FORMAT_REPAIR_PROMPT]
+    # Only the tool-less repair turn carries the native response format.
+    assert native_flags == [None, True]
     assert build_kwargs[0]["request_prompt"] == request_prompt
     assert result["content"] == expected
     assert [
