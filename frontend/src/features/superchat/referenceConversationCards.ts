@@ -9,6 +9,7 @@ export function productionCardRefs(messages: ChatMessage[], project: string, can
       if (!event || typeof event !== 'object') continue;
       const row = event as Record<string, unknown>;
       if (row.type !== 'reference.production.card' || row.schema === 'material_work_package.v1'
+        || row.schema === 'material_review.v1'
         || row.project_id !== project || row.canvas_id !== canvas || row.agent_id !== agent) continue;
       const owner = row.commission_ref as DirectorArtifactRef | undefined;
       const ref = row.ref as DirectorArtifactRef | undefined;

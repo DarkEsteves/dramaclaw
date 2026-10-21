@@ -42,6 +42,56 @@ describe('workflowRecipeRuntime', () => {
     expect(compileMock).not.toHaveBeenCalled();
   });
 
+  it('injects planItem narration into the video compile context and preserves the lines', async () => {
+    compileMock.mockResolvedValue('开场提问后镜头平滑横移');
+    const narration =
+      '小北：阿茗，如果只能留一样东西，你平时最离不开什么？\n阿茗：黑咖啡。一天一杯，天天都得来一杯。';
+
+    const result = await compileWorkflowNodePrompt({
+      nodeData: {
+        workflowCatalog: {
+          recipeId: 'general-video',
+          recipeVersion: 1,
+          promptStrategy: 'llm_refine',
+          promptBuilder: { planItem: { narration } },
+        },
+      },
+      nodeKind: 'video',
+      nodePrompt: '原创访谈角，完成开场提问',
+      upstreamText: '按已确认方案准备当前可制作的素材',
+      fallbackPrompt: 'fallback',
+    });
+
+    expect(compileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nodeKind: 'video',
+        upstreamText: expect.stringContaining('小北：阿茗'),
+      }),
+    );
+    const sentUpstream = compileMock.mock.calls[0][0].upstreamText ?? '';
+    expect(sentUpstream).toContain('必须逐字保留');
+    expect(sentUpstream).toContain('按已确认方案准备当前可制作的素材');
+    // 编译器若漏掉台词，结果必须兜底补回逐字对白
+    expect(result).toContain('阿茗：黑咖啡。一天一杯，天天都得来一杯。');
+  });
+
+  it('does not duplicate narration already present in the compiled prompt', async () => {
+    compileMock.mockResolvedValue('镜头推进，小北：可以吗？口型同步');
+    const result = await compileWorkflowNodePrompt({
+      nodeData: {
+        workflowCatalog: {
+          recipeId: 'general-video',
+          promptStrategy: 'llm_refine',
+          promptBuilder: { planItem: { narration: '小北：可以吗？' } },
+        },
+      },
+      nodeKind: 'video',
+      nodePrompt: 'x',
+      fallbackPrompt: 'f',
+    });
+    expect(result).toBe('镜头推进，小北：可以吗？口型同步');
+  });
+
   it('compiles catalog-backed nodes with user goal and upstream context', async () => {
     compileMock.mockResolvedValue('compiled prompt');
 

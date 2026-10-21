@@ -339,7 +339,7 @@ async def test_draft_can_author_text_selection_before_any_media(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_draft_stops_on_requirement_mismatch_without_retry(monkeypatch):
+async def test_draft_ignores_primary_shot_mismatch_without_retry(monkeypatch):
     from novelvideo.freezone.remix import production_plan
     from test_production_requirements import independent_visual_plan
     calls = []
@@ -347,14 +347,14 @@ async def test_draft_stops_on_requirement_mismatch_without_retry(monkeypatch):
         calls.append(kwargs)
         return _draft_response(independent_visual_plan(1), kwargs)
     monkeypatch.setattr(production_plan, 'generate_recipe_text', generate)
-    with pytest.raises(ValueError, match="plan_validation_failed"):
-        await _generate_reviewed_plan(topic='Three independent shots',
-            blueprint=None, username='alice', requirements={'primary_shots': {'min': 3, 'max': 3}})
+    drafted = await _generate_reviewed_plan(topic='Three independent shots',
+        blueprint=None, username='alice', requirements={'primary_shots': {'min': 3, 'max': 3}})
+    assert drafted  # shot count is surfaced but does not gate the draft
     assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_draft_requirement_mismatch_records_specific_check(monkeypatch):
+async def test_draft_does_not_record_primary_shot_mismatch_as_failure(monkeypatch):
     from novelvideo.freezone.remix import production_plan
     from novelvideo.llm_instrumentation import production_plan_diagnostic_sink
     from test_production_requirements import independent_visual_plan
@@ -365,20 +365,15 @@ async def test_draft_requirement_mismatch_records_specific_check(monkeypatch):
     monkeypatch.setattr(production_plan, "generate_recipe_text", generate)
     records = []
     with production_plan_diagnostic_sink(records.append):
-        with pytest.raises(ValueError, match="plan_validation_failed"):
-            await _generate_reviewed_plan(
-                topic="Three independent shots", blueprint=None, username="alice",
-                requirements={"primary_shots": {"min": 3, "max": 3}},
-            )
+        drafted = await _generate_reviewed_plan(
+            topic="Three independent shots", blueprint=None, username="alice",
+            requirements={"primary_shots": {"min": 3, "max": 3}},
+        )
 
-    failure = next(
-        row for row in records if row["event"] == "production_plan.validation_failed"
+    assert drafted
+    assert not any(
+        row["event"] == "production_plan.validation_failed" for row in records
     )
-    assert failure["validation_issue_count"] == 1
-    assert failure["validation_issues"] == [{
-        "code": "primary_shot_count_mismatch",
-        "path": "/requirements/primary_shots",
-    }]
 
 
 @pytest.mark.asyncio

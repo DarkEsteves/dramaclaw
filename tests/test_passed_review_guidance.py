@@ -17,13 +17,13 @@ NATIVE_ERROR = 'material technical/content review has not passed'
 # checked-in values keep the contract test usable in an ordinary checkout.
 DIRECTOR_TOOL_NAMES = (
     'freezone_accept_material_candidate',
-    'freezone_advance_reference_production',
     'freezone_associate_material_upload',
-    'freezone_create_production_plan',
+    'freezone_confirm_reference_plan',
     'freezone_get_material_work',
     'freezone_get_reference_director_state',
     'freezone_get_reference_evidence',
     'freezone_get_speech_review',
+    'freezone_list_reference_media',
     'freezone_prepare_material_stage',
     'freezone_prepare_material_work',
     'freezone_prepare_reference_branches',
@@ -33,8 +33,12 @@ DIRECTOR_TOOL_NAMES = (
     'freezone_review_material_candidate',
     'freezone_review_production_output',
     'freezone_review_production_plan',
+    'freezone_revise_material_strategy',
 )
-DIRECTOR_PARAMETER_SHA256 = 'e2655a2271a0935f74018eff2c573d81ad9ea503b838da6c87743168158b8095'
+# Re-baselined for the deliberate chat-confirmed acceptance parameter
+# (freezone_accept_material_candidate.user_confirmed); every other legacy
+# parameter contract is unchanged.
+DIRECTOR_PARAMETER_SHA256 = '2db7a53ca89cea60985240c0d177f9665cab1ddf4aa712310db416ebba6b5794'
 
 
 def adapter(monkeypatch, response, *, tool='freezone_accept_material_candidate', packed=False):
@@ -61,8 +65,14 @@ def arguments():
 @pytest.mark.parametrize('error_field', ['error', 'detail'])
 def test_native_content_rejection_has_bounded_static_saved_review_guidance(tmp_path, monkeypatch, packed, error_field):
     store, ref, _, review = material_fixture(tmp_path)
+    saved = store.read(review['review_ref']['artifact_id'], review['review_ref']['revision'])
+    payload = deepcopy(saved['payload'])
+    payload['content'] = {'status': 'rejected', 'checks': ['visible mismatch'], 'findings': ['wrong product']}
+    rejected_review = store.revise(saved['id'], saved['revision'], payload, saved['upstream_refs'])
     with pytest.raises(ValueError, match=NATIVE_ERROR) as rejected:
-        accept_material_candidate(store, ref, 'image', review['review']['resource'], review['review_ref'], 'accept-cached')
+        accept_material_candidate(store, ref, 'image', review['review']['resource'],
+                                  {'artifact_id': rejected_review['id'], 'revision': rejected_review['revision']},
+                                  'accept-cached')
     response = {'ok': False, 'status_code': 422, error_field: str(rejected.value)}
     plugin, _, handler, calls = adapter(monkeypatch, response, packed=packed)
     args = arguments()
@@ -81,7 +91,7 @@ def test_native_content_rejection_has_bounded_static_saved_review_guidance(tmp_p
         assert required in instruction
     assert len(instruction) < 1600
     assert 'cached-review' not in instruction and 'actual-node' not in instruction
-    assert calls == [('POST', '/api/v1/projects/project/freezone/canvases/canvas/director/material-accept', {'body': original})]
+    assert calls == [('POST', '/api/v1/projects/project/freezone/canvases/canvas/director/material-accept', {'query': None, 'body': original})]
     assert args == original
     assert store.read_latest(ref['artifact_id']) == native_before
 

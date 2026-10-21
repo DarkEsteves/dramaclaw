@@ -166,18 +166,18 @@ async def test_cancel_after_outline_does_not_start_arrangement(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_outline_checks_duration_without_requiring_arrangement(monkeypatch):
+async def test_outline_does_not_gate_on_duration_without_requiring_arrangement(monkeypatch):
     from novelvideo.freezone.remix import production_plan
     calls = []
     async def model(**kwargs):
         calls.append(kwargs['production_plan_stage'])
         return json.dumps(_outline())
     monkeypatch.setattr(production_plan, 'generate_recipe_text', model)
-    with pytest.raises(ValueError, match='duration_mismatch'):
-        await production_plan.generate_production_plan_outline(
-            topic='目标', blueprint=None, username='alice',
-            requirements={'duration_us': {'min': 10_000_000}})
+    drafted = await production_plan.generate_production_plan_outline(
+        topic='目标', blueprint=None, username='alice',
+        requirements={'duration_us': {'min': 10_000_000}})
     assert calls == ['outline']
+    assert drafted  # duration target is surfaced but does not gate the draft
 
 
 @pytest.mark.asyncio

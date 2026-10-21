@@ -68,6 +68,10 @@ class AcceptBody(WorkBody):
     resource: dict[str, Any]
     review_ref: dict[str, Any]
     command_id: str = Field(min_length=1, max_length=128)
+    # Chat-confirmed human acceptance: when true, the host records the
+    # authenticated session user's content-review pass before binding, so the
+    # user can confirm in ordinary chat instead of on the canvas.
+    user_confirmed: bool = False
 
 class ExecutionBody(ReviewBody):
     run_id: str = Field(min_length=1, max_length=160)
@@ -79,10 +83,16 @@ class DraftBody(BaseModel):
     draft_id: str = Field(min_length=1, max_length=160)
     draft_revision: int = Field(ge=1)
 
+def _material_chat_confirm_enabled() -> bool:
+    import os
+    raw = os.environ.get("DRAMACLAW_MATERIAL_CHAT_CONFIRM", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
 async def _scope(project, canvas_id, user, work_ref, role='editor'):
     from .reference_director import _context, _plan_in_canvas
     ctx, canvas, store = await _context(project, canvas_id, user, role)
-    state = await _call(read_material_state, store, work_ref, include_workflow_intent=False)
+    state = await _call(read_material_state, store, work_ref, include_workflow_intent=False,
+                        workflow_state_dir=ctx.state_dir)
     await _plan_in_canvas(store, state['work']['plan_ref'], canvas)
     return ctx, canvas, store, state
 
@@ -115,14 +125,16 @@ async def material_strategy(project: str, canvas_id: str, body: StrategyBody,
 
 @router.get('/material-state')
 async def material_state_get(project: str, canvas_id: str, artifact_id: str = Query(), revision: int = Query(ge=1), user: dict = Depends(get_api_user)):
-    _, canvas, store, state = await _scope(project, canvas_id, user, {'artifact_id':artifact_id,'revision':revision}, 'viewer')
-    state = await _call(read_material_state, store, state['work_ref'], canvas=canvas, canvas_id=canvas_id)
+    ctx, canvas, store, state = await _scope(project, canvas_id, user, {'artifact_id':artifact_id,'revision':revision}, 'viewer')
+    state = await _call(read_material_state, store, state['work_ref'], canvas=canvas, canvas_id=canvas_id,
+                        workflow_state_dir=ctx.state_dir)
     return {'ok':True,'data':state}
 
 @router.post('/material-state')
 async def material_state(project: str, canvas_id: str, body: WorkBody, user: dict = Depends(get_api_user)):
-    _, canvas, store, state = await _scope(project, canvas_id, user, body.work_ref, 'viewer')
-    state = await _call(read_material_state, store, state['work_ref'], canvas=canvas, canvas_id=canvas_id)
+    ctx, canvas, store, state = await _scope(project, canvas_id, user, body.work_ref, 'viewer')
+    state = await _call(read_material_state, store, state['work_ref'], canvas=canvas, canvas_id=canvas_id,
+                        workflow_state_dir=ctx.state_dir)
     return {'ok':True,'data':state}
 
 @router.post('/material-speech-status')
@@ -211,13 +223,7 @@ async def material_review(project: str, canvas_id: str, body: ReviewBody, user: 
         payload['content'] = {'status':observation['status'],'checks':observation.get('checked_items',[]),
                               'findings':observation.get('findings',[])}
     saved = await _call(store.revise,review['id'],review['revision'],payload,review['upstream_refs'])
-    if observation['status'] == 'rejected':
-        from novelvideo.freezone.remix.material_work import retry_material_step
-        failure = await _call(retry_material_step,store,body.work_ref,body.step_id,
-                              '; '.join(observation.get('findings',[]))[:4000] or 'Actual content review rejected candidate',
-                              'review-rejected:' + saved['id'],rejected_review_ref={'artifact_id':saved['id'],'revision':saved['revision']})
-        result['work_ref'] = failure['work_ref']
-    await _notify_material(ctx,canvas_id,store,result.get('work_ref',body.work_ref),
+    await _notify_material(ctx,canvas_id,store,body.work_ref,
         'material-review:' + saved['id'],invalidated=observation['status']=='rejected')
     from .reference_director import _emit_director_update
     await _emit_director_update(ctx,canvas_id)
@@ -267,10 +273,20 @@ async def material_confirm(project: str, canvas_id: str, artifact_id: str, user:
 @router.post('/material-accept')
 async def material_accept(project: str, canvas_id: str, body: AcceptBody, user: dict = Depends(get_api_user)):
     from novelvideo.freezone import canvas_store
-    ctx, _, store, state = await _scope(project,canvas_id,user,body.work_ref)
+    ctx, canvas, store, state = await _scope(project,canvas_id,user,body.work_ref)
     from novelvideo.freezone.remix.material_work import prepare_material_acceptance
+    review_ref = body.review_ref
+    if body.user_confirmed and _material_chat_confirm_enabled():
+        # The authenticated user confirmed in ordinary chat. Record that human
+        # content-review acceptance (actor_kind=user) for the session identity,
+        # producing a new content=passed review revision, before binding.
+        if canvas.get('access_model') in {'private', 'user_private'} and canvas.get('owner_principal_id') != ctx.requester_user_id:
+            raise HTTPException(403, 'private canvas access denied')
+        confirmed = await _call(confirm_material_review, store, body.review_ref, canvas,
+                                canvas_id=canvas_id, requester_user_id=ctx.requester_user_id)
+        review_ref = confirmed['review_ref']
     prepared = await _call(prepare_material_acceptance, store, body.work_ref, body.step_id,
-        body.resource, body.review_ref, body.command_id, canvas_id=canvas_id)
+        body.resource, review_ref, body.command_id, canvas_id=canvas_id)
     def accept_current_material():
         with canvas_store.get_canvas_write_mutex().write_mutex(ctx.state_dir, canvas_id) as guard:
             canvas = canvas_store.read_canvas(ctx.state_dir, canvas_id)
@@ -287,7 +303,7 @@ async def material_accept(project: str, canvas_id: str, body: AcceptBody, user: 
             current = canvas_material_resource(store,canvas,body.resource.get('node_id'),body.resource.get('media_kind'))
             if current != body.resource:
                 raise HTTPException(409,'candidate differs from current canvas media')
-            return accept_material_candidate(store,body.work_ref,body.step_id,body.resource,body.review_ref,body.command_id,
+            return accept_material_candidate(store,body.work_ref,body.step_id,body.resource,review_ref,body.command_id,
                                              canvas_id=canvas_id, _canvas_guard=guard, _prepared=prepared)
     result = await _call(accept_current_material)
     await _notify_material(ctx,canvas_id,store,result['work_ref'],'material-accept:' + body.work_ref['artifact_id'] + ':' + body.command_id)
@@ -328,7 +344,8 @@ async def material_stage(project: str, canvas_id: str, body: MaterialStageBody, 
             raise HTTPException(409, {'code': 'material_parameter_choice_conflict',
                                       'required_choices': missing, 'conflicts': conflicts})
     intent = await _call(material_workflow_intent, state['work'], canvas=canvas, store=store,
-                         selected_step_ids=scope['ready'] if scope is not None else None)
+                         selected_step_ids=scope['ready'] if scope is not None else None,
+                         reopenable_step_ids=state.get('reopenable_step_ids') or [])
     return {'ok':True,'data':{**state, 'workflow_intent':intent,
                               **({'ready_step_ids': scope['ready'], 'generation_scope': scope}
                                  if scope is not None else {})}}

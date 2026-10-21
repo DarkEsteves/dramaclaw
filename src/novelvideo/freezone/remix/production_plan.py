@@ -38,6 +38,15 @@ _SOURCE_EVIDENCE_GUIDANCE = (
     "未指定时不要从原片事件、关键帧或分析段落数量推导镜头数量。"
 )
 
+# Draft authoring surfaces the confirmed shot-count, shot-timing and total-duration
+# targets to the user, but they are not hard gates while drafting: the plan stays
+# editable and the user can revise timing/shot count later. The final review and
+# compile stages still enforce these requirements when the plan is accepted and
+# executed.
+_DRAFT_NON_BLOCKING_REQUIREMENT_CODES = frozenset(
+    {"duration_mismatch", "primary_shot_count_mismatch", "primary_shot_timing_invalid"}
+)
+
 
 async def generate_recipe_text(**kwargs: Any) -> str:
     """Load model execution only when drafting, keeping contracts portable."""
@@ -683,7 +692,8 @@ async def _generate_production_plan_stage(
                               fps_den=draft["output"]["fps_den"])
         failed = [row for row in check_production_requirements(
             draft, outline_requirements, project_dir=Path('.'), locked_turns=locked_turns)
-                  if row["status"] == "failed"]
+                  if row["status"] == "failed"
+                  and row["code"] not in _DRAFT_NON_BLOCKING_REQUIREMENT_CODES]
         if failed:
             raise ValueError(json.dumps(failed, ensure_ascii=False))
         return draft
@@ -1029,11 +1039,12 @@ def validate_generated_production_plan(
                               fps_den=draft['output']['fps_den'])
         checks = check_production_requirements(draft, requirements or {}, project_dir=Path('.'),
                                                locked_turns=locked_turns)
-        # A new, schema-valid draft remains editable when its creative timing
-        # misses the target. The saved revision cannot pass review or execute
-        # until the existing requirement gate is satisfied.
+        # A new, schema-valid draft remains editable when its creative timing or
+        # shot count misses the target. Shot count and total duration are surfaced
+        # but not gated here; the saved revision still cannot pass review or
+        # execute until the existing requirement gate is satisfied.
         failed = [row for row in checks if row['status'] == 'failed'
-                  and (saved_story or row['code'] != 'duration_mismatch')]
+                  and row['code'] not in _DRAFT_NON_BLOCKING_REQUIREMENT_CODES]
         if failed:
             raise _ProductionRequirementValidationError(failed)
         log_production_plan_diagnostic(

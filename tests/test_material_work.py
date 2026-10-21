@@ -167,8 +167,10 @@ def test_candidate_requires_real_resource_and_content_review(tmp_path):
     review = store.create("material_review.v1", {"resource": resource, "step_id": "image", "work_ref": result["work_ref"],
         "technical": {"status": "passed", "checks": ["project_file_hash"]},
         "content": {"status": "unavailable", "findings": ["未查看"]}, "actor_kind": "agent", "evidence_refs": []}, [result["work_ref"]])
-    with pytest.raises(ValueError, match="content"):
-        accept_material_candidate(store, result["work_ref"], "image", resource, {"artifact_id": review["id"], "revision": 1}, "accept-1")
+    # Unobserved content stays advisory: a technical pass can be accepted and
+    # bound, and the look is confirmed later instead of blocking the pipeline.
+    accepted = accept_material_candidate(store, result["work_ref"], "image", resource, {"artifact_id": review["id"], "revision": 1}, "accept-1")
+    assert accepted["ready_step_ids"] == ["video"]
 
 
 def test_invalidating_one_branch_keeps_independent_steps():
@@ -343,6 +345,55 @@ def test_generated_video_cannot_omit_turns_owned_by_its_planned_source(tmp_path)
               'recipe_id': 'general-video', 'prompt': '两人交谈'}]
     with pytest.raises(ValueError, match='demo-video.*ask.*answer.*clip'):
         prepare_material_work(store, ref, requirements, steps, 'missing-dialogue')
+
+
+def test_reference_shot_defaults_to_a_mode_that_consumes_media(tmp_path):
+    from novelvideo.freezone.remix.material_work import material_workflow_intent
+    from novelvideo.freezone.agent_workflows.catalog import compile_workflow_intent
+    from novelvideo.freezone.workflow_preflight import evaluate_workflow_preflight
+
+    store = RemixArtifactStore(tmp_path, project_id='project', created_by='alice')
+    saved = store.create('production_plan.v2', planned_video_dialogue(), [])
+    ref = {'artifact_id': saved['id'], 'revision': saved['revision']}
+    requirements = [{'id': 'dialogue-video', 'placement_ids': ['demo-video'],
+                     'turn_ids': ['ask', 'answer'], 'description': '两人交谈',
+                     'media_kind': 'video', 'final_step_id': 'clip'}]
+    steps = [
+        {'id': 'look', 'label': '场景参考', 'media_kind': 'image', 'source': 'generate',
+         'recipe_id': 'general-image', 'prompt': '场景'},
+        {'id': 'clip', 'label': '交谈视频', 'media_kind': 'video', 'source': 'generate',
+         'recipe_id': 'general-video', 'prompt': '两人交谈',
+         'dialogue_turn_ids': ['ask', 'answer'],
+         'references': [{'step_id': 'look', 'role': 'setting'}],
+         'generation_inputs': {'durationSec': 5}},
+    ]
+    result = prepare_material_work(store, ref, requirements, steps, 'reference-shot')
+    work = store.read(result['work_ref']['artifact_id'], 1)['payload']
+    intent = material_workflow_intent(work, store=store)
+    # The plan carries a consuming edge for this shot, so an unstated mode must
+    # not fall back to the runtime's media-less textToVideo default.
+    assert intent['inputs']['video_generation_mode'] == 'imageReference'
+    assert intent['inputs']['video_generate_audio'] is True
+    compiled = compile_workflow_intent(intent)
+    assert compiled['ok'] is True
+    preflight = evaluate_workflow_preflight(
+        compiled, model_responses={}, limits={}, runtime_available=False)
+    assert [blocker['code'] for blocker in preflight['blockers']] == []
+
+
+def test_revise_strategy_names_the_fields_it_rejects(tmp_path):
+    store, _, prepared = setup_work(tmp_path)
+    ref = prepared['work_ref']
+    saved = store.read(ref['artifact_id'], ref['revision'])['payload']
+    image_step = next(step for step in saved['steps'] if step['media_kind'] == 'image')
+    with pytest.raises(ValueError, match='remove candidates, status'):
+        revise_material_strategy(store, ref, [{**image_step, 'status': 'planned'}],
+                                 'server-field', canvas={})
+    with pytest.raises(ValueError, match='audio_v1.*existing steps'):
+        revise_material_strategy(store, ref, [{'id': 'audio_v1', 'label': '旁白',
+                                               'media_kind': 'audio', 'source': 'generate',
+                                               'recipe_id': 'general-audio', 'prompt': '旁白'}],
+                                 'invented-step', canvas={})
 
 
 def test_explicit_silent_video_choice_stays_a_native_preflight_conflict(tmp_path):

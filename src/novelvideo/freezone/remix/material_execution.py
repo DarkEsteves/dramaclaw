@@ -42,41 +42,89 @@ def canvas_material_resource(store, canvas: dict, node_id: str, media_kind: str)
     return ResourceV2.model_validate(resource).model_dump(mode='json', exclude_none=True)
 
 
-def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, canvas_id: str | None = None, include_workflow_intent: bool = True) -> dict:
+def _attached_material_drafts(project_dir, canvas_id, work) -> dict[str, dict]:
+    """Read every draft a material step points at, keyed by draft id."""
+    from novelvideo.freezone.workflow_drafts import read_workflow_draft
+    drafts: dict[str, dict] = {}
+    for step in work.get('steps') or []:
+        if not isinstance(step, dict):
+            continue
+        draft_id = str((step.get('execution') or {}).get('draft_id') or '').strip()
+        if not draft_id or draft_id in drafts:
+            continue
+        draft, error = read_workflow_draft(
+            project_dir=project_dir, canvas_id=canvas_id, draft_id=draft_id,
+        )
+        if error or not draft:
+            continue
+        drafts[draft_id] = draft
+    return drafts
+
+
+def reopenable_material_step_ids(project_dir, canvas_id, work) -> list[str]:
+    """Steps whose attached draft was never confirmed and can be replanned.
+
+    A ``ready`` draft still waits for the canvas confirmation; a ``cancelled``
+    one is abandoned. Treating their steps as pending again lets an incorrect
+    draft be replanned without a manual retry, and never claims generation.
+    """
+    drafts = _attached_material_drafts(project_dir, canvas_id, work)
+    reopenable = {draft_id for draft_id, draft in drafts.items()
+                  if str(draft.get('status') or '') in {'ready', 'cancelled'}}
+    return [step['id'] for step in work.get('steps') or []
+            if isinstance(step, dict)
+            and str((step.get('execution') or {}).get('draft_id') or '').strip() in reopenable]
+
+
+def read_material_state(store, work_ref: dict, *, canvas: dict | None = None, canvas_id: str | None = None,
+                        include_workflow_intent: bool = True, workflow_state_dir=None) -> dict:
     _exact_ref(work_ref)
     saved = store.read_latest(work_ref['artifact_id'])
     if saved['schema'] != 'material_work_package.v1':
         raise ValueError('material work package required')
     work = saved['payload']
     lifecycle = material_lifecycle_status(work)
+    drafts_dir = Path(workflow_state_dir) if workflow_state_dir is not None else store.project_dir
+    reopenable_step_ids: list[str] = []
     if canvas_id:
-        from novelvideo.freezone.workflow_drafts import (
-            list_workflow_delivery_receipts,
-            read_workflow_draft,
-        )
-        draft_ids = {
-            str((step.get('execution') or {}).get('draft_id')).strip()
-            for step in work.get('steps', [])
-            if isinstance(step, dict) and (step.get('execution') or {}).get('draft_id')
-        }
-        for draft_id in draft_ids:
-            draft, error = read_workflow_draft(
-                project_dir=store.project_dir, canvas_id=canvas_id, draft_id=draft_id,
-            )
-            if error or not draft:
-                continue
-            lifecycle = material_lifecycle_status(
+        from novelvideo.freezone.workflow_drafts import list_workflow_delivery_receipts
+        drafts = _attached_material_drafts(drafts_dir, canvas_id, work)
+        reopenable_draft_ids = {draft_id for draft_id, draft in drafts.items()
+                                if str(draft.get('status') or '') in {'ready', 'cancelled'}}
+        reopenable_step_ids = [step['id'] for step in work.get('steps', [])
+                               if isinstance(step, dict)
+                               and str((step.get('execution') or {}).get('draft_id') or '').strip()
+                               in reopenable_draft_ids]
+        lifecycle_by_draft: list[dict] = []
+        pending_draft_ids: list[str] = []
+        for draft_id in sorted(drafts):
+            state = material_lifecycle_status(
                 work,
-                workflow_draft=draft,
+                workflow_draft=drafts[draft_id],
                 delivery_receipts=list_workflow_delivery_receipts(
-                    project_dir=store.project_dir, canvas_id=canvas_id, draft_id=draft_id,
+                    project_dir=drafts_dir, canvas_id=canvas_id, draft_id=draft_id,
                 ),
             )
-            break
+            if state['canvas_delivery_status'] == 'awaiting_confirmation':
+                pending_draft_ids.append(draft_id)
+            lifecycle_by_draft.append(state)
+        if lifecycle_by_draft:
+            # Report the draft that still needs host action first: a delivered
+            # earlier wave must not hide a later draft that is waiting for the
+            # canvas confirmation.
+            precedence = {'awaiting_confirmation': 4, 'pending': 3, 'delivered': 2,
+                          'failed': 1, 'not_requested': 0}
+            lifecycle = max(lifecycle_by_draft,
+                            key=lambda state: precedence.get(state['canvas_delivery_status'], 0))
+            if pending_draft_ids:
+                lifecycle = {**lifecycle, 'pending_draft_ids': pending_draft_ids}
     return {'work_ref': {'artifact_id': saved['id'], 'revision': saved['revision']}, 'work': work,
-            'ready_step_ids': ready_material_steps(work),
+            'ready_step_ids': ready_material_steps(work, reopenable_step_ids),
+            'reopenable_step_ids': reopenable_step_ids,
             'material_lifecycle': lifecycle,
-            **({'workflow_intent': material_workflow_intent(work, canvas=canvas, store=store)} if include_workflow_intent else {}),
+            **({'workflow_intent': material_workflow_intent(
+                work, canvas=canvas, store=store, reopenable_step_ids=reopenable_step_ids)}
+               if include_workflow_intent else {}),
             **(_saved_material_reviews(store, saved, canvas, canvas_id) if canvas is not None and canvas_id else {})}
 
 
@@ -264,13 +312,18 @@ def confirm_material_review(store, review_ref: dict, canvas: dict, *, canvas_id:
 
 def attach_material_execution_draft(store, work_ref: dict, *, canvas_id: str, draft_id: str, draft_revision: int, workflow_state_dir: Path | None = None, canvas: dict | None = None) -> dict:
     from novelvideo.freezone.workflow_drafts import read_workflow_draft
+    state_dir = workflow_state_dir if workflow_state_dir is not None else store.project_dir
     saved = store.read(work_ref['artifact_id'], work_ref['revision'])
     if saved['schema'] != 'material_work_package.v1':
         raise ValueError('material work package required')
-    draft, error = read_workflow_draft(project_dir=workflow_state_dir if workflow_state_dir is not None else store.project_dir, canvas_id=canvas_id, draft_id=draft_id)
+    draft, error = read_workflow_draft(project_dir=state_dir, canvas_id=canvas_id, draft_id=draft_id)
     if error or not draft or draft['revision'] != draft_revision or draft['project_id'] != store.project_id:
         raise ValueError('native workflow draft scope or revision differs')
-    expected = material_workflow_intent(saved['payload'], canvas=canvas, store=store)
+    # A wrong draft that was never confirmed is replanned: include the steps it
+    # still holds so the whole graph is recompiled in one wave.
+    reopenable_step_ids = reopenable_material_step_ids(state_dir, canvas_id, saved['payload'])
+    expected = material_workflow_intent(saved['payload'], canvas=canvas, store=store,
+                                        reopenable_step_ids=reopenable_step_ids)
     # Compilers normalize optional defaults; compare executable identity and supplied parameters.
     intent = draft.get('intent', {})
     if intent.get('skill_id') != expected['skill_id'] or intent.get('items') != expected['items'] or intent.get('external_inputs', []) != expected['external_inputs']:
@@ -287,8 +340,23 @@ def attach_material_execution_draft(store, work_ref: dict, *, canvas_id: str, dr
             step['execution'] = {'draft_id':draft_id, 'draft_revision':draft_revision,
                                  'workflow_instance_id':draft_id, 'plan_node_id':step['id'], 'canvas_id':canvas_id}
     result = store.revise(saved['id'], saved['revision'], work, saved['upstream_refs'])
+    _cancel_superseded_material_drafts(state_dir, canvas_id, saved['payload'], keep_draft_id=draft_id)
     return {'work_ref':{'artifact_id':result['id'],'revision':result['revision']}, 'work':result['payload'],
-            'ready_step_ids':ready_material_steps(result['payload'])}
+            'ready_step_ids':ready_material_steps(result['payload']),
+            'reopenable_step_ids':reopenable_material_step_ids(state_dir, canvas_id, result['payload'])}
+
+
+def _cancel_superseded_material_drafts(project_dir, canvas_id, work, *, keep_draft_id) -> None:
+    """Cancel ready drafts a replanned wave supersedes so they cannot be confirmed."""
+    from novelvideo.freezone.workflow_drafts import cancel_workflow_draft
+    for draft_id, draft in _attached_material_drafts(project_dir, canvas_id, work).items():
+        if draft_id == keep_draft_id or str(draft.get('status') or '') != 'ready':
+            continue
+        try:
+            cancel_workflow_draft(project_dir=project_dir, canvas_id=canvas_id,
+                                  draft_id=draft_id, expected_revision=draft['revision'])
+        except Exception:  # best-effort supersession; the new draft stays authoritative
+            pass
 
 
 def material_step_target(step: dict) -> dict:

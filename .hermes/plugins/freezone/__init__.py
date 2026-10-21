@@ -1196,8 +1196,6 @@ def _emit_clarification_event(
 
 
 def _clarification_timeout_seconds() -> int:
-    if os.environ.get("DRAMACLAW_CANVAS_READ_MODE", "current_browser") == "saved":
-        return 1
     try:
         return max(
             1,
@@ -1241,25 +1239,6 @@ def _clarification_timeout_result(
 def _await_clarification_result(
     key: str, project: str | None, canvas: str | None, event: dict[str, Any]
 ) -> str:
-    if os.environ.get('DRAMACLAW_TURN_ID', '').startswith('reference-remix-') and any(isinstance(question, dict)
-           and question.get("id") in _GENERATION_ANSWER_DATA_FIELDS
-           for question in event.get("questions", [])):
-        return tool_result({
-            "ok": True,
-            "status": "waiting_user",
-            "tool_call_status": "completed",
-            "clarification_status": "pending_user_input",
-            "bridge_key": key,
-            "clarification_id": event.get("clarification_id"),
-            "project_id": project,
-            "canvas_id": canvas,
-            "type": event.get("type"),
-            "answers": {},
-            "agent_instruction": (
-                "End this turn. The saved parameter request owns the wait; "
-                "resume only after its authenticated answer arrives."
-            ),
-        })
     resolved = wait_clarification_result(
         key, timeout_seconds=_clarification_timeout_seconds()
     )
@@ -4380,6 +4359,11 @@ def _generation_clarification_recommendations(
     data_by_type = {node["node_type"]: node["data"] for node in nodes}
     recommended: dict[str, Any] = {}
     for question_id in asked:
+        if question_id == "video_generate_audio" and question_id not in preferences:
+            # Sound generation is a product decision, not a capability default.
+            # A recommended value would become the user's own choice and can
+            # contradict the shot's dialogue, so the card must ask it.
+            continue
         node_type, field = _GENERATION_ANSWER_DATA_FIELDS[question_id]
         value = data_by_type[node_type].get(field)
         if value is None or (

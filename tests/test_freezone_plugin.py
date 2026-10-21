@@ -3492,25 +3492,28 @@ def _clarification_handler(plugin):
     ]
 
 
-def test_generation_parameter_card_returns_durable_wait_without_blocking_tool(monkeypatch):
+def test_generation_parameter_card_waits_for_the_human_answer(monkeypatch):
+    # Regression: an earlier reference-remix shortcut returned early with
+    # `waiting_user`, so the Agent ended its turn while the card was still
+    # unanswered and then continued as if the user had chosen.
     plugin = _load_plugin_module()
     monkeypatch.setenv('DRAMACLAW_TURN_ID', 'reference-remix-test-resume-1')
     saved = []
     monkeypatch.setattr(plugin, 'clarification_bridge_key', lambda **_kw: 'generation-bridge')
     monkeypatch.setattr(plugin, 'put_pending_clarification_event', lambda **kw: saved.append(kw))
     monkeypatch.setattr(plugin, 'wait_clarification_result',
-                        lambda *_a, **_kw: pytest.fail('parameter wait must not block the tool'))
+                        lambda *_a, **_kw: {'ok': True, 'status': 'clarification_frontend_result',
+                                            'clarification_status': 'answered',
+                                            'answers': {'image_model': {'option_ids': ['m']}}})
     result = plugin._tool_result_payload(plugin._emit_clarification_event(
         'project-a', 'canvas-a', {
             'type': 'assistant.clarification.request', 'clarification_id': 'clarify-generation',
             'questions': [{'id': 'image_model', 'title': '选择模型', 'options': []}],
         }))
     assert len(saved) == 1
-    assert result['ok'] is True
-    assert result['status'] == 'waiting_user'
-    assert result['clarification_status'] == 'pending_user_input'
-    assert result['bridge_key'] == 'generation-bridge'
-    assert result['clarification_id'] == 'clarify-generation'
+    assert saved[0]['key'] == 'generation-bridge'
+    assert result['status'] == 'clarification_frontend_result'
+    assert result['answers'] == {'image_model': {'option_ids': ['m']}}
 
 
 def test_clarification_timeout_result_tells_agent_how_to_resume(monkeypatch):
@@ -4147,6 +4150,29 @@ def test_generation_recommendation_uses_explicit_specs_and_keeps_delivery_separa
     assert events[1]["recommended_answers"]["video_resolution"] == {
         "option_ids": ["1080P"]
     }
+
+
+def test_recommendation_does_not_invent_a_video_audio_choice(monkeypatch):
+    # Regression: the recommended action became the user's own choice, and the
+    # capability default `generateAudio=false` then contradicted shots whose
+    # dialogue requires sound. The card must ask the question instead.
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    events = []
+    monkeypatch.setattr(plugin, "_emit_clarification_event",
+                        lambda _project, _canvas, event: events.append(event) or "shown")
+    monkeypatch.setattr(plugin, "_request", lambda method, path, **_kwargs: {
+        "ok": True, "data": [{
+            "id": "newapi_seedance-2.0-fast", "ratioOptions": ["9:16"],
+            "resolutionOptions": ["720P"], "minDuration": 4, "maxDuration": 15,
+            "supportsGenerateAudio": True,
+        }] if "/video/models" in path else [],
+    })
+    handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a", "generation_media_types": ["video"],
+    })
+    assert "video_generate_audio" not in events[0]["recommended_answers"]
+    assert events[0]["allow_recommended"] is True
 
 
 def test_generation_recommendation_accepts_and_validates_explicit_model(monkeypatch):
@@ -10407,10 +10433,14 @@ def test_saved_read_cursor_is_forwarded_by_existing_tools(monkeypatch):
         assert 'cursor' in schema['parameters']['properties']
 
 
-def test_background_saved_clarification_wait_is_bounded_but_foreground_unchanged(monkeypatch):
+def test_clarification_wait_is_not_shortened_by_the_saved_read_mode(monkeypatch):
+    # Regression: an earlier reference-remix shortcut shortened the saved read
+    # mode wait to one second, so every card returned timeout before a human
+    # could answer and the Agent continued on its own.
     plugin = _load_plugin_module()
+    monkeypatch.delenv('DRAMACLAW_CLARIFICATION_RESULT_TIMEOUT_SECONDS', raising=False)
     monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE', 'saved')
-    assert plugin._clarification_timeout_seconds() == 1
+    assert plugin._clarification_timeout_seconds() == 600
     monkeypatch.setenv('DRAMACLAW_CANVAS_READ_MODE', 'current_browser')
     assert plugin._clarification_timeout_seconds() == 600
 
@@ -10808,7 +10838,7 @@ def _ready_material_adapter(monkeypatch, tmp_path, tool_name):
     store, plan_ref, prepared = setup_work(tmp_path)
     work = store.read(prepared["work_ref"]["artifact_id"], 1)["payload"]
     intent = material_workflow_intent(work)
-    assert [item["id"] for item in intent["items"]] == ["image"]
+    assert [item["id"] for item in intent["items"]] == ["image", "video"]
     monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
     monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
     monkeypatch.setattr(plugin, "tool_result", json.dumps)

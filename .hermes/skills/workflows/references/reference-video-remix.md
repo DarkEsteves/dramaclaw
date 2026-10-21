@@ -743,6 +743,21 @@ Read the updated commission and work revisions before preparing the next wave.
 Media binding or timing refinement retains approval of unchanged creative
 content; changed target words, narrative or output requires a new content review.
 
+Two different "content checks" must not be conflated. (1) Material content review,
+including audio/video whose content check is `unavailable` and must be judged by
+the user listening/watching: once the user has actually viewed/listened to the
+material in the conversation and explicitly confirms it in chat, call
+`freezone_accept_material_candidate` with `user_confirmed=true` on the same
+work_ref/resource/review_ref (the review_ref need not already be content-passed);
+the host records the authenticated session user's content-review acceptance before
+binding, so do not send the user to the canvas only to click confirm, and never
+set `user_confirmed` without a real confirmation in this conversation. (2) Upstream
+model content filter (`content_filter`): if the reference visual analysis is
+blocked by provider content moderation, the saved analysis carries the
+`content_filtered` limitation/coverage with missing visual events; do not silently
+retry the vision call — continue in ordinary chat, explain the limitation, and ask
+the user how to proceed or to supply the missing visual direction.
+
 For speech, inspect technically checked candidates before formal adoption.
 Use only the host's registered `analyze_material_speech` action through the
 existing remix processing/task framework, with the actual canvas_id, work_ref,

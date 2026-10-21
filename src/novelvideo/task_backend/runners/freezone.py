@@ -977,6 +977,9 @@ async def _run_freezone_video_story_async(
         **({"frame_times_us": frame_times_us} if frame_times_us is not None else {}),
         "analyses": result.get("analyses"),
         "video_story": result.get("video_story"),
+        **({"content_filtered": True} if result.get("content_filtered") else {}),
+        **({"content_filter_reason": result.get("content_filter_reason")}
+           if result.get("content_filtered") else {}),
         **({"reference_events": notes} if notes is not None else {}),
     }
 

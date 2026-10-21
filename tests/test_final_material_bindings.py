@@ -150,6 +150,31 @@ def test_one_reviewed_final_source_can_complete_several_distinct_saved_placement
     assert {row['resource_id'] for row in targets} == {resource['id']}
 
 
+def test_advisory_content_binds_into_plan_without_browser_confirmation(tmp_path):
+    from novelvideo.freezone.remix.material_execution import review_material_candidate
+    from novelvideo.freezone.remix.material_work import bind_accepted_materials
+
+    store, plan_ref, _ = _plan(tmp_path)
+    requirements = [{'id': target, 'placement_ids': [target], 'description': 'Advisory picture',
+                     'media_kind': 'image', 'final_step_id': 'shared'} for target in ('picture', 'cutaway')]
+    steps = [{'id': 'shared', 'label': 'Shared final picture', 'source': 'existing', 'media_kind': 'image', 'node_id': 'n'}]
+    work = prepare_material_work(store, plan_ref, requirements, steps, 'advisory-final')
+    Image.new('RGB', (16, 12), 'red').save(tmp_path / 'picture.png')
+    canvas = {'nodes': [{'id': 'n', 'data': {'imageUrl': '/static/projects/project/picture.png'}}]}
+
+    review = review_material_candidate(store, work['work_ref'], 'shared', canvas, 'n')
+    assert review['review']['content']['status'] == 'unavailable'
+    accepted = accept_material_candidate(store, work['work_ref'], 'shared', review['review']['resource'],
+                                         review['review_ref'], 'accept-advisory')
+
+    bound = bind_accepted_materials(store, accepted['work_ref'], plan_ref, 'bind-advisory')
+    current_plan = store.read(bound['plan_ref']['artifact_id'], bound['plan_ref']['revision'])['payload']
+    current_work = store.read(bound['work_ref']['artifact_id'], bound['work_ref']['revision'])
+    validate_material_completion(store, current_work, current_plan)
+    targets = [row for row in current_plan['placements'] if row['id'] in {'picture', 'cutaway'}]
+    assert {row['resource_id'] for row in targets} == {review['review']['resource']['id']}
+
+
 @pytest.fixture
 def material_api(monkeypatch, tmp_path):
     from novelvideo.api.auth import get_api_user

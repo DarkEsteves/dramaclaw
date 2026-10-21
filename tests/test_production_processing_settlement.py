@@ -132,6 +132,67 @@ def test_completed_native_plan_is_published_to_its_original_canvas_node(tmp_path
     assert settle_production_processing(ctx, canvas_id="default", run_id=run_id)["published"] == []
 
 
+def test_editor_revision_after_delivery_is_not_a_settlement_conflict(tmp_path):
+    from novelvideo.freezone.remix.production_processing_settlement import (
+        read_processing_settlement_conflicts, settle_production_processing,
+    )
+
+    ctx, run_id, ref, operation_id = _saved_plan_run(tmp_path)
+    settle_production_processing(ctx, canvas_id="default", run_id=run_id)
+    path = canvas_store.canvas_path(ctx.state_dir, "default")
+    edited = canvas_store.read_canvas(ctx.state_dir, "default")
+    plan = next(node for node in edited["nodes"] if node["id"] == "plan")
+    # The editor saves a newer revision of the same plan after the AI draft.
+    plan["data"]["productionPlanV2Ref"] = {"artifactId": ref["artifact_id"],
+                                           "revision": ref["revision"] + 1}
+    canvas_store.atomic_write_json(path, edited)
+
+    replay = settle_production_processing(ctx, canvas_id="default", run_id=run_id)
+
+    assert replay["conflicts"] == [] and replay["conflict_records"] == []
+    assert read_processing_settlement_conflicts(ctx, canvas_id="default", run_id=run_id) == []
+
+
+def test_settlement_still_conflicts_when_the_node_adopts_another_plan(tmp_path):
+    from novelvideo.freezone.remix.production_processing_settlement import settle_production_processing
+
+    ctx, run_id, ref, operation_id = _saved_plan_run(tmp_path)
+    settle_production_processing(ctx, canvas_id="default", run_id=run_id)
+    path = canvas_store.canvas_path(ctx.state_dir, "default")
+    edited = canvas_store.read_canvas(ctx.state_dir, "default")
+    plan = next(node for node in edited["nodes"] if node["id"] == "plan")
+    plan["data"]["productionPlanV2Ref"] = {"artifactId": "another-plan", "revision": 1}
+    canvas_store.atomic_write_json(path, edited)
+
+    replay = settle_production_processing(ctx, canvas_id="default", run_id=run_id)
+
+    assert replay["conflicts"] == ["plan"]
+    assert replay["conflict_records"][0]["reason"] == "target_changed_or_stopped"
+
+
+def test_recovered_delivery_clears_the_previous_conflict_record(tmp_path):
+    from novelvideo.freezone.remix.production_processing_settlement import (
+        read_processing_settlement_conflicts, settle_production_processing,
+    )
+
+    ctx, run_id, ref, operation_id = _saved_plan_run(tmp_path)
+    path = canvas_store.canvas_path(ctx.state_dir, "default")
+    edited = canvas_store.read_canvas(ctx.state_dir, "default")
+    plan = next(node for node in edited["nodes"] if node["id"] == "plan")
+    plan["data"]["productionPlanV2Ref"] = {"artifactId": "another-plan", "revision": 1}
+    canvas_store.atomic_write_json(path, edited)
+    assert settle_production_processing(ctx, canvas_id="default", run_id=run_id)["conflicts"] == ["plan"]
+    assert read_processing_settlement_conflicts(ctx, canvas_id="default", run_id=run_id)
+
+    restored = canvas_store.read_canvas(ctx.state_dir, "default")
+    plan = next(node for node in restored["nodes"] if node["id"] == "plan")
+    plan["data"]["productionPlanV2Ref"] = {"artifactId": ref["artifact_id"], "revision": ref["revision"]}
+    canvas_store.atomic_write_json(path, restored)
+
+    assert settle_production_processing(ctx, canvas_id="default", run_id=run_id)["conflicts"] == []
+    assert read_processing_settlement_conflicts(ctx, canvas_id="default", run_id=run_id) == []
+
+
 def test_plan_delivery_recovers_after_canvas_write_before_operation_completion(tmp_path, monkeypatch):
     from novelvideo.freezone.remix.production_processing_settlement import settle_production_processing
 

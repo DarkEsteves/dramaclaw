@@ -79,7 +79,7 @@ it('does not render a legacy saved direction card after loading authorized facts
  view.unmount(); summary.remove();
 });
 
-it('filters saved plan confirmation history while retaining native material review', async () => {
+it('filters saved plan confirmation and material review history from the conversation', async () => {
  const commissionRef = { artifact_id: 'commission', revision: 2 };
  vi.mocked(getReferenceProductionState).mockResolvedValue({
    scope: { project_id: 'p', canvas_id: 'c', agent_id: 'main' }, commission_ref: commissionRef,
@@ -104,7 +104,8 @@ it('filters saved plan confirmation history while retaining native material revi
      project_id: 'p', canvas_id: 'c', agent_id: 'main', commission_ref: commissionRef,
      ref: { artifact_id: id, revision: 1 } } }] })) as never;
  render(<ReferenceProductionPanel {...props} messages={messages} conversationMode />);
- await screen.findByRole('article', { name: '素材审看 · 历史记录' });
+ await waitFor(() => expect(getReferenceConversationCards).toHaveBeenCalled());
+ expect(screen.queryByRole('article', { name: '素材审看 · 历史记录' })).toBeNull();
  expect(screen.queryByRole('article', { name: '作品方案 · 历史记录' })).toBeNull();
 });
 

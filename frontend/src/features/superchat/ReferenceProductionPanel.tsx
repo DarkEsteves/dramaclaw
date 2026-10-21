@@ -235,6 +235,7 @@ export function ReferenceProductionPanel(props: Props) {
   if (!branches.length && !recoveries.length && !error && !resumePending) return null;
   return <article aria-label="作品制作操作" className="space-y-2">
     {cards.filter((card) => card.schema !== 'material_work_package.v1'
+      && card.schema !== 'material_review.v1'
       && !(['direction', 'plan'].includes(card.decision_kind || '')
       || (card.schema === 'reference_decision.v1' && ['复刻方向', '作品方案'].includes(card.title)))
       && (!props.conversationMode || card.status === 'confirmed' || card.status === 'recorded')).map((card) => <article aria-label={`${card.title} · 历史记录`} key={card.card_id}

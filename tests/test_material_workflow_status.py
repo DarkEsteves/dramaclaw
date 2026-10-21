@@ -64,3 +64,10 @@ def test_operation_delivery_without_graph_receipt_does_not_claim_canvas_delivery
 
     assert state["canvas_delivery_status"] == "pending"
     assert state["generation_status"] == "submitted"
+
+
+def test_steps_attached_to_an_unconfirmed_draft_are_not_submitted_generation():
+    state = material_lifecycle_status(_work("submitted"), workflow_draft={"status": "ready"})
+
+    assert state["canvas_delivery_status"] == "awaiting_confirmation"
+    assert state["generation_status"] == "awaiting_confirmation"

@@ -126,6 +126,39 @@ export function selectWorkflowUpstreamText(
   );
 }
 
+function planItemNarration(nodeData: unknown): string {
+  const catalog = readCatalog(nodeData);
+  const builder = asRecord(catalog?.promptBuilder);
+  const planItem = asRecord(builder?.planItem);
+  return text(planItem?.narration);
+}
+
+// 片段视频的对白原文通常在 workflowCatalog.promptBuilder.planItem.narration，
+// 但节点自身的 prompt 只是“开场提问+回答”这类概括。若不把台词显式塞进编译
+// 上下文，通用视频 Recipe 会把它改写成“提出一个简短问题”，导致视频没有可读
+// 的口播/口型依据。
+function dialogueBlock(narration: string): string {
+  if (!narration) return '';
+  return [
+    '【本镜对白原文 · 必须逐字保留】以下台词必须原样写进提示词，不得改写、合并、意译或省略；',
+    '按发生顺序标出每句的说话人、情绪、语速、停顿和重点字，并确保口型与台词逐字一致：',
+    narration,
+  ].join('\n');
+}
+
+// 兜底：即使编译器仍改写了台词，也要保证最终可执行 prompt 里保留逐字对白，
+// 否则配音/口型模型拿不到真实台词。
+function ensureNarrationInPrompt(prompt: string, narration: string): string {
+  if (!narration) return prompt;
+  const firstLine = narration
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? '';
+  const probe = firstLine.slice(0, Math.min(12, firstLine.length));
+  if (probe && prompt.includes(probe)) return prompt;
+  return `${prompt}\n\n对白（逐字，须与口型/配音完全一致，不得改写）：\n${narration}`;
+}
+
 /** Compile only catalog-backed nodes; legacy/manual nodes keep their exact prompt behavior. */
 export async function compileWorkflowNodePrompt(
   input: CompileWorkflowNodePromptInput,
@@ -155,18 +188,22 @@ export async function compileWorkflowNodePrompt(
     return text(input.nodePrompt) || previouslyCompiledPrompt || input.fallbackPrompt;
   }
   const isMusicRecipe = input.nodeKind === 'audio' && recipeId === 'drama-background-music';
-  const upstreamText = isMusicRecipe
+  const selectedUpstreamText = isMusicRecipe
     ? ''
     : selectWorkflowUpstreamText(
       input.nodeData,
       input.upstreamContents,
       input.upstreamText ?? '',
     );
+  const narration = input.nodeKind === 'video' ? planItemNarration(input.nodeData) : '';
+  const upstreamText = [dialogueBlock(narration), selectedUpstreamText]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
   const pipeline = recipePipeline(catalog?.recipePipeline);
 
   reportWorkflowExecutionActivity(input.nodeId, 'compiling_recipe');
   try {
-    return await compileFreezoneRecipePrompt({
+    const compiledPrompt = await compileFreezoneRecipePrompt({
       ...(productOperation
         ? {
             projectId: productOperation.projectId,
@@ -185,6 +222,7 @@ export async function compileWorkflowNodePrompt(
       referenceMedia: input.referenceMedia,
       ...(input.onCompileMetadata ? { onCompileMetadata: input.onCompileMetadata } : {}),
     });
+    return ensureNarrationInPrompt(compiledPrompt, narration);
   } finally {
     reportWorkflowExecutionActivity(input.nodeId, 'submitting');
   }

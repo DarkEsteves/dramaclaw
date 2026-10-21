@@ -272,6 +272,28 @@ def _safe_arrangement_target(ctx: Any, canvas_id: str, canvas: dict, node: dict,
     return True
 
 
+def _plan_result_applied(data: dict, *, action: dict, expected_ref: dict) -> bool:
+    """Whether this operation's result is what the canvas node adopted.
+
+    A later editor save advances ``productionPlanV2Ref`` to a newer revision of
+    the same plan artifact. The generated result is still the one the node
+    adopted, so a delivery replay must report "already" instead of turning the
+    user's own edit into a permanent settlement conflict.
+    """
+    if data.get('productionWorkflowAction') != action['action']:
+        return False
+    if _ref(data.get('productionWorkflowResultRef')) != expected_ref:
+        return False
+    plan_ref = _ref(data.get('productionPlanV2Ref'))
+    if plan_ref == expected_ref:
+        return True
+    return bool(plan_ref
+                and plan_ref['artifactId'] == expected_ref['artifactId']
+                and plan_ref['revision'] > expected_ref['revision']
+                and not data.get('productionPlanV2Dirty')
+                and not data.get('productionPlanV2Conflict'))
+
+
 def _publish_plan(ctx: Any, *, canvas_id: str, action: dict, artifact: dict,
                   store: RemixArtifactStore) -> str:
     from .operations import RemixOperationStore
@@ -302,9 +324,7 @@ def _publish_plan(ctx: Any, *, canvas_id: str, action: dict, artifact: dict,
                 or operation.get('cancel_reason') or operation.get('superseded_by')
                 or operation.get('status') not in {'needs_confirmation', 'confirming', 'completed'}):
             return {'status': 'conflict'}
-        applied = (data.get('productionWorkflowAction') == action['action']
-                   and _ref(data.get('productionPlanV2Ref')) == expected_ref
-                   and _ref(data.get('productionWorkflowResultRef')) == expected_ref)
+        applied = _plan_result_applied(data, action=action, expected_ref=expected_ref)
         if operation['status'] == 'confirming':
             operation = operations.recover_confirmation(operation_id, applied_to_canvas=applied)
             if operation['status'] == 'confirming':
@@ -883,6 +903,16 @@ def _record_conflict(ctx: Any, *, canvas_id: str, run_id: str, action: dict,
     return record
 
 
+def _clear_conflict(ctx: Any, *, canvas_id: str, run_id: str, action: dict) -> None:
+    """Drop a stale settlement conflict once delivery is proven again."""
+    path = _conflict_path(ctx, canvas_id, run_id, action["node_id"], action["action"])
+    try:
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def has_settleable_native_action(run: dict[str, Any]) -> bool:
     """Whether a saved run contains a native result that needs canvas publication."""
     for action in run.get("actions", []):
@@ -945,12 +975,17 @@ def settle_production_processing(ctx: Any, *, canvas_id: str, run_id: str) -> di
             outcome = _publish_speech(ctx, canvas_id=canvas_id, action=action, artifact=artifact, store=store)
         if outcome == "publish":
             published.append(action["node_id"])
+            _clear_conflict(ctx, canvas_id=canvas_id, run_id=run_id, action=action)
             from novelvideo.chat.reference_production_observer import wake_local_observers
             wake_local_observers()
         elif outcome == "conflict":
             conflicts.append(action["node_id"])
             conflict_records.append(_record_conflict(ctx, canvas_id=canvas_id, run_id=run_id,
                                                      action=action, reason="target_changed_or_stopped"))
+        elif outcome == "already":
+            # Delivery is proven again, so a conflict recorded for an earlier
+            # attempt no longer describes the current canvas.
+            _clear_conflict(ctx, canvas_id=canvas_id, run_id=run_id, action=action)
         if action["action"] in {"generate_production_plan_draft", "generate_production_plan_arrangement"}:
             log_production_plan_diagnostic(
                 "production_plan.publishing", project_id=ctx.project_id, canvas_id=canvas_id,

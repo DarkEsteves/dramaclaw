@@ -2226,6 +2226,43 @@ async def run_freezone_analyze_shots(
                 raise RuntimeError(f"{used_provider} response is not an object")
         elif not isinstance(analyses, list):
             raise RuntimeError(f"{used_provider} response is not a list")
+    except vision_gateway.VisionContentFiltered as filtered:
+        # 上游内容审核拦截（或空输出）：不重试、不判失败，降级为「待人工确认」产物。
+        partial_text = getattr(filtered, "partial_text", "") or ""
+        await complete_freezone_vision_egress(vision_egress, result=partial_text)
+        salvaged = None
+        if partial_text.strip():
+            try:
+                candidate = loads_model_json(partial_text)
+                if mode == "video_story":
+                    if isinstance(candidate, dict):
+                        salvaged = candidate
+                elif isinstance(candidate, list):
+                    salvaged = candidate
+            except Exception:
+                salvaged = None
+        degraded = {
+            "provider": "newapi",
+            "model": resolve_freezone_vision_model(model),
+            "analysis_mode": mode,
+            "frame_count": len(frame_paths),
+            "content_filtered": True,
+            "content_filter_reason": getattr(filtered, "reason", "content_filter"),
+            "partial": salvaged is not None,
+            "video_story": None,
+            "analyses": [],
+            "message": "视觉分析命中上游内容审核(content_filter)，未完成自动解析，需人工确认。",
+        }
+        if salvaged is not None:
+            if mode == "video_story":
+                degraded["video_story"] = salvaged
+                degraded["analyses"] = salvaged.get("shots", [])
+            else:
+                degraded["analyses"] = salvaged
+        out_file = out_dir / "analysis.json"
+        out_file.write_text(json.dumps(degraded, ensure_ascii=False, indent=2), encoding="utf-8")
+        degraded["output_path"] = str(out_file)
+        return degraded
     except BaseException:
         # 出网点一抛就到不了 complete_*，claim 会停在 dispatching 等收割器。
         # 这里恒 submitted=True：帧字节在 claim 之前就读完了（digest 要用），claim

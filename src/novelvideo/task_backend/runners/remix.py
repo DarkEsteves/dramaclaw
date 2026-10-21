@@ -291,7 +291,12 @@ def run_remix_joint_reference_analysis(envelope: dict[str, Any], ctx: ProjectCon
     story_envelope = copy(envelope)
     story_envelope["payload"] = story_payload
     story = asyncio.run(service.analyze_story(story_envelope, ctx))
-    coverage = {"visual_inspection": "sampled_frames", "frame_times_us": story.get("frame_times_us", []),
+    content_filtered = bool(story.get("content_filtered"))
+    if content_filtered:
+        limitations.append(
+            "上游内容审核(content_filter)拦截了视觉解析，镜头/节奏/动作/视觉风格未自动完成，需人工确认或补充。")
+    coverage = {"visual_inspection": "content_filtered" if content_filtered else "sampled_frames",
+                "frame_times_us": story.get("frame_times_us", []),
                 "decoded_frame_count": evidence.get("frame_count"), "duration_us": evidence["duration_us"],
                 "scene_detection": "full_source", "speech_recognition": "reused_transcript" if payload.get("transcript_ref") else "reused_no_speech" if no_speech_ref else "skipped_no_audio" if transcript_status == "no_audio" else "failed" if transcript_status == "failed" else "full_source"}
     unknowns = ["Cross-shot visual consistency has not been separately verified.",
@@ -324,7 +329,8 @@ def run_remix_joint_reference_analysis(envelope: dict[str, Any], ctx: ProjectCon
                "evidence_ref": evidence_ref, "transcript_ref": transcript_ref, "blueprint_ref": blueprint_ref,
                "transcript_status": transcript_status, "story": story,
                "coverage": coverage, "limitations": limitations,
-               "visual_system": {"status": "unknown", "entrance_hold_exit": "unknown"},
+               "content_filtered": content_filtered,
+               "visual_system": {"status": "content_filtered" if content_filtered else "unknown", "entrance_hold_exit": "unknown"},
                "sound_roles": [], "semantic_triggers": [], "unknowns": unknowns}
     refs = [evidence_ref, blueprint_ref, *([transcript_ref] if transcript_ref else [])]
     saved_receipt = store.create("reference_analysis.v1", receipt, refs)
@@ -332,7 +338,8 @@ def run_remix_joint_reference_analysis(envelope: dict[str, Any], ctx: ProjectCon
     _publish_operation_result(payload, ctx, analysis_ref)
     return {**story, "status": "completed", "analysis_ref": analysis_ref, "artifact_ref": analysis_ref,
             "evidence_ref": evidence_ref, "transcript_ref": transcript_ref, "blueprint_ref": blueprint_ref,
-            "transcript_status": transcript_status, "limitations": limitations, "coverage": coverage}
+            "transcript_status": transcript_status, "limitations": limitations, "coverage": coverage,
+            "content_filtered": content_filtered}
 
 def run_remix_plan_broll(envelope: dict[str, Any], ctx: ProjectContext) -> dict[str, Any]:
     """Publish B-roll decisions for one exact immutable remix script revision."""

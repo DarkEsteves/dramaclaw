@@ -27,6 +27,32 @@ _VISION_IMAGE_COMPACTION_SLOTS = threading.BoundedSemaphore(
 )
 
 
+class VisionContentFiltered(RuntimeError):
+    """Vision model output was blocked by upstream content moderation.
+
+    Raised only when the content-filter degrade path is enabled; callers turn
+    this into a degraded "needs human confirmation" result instead of failing
+    the whole reference analysis.
+    """
+
+    def __init__(self, reason: str, partial_text: str = "") -> None:
+        self.reason = reason
+        self.partial_text = partial_text
+        super().__init__(f"vision content filtered: {reason}")
+
+
+def vision_content_filter_degrade_enabled() -> bool:
+    import os
+
+    raw = os.environ.get("DRAMACLAW_VISION_CONTENT_FILTER_DEGRADE", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _looks_like_content_filter(value: object) -> bool:
+    text = str(value or "").lower()
+    return "content_filter" in text or "content filter" in text
+
+
 @dataclass(frozen=True)
 class VisionInput:
     data: bytes
@@ -257,16 +283,23 @@ async def call_freezone_vision_model(
         name="Freezone Vision Analyzer",
         model_settings=model_settings,
     )
-    result = await agent.run(
-        [
-            prompt,
-            *[
-                BinaryContent(data=image.data, media_type=image.media_type)
-                for image in images
-            ],
-        ]
-    )
+    try:
+        result = await agent.run(
+            [
+                prompt,
+                *[
+                    BinaryContent(data=image.data, media_type=image.media_type)
+                    for image in images
+                ],
+            ]
+        )
+    except Exception as exc:
+        if vision_content_filter_degrade_enabled() and _looks_like_content_filter(exc):
+            raise VisionContentFiltered("content_filter") from exc
+        raise
     text = str(result.output or "").strip()
     if not text:
+        if vision_content_filter_degrade_enabled():
+            raise VisionContentFiltered("empty")
         raise RuntimeError("视觉模型返回空内容")
     return model, text

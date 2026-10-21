@@ -147,7 +147,10 @@ def test_read_and_attach_use_same_current_canvas_intent_and_reject_drift(tmp_pat
                                 include_workflow_intent=False)
     assert state['material_lifecycle']['workflow_draft_status'] == 'ready'
     assert state['material_lifecycle']['canvas_delivery_status'] == 'awaiting_confirmation'
-    assert state['material_lifecycle']['generation_status'] == 'submitted'
+    # A step attached to an unconfirmed draft has not been submitted for
+    # generation; reporting "submitted" here let agents claim delivery.
+    assert state['material_lifecycle']['generation_status'] == 'awaiting_confirmation'
+    assert state['material_lifecycle']['pending_draft_ids'] == [draft['draft_id']]
 
 
 @pytest.mark.asyncio

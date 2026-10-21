@@ -10,8 +10,8 @@ from novelvideo.freezone.remix.material_work import (
     material_duration_issues,
     material_parameter_conflicts,
 )
-from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
-from novelvideo.freezone.workflow_drafts import create_workflow_draft
+from novelvideo.freezone.remix.material_execution import attach_material_execution_draft, read_material_state
+from novelvideo.freezone.workflow_drafts import create_workflow_draft, read_workflow_draft
 
 
 CONTROLS = {'aspectRatio': '9:16', 'count': 1, 'durationSec': 5, 'genMode': 'allReference',
@@ -150,6 +150,62 @@ def test_saved_user_model_choice_fills_missing_step_fields_without_replacing_exp
     assert actual['video_resolution'] == '480p'
     assert 'video_aspect_ratio' not in actual
     assert requested == before
+
+
+def test_dependent_video_joins_the_same_wave_and_the_edge_orders_execution(native_catalog):
+    image = step('ref_guest', {'aspectRatio': '9:16', 'count': 1, 'model': 'image-model',
+                               'size': '1K', 'quality': 'high'}, 'image')
+    video = step('shot_1')
+    video['depends_on'] = ['ref_guest']
+    video['references'] = [{'step_id': 'ref_guest', 'role': 'identity'}]
+    intent = material_workflow_intent({'steps': [image, video]})
+    assert [item['id'] for item in intent['items']] == ['ref_guest', 'shot_1']
+    assert intent['items'][1]['reference_inputs'] == ['ref_guest']
+    assert intent['external_inputs'] == []
+    compiled = catalog.compile_workflow_intent(intent)
+    assert compiled['ok'], compiled
+    assert {'ref_guest', 'shot_1'} <= {node['id'] for node in compiled['plan']['nodes']}
+    edges = {(edge['source'], edge['target']): edge['link_type']
+             for edge in compiled['plan']['edges']}
+    assert edges[('ref_guest', 'shot_1')] == 'media_input_for'
+
+
+def test_dependents_wait_when_an_incoherent_prerequisite_leaves_the_wave():
+    first = step('ref_a', {'model': 'image-model'}, 'image')
+    other = step('ref_b', {'model': 'image-model-2'}, 'image')
+    video = step('shot_1')
+    video['references'] = [{'step_id': 'ref_b', 'role': 'identity'}]
+    intent = material_workflow_intent({'steps': [first, other, video]})
+    assert [item['id'] for item in intent['items']] == ['ref_a']
+
+
+def test_unconfirmed_draft_returns_to_pending_so_the_whole_wave_is_replanned(tmp_path):
+    store, plan_ref, prepared = setup_work(tmp_path)
+    work = store.read(prepared['work_ref']['artifact_id'], 1)['payload']
+    intent = material_workflow_intent(work)
+    first = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                  intent=intent, compiled={'ok': True, 'plan': {'nodes': []}})
+    attached = attach_material_execution_draft(
+        store, prepared['work_ref'], canvas_id='canvas', draft_id=first['draft_id'],
+        draft_revision=1, workflow_state_dir=tmp_path)
+    state = read_material_state(store, attached['work_ref'], canvas_id='canvas',
+                                workflow_state_dir=tmp_path)
+    assert state['material_lifecycle']['canvas_delivery_status'] == 'awaiting_confirmation'
+    assert state['material_lifecycle']['generation_status'] == 'awaiting_confirmation'
+    assert state['reopenable_step_ids'] == ['image', 'video']
+    assert [item['id'] for item in state['workflow_intent']['items']] == ['image', 'video']
+    replanned = material_workflow_intent(state['work'], reopenable_step_ids=state['reopenable_step_ids'])
+    second = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                   intent=replanned, compiled={'ok': True, 'plan': {'nodes': []}})
+    again = attach_material_execution_draft(
+        store, {'artifact_id': attached['work_ref']['artifact_id'],
+                'revision': attached['work_ref']['revision']},
+        canvas_id='canvas', draft_id=second['draft_id'], draft_revision=1,
+        workflow_state_dir=tmp_path)
+    assert {step['status'] for step in again['work']['steps']} == {'submitted'}
+    superseded, _ = read_workflow_draft(project_dir=tmp_path, canvas_id='canvas',
+                                        draft_id=first['draft_id'])
+    assert superseded['status'] == 'cancelled'
 
 
 def test_coherent_wave_selects_stable_first_controls_and_keeps_per_item_durations(native_catalog):

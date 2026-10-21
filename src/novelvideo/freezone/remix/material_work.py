@@ -11,6 +11,17 @@ from .production_plan_v2 import ResourceV2
 from .production_audio_sources import planned_speech_sources
 
 
+def material_content_blocks(review: dict[str, Any]) -> bool:
+    """Only an explicit content rejection blocks a candidate.
+
+    Content that could not be observed (``unavailable``) stays advisory: the
+    candidate keeps its technical pass, can be accepted and bound to the plan,
+    and is confirmed in aggregate later. A rejection still blocks acceptance;
+    regenerating stays an explicit action on the same step.
+    """
+    return (review.get("content") or {}).get("status") == "rejected"
+
+
 class _Value(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -288,7 +299,7 @@ def validate_material_completion(store, work: dict, plan: dict) -> None:
         if digest.hexdigest() != resource['media_hash']:
             raise ValueError('accepted material media changed before completion')
         evidence = review['payload']
-        if review['schema'] != 'material_review.v1' or evidence['technical']['status'] != 'passed' or evidence['content']['status'] != 'passed' or evidence['resource'] != resource or evidence['step_id'] != step['id'] or evidence['work_ref']['artifact_id'] != work['id']:
+        if review['schema'] != 'material_review.v1' or evidence['technical']['status'] != 'passed' or material_content_blocks(evidence) or evidence['resource'] != resource or evidence['step_id'] != step['id'] or evidence['work_ref']['artifact_id'] != work['id']:
             raise ValueError('material acceptance requires its actual passed review')
         for field, entities in (('placement_ids', placements), ('take_ids', takes)):
             if any(entities.get(identity, {}).get('resource_id') != resource['id'] for identity in requirement.get(field, [])):
@@ -512,10 +523,35 @@ def _prepare_material_work(store, plan_ref: dict, requirements: list[dict], step
         return {"work_ref": {"artifact_id": artifact_id, "revision": 1}, "ready_step_ids": ready_material_steps(payload)}
 
 
-def ready_material_steps(work: dict) -> list[str]:
+def ready_material_steps(work: dict, reopenable_step_ids=None) -> list[str]:
     accepted = {s["id"] for s in work["steps"] if s.get("status") == "accepted"}
-    return [s["id"] for s in work["steps"] if s.get("status") in {"planned", "awaiting_upload", "rejected", "stale"}
-            and (set(s.get("depends_on", [])) | {r["step_id"] for r in s.get("references", []) if r.get("step_id")}) <= accepted]
+    reopenable = set(reopenable_step_ids or ())
+    ready: list[str] = []
+    for step in work["steps"]:
+        status = step.get("status")
+        if status not in {"planned", "awaiting_upload", "rejected", "stale"} and not (
+                status == "submitted" and step["id"] in reopenable):
+            continue
+        dependencies = set(step.get("depends_on", [])) | {
+            r["step_id"] for r in step.get("references", []) if r.get("step_id")}
+        if dependencies <= accepted:
+            ready.append(step["id"])
+    return ready
+
+
+def pending_material_steps(work: dict, reopenable_step_ids=None) -> list[str]:
+    """Steps that still need work, in plan order and ignoring earlier waves.
+
+    Execution order belongs to the compiled graph edges, so a step whose
+    prerequisites are still unproduced is already part of the same draft wave.
+    Steps bound to a draft that was never confirmed (``reopenable_step_ids``)
+    are pending again so a wrong draft can be replanned without a manual retry.
+    ``ready_material_steps`` stays the "runnable right now" projection.
+    """
+    reopenable = set(reopenable_step_ids or ())
+    return [s["id"] for s in work["steps"]
+            if s.get("status") in {"planned", "awaiting_upload", "rejected", "stale"}
+            or (s.get("status") == "submitted" and s["id"] in reopenable)]
 
 
 def material_lifecycle_status(
@@ -568,6 +604,11 @@ def material_lifecycle_status(
         generation_status = "completed"
     elif result_steps:
         generation_status = "candidate_ready"
+    elif (any(step.get("status") == "submitted" for step in generated_steps)
+          and canvas_delivery_status != "delivered" and draft_status in {"ready", "confirming"}):
+        # Steps attached to a draft that still waits for the canvas
+        # confirmation have not been submitted for generation: nothing ran.
+        generation_status = "awaiting_confirmation"
     elif any(step.get("status") == "submitted" for step in generated_steps):
         generation_status = "submitted"
     else:
@@ -735,8 +776,9 @@ def _material_generation_controls(step: dict) -> dict:
 
 
 def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix", *, canvas: dict | None = None,
-                             store=None, selected_step_ids: list[str] | None = None) -> dict:
-    """Compile only ready generation steps: dependent stages follow accepted outputs."""
+                             store=None, selected_step_ids: list[str] | None = None,
+                             reopenable_step_ids=None) -> dict:
+    """Compile every pending generation step into one graph; edges order the run."""
     if any(row.get('preservation_bindings') for row in work.get('requirements', [])):
         if canvas is None or store is None:
             raise ValueError('preservation binding requires current project media verification')
@@ -766,25 +808,57 @@ def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix"
                    or placement_id in planned_sources or placement_id in take_origins.values()
                    for placement_id in targets):
                 voiced_step_ids.add(step['id'])
-    ready = set(ready_material_steps(work))
+    steps = {s["id"]: s for s in work["steps"]}
+    compile_set = set(pending_material_steps(work, reopenable_step_ids))
     if selected_step_ids is not None:
         if (any(not isinstance(step_id, str) for step_id in selected_step_ids)
                 or len(selected_step_ids) != len(set(selected_step_ids))
-                or not set(selected_step_ids) <= ready):
-            raise ValueError("selected material steps must be unique ready saved steps")
-        ready &= set(selected_step_ids)
-    steps = {s["id"]: s for s in work["steps"]}
+                or not set(selected_step_ids) <= compile_set):
+            raise ValueError("selected material steps must be unique pending saved steps")
+        chosen = set(selected_step_ids)
+        frontier = list(chosen)
+        while frontier:
+            selected_step = steps[frontier.pop()]
+            prerequisites = [*selected_step.get("depends_on", []),
+                             *(ref["step_id"] for ref in selected_step.get("references", [])
+                               if ref.get("step_id"))]
+            for prerequisite in prerequisites:
+                if prerequisite in compile_set and prerequisite not in chosen:
+                    chosen.add(prerequisite)
+                    frontier.append(prerequisite)
+        compile_set = chosen
     external: dict[str, dict] = {}
     items = []
     cohorts, shared_inputs, durations = {}, {}, []
+    compiled: set[str] = set()
     for step in work["steps"]:
-        if step["id"] not in ready or step["source"] != "generate":
+        if step["id"] not in compile_set or step["source"] != "generate":
+            continue
+        blockers = ({reference["step_id"] for reference in step.get("references", [])
+                     if reference.get("step_id")}
+                    | set(step.get("depends_on", [])))
+        if (blockers & compile_set) - compiled:
+            # A prerequisite stayed out of this wave (incoherent generation
+            # controls or an unresolved external reference); its dependents
+            # wait with it so the compiled graph stays resolvable.
             continue
         controls = _material_generation_controls(step)
-        if step['id'] in voiced_step_ids and 'video_generate_audio' not in controls:
-            controls['video_generate_audio'] = True
-        shared = {key: value for key, value in controls.items() if key != 'video_duration_seconds'}
         kind = step['media_kind']
+        if kind == 'video' and 'video_generation_mode' not in controls and step.get('references'):
+            # The compiled plan carries a consuming edge for this shot, and
+            # ``textToVideo`` is the runtime default for an omitted mode, which
+            # does not consume media. State the mode the references require.
+            controls = {**controls, 'video_generation_mode': 'imageReference'}
+        if (
+            kind == 'video'
+            and step['id'] in voiced_step_ids
+            and 'video_generate_audio' not in controls
+        ):
+            # A shot whose generated dialogue is already saved in the plan
+            # cannot be silent. Only an unstated choice is filled here; an
+            # explicit `false` stays a preflight conflict the caller resolves.
+            controls = {**controls, 'video_generate_audio': True}
+        shared = {key: value for key, value in controls.items() if key != 'video_duration_seconds'}
         if kind in cohorts and cohorts[kind] != shared:
             continue
         cohorts.setdefault(kind, shared)
@@ -794,8 +868,18 @@ def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix"
         inputs = []
         for reference in step.get("references", []):
             node_id = reference.get("node_id")
-            if reference.get("step_id"):
-                source = steps[reference['step_id']]
+            step_ref = reference.get("step_id")
+            if step_ref and step_ref in compile_set:
+                # Same-wave sibling: the compiled plan carries the
+                # ``media_input_for`` edge, and the canvas order decides when
+                # this step may actually run.
+                if steps[step_ref]['media_kind'] != 'image':
+                    raise ValueError(f'material workflow supports only image references; actual reference is {steps[step_ref]["media_kind"]}; select or prepare an image reference, use source=existing for an unchanged video clip, or revise the preservation requirement')
+                if step_ref not in inputs:
+                    inputs.append(step_ref)
+                continue
+            if step_ref:
+                source = steps[step_ref]
                 resource = source.get('accepted_resource') or {}
                 node_id, media_kind = resource.get('node_id'), resource.get('media_kind')
                 if (media_kind not in {'image', 'video', 'audio'} or media_kind != source.get('media_kind')
@@ -832,6 +916,7 @@ def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix"
             item['duration_seconds'] = controls['video_duration_seconds']
         if inputs:
             item["reference_inputs"] = inputs
+        compiled.add(step["id"])
         items.append(item)
     if durations and durations[0] is not None and all(value == durations[0] for value in durations):
         shared_inputs['video_duration_seconds'] = durations[0]
@@ -1183,7 +1268,7 @@ def prepare_material_acceptance(store, work_ref: dict, step_id: str, resource: d
         raise ValueError("material review does not belong to candidate")
     if review['payload']['work_ref'] != work_ref:
         _IndependentMaterialReviewContinuity(store, current, canvas_id).validate(review)
-    if review["payload"]["technical"]["status"] != "passed" or review["payload"]["content"]["status"] != "passed":
+    if review["payload"]["technical"]["status"] != "passed" or material_content_blocks(review["payload"]):
         raise ValueError("material technical/content review has not passed")
     accepted = {s["id"] for s in work["steps"] if s.get("status") == "accepted"}
     dependencies = set(step.get("depends_on", [])) | {r["step_id"] for r in step.get("references", []) if r.get("step_id")}
@@ -1284,8 +1369,9 @@ def retry_material_step(store, work_ref: dict, step_id: str, reason: str, comman
                     after['candidates'].append({'attempt_history':history,'reason':reason,'command_id':command_id})
                 after.pop('execution',None)
                 after.pop('task_id',None)
-                if after['source'] == 'generate':
-                    after.pop('node_id',None)
+                # The producing node stays put so a retry regenerates the same
+                # canvas node and keeps its plan ownership; only the produced
+                # material and its review evidence are invalidated.
         target = next(s for s in updated['steps'] if s['id'] == step_id)
         target['status'] = 'rejected'
         if review is not None:
@@ -1343,8 +1429,16 @@ def revise_material_strategy(store, work_ref: dict, replacements: list[dict], co
         raise ValueError('material strategy requires an authorized current canvas')
     normalized = []
     for replacement in replacements:
-        if not isinstance(replacement, dict) or _SERVER_STEP_FIELDS & replacement.keys():
-            raise ValueError('material strategy cannot set execution or review state')
+        if not isinstance(replacement, dict):
+            raise ValueError('material strategy requires object replacements')
+        rejected = sorted(_SERVER_STEP_FIELDS & replacement.keys())
+        if rejected:
+            # The Agent usually copies a saved step verbatim, so the message must
+            # name the fields it has to drop instead of failing opaquely.
+            raise ValueError(
+                'material strategy cannot set execution or review state; remove '
+                + ', '.join(rejected)
+            )
         if replacement.get('source') in {'generate', 'upload'} and replacement.get('node_id'):
             raise ValueError('generated or awaiting upload strategy cannot claim a canvas output node')
         normalized.append(MaterialStep.model_validate(replacement).model_dump(mode='json', exclude_none=True))
@@ -1368,8 +1462,14 @@ def revise_material_strategy(store, work_ref: dict, replacements: list[dict], co
                 _step_strategy(step) != _step_strategy(previous_steps.get(step['id'], {}))]
             raise MaterialStrategyConflict({'artifact_id': current['id'], 'revision': current['revision']}, changed)
         original = {step['id']: step for step in current['payload']['steps']}
-        if any(step_id not in original for step_id in ids):
-            raise ValueError('unknown material step')
+        unknown_ids = sorted(step_id for step_id in ids if step_id not in original)
+        if unknown_ids:
+            # A revision only replaces existing steps; the caller cannot invent
+            # new ones, so it must learn which ids actually exist.
+            raise ValueError(
+                'unknown material step: ' + ', '.join(unknown_ids)
+                + '; existing steps: ' + ', '.join(sorted(original))
+            )
         # Validate every supplied source before publishing any replacement.
         from .material_execution import canvas_material_resource
         for step in normalized:
@@ -1454,7 +1554,7 @@ def material_binding_commands(store, work: dict, plan: dict) -> list[dict]:
                 or review['payload']['step_id'] != step['id']
                 or review['payload']['resource'] != resource
                 or review['payload']['technical']['status'] != 'passed'
-                or review['payload']['content']['status'] != 'passed'):
+                or material_content_blocks(review['payload'])):
             raise ValueError('final material review is no longer current and passed')
         from .material_review import validate_material_review_lineage
         validate_material_review_lineage(store, review['payload'], review['upstream_refs'])

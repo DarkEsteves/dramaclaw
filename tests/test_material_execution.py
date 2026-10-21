@@ -161,9 +161,11 @@ def test_separately_generated_existing_source_still_requires_current_media_revie
     assert review['review']['technical']['status'] == 'passed'
     assert review['review']['content']['status'] == 'unavailable'
     assert review['requires_user_review'] is True
-    with pytest.raises(ValueError, match='technical/content review'):
-        accept_material_candidate(store, reused['work_ref'], 'image', review['review']['resource'],
-                                  review['review_ref'], 'accept-before-content-review')
+    # Unobserved content stays advisory: the technical pass is enough to accept
+    # and bind the candidate before a human confirms the look.
+    accepted = accept_material_candidate(store, reused['work_ref'], 'image', review['review']['resource'],
+                                         review['review_ref'], 'accept-advisory-image')
+    assert accepted['work_ref']['revision'] > reused['work_ref']['revision']
 
     Image.new('RGB', (16, 12), 'blue').save(tmp_path / 'picture.png')
     with pytest.raises(ValueError, match='changed after review'):
@@ -245,8 +247,52 @@ def test_retry_invalidates_only_dependent_branch_and_replays_command(tmp_path):
         retry_material_step(store,prepared['work_ref'],'image','other reason','retry-one')
 
 
+def test_retry_keeps_producing_node_for_same_node_regeneration(tmp_path):
+    from novelvideo.freezone.remix.material_work import retry_material_step
+
+    store, _, prepared = setup_work(tmp_path)
+    saved = store.read(prepared['work_ref']['artifact_id'], 1)
+    work = saved['payload']
+    work['steps'][0].update(node_id='image-node', task_id='image-task', execution={'run_id': 'run-1'})
+    work['steps'][1].update(node_id='video-node')
+    current = store.revise(saved['id'], saved['revision'], work, saved['upstream_refs'])
+
+    result = retry_material_step(store, {'artifact_id': current['id'], 'revision': current['revision']},
+                                 'image', 'Candidate rejected by review', 'retry-same-node')
+
+    image, video = result['work']['steps']
+    assert image['status'] == 'rejected' and image['node_id'] == 'image-node'
+    assert 'task_id' not in image and 'execution' not in image
+    assert video['status'] == 'stale' and video['node_id'] == 'video-node'
+    assert result['ready_step_ids'] == ['image']
+
+
+def test_explicit_content_rejection_still_blocks_acceptance(tmp_path):
+    from copy import deepcopy
+    from novelvideo.freezone.remix.material_execution import review_material_candidate
+    from novelvideo.freezone.remix.material_work import accept_material_candidate, prepare_material_work
+
+    store, plan_ref, prepared = setup_work(tmp_path)
+    work = store.read(prepared['work_ref']['artifact_id'], 1)['payload']
+    work['steps'][0].update(source='existing', node_id='n')
+    work['steps'][0].pop('recipe_id')
+    reused = prepare_material_work(store, plan_ref, work['requirements'], work['steps'], 'reject-existing')
+    Image.new('RGB', (16, 12), 'red').save(tmp_path / 'picture.png')
+    canvas = {'nodes': [{'id': 'n', 'data': {'imageUrl': '/static/projects/project/picture.png'}}]}
+    review = review_material_candidate(store, reused['work_ref'], 'image', canvas, 'n')
+
+    saved_review = store.read(review['review_ref']['artifact_id'], review['review_ref']['revision'])
+    payload = deepcopy(saved_review['payload'])
+    payload['content'] = {'status': 'rejected', 'checks': ['visible mismatch'], 'findings': ['wrong product']}
+    rejected = store.revise(saved_review['id'], saved_review['revision'], payload, saved_review['upstream_refs'])
+    with pytest.raises(ValueError, match='technical/content review'):
+        accept_material_candidate(store, reused['work_ref'], 'image', review['review']['resource'],
+                                  {'artifact_id': rejected['id'], 'revision': rejected['revision']},
+                                  'accept-rejected-image')
+
+
 @pytest.mark.asyncio
-async def test_rejected_actual_review_releases_work_for_retry(tmp_path, monkeypatch):
+async def test_rejected_actual_review_is_recorded_without_auto_retry(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import novelvideo.api.routes.reference_material as route
     import novelvideo.freezone.remix.material_execution as execution
@@ -266,8 +312,12 @@ async def test_rejected_actual_review_releases_work_for_retry(tmp_path, monkeypa
     from novelvideo.chat.reference_remix_continuation import coordinator
     monkeypatch.setattr(coordinator.store,'list_for_actor',lambda *args: [])
     monkeypatch.setattr(execution,'inspect_material_content',rejected)
+    before = store.read_latest(ref['artifact_id'])
     result = await route.material_review('project','canvas',route.ReviewBody(work_ref=ref,step_id='image',node_id='n'),{})
     state = store.read_latest(ref['artifact_id'])
-    assert state['payload']['steps'][0]['status'] == 'rejected'
-    assert result['data']['work_ref']['revision'] == state['revision']
+    # A rejection is recorded as review evidence only: regenerating stays an
+    # explicit agent/user action, so the work package keeps its status.
+    assert state['revision'] == before['revision']
+    assert state['payload']['steps'][0]['status'] == before['payload']['steps'][0]['status']
     assert result['data']['review']['content']['status'] == 'rejected'
+    assert result['data']['requires_user_review'] is False
