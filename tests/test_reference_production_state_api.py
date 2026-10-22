@@ -59,6 +59,59 @@ def test_state_reports_measurement_for_current_plan_revision(selection_api):
     assert any(row["entity_id"] == "line" for row in latest["speech_estimates"])
 
 
+@pytest.mark.parametrize('failed_review', [False, True])
+def test_pending_plan_review_is_not_reported_as_approved(selection_api, failed_review):
+    from novelvideo.freezone.remix.production_review import review_production_plan
+
+    client, store, _, plan, _, _ = selection_api
+    current = commissions.create_reference_commission(
+        store, canvas_id='c', requester_user_id='u', analysis_node_id='a',
+        goal=plan['payload']['goal'],
+        analysis_evidence={'task_id': 'analysis', 'result_fingerprint': 'hash'},
+    )
+    current = commissions.advance_reference_commission(
+        store, current['commission_ref'],
+        {'type': 'direction_confirmed', 'direction': {'target_goal': plan['payload']['goal']}},
+        current['commission_ref']['revision'],
+        host_evidence=commissions.AuthenticatedDecisionEvidence('p', 'c', 'u', 'direction-message'),
+    )
+    plan_ref = {'artifact_id': plan['id'], 'revision': plan['revision'], 'project_id': 'p'}
+    current = commissions.advance_reference_commission(
+        store, current['commission_ref'], {'type': 'plan_ready', 'plan_ref': plan_ref},
+        current['commission_ref']['revision'],
+    )
+    if failed_review:
+        review = review_production_plan(store, plan_ref, current['commission_ref'], [])
+        assert review['payload']['status'] == 'changes_required'
+    state = get_state(client, current).json()['data']
+    assert state['phase'] == 'awaiting_plan_review'
+    assert state['plan_review_valid'] is False
+    assert state['next_action']['kind'] == 'review_production_plan'
+    assert state['next_action']['owner'] == 'agent'
+    assert any(row['kind'] == 'review_production_plan' for row in state['blockers'])
+    assert state['ready_system_actions'] == []
+    assert state['director_state']['decisions'] == []
+
+
+@pytest.mark.parametrize('confirmed_direction', [False, True])
+def test_early_phases_do_not_claim_review_or_jump_to_review(selection_api, confirmed_direction):
+    client, store, _, _, _, _ = selection_api
+    current = commissions.create_reference_commission(
+        store, canvas_id='c', requester_user_id='u', analysis_node_id='a', goal='new',
+        analysis_evidence={'task_id': 'analysis', 'result_fingerprint': 'hash'},
+    )
+    if confirmed_direction:
+        current = commissions.advance_reference_commission(
+            store, current['commission_ref'],
+            {'type': 'direction_confirmed', 'direction': {'target_goal': 'new'}},
+            current['commission_ref']['revision'],
+            host_evidence=commissions.AuthenticatedDecisionEvidence('p', 'c', 'u', 'direction-message'),
+        )
+    state = get_state(client, current).json()['data']
+    assert state['plan_review_valid'] is False
+    assert not any(row['kind'] == 'review_production_plan' for row in state['blockers'])
+
+
 def test_state_exposes_scoped_selected_model_duration_intersection(selection_api, monkeypatch):
     from novelvideo.api.routes import freezone, reference_director
     client, _, commission, _, _, _ = selection_api
@@ -245,7 +298,9 @@ def test_valid_pass_suppresses_duplicate_unavailable_review_and_changed_media_re
     data = get_state(client, c).json()["data"]
     assert data["progress"]["materials_available"] == 1
     assert data["progress"]["user_action_count"] == 0
-    assert data["director_state"]["material_reviews"] == []
+    assert len(data['director_state']['material_reviews']) == 1
+    assert data['director_state']['material_reviews'][0]['content']['status'] == 'passed'
+    assert data['director_state']['material_stages'][0]['reviewed'] == 1
     assert data["next_action"]["owner"] == "system"
     assert data["next_action"]["kind"] == "accept_materials"
     # Revoking the exact pass makes the unchanged current unavailable review relevant.
@@ -262,6 +317,24 @@ def test_valid_pass_suppresses_duplicate_unavailable_review_and_changed_media_re
     assert data["director_state"]["material_reviews"] == []
     assert data["next_action"]["owner"] == "system"
     assert data["next_action"]["kind"] == "check_materials"
+
+
+def test_confirmed_material_stage_remains_in_projection_after_acceptance(selection_api):
+    from novelvideo.freezone.remix.material_work import accept_material_candidate
+
+    client, store, commission, _, work, _ = selection_api
+    work, canvas = attach_picture(store, work)
+    review = review_material_candidate(store, work, 'image', canvas, 'picture')
+    confirmed = confirm_material_review(store, review['review_ref'], canvas,
+        canvas_id='c', requester_user_id='u')
+    accepted = accept_material_candidate(store, work, 'image', confirmed['review']['resource'],
+        confirmed['review_ref'], 'stage-confirmation', canvas_id='c')
+    commission = select(client, commission, accepted['work_ref'])
+    data = get_state(client, commission).json()['data']['director_state']
+    assert data['material_stages'][0]['status'] == 'confirmed'
+    assert data['material_stages'][0]['confirmed'] == 1
+    assert data['material_reviews'][0]['review_ref'] == confirmed['review_ref']
+    assert data['material_reviews'][0]['content']['status'] == 'passed'
 
 
 def test_missing_media_is_unavailable_and_read_has_no_artifact_writes(selection_api):
@@ -931,12 +1004,11 @@ def test_current_native_failure_remains_visible_alongside_another_material_revie
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["progress"]["user_action_count"] == (
-        2 if current_user_blocker and native_status != "cancelled" else 1
+        1 if current_user_blocker and native_status != "cancelled" else 0
     )
-    assert (
-        data["director_state"]["material_reviews"][0]["review_ref"]
-        == review["review_ref"]
-    )
+    # A sibling failure keeps the stage in preparation, not partial user review.
+    assert data['director_state']['material_reviews'] == []
+    assert data['director_state']['material_stages'][0]['status'] == 'preparing'
     assert data["material_steps"][0]["status"] == "needs_review"
     assert data["next_action"] is None
     assert data["ready_system_actions"] == []

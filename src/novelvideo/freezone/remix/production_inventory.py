@@ -272,7 +272,7 @@ def _plan_review_is_valid(store, c, plan):
     """Only the pinned review identity can revoke its original approval."""
     ref = c.get("review_ref")
     if not ref:
-        return True
+        return False
     try:
         from .production_review import production_decision_fingerprint
 
@@ -323,6 +323,12 @@ def _material_evidence(store, work, canvas, canvas_id, state_dir, agent_id='main
         for r in discovered.get("material_reviews", [])
         if r["review_compatible_with_current_work"] is True
     ]
+    from .material_work import material_stage_groups
+
+    groups = material_stage_groups(work['payload'])
+    active_stage = next((set(group) for group in groups if any(
+        step['status'] != 'accepted' for step in work['payload']['steps']
+        if step['id'] in group)), set())
     facts, actions, pending_reviews, steps = [], [], [], []
     basis = _ref(work, store.project_id)
     for step in work["payload"]["steps"]:
@@ -424,7 +430,7 @@ def _material_evidence(store, work, canvas, canvas_id, state_dir, agent_id='main
             ),
             None,
         )
-        if not accepted:
+        if not accepted and step['id'] in active_stage:
             if chosen:
                 pending_reviews.append(chosen)
                 actions.append(
@@ -476,6 +482,12 @@ def _material_evidence(store, work, canvas, canvas_id, state_dir, agent_id='main
                 else None,
             }
         )
+    stage_ready = all(row['status'] in {'accepted', 'checked', 'needs_review'}
+                      for row in steps if row['step_id'] in active_stage)
+    if not stage_ready:
+        actions = [action for action in actions
+                   if action['kind'] not in {'review_materials', 'accept_materials'}]
+        pending_reviews = []
     evidence = discovered.get('material_execution') or {}
     draft_actions = [row['next_action'] for row in evidence.get('drafts', []) if row.get('next_action')]
     if draft_actions:
@@ -909,13 +921,41 @@ def read_current_production(
             # identity for candidate inspection/explicit batch actions. Compact
             # material-state rows are not the browser's full review contract.
             displayed_reviews = []
-            for pending in pending_reviews:
+            stages = []
+            if work:
+                from .material_work import material_stage_groups
+                discovered = read_material_state(store,
+                    {'artifact_id': work['id'], 'revision': work['revision']},
+                    canvas=canvas, canvas_id=canvas_id, include_workflow_intent=False,
+                    workflow_state_dir=state_dir, agent_id=agent_id)
+                compatible = [row for row in discovered.get('material_reviews', [])
+                              if row['review_compatible_with_current_work']]
+                passed_resources = {(row['step_id'], row['resource']['media_hash'])
+                                    for row in compatible if row['technical']['status']
+                                    == row['content']['status'] == 'passed'}
+                compatible = [row for row in compatible if row['content']['status'] == 'passed'
+                              or (row['step_id'], row['resource']['media_hash']) not in passed_resources]
+                statuses = {row['step_id']: row['status'] for row in steps}
+                for number, group in enumerate(material_stage_groups(work['payload']), 1):
+                    confirmed = sum(statuses.get(step_id) == 'accepted' for step_id in group)
+                    reviewed = sum(statuses.get(step_id) in {'accepted', 'checked'} for step_id in group)
+                    ready = all(statuses.get(step_id) in {'accepted', 'checked', 'needs_review'}
+                                for step_id in group)
+                    stage_status = ('confirmed' if confirmed == len(group) else
+                                    'awaiting_confirmation' if ready else 'preparing')
+                    stages.append({'stage_id': f"{work['id']}:stage:{number}",
+                        'stage_number': number, 'step_ids': group, 'status': stage_status,
+                        'total': len(group), 'confirmed': confirmed, 'reviewed': reviewed})
+                    if ready:
+                        displayed_reviews.extend(row for row in compatible if row['step_id'] in group)
+            for index, pending in enumerate(displayed_reviews):
                 saved_review = store.read(pending["review_ref"]["artifact_id"],
                                           pending["review_ref"]["revision"])
-                displayed_reviews.append({**pending,
+                displayed_reviews[index] = {**pending,
                     "current_work_ref": {"artifact_id": work["id"], "revision": work["revision"]},
                     "technical": saved_review["payload"]["technical"],
-                    "content": saved_review["payload"]["content"]})
+                    "content": saved_review["payload"]["content"]}
+            details['material_stages'] = stages
             details["material_reviews"] = _safe(displayed_reviews)
             for decision in details["decisions"]:
                 # The step-specific discovery above owns material pending actions.
@@ -952,10 +992,11 @@ def read_current_production(
                         c["commission_ref"],
                     )
                 )
-            if not review_valid:
+            if not review_valid and c['phase'] not in {'awaiting_direction', 'drafting_plan'}:
+                review_identity = (c.get('review_ref') or c['commission_ref'])['artifact_id']
                 actions = [
                     _action(
-                        "plan-review:" + c["review_ref"]["artifact_id"],
+                        "plan-review:" + review_identity,
                         "review_production_plan",
                         "agent",
                         c["commission_ref"],
@@ -964,6 +1005,7 @@ def read_current_production(
                 for key in (
                     "decisions",
                     "material_reviews",
+                    "material_stages",
                     "speech_corrections",
                     "output_reviews",
                 ):

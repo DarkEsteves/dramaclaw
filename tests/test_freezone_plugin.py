@@ -10838,7 +10838,7 @@ def _ready_material_adapter(monkeypatch, tmp_path, tool_name):
     store, plan_ref, prepared = setup_work(tmp_path)
     work = store.read(prepared["work_ref"]["artifact_id"], 1)["payload"]
     intent = material_workflow_intent(work)
-    assert [item["id"] for item in intent["items"]] == ["image", "video"]
+    assert [item["id"] for item in intent["items"]] == ["image"]
     monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
     monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
     monkeypatch.setattr(plugin, "tool_result", json.dumps)
@@ -10863,6 +10863,7 @@ def _ready_material_adapter(monkeypatch, tmp_path, tool_name):
             return {"ok": True, "data": {
                 "work_ref": dict(prepared["work_ref"]), "ready_step_ids": ["image"],
                 "workflow_intent": copy.deepcopy(intent),
+                "generation_readiness": {"ready_for_native_generation": True, "missing_choices": {}},
             }}
         if "/agent-product-operations/" in path:
             if path.endswith(_MATERIAL_ADMITTED_OPERATION):

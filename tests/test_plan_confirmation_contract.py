@@ -245,7 +245,12 @@ def test_mirrored_guide_uses_ordinary_plan_confirmation_after_shared_review():
     )]
     assert len({path.read_bytes() for path in paths}) == 1
     guide = paths[0].read_text()
-    section = guide.split('Fix changes_required findings', 1)[1].split('Plan how media is made', 1)[0]
+    section = guide.split('Call `freezone_review_production_plan`', 1)[1].split('Plan how media is made', 1)[0]
+    assert 'complete independent review snapshot' in section
+    assert 'findings never accumulate across calls' in section
+    assert 'resubmit all\neight categories together' in section
+    assert 'required_evidence_refs' in section
+    assert 'alternative_evidence_refs' in section
     assert 'registers the exact pending plan decision internally' in section
     assert 'ordinary chat' in section
     assert 'Do not call `freezone_prepare_reference_decision`' in section

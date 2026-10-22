@@ -251,7 +251,8 @@ async def material_reviews_confirm_batch(project: str, canvas_id: str, body: Mat
     result = await _call(confirm_current)
     for item in result['items']:
         await _notify_material(ctx, canvas_id, store, item['review']['work_ref'],
-            'material-review:' + item['review_ref']['artifact_id'] + ':' + str(item['review_ref']['revision']))
+            'material-review:' + item['review_ref']['artifact_id'] + ':' + str(item['review_ref']['revision']),
+            notify_agent=False)
     await _emit_director_update(ctx, canvas_id)
     return {'ok': True, 'data': result}
 
@@ -267,7 +268,8 @@ async def material_confirm(project: str, canvas_id: str, artifact_id: str, user:
     await _scope(project,canvas_id,user,review['payload']['work_ref'])
     result = await _call(confirm_material_review,store,{'artifact_id':artifact_id},canvas,
                          canvas_id=canvas_id,requester_user_id=ctx.requester_user_id)
-    await _notify_material(ctx,canvas_id,store,review['payload']['work_ref'],'material-review:' + artifact_id + ':' + str(result['review_ref']['revision']))
+    await _notify_material(ctx,canvas_id,store,review['payload']['work_ref'],
+        'material-review:' + artifact_id + ':' + str(result['review_ref']['revision']), notify_agent=False)
     return {'ok':True,'data':result}
 
 @router.post('/material-accept')
@@ -310,9 +312,22 @@ async def material_accept(project: str, canvas_id: str, body: AcceptBody, user: 
     return {'ok':True,'data':result}
 
 
+async def _current_material_generation_choices(ctx, canvas_id, store, state):
+    from .reference_director import _saved_material_generation_choices
+    from novelvideo.freezone.remix.reference_director import list_director_artifacts
+
+    artifacts = await _call(list_director_artifacts, store, canvas_id, ctx.requester_user_id,
+                            limit=None)
+    commissions = [commission for commission in artifacts['commissions']
+                   if (commission.get('work_ref') or {}).get('artifact_id') == state['work_ref']['artifact_id']
+                   and (commission.get('plan_ref') or {}).get('artifact_id') == state['work']['plan_ref']['artifact_id']]
+    return (await _saved_material_generation_choices(ctx, canvas_id, commissions[0])
+            if len(commissions) == 1 else {})
+
+
 @router.post('/material-stage')
 async def material_stage(project: str, canvas_id: str, body: MaterialStageBody, user: dict = Depends(get_api_user)):
-    _, canvas, store, state = await _scope(project,canvas_id,user,body.work_ref)
+    ctx, canvas, store, state = await _scope(project,canvas_id,user,body.work_ref)
     if state['work_ref'] != body.work_ref:
         raise HTTPException(409,'material work changed; reload current revision')
     await _call(validate_final_material_bindings,state['work']['requirements'])
@@ -336,22 +351,38 @@ async def material_stage(project: str, canvas_id: str, body: MaterialStageBody, 
     duration_issues = material_duration_issues(ready_steps)
     if duration_issues:
         raise HTTPException(422, {'code': 'material_duration_invalid', 'issues': duration_issues})
-    choices = state['work'].get('confirmed_generation_choices')
-    if choices is not None:
-        missing = missing_material_parameter_choices(ready_steps, choices)
-        conflicts = material_parameter_conflicts(ready_steps, choices)
-        if missing or conflicts:
-            raise HTTPException(409, {'code': 'material_parameter_choice_conflict',
-                                      'required_choices': missing, 'conflicts': conflicts})
-    intent = await _call(material_workflow_intent, state['work'], canvas=canvas, store=store,
+    from novelvideo.freezone.remix.material_work import _apply_confirmed_material_choices
+
+    choices = await _current_material_generation_choices(ctx, canvas_id, store, state)
+    missing = missing_material_parameter_choices(state['work']['steps'], choices)
+    readiness = {'confirmed_choices': bool(choices), 'missing_choices': missing,
+                 'ready_for_native_generation': not bool(missing)}
+    if missing:
+        return {'ok': True, 'data': {**state, 'workflow_intent': {'items': []},
+                'generation_readiness': readiness, 'next_action': 'request_user_clarification',
+                'agent_instruction': '素材工作包已保存。请通过现有参数卡确认模型、比例和分辨率；'
+                                     '视频时长按方案逐段规划。保留同一 work_ref，回答后再准备素材阶段。'}}
+    conflicts = material_parameter_conflicts(state['work']['steps'], choices)
+    if conflicts:
+        raise HTTPException(409, {'code': 'material_parameter_choice_conflict',
+                                  'conflicts': conflicts})
+    work = {**state['work'], 'steps': _apply_confirmed_material_choices(state['work']['steps'], choices),
+            'confirmed_generation_choices': choices}
+    if choices and work != state['work']:
+        current = await _call(store.read, body.work_ref['artifact_id'], body.work_ref['revision'])
+        revised = await _call(store.revise, current['id'], current['revision'], work, current['upstream_refs'])
+        state = {**state, 'work_ref': {'artifact_id': revised['id'], 'revision': revised['revision']},
+                 'work': revised['payload']}
+    intent = await _call(material_workflow_intent, work, canvas=canvas, store=store,
                          selected_step_ids=scope['ready'] if scope is not None else None,
                          reopenable_step_ids=state.get('reopenable_step_ids') or [])
     return {'ok':True,'data':{**state, 'workflow_intent':intent,
+                              'generation_readiness': readiness,
                               **({'ready_step_ids': scope['ready'], 'generation_scope': scope}
                                  if scope is not None else {})}}
 
 
-async def _notify_material(ctx, canvas_id, store, work_ref, event_key, *, invalidated=False):
+async def _notify_material(ctx, canvas_id, store, work_ref, event_key, *, invalidated=False, notify_agent=True):
     from novelvideo.freezone.remix.reference_director import list_director_artifacts
     from .reference_director import _notify_commission
     state = await _call(read_material_state,store,work_ref,include_workflow_intent=False)
@@ -362,7 +393,8 @@ async def _notify_material(ctx, canvas_id, store, work_ref, event_key, *, invali
                 from novelvideo.freezone.remix.reference_commission import advance_reference_commission
                 commission = await _call(advance_reference_commission, store, commission['commission_ref'],
                     {'type':'materials_invalidated','work_ref':state['work_ref']}, commission['commission_ref']['revision'])
-            await _notify_commission(ctx,canvas_id,commission,event_key)
+            if notify_agent:
+                await _notify_commission(ctx,canvas_id,commission,event_key)
     from .reference_director import _emit_director_update
     await _emit_director_update(ctx,canvas_id)
 

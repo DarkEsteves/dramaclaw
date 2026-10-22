@@ -100,9 +100,14 @@ import type { ChatMessage, ChatMessagePart } from './types';
 /** Incremental recovery never treats a bounded page as a complete history. */
 export function mergeBridgeRecoveryMessages(current: ChatMessage[], page: BridgeRecoveryPage, optimisticUserTurns: ReadonlySet<string> = new Set()): ChatMessage[] {
   let next = [...current];
+  const oldestLoadedTime = current.length ? Math.min(...current.map(message => message.timestamp)) : null;
+  const loadedTurns = new Set(current.map(message => message.turnId).filter(Boolean));
   for (const raw of page.messages) {
     const message = normalizeMessage(raw);
     if (!message) continue;
+    // Recovery is not history pagination: do not resurrect older, unloaded turns.
+    if (oldestLoadedTime !== null && message.timestamp < oldestLoadedTime
+      && !loadedTurns.has(message.turnId) && !current.some(item => item.id === message.id)) continue;
     const index = next.findIndex(item => item.id === message.id || (message.turnId && item.turnId === message.turnId && item.role === message.role && (
       (message.role === 'assistant' && item.id === `assistant-${message.turnId}`)
       // The caller supplies only turns sent by this actor in this exact scope.
@@ -114,13 +119,16 @@ export function mergeBridgeRecoveryMessages(current: ChatMessage[], page: Bridge
   const assistant = (turnId: string) => {
     let index = next.findIndex(item => item.turnId === turnId && item.role === 'assistant');
     if (index < 0) {
-      next.push({ id: `assistant-${turnId}`, role: 'assistant', turnId, text: '', timestamp: Date.now() });
+      const origin = next.find(item => item.turnId === turnId);
+      if (!origin) return -1;
+      next.push({ id: `assistant-${turnId}`, role: 'assistant', turnId, text: '', timestamp: origin.timestamp });
       index = next.length - 1;
     }
     return index;
   };
   for (const row of page.events) {
     const index = assistant(row.turn_id);
+    if (index < 0) continue;
     const message = next[index];
     let event: Record<string, unknown> = { ...row.payload, recovery_event_id: row.id, turn_id: row.turn_id };
     const events = (message.uiEvents ?? []).filter(value => (value as { recovery_event_id?: number })?.recovery_event_id !== row.id);
@@ -145,6 +153,7 @@ export function mergeBridgeRecoveryMessages(current: ChatMessage[], page: Bridge
   }
   for (const receipt of page.receipts) {
     const index = assistant(receipt.turn_id);
+    if (index < 0) continue;
     const message = next[index];
     const id = `bridge-receipt-${receipt.request_id}`;
     const type = receipt.kind === 'canvas_command' ? 'canvas_feedback' : receipt.kind === 'canvas_context' ? 'canvas_context' : receipt.kind === 'clarification_event' ? 'clarification' : 'skill_studio';

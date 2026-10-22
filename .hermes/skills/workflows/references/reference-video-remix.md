@@ -2,6 +2,19 @@
 
 Do not automatically upgrade historical parameter choices into a new confirmation.
 
+## Material stage gate
+
+Material dependencies define production stages. Generate only the current stage;
+never compile reference images and their dependent videos into one executable wave.
+Wait until every required material in the stage has completed technical checks,
+then present one grouped material confirmation card. Partial user confirmations do
+not unlock dependent generation. User confirmation is the final human review:
+the host records acceptance automatically, without another approval request.
+Continue to the next stage only after every current-stage material is accepted,
+and only within the existing generation authorization. Keep the stage card as a
+collapsed, expandable confirmation record after completion; do not remove it.
+Individual task completions update progress, not repeated Agent continuations.
+
 ## Current-stage decisions
 
 First identify what the user wants to 保留, 替换, 新增 or leave undecided. Keep
@@ -241,7 +254,14 @@ is not actual speech alignment. The user's submitted model,
 ratio and resolution choice is required for each generated media type. A
 recommendation or workflow approval marker is not that choice. Use the
 existing parameter clarification and native canvas/action confirmation;
-do not start paid generation on a missing choice. Read the actual Skill package
+do not start paid generation on a missing choice. If `generation_readiness`
+reports missing choices, preserve the returned `work_ref` and use
+`freezone_request_user_clarification` with `generation_required_choices` from
+`missing_choices`. Do not include video duration: it is planned per step.
+After the real card submission, resume that same work package through
+`freezone_prepare_material_stage` and use its returned current revision.
+Recommended defaults, plan confirmation and canvas approval are not parameter
+receipts. Read the actual Skill package
 to obtain `reference-video-remix`'s current version before registration.
 After a candidate is accepted, align its actual speech once for the shared
 source; use measured words for auto subtitles and semantic positions. Silent
@@ -569,17 +589,48 @@ Call `freezone_review_production_plan` with the actual plan/commission refs and
 entity-located reasons/evidence in all eight categories: dialogue, narrative,
 audio_visual_roles, material_requirements, native_effects, output,
 semantic_anchors, direction. Structure validity alone is not creative review.
+The host waives only the missing `dialogue` finding when the saved plan has no
+nonblank turns and no explicit confirmed dialogue constraint. An explicit mode
+other than `unspecified` (including `rewrite`), locked or exact turns, or a
+structured turn/dialogue choice keeps dialogue review required. All other
+categories remain required, including audio review for BGM or sound-only sources.
+Free-form semantic constraints still require their grounded findings; deleting
+turns never satisfies a confirmed speech requirement. Do not invent dialogue or
+a pass to fill a category. `unsupported` means insufficient support, not
+not-applicable: any submitted `change` or `unsupported` still blocks approval.
 First read the current production state's `review_context.requirements`, then
 inspect the exact saved plan. For each semantic requirement copy its ID into
 `requirement_id` and cite an actual saved `beat`, `turn`, `placement`, `resource`
 or `selection` through `evidence_refs` (`entity_kind`, `entity_id`, `field`).
+Structured preserve/replace choices are exposed there as semantic requirements
+using their stable choice IDs. Put that ID in `requirement_id`, not `entity_id`;
+`entity_id` must still identify actual saved plan content. Review each choice
+with grounded findings; never amend the confirmed direction to add review reasons.
 Use `field=purpose`, `text`, `description`, `media_path` or `graphic.text` as
 appropriate; the server reads that field from the saved plan. If the plan goal
 expands the confirmed direction, the direction finding also cites `plan.goal`
 and one actual content entity. Explain your conclusion in `reason` and
 `evidence`; copying the full field text into prose is unnecessary. Mark an
 unmet requirement `change` or `unsupported` instead of inventing a citation.
-Fix changes_required findings against the current saved plan and review again.
+Each submission is a complete independent review snapshot for the exact saved
+`plan_ref` and confirmed direction; findings never accumulate across calls.
+For every planned speech source, add an `audio_visual_roles` finding with
+`entity_kind=placement` and that source's actual ID. Its `evidence_refs` must
+cite `field=text` for every turn whose `speech_placement_id` points to it.
+For example, a source owning two turns needs both turn references in the same
+finding; prose in `evidence` does not substitute for those references. You may
+also cite the source's saved `description`. A sound-only source instead cites
+its description or an overlapping beat's purpose. These are planned-source
+checks, not approval of actual generated media audio.
+On `changes_required`, inspect `review.checks`: `required_evidence_refs` lists
+all required citations for an audio source; `alternative_evidence_refs` lists
+choices where at least one is needed for sound without dialogue. Inspect the
+content before judging it; do not invent a pass just because citations resolve.
+Recheck and retain still-valid findings, fix failed items, then resubmit all
+eight categories together, not just supplemental findings. If the plan changed,
+reread its exact current revision and recheck affected conclusions. Never merge
+historical failures into a pass, reuse an older revision's approval, request
+user confirmation before a pass, or switch audio strategy to bypass evidence.
 A passed review registers the exact pending plan decision internally. Explain
 that reviewed plan in ordinary chat and ask the user to confirm, change, or
 question it in their own words. Do not call `freezone_prepare_reference_decision`
@@ -589,7 +640,14 @@ saved `commission_ref` and `plan_ref`; the host binds it to the active human
 turn and returns the confirmation receipt. Normal replies remain ordinary chat,
 and neither the Agent nor a system notification can approve without that host
 receipt. Work scope and material production begin only after the authenticated user confirms through the existing flow; the authenticated user confirmation is
-the state transition, not an Agent assertion.
+the state transition, not an Agent assertion. A completed review tool call is not
+proof of a passed review: inspect `review.status` and the current commission phase.
+Never say confirmation is recorded based only on a progress read or user text.
+Nonblocking diagnostics may be mentioned, but do not add a second confirmation
+for an unchanged plan; ask again only if the plan is actually revised. If a saved
+review is revoked while production is already running, progress exposes the exact
+`plan_revision_sync.plan_ref` and the Agent reviews that revision: unchanged creative
+content regains approval in place, while changed content returns to the user.
 
 For several real saved plans, use `freezone_prepare_reference_branches` with
 the confirmed parent commission and each exact plan_ref. Read each child
@@ -642,7 +700,22 @@ For each generated video step, set `generation_inputs.durationSec` from the
 placement's intended use and the selected model's current limits. A missing
 production-step duration is a planning error naming that step, not a request
 for a global duration card. Keep the edit interval in the plan placement; do
-not force it to equal the length of a generated source clip.
+not force it to equal the length of a generated source clip. Supply an integer
+4–15 seconds within the selected live model limits; never add `duration_frames`
+to a material step. Always include a stable `command_id` in the request.
+A `material_duration_invalid` response lists the affected steps in `issues`;
+correct their `generation_inputs.durationSec`, not the saved plan's frame fields.
+
+Prepare actual media resources, not an entire edited film as a `general-video`
+step named final composition. Final assembly, subtitles, graphics and mixing
+belong to the existing native composition pipeline after material acceptance.
+Bind each requirement to its actual compatible media targets; do not bind all
+visual, subtitle, graphic and BGM placements to one generated video. `depends_on`
+only orders steps; it neither passes audio nor performs lip sync. Real inputs
+use supported references. For voiced sources, follow saved `speech_placement_id`:
+the generated final source step must contain all its `dialogue_turn_ids`, and
+its requirement must contain the same `turn_ids`. Do not silently replace a
+voiced video source with separate narration or copy dialogue into prompt.
 
 Each final placement or speech take has one resource slot. Different
 `final_step_id` values cannot claim the same `placement_ids` or `take_ids` target.
@@ -679,6 +752,7 @@ has been requested.
      "source": "generate", "recipe_id": "general-image", "prompt": "Confirmed product in the agreed setting"},
     {"id": "clip", "label": "Final product clip", "media_kind": "video",
      "source": "generate", "recipe_id": "general-video", "prompt": "Agreed action and camera motion",
+     "generation_inputs": {"durationSec": 6},
      "depends_on": ["shared-image"], "references": [{"step_id": "shared-image", "role": "first_frame"}]}
   ]
 }

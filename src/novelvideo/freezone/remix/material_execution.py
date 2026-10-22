@@ -280,7 +280,11 @@ def _saved_material_reviews(store, work, canvas: dict, canvas_id: str) -> dict:
                     continue
                 if canvas_material_resource(store, canvas, resource['node_id'], resource['media_kind']) != resource:
                     continue
-                compatible = payload['work_ref'] == exact
+                compatible = payload['work_ref'] == exact or (
+                    step.get('status') == 'accepted'
+                    and step.get('accepted_resource') == resource
+                    and step.get('review_ref') == {'artifact_id': saved['id'], 'revision': saved['revision']}
+                    and payload['technical']['status'] == payload['content']['status'] == 'passed')
                 if not compatible:
                     try:
                         continuity.validate_target(saved)

@@ -627,6 +627,114 @@ def test_observer_recovers_settlement_after_confirmed_draft_retention_cleanup(tm
         assert recovered['event_key'] == first['event_key']
     assert store.read_latest(ref['artifact_id']) == before
 
+@pytest.fixture
+def material_stage_observation(monkeypatch):
+    from novelvideo.chat import reference_production_observer as module
+    from novelvideo.freezone.remix import material_execution, material_settlement
+    from novelvideo.freezone import workflow_runs
+    steps = [
+        {'id': 'a', 'source': 'generate', 'status': 'submitted', 'node_id': 'a',
+         'media_kind': 'image', 'recipe_id': 'image'},
+        {'id': 'b', 'source': 'generate', 'status': 'submitted', 'node_id': 'b',
+         'media_kind': 'image', 'recipe_id': 'image'},
+        {'id': 'video', 'source': 'generate', 'status': 'planned',
+         'media_kind': 'video', 'depends_on': ['a']},
+    ]
+    work = {'id': 'work', 'revision': 1, 'payload': {'steps': steps,
+            'requirements': [{'final_step_id': 'video'}]}}
+    statuses = {'a': 'completed', 'b': 'running'}
+    plan = {'id': 'plan', 'revision': 1, 'schema': 'production_plan.v2', 'payload': {}}
+    store = SimpleNamespace(project_id='project', project_dir='unused', read_latest=lambda _id: work)
+    commission = {'phase': 'preparing_materials', 'canvas_id': 'canvas',
+                  'plan_ref': {'artifact_id': 'plan', 'revision': 1}}
+    monkeypatch.setattr(module, '_canvas_refs', lambda *_args: [plan])
+    monkeypatch.setattr(module, '_saved_work', lambda *_args: work)
+    monkeypatch.setattr(module, '_discover_material_executions', lambda *_args: work)
+    monkeypatch.setattr(material_execution, 'validate_material_native_execution',
+        lambda _store, _canvas, step, *_args, **_kwargs: {'run_id': step['id'], 'task_id': step['id']})
+    monkeypatch.setattr(workflow_runs, 'read_workflow_run', lambda **kwargs: {
+        'project_id': 'project', 'actions': [{'node_id': kwargs['run_id'],
+            'task_key': kwargs['run_id'], 'recipe_id': 'image', 'status': statuses[kwargs['run_id']]}]})
+    monkeypatch.setattr(material_settlement, 'settle_material_result', lambda **kwargs: {
+        'status': 'registered', 'resource': {'node_id': kwargs['step_id']},
+        'review_ref': {'artifact_id': 'review'}, 'settlement_id': kwargs['step_id']})
+    monkeypatch.setattr(material_execution, 'canvas_material_resource',
+        lambda _store, _canvas, node_id, _kind: {'node_id': node_id})
+    return lambda: module.production_event(store, {}, commission), steps, statuses
+
+
+def test_material_stage_waits_for_all_candidates_and_ignores_partial_acceptance(material_stage_observation):
+    observe, steps, statuses = material_stage_observation
+    assert observe() is None
+    statuses['b'] = 'completed'
+    complete = observe()
+    assert complete['settlement_ids'] == ['a', 'b']
+    steps[0].update(status='accepted', accepted_resource={'node_id': 'a'})
+    assert observe()['event_key'] == complete['event_key']
+    steps[1].update(status='accepted', accepted_resource={'node_id': 'b'})
+    next_stage = observe()
+    assert next_stage['event_key'] != complete['event_key']
+    assert observe()['event_key'] == next_stage['event_key']
+    steps[2]['status'] = 'submitted'
+    assert observe() is None
+
+
+def test_material_failure_identity_ignores_other_partial_completions(material_stage_observation):
+    observe, _steps, statuses = material_stage_observation
+    statuses.update(a='failed', b='running')
+    failed = observe()
+    assert '失败' in failed['notice']
+    statuses['b'] = 'completed'
+    assert observe()['event_key'] == failed['event_key']
+
+
+@pytest.mark.asyncio
+async def test_partial_branch_material_revision_does_not_wake_again(monkeypatch):
+    from novelvideo.chat import reference_production_observer as module
+    child = {'phase': 'preparing_materials',
+             'commission_ref': {'artifact_id': 'child', 'revision': 1}}
+    parent = {'phase': 'preparing_materials',
+              'commission_ref': {'artifact_id': 'parent', 'revision': 1}}
+    run = {'run_id': 'run', 'canvas_id': 'canvas', 'commission_event_receipts': []}
+    wakes = []
+    async def wake(**kwargs):
+        wakes.append(kwargs['event_key'])
+    observer = ReferenceProductionObserver(SimpleNamespace(continue_commission=wake))
+    observer._branch_plan_consumption = lambda *_args, **_kwargs: set()
+    async def publish(*_args):
+        pass
+    observer._publish_cards = publish
+    monkeypatch.setattr(module, 'production_event', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, 'read_reference_commission', lambda *_args, **_kwargs: child)
+    ctx = SimpleNamespace(state_dir='unused')
+    assert await observer._observe_branches(ctx, run, None, {}, parent, [child], {})
+    run['commission_event_receipts'] = list(wakes)
+    child['commission_ref']['revision'] += 1
+    assert not await observer._observe_branches(ctx, run, None, {}, parent, [child], {})
+    assert len(wakes) == 1
+
+
+@pytest.mark.asyncio
+async def test_verified_observation_survives_automatic_advancement_error(monkeypatch):
+    from novelvideo.freezone.remix import production_automation
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError('automatic advancement unavailable')
+    monkeypatch.setattr(production_automation, 'advance_enrolled_production', unavailable)
+    observer = ReferenceProductionObserver(SimpleNamespace(
+        store=SimpleNamespace(list_for_actor=lambda *_args: [])))
+    run = {'run_id': 'run', 'canvas_id': 'canvas',
+           'commission_ref': {'artifact_id': 'commission', 'revision': 1}}
+    observed = {'event_key': 'verified', 'event': None}
+    assert await observer._advance_automation(None, run, observed) is False
+    assert observed['event_key'] != 'verified'
+    assert '自动推进未完成' in observed['notice']
+    retry = {'event_key': 'verified', 'event': None}
+    assert await observer._advance_automation(None, run, retry) is False
+    assert retry['event_key'] == observed['event_key']
+    with pytest.raises(RuntimeError, match='advancement unavailable'):
+        await observer._advance_automation(None, run, None)
+
+
 def test_observer_does_not_adopt_unique_unselected_work(tmp_path):
     from novelvideo.chat.reference_production_observer import _saved_work
     from novelvideo.freezone.remix.store import RemixArtifactStore

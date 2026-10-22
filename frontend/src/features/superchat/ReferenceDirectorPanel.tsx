@@ -76,13 +76,14 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
   const [viewedMaterials, setViewedMaterials] = useState<Set<string>>(new Set());
   const [viewedOutputs, setViewedOutputs] = useState<Set<string>>(new Set());
   const [uploadSelections, setUploadSelections] = useState<Record<string,string>>({});
+  const [expandedStages, setExpandedStages] = useState<Set<string>>(new Set());
   const canvasNodes = useCanvasStore((store) => store.nodes);
   const [reload, setReload] = useState(0);
   const scopeRef = useRef('');
   const epochRef = useRef(0);
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   const identityScope = JSON.stringify([account, projectId, canvasId, agentId?.trim() || 'main', progress?.commission_ref.artifact_id ?? controlledState?.commissions.map((row) => row.commission_ref.artifact_id) ?? 'legacy', progress?.work_ref?.artifact_id]);
-  const scope = JSON.stringify([account, projectId, canvasId, agentId?.trim() || 'main', progress?.commission_ref ?? controlledState?.commissions.map((row) => row.commission_ref.artifact_id) ?? 'legacy', progress?.work_ref, controlledState?.material_reviews?.map(materialReviewKey), controlledState?.decisions, progress?.projection_revision]);
+  const scope = JSON.stringify([account, projectId, canvasId, agentId?.trim() || 'main', progress?.commission_ref ?? controlledState?.commissions.map((row) => row.commission_ref.artifact_id) ?? 'legacy', progress?.work_ref, controlledState?.material_reviews?.map(materialReviewKey), controlledState?.material_stages, controlledState?.decisions, progress?.projection_revision]);
   scopeRef.current = scope;
 
   useEffect(() => { epochRef.current += 1; setBusy(null); setError(null); }, [scope]);
@@ -92,7 +93,7 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
     let cancelled = false;
     let request = 0;
     let canvasQueue: Promise<void> = Promise.resolve();
-    setState(controlledRef.current ?? EMPTY); setError(null); setBusy(null); setViewedOutputs(new Set()); setViewedMaterials(new Set()); setBatchMaterials(new Set()); setUploadSelections({});
+    setState(controlledRef.current ?? EMPTY); setError(null); setBusy(null); setViewedOutputs(new Set()); setViewedMaterials(new Set()); setBatchMaterials(new Set()); setUploadSelections({}); setExpandedStages(new Set());
     if (!projectId || !canvasId || !connected) return;
     if (controlledRef.current !== undefined) {
       refreshRef.current = async () => { await externalRefreshRef.current?.(); };
@@ -182,8 +183,16 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
     } catch (caught) { if (current()) setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { if (current()) setBusy(null); }
   };
+  const materialGroups = state.material_stages !== undefined
+    ? state.material_stages.map((stage) => ({ ...stage, reviews: (state.material_reviews ?? []).filter((review) =>
+      stage.step_ids.includes(review.step_id) && stage.stage_id.startsWith(`${(review.current_work_ref ?? review.work_ref).artifact_id}:stage:`)) }))
+    : (state.material_reviews?.length ? [{ stage_id: 'legacy-materials', stage_number: 0,
+      status: state.material_reviews.every((review) => review.content.status === 'passed') ? 'confirmed' as const : 'awaiting_confirmation' as const,
+      total: state.material_reviews.length, confirmed: state.material_reviews.filter((review) => review.content.status === 'passed').length,
+      reviews: state.material_reviews }] : []);
+  const actionableMaterials = materialGroups.filter((group) => group.status === 'awaiting_confirmation').flatMap((group) => group.reviews);
   const confirmMaterial = async (review: DirectorMaterialReview) => {
-    if (!projectId || !canvasId || !connected || busy || review.technical.status !== 'passed'
+    if (!projectId || !canvasId || !connected || busyRef.current || !actionableMaterials.includes(review) || review.content.status === 'passed' || review.technical.status !== 'passed'
       || review.resource.media_kind !== 'image' && !viewedMaterials.has(materialReviewKey(review))) return;
     const epoch = epochRef.current;
     const current = () => scopeRef.current === scope && epochRef.current === epoch;
@@ -191,26 +200,30 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
     try {
       await confirmReferenceMaterialReview(projectId, canvasId, review.review_ref.artifact_id);
       if (!current()) return;
-      setState((prior) => ({ ...prior, material_reviews: prior.material_reviews?.filter((row) => row.review_ref.artifact_id !== review.review_ref.artifact_id) }));
+      // Keep the current card while the authoritative projection refreshes.
+      // Removing the review here made partial approvals and completed stages disappear.
       await refreshRef.current();
     } catch (caught) { if (current()) setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { if (current()) setBusy(null); }
   };
-  const selectedMaterials = (state.material_reviews ?? []).filter((review) => review.content.status !== 'passed' && batchMaterials.has(materialReviewKey(review)));
-  const batchReady = selectedMaterials.length > 0 && selectedMaterials.length <= 20 && selectedMaterials.every((review) => review.technical.status === 'passed'
+  const selectedMaterials = actionableMaterials.filter((review) => review.content.status !== 'passed' && batchMaterials.has(materialReviewKey(review)));
+  const materialsReady = (reviews: DirectorMaterialReview[]) => reviews.length > 0 && reviews.length <= 20 && reviews.every((review) => review.technical.status === 'passed'
     && (review.resource.media_kind === 'image' || viewedMaterials.has(materialReviewKey(review))));
-  const confirmBatch = async () => {
-    if (!projectId || !canvasId || !connected || busy || !batchReady) return;
+  const confirmBatch = async (reviews: DirectorMaterialReview[]) => {
+    const selected = selectedMaterials.filter((review) => reviews.includes(review));
+    if (!projectId || !canvasId || !connected || busyRef.current || !materialsReady(selected)) return;
     const epoch = epochRef.current;
     const current = () => scopeRef.current === scope && epochRef.current === epoch;
-    const items = selectedMaterials.map((review) => ({ review_ref: review.review_ref, work_ref: review.current_work_ref ?? review.work_ref, step_id: review.step_id, node_id: review.resource.node_id }));
+    const items = selected.map((review) => ({ review_ref: review.review_ref, work_ref: review.current_work_ref ?? review.work_ref, step_id: review.step_id, node_id: review.resource.node_id }));
     const serialized = JSON.stringify([scope, items]);
     if (batchCommand.current?.input !== serialized) batchCommand.current = { input: serialized, id: 'materials-' + crypto.randomUUID() };
     setBusy('material-batch'); setError(null);
     try {
       await confirmReferenceMaterialReviewBatch(projectId, canvasId, { items, command_id: batchCommand.current.id });
       if (!current()) return;
-      setBatchMaterials(new Set());
+      setBatchMaterials((prior) => {
+        const next = new Set(prior); selected.forEach((review) => next.delete(materialReviewKey(review))); return next;
+      });
       await refreshRef.current();
     } catch (caught) { if (current()) setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { if (current()) setBusy(null); }
@@ -245,10 +258,10 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
     finally { if (current()) setBusy(null); }
   };
 
-  if (!state.commissions.length && !state.decisions.length && !state.material_work.length && !state.speech_corrections?.length && !state.material_reviews?.length && !state.output_reviews?.length && !error) return null;
+  if (!state.commissions.length && !state.decisions.length && !state.material_work.length && !state.speech_corrections?.length && !state.material_reviews?.length && !state.material_stages?.length && !state.output_reviews?.length && !error) return null;
   const pendingCount = Math.max(0, (progress?.progress.user_action_count ?? (state.decisions.filter((row) => row.status === 'pending').length
     + state.material_work.reduce((count, work) => count + work.steps.filter((step) => step.source === 'upload' && ['planned', 'awaiting_upload', 'rejected', 'stale'].includes(step.status)).length, 0)
-    + (state.material_reviews ?? []).filter((review) => review.content.status !== 'passed').length
+    + actionableMaterials.filter((review) => review.content.status !== 'passed').length
     + (state.output_reviews ?? []).filter((review) => review.status !== 'passed').length
     + (state.speech_corrections ?? []).length)) - state.decisions.filter((row) => row.kind === 'direction' && row.status === 'pending').length);
   const phaseLabel = (phase: keyof typeof REFERENCE_DIRECTOR_PHASE_LABELS) => progress?.execution_status === 'stopped' ? '制作已停止'
@@ -336,14 +349,28 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
         </li>;
       })}</ul>
     </div>)}
-    {(state.material_reviews ?? []).map((review) => {
+    {materialGroups.map((group) => {
+      const title = group.stage_number ? `第 ${group.stage_number} 阶段素材确认` : '素材确认';
+      const open = group.status === 'awaiting_confirmation' || expandedStages.has(group.stage_id);
+      const stageSelection = selectedMaterials.filter((review) => group.reviews.includes(review));
+      return <article aria-label={title} className={panelClass} key={group.stage_id}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-medium">{title}</h3>
+          {group.status === 'confirmed' ? <button type="button" className="tap-button" aria-expanded={open} aria-label={`${open ? '收起' : '展开'}${title}`} onClick={() => setExpandedStages((prior) => {
+            const next = new Set(prior); if (open) next.delete(group.stage_id); else next.add(group.stage_id); return next;
+          })}>{open ? '收起素材' : '查看已确认素材'}</button> : null}
+        </div>
+        <p role="status">{group.status === 'preparing' ? '本阶段素材正在准备，全部通过技术检查后统一审看。'
+          : group.status === 'confirmed' ? `本阶段素材已全部确认（${group.confirmed}/${group.total}）`
+          : `本阶段素材已就绪，请统一审看 · 已确认 ${group.confirmed}/${group.total}`}</p>
+        {group.status !== 'preparing' && open ? <div className="space-y-3">{group.reviews.map((review) => {
       const reviewKey = materialReviewKey(review);
       const validPath = !review.resource.media_path.startsWith('/') && !review.resource.media_path.includes('\\') && review.resource.media_path.split('/').every((part) => part && part !== '.' && part !== '..');
       const url = validPath && projectId ? `/static/projects/${encodeURIComponent(projectId)}/${review.resource.media_path.split('/').map(encodeURIComponent).join('/')}` : null;
-      return <div className={panelClass} key={review.review_ref.artifact_id}>
-        <p className="font-medium">素材需审看</p>
+      return <div className="space-y-2 border-t border-[var(--ui-border-soft)] pt-3" key={review.review_ref.artifact_id}>
+        <p className="font-medium">{state.material_work.find((work) => work.work_ref.artifact_id === (review.current_work_ref ?? review.work_ref).artifact_id)?.steps.find((step) => step.id === review.step_id)?.label ?? '素材需审看'}{review.content.status === 'passed' ? ' · 已确认' : ''}</p>
         {url ? review.resource.media_kind === 'image' ? <img src={url} alt="待审看素材" className="max-h-48 w-full object-contain" /> : review.resource.media_kind === 'video' ? <video ref={(element) => { mediaElements.current[reviewKey] = element; }} controls preload="metadata" src={url} className="max-h-48 w-full" aria-label="待审看素材" /> : <audio ref={(element) => { mediaElements.current[reviewKey] = element; }} controls preload="metadata" src={url} className="w-full" aria-label="待审听素材" /> : null}
-        {projectId && canvasId && review.resource.media_kind !== 'image' ? <MaterialSpeechReviewCard
+        {projectId && canvasId && review.content.status !== 'passed' && review.resource.media_kind !== 'image' ? <MaterialSpeechReviewCard
           key={JSON.stringify([identityScope, materialReviewKey(review)])}
           projectId={projectId} canvasId={canvasId} agentId={agentId?.trim() || 'main'} review={review}
           active={(conversationMode || !!summaryTarget || expanded) && connected} refreshToken={progress ?? state}
@@ -371,9 +398,12 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
         {review.content.status !== 'passed' ? <button type="button" className="tap-button tap-button-quiet-primary" disabled={!connected || Boolean(busy) || review.technical.status !== 'passed' || review.resource.media_kind !== 'image' && !viewedMaterials.has(reviewKey)} onClick={() => void confirmMaterial(review)}>{busy === review.review_ref.artifact_id ? '正在确认…' : '我已审看，确认素材内容'}</button> : null}
       </div>;
     })}
-    {(state.material_reviews ?? []).some((review) => review.content.status !== 'passed') ? <button type="button"
-      className="tap-button tap-button-quiet-primary" disabled={!connected || Boolean(busy) || !batchReady}
-      onClick={() => void confirmBatch()}>{busy === 'material-batch' ? '正在确认已勾选素材…' : '确认已勾选的素材'}</button> : null}
+    {group.status === 'awaiting_confirmation' && group.reviews.some((review) => review.content.status !== 'passed') ? <button type="button"
+      className="tap-button tap-button-quiet-primary" disabled={!connected || Boolean(busy) || !materialsReady(stageSelection)}
+      onClick={() => void confirmBatch(group.reviews)}>{busy === 'material-batch' ? '正在确认已勾选素材…' : '确认已勾选的素材'}</button> : null}
+        </div> : null}
+      </article>;
+    })}
     {(state.output_reviews ?? []).map((review) => {
       const key = `${review.review_ref.artifact_id}:${review.review_ref.revision}`;
       return <div className={panelClass} key={key}>

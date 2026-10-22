@@ -254,6 +254,42 @@ def test_planned_video_sound_requires_grounded_source_finding():
     assert reviewed['status'] == 'passed'
 
 
+@pytest.mark.parametrize('refs', [
+    [],
+    [{'entity_kind': 'placement', 'entity_id': 'demo-video', 'field': 'description'}],
+    [{'entity_kind': 'turn', 'entity_id': 'ask', 'field': 'text'}],
+])
+def test_audio_review_prose_or_partial_refs_cannot_approve_all_turns(refs):
+    from test_production_audio_sources import planned_video_dialogue
+    from novelvideo.freezone.remix.production_review import evaluate_production_review
+
+    audio = {'category': 'audio_visual_roles', 'entity_kind': 'placement',
+             'entity_id': 'demo-video', 'verdict': 'pass',
+             'reason': 'Claims both turns are covered',
+             'evidence': ['demo-video owns ask and answer; all dialogue inspected'],
+             'evidence_refs': refs}
+    result = evaluate_production_review(planned_video_dialogue(), {}, passing_findings() + [audio])
+    assert result['status'] == 'changes_required'
+    check = next(row for row in result['checks'] if row['code'] == 'planned_audio_source_review_missing')
+    assert {ref['entity_id'] for ref in check['required_evidence_refs']} == {'ask', 'answer'}
+    assert 'alternative_evidence_refs' not in check
+
+
+def test_sound_only_review_returns_alternative_saved_context_refs():
+    from test_production_audio_sources import planned_video_dialogue
+    from novelvideo.freezone.remix.production_review import evaluate_production_review
+
+    source = planned_video_dialogue()
+    source['beats'][0]['turns'] = []
+    result = evaluate_production_review(source, {}, passing_findings())
+    check = next(row for row in result['checks'] if row['code'] == 'planned_audio_source_review_missing')
+    assert check['alternative_evidence_refs'] == [
+        {'entity_kind': 'beat', 'entity_id': 'demo', 'field': 'purpose'},
+        {'entity_kind': 'placement', 'entity_id': 'demo-video', 'field': 'description'},
+    ]
+    assert 'required_evidence_refs' not in check
+
+
 def test_sound_only_video_without_description_can_cite_owning_beat_purpose():
     from test_production_audio_sources import planned_video_dialogue
     from novelvideo.freezone.remix.production_review import evaluate_production_review
@@ -310,6 +346,39 @@ def test_review_rejects_preserve_replace_conflict_and_creative_graphic_edits():
     changed = deepcopy(source)
     changed["placements"][0]["text"] = "另一主题"
     assert production_decision_fingerprint(source) != production_decision_fingerprint(changed)
+
+
+@pytest.mark.parametrize('grounding,expected', [
+    ('missing', 'changes_required'), ('prose', 'changes_required'),
+    ('plan_only', 'changes_required'), ('saved_content', 'passed'),
+])
+def test_structured_direction_is_reviewed_against_saved_content(grounding, expected):
+    from novelvideo.freezone.remix.production_review import evaluate_production_review
+
+    direction = {'preserve_replace': [
+        {'id': 'pr-scene', 'entity_kind': 'scene', 'entity_id': '咖啡馆双人访谈场景',
+         'action': 'preserve', 'evidence': '其他保持', 'reason': 'An assertion is not review evidence'},
+    ]}
+    findings = passing_findings()
+    if grounding != 'missing':
+        refs = {
+            'prose': [],
+            'plan_only': [{'entity_kind': 'plan', 'entity_id': 'plan', 'field': 'goal'}],
+            'saved_content': [{'entity_kind': 'beat', 'entity_id': 'intro', 'field': 'purpose'}],
+        }[grounding]
+        findings.append({
+            'category': 'direction', 'entity_kind': 'beat', 'entity_id': 'intro',
+            'requirement_id': 'pr-scene', 'verdict': 'pass',
+            'reason': 'Inspected the saved opening', 'evidence': ['The opening retains the interview'],
+            'evidence_refs': refs,
+        })
+    reviewed = evaluate_production_review(plan(), direction, findings)
+    assert reviewed['status'] == expected
+    if expected == 'passed':
+        assert reviewed['resolved_evidence'][0]['value'] == '提问'
+    else:
+        assert any(row['entity_id'] == 'pr-scene' and row['status'] == 'failed'
+                   for row in reviewed['checks'])
 
 
 def test_voiced_visual_plan_with_only_absolute_frame_anchors_cannot_pass_review():

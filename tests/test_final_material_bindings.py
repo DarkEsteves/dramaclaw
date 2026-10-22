@@ -247,12 +247,17 @@ def test_material_stage_rechecks_each_video_clip_duration_before_draft(material_
     assert response.json()['detail']['issues'][0]['step_id'] == 'final-0'
 
 
-def test_material_stage_rechecks_saved_user_parameters_before_next_wave(material_api):
+def test_material_stage_rechecks_saved_user_parameters_before_next_wave(material_api, monkeypatch):
+    from novelvideo.api.routes import reference_material
+
     client, store, plan_ref, _, _, _ = material_api
     requirements, steps = _requirements('placement_ids', ('video',))
     steps[0]['generation_inputs'] = {'durationSec': 5, 'model': 'agent-model'}
     choices = {'video_model': 'user-model', 'video_aspect_ratio': '9:16',
                'video_resolution': '720P'}
+    async def current_choices(*args):
+        return choices
+    monkeypatch.setattr(reference_material, '_current_material_generation_choices', current_choices)
     prepared = prepare_material_work(
         store, plan_ref, requirements, steps, 'saved-choices',
         confirmed_choices=choices,
@@ -264,11 +269,22 @@ def test_material_stage_rechecks_saved_user_parameters_before_next_wave(material
     assert detail['conflicts'][0]['step_id'] == 'final-0'
 
 
-def test_material_stage_scopes_native_workflow_to_selected_saved_placement(material_api):
+def test_material_stage_scopes_native_workflow_to_selected_saved_placement(material_api, monkeypatch):
+    from novelvideo.api.routes import reference_material
+
+    async def current_choices(*args):
+        return {f'{kind}_{field}': value for kind in ('image', 'video')
+                for field, value in (('model', 'chosen-model'), ('aspect_ratio', '9:16'),
+                                     ('resolution', '720p'))}
+    monkeypatch.setattr(reference_material, '_current_material_generation_choices', current_choices)
     client, store, plan_ref, _, tmp_path, _ = material_api
     requirements, steps = _requirements('placement_ids', ('image', 'video'))
     requirements[1]['placement_ids'] = ['cutaway']
-    prepared = prepare_material_work(store, plan_ref, requirements, steps, 'stage-selected')
+    prepared = prepare_material_work(store, plan_ref, requirements, steps, 'stage-selected',
+                                     confirmed_choices={f'{kind}_{field}': value for kind in ('image', 'video')
+                                                        for field, value in (('model', 'chosen-model'),
+                                                                             ('aspect_ratio', '9:16'),
+                                                                             ('resolution', '720p'))})
     before = _snapshot(tmp_path)
     response = client.post(_BASE + '/material-stage', json={
         'work_ref': prepared['work_ref'], 'placement_ids': ['picture'],

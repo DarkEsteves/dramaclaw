@@ -93,6 +93,32 @@ def _copy_material_diagnostics(result: dict[str, Any], source: Any) -> None:
     errors = _structured_error_items(source.get("errors"))
     if errors:
         result["errors"] = errors
+    if source.get("code") == "material_duration_invalid" and isinstance(source.get("issues"), list):
+        issues = []
+        for raw in source["issues"][:8]:
+            if not isinstance(raw, dict):
+                continue
+            step_id = raw.get("step_id")
+            if not isinstance(step_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", step_id):
+                continue
+            issue = {"step_id": step_id}
+            for field in ("minimum", "maximum"):
+                value = raw.get(field)
+                if type(value) is int and 0 <= value <= 10000:
+                    issue[field] = value
+            issues.append(issue)
+        if issues:
+            result["issues"] = issues
+    if source.get("code") == "material_speech_source_conflict":
+        for field in ("placement_id", "turn_ids", "step_ids"):
+            value = source.get(field)
+            values = [value] if field == "placement_id" else value
+            if not isinstance(values, list) or not 0 < len(values) <= 200:
+                continue
+            if (all(isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item)
+                    for item in values)
+                    and len(json.dumps(value).encode("utf-8")) <= 1024):
+                result[field] = value
 
 
 def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, Any]:
@@ -137,7 +163,8 @@ def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, An
     for field in ("error", "message"):
         value = _safe_error_string(source.get(field), 300)
         if value:
-            result[field] = value
+            result["error"] = value
+            break
     if result.get("code") in {"revision_conflict", "canvas_revision_conflict"}:
         revision = source.get("current_revision")
         if type(revision) is int and revision >= 0:

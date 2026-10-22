@@ -370,8 +370,11 @@ def test_reference_shot_defaults_to_a_mode_that_consumes_media(tmp_path):
     result = prepare_material_work(store, ref, requirements, steps, 'reference-shot')
     work = store.read(result['work_ref']['artifact_id'], 1)['payload']
     intent = material_workflow_intent(work, store=store)
-    # The plan carries a consuming edge for this shot, so an unstated mode must
-    # not fall back to the runtime's media-less textToVideo default.
+    assert [item['id'] for item in intent['items']] == ['look']
+    work['steps'][0].update(status='accepted', node_id='look-node', accepted_resource={
+        'node_id': 'look-node', 'media_kind': 'image'})
+    intent = material_workflow_intent(work, store=store)
+    # The accepted first-stage image is consumed by the second-stage shot.
     assert intent['inputs']['video_generation_mode'] == 'imageReference'
     assert intent['inputs']['video_generate_audio'] is True
     compiled = compile_workflow_intent(intent)

@@ -727,7 +727,7 @@ async def production_batch(project: str, canvas_id: str, body: ProductionBatchRe
 @router.post("/material-work")
 async def material_work(project: str, canvas_id: str, body: MaterialWorkRequest, user: dict = Depends(get_api_user)):
     from novelvideo.freezone.remix.material_work import (
-        MaterialSourceConflict, material_workflow_intent,
+        material_workflow_intent,
         missing_material_parameter_choices, material_duration_issues,
         material_parameter_conflicts, material_lifecycle_status,
     )
@@ -809,9 +809,10 @@ async def material_work(project: str, canvas_id: str, body: MaterialWorkRequest,
         ) from exc
     artifact = await _call(store.read, result["work_ref"]["artifact_id"], result["work_ref"]["revision"])
     await _emit_director_update(ctx, canvas_id)
-    intent = await _call(material_workflow_intent, artifact["payload"], canvas=canvas, store=store)
     missing_choices = missing_material_parameter_choices(artifact["payload"]["steps"], confirmed_choices)
     ready_for_native_generation = not bool(missing_choices)
+    intent = (await _call(material_workflow_intent, artifact["payload"], canvas=canvas, store=store)
+              if ready_for_native_generation else {"items": []})
     return _data({**result, "workflow_intent": intent, "work": artifact["payload"],
                   "material_lifecycle": material_lifecycle_status(artifact["payload"]),
                   "generation_readiness": {

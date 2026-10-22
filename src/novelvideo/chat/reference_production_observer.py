@@ -518,14 +518,39 @@ def production_event(store: RemixArtifactStore, canvas: dict, commission: dict, 
                     observations.append({'step_id':step['id'],'resource':resource})
                 except (ValueError, KeyError, FileNotFoundError):
                     continue
-            from novelvideo.freezone.remix.material_work import ready_material_steps
-            accepted = [{'step_id':step['id'],'resource':step.get('accepted_resource')} for step in work['payload']['steps'] if step['status'] == 'accepted']
+            from novelvideo.freezone.remix.material_work import material_stage_groups, ready_material_steps
+            # Settlement remains per candidate, but an Agent turn belongs to a
+            # complete dependency-depth stage, not each native completion.
+            steps = {step['id']: step for step in work['payload']['steps']}
+            groups = material_stage_groups(work['payload'])
+            stage = next((group for group in groups
+                          if any(steps[step_id]['status'] != 'accepted' for step_id in group)), [])
+            candidates = {row['step_id']: row['resource'] for row in observations}
+            stage_resources = [
+                {'step_id': step_id, 'resource': steps[step_id].get('accepted_resource')
+                 if steps[step_id]['status'] == 'accepted' else candidates.get(step_id)}
+                for step_id in stage
+            ]
             ready = ready_material_steps(work['payload'])
-            if observations or failures or (accepted and ready):
-                observation = _observation(None,{'work_id':work['id'],'candidates':observations,'failures':failures,'accepted':accepted,'ready_step_ids':ready})
+            stage_complete = bool(stage_resources) and all(row['resource'] for row in stage_resources)
+            next_stage_ready = bool(stage and groups.index(stage) > 0 and set(ready) == set(stage))
+            if failures or stage_complete or next_stage_ready:
+                # Failure identity excludes partial candidates. Acceptance of
+                # one candidate likewise cannot change a stage-ready identity.
+                evidence = {'work_id': work['id'], 'stage_step_ids': stage}
+                if failures:
+                    evidence['failures'] = failures
+                elif stage_complete:
+                    evidence['candidates'] = stage_resources
+                else:
+                    evidence['ready_step_ids'] = stage
+                observation = _observation(None, evidence)
                 if settlement_ids:
                     observation['settlement_ids'] = settlement_ids
-                    observation['notice'] = '素材结果已登记，检查记录已保存；请审看需要确认的素材。'
+                if stage_complete:
+                    observation['notice'] = '本阶段素材已全部就绪，检查记录已保存；请统一审看并确认本阶段素材。'
+                elif next_stage_ready:
+                    observation['notice'] = '上一阶段素材已全部确认，下一阶段已就绪；请按原有授权与动作确认流程继续。'
                 if failures:
                     observation['notice'] = '素材制作任务失败或已取消，已保留原片分析和当前候选，请检查当前工作包后重试失败步骤。'
                 return observation
@@ -821,9 +846,7 @@ class ReferenceProductionObserver:
             observed = await asyncio.to_thread(_native_delivery_failure_observation,
                 ctx, canvas, commission)
         if control and control['active']:
-            from novelvideo.freezone.remix.production_automation import advance_enrolled_production
-            runs = await asyncio.to_thread(self.coordinator.store.list_for_actor, ctx, run['canvas_id'], run.get('agent_id', 'main'))
-            if await advance_enrolled_production(ctx, run, runs=runs):
+            if await self._advance_automation(ctx, run, observed):
                 await self._publish_cards(ctx, run)
                 return True
         from novelvideo.chat.reference_remix_continuation import native_submission_blocks
@@ -887,6 +910,33 @@ class ReferenceProductionObserver:
             log_production_plan_diagnostic('production_plan.notification_finished', stage='notifying', **plan_diagnostic)
         await self._acknowledge_settlements(ctx, run, store, observed)
         return True
+
+    async def _advance_automation(self, ctx, run, observed):
+        """An optional next action must not swallow an already verified notice."""
+        from novelvideo.freezone.remix.production_automation import advance_enrolled_production
+        try:
+            runs = await asyncio.to_thread(self.coordinator.store.list_for_actor,
+                ctx, run['canvas_id'], run.get('agent_id', 'main'))
+            return await advance_enrolled_production(ctx, run, runs=runs)
+        except Exception as exc:
+            if not observed:
+                raise
+            failed_runs = _observation_failures.get()
+            if failed_runs is not None:
+                failed_runs.add(id(run))
+            log_reference_runtime_failure(component='reference_production_observer',
+                scope=run, stage='automatic_advancement', error=exc,
+                refs={'commission_ref': run.get('commission_ref')})
+            # A previously delivered stage-ready notice must not hide a later
+            # acceptance/binding failure. This distinct, stable failure receipt
+            # wakes once, even if the original stage receipt is already consumed.
+            observed.update(_observation(observed.get('event'), {
+                'observation': observed['event_key'],
+                'automatic_advancement_failure': type(exc).__name__,
+            }))
+            observed['notice'] = (observed.get('notice', '')
+                + ' 自动推进未完成，当前素材与确认记录已保留；请检查工作包后继续。')
+            return False
 
     def _advance_observed(self, ctx, run, store, commission, event, control):
         from novelvideo.freezone import canvas_store
@@ -1042,7 +1092,7 @@ class ReferenceProductionObserver:
         for child in children:
             try:
                 from novelvideo.project_context import ProjectContext
-                from novelvideo.freezone.remix.production_automation import read_production_control, advance_enrolled_production
+                from novelvideo.freezone.remix.production_automation import read_production_control
                 child_run = {**run, 'commission_ref': child['commission_ref']}
                 child_control = (await asyncio.to_thread(read_production_control, ctx, canvas_id=run['canvas_id'],
                     commission_id=child['commission_ref']['artifact_id'], agent_id=run.get('agent_id', 'main'))
@@ -1053,8 +1103,7 @@ class ReferenceProductionObserver:
                     continue
                 observed = await asyncio.to_thread(production_event,store,canvas,child,tasks,workflow_state_dir=ctx.state_dir, check_scheduler=check_scheduler, consumed_event_keys=consumed_plan_events)
                 if child_control and child_control['active']:
-                    runs = await asyncio.to_thread(self.coordinator.store.list_for_actor, ctx, run['canvas_id'], run.get('agent_id', 'main'))
-                    if await advance_enrolled_production(ctx, child_run, runs=runs):
+                    if await self._advance_automation(ctx, child_run, observed):
                         advanced = True
                         observed = None  # The preceding observation is now superseded.
                 if observed and observed['event']:
@@ -1086,7 +1135,11 @@ class ReferenceProductionObserver:
                           'bound_plan_ref': child.get('plan_ref')})
             child = await asyncio.to_thread(read_reference_commission,store,child['commission_ref'],latest=True)
             latest_children.append(child)
-            evidence.append({'commission_ref':child['commission_ref'],'phase':child['phase']})
+            # Candidate review can revise a material commission without ending
+            # its stage. Only production_event's stage identity may wake it.
+            child_identity = ({'artifact_id': child['commission_ref']['artifact_id']}
+                              if child['phase'] == 'preparing_materials' else child['commission_ref'])
+            evidence.append({'commission_ref':child_identity,'phase':child['phase']})
         if advanced:
             await self._publish_cards(ctx, run)
             return True

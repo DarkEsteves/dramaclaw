@@ -181,6 +181,31 @@ def _production_instruction(data):
     if "branches" in data:
         return "Use the actual branches to identify the user's requested commission. If ambiguous, ask for the specific choice; never select the most recent plan or work. Read that commission with freezone_get_production_progress."
     action = data.get("next_action") or {}
+    if (data.get('phase') == 'awaiting_plan_review'
+            or (data.get('phase') == 'awaiting_plan_confirmation'
+                and data.get('plan_review_valid') is False)):
+        return ('The current plan has not passed review. Read review_context.requirements and inspect '
+                'the saved plan, then submit freezone_review_production_plan with grounded findings. '
+                'Do not claim review passed or user confirmation was recorded. A completed tool call '
+                'is not a passing review, and diagnostic warnings do not create another approval stage.')
+    if data.get('phase') == 'awaiting_plan_confirmation':
+        return ('Present the exact reviewed plan in ordinary chat. After a clear human approval of '
+                'that presented revision, call freezone_confirm_reference_plan with the returned '
+                'commission_ref and plan_ref. Say confirmation was recorded only after its successful '
+                'host receipt; a progress read or chat approval alone does not record confirmation. '
+                'Nonblocking warnings alone do not require another confirmation.')
+    if data.get('plan_review_valid') is False:
+        sync = data.get('plan_revision_sync') or {}
+        if sync.get('status') == 'pending_commission_sync':
+            newer = sync.get('plan_ref') or {}
+            return ('The canvas plan has a newer saved revision '
+                    + str(newer.get('artifact_id')) + '@' + str(newer.get('revision'))
+                    + ' that the commission has not received yet. Review and submit that exact '
+                    'revision with freezone_review_production_plan, then continue the existing production.')
+        return ('The saved review no longer covers the current plan. Read review_context.requirements, '
+                'inspect the current saved plan and submit freezone_review_production_plan with grounded '
+                'findings for the exact plan_ref in this progress result. Repeating the earlier review '
+                'cannot unblock this; if the plan content changed, the user confirms it again.')
     if action.get('kind') == 'await_canvas_receipt':
         return 'End this turn and await the existing canvas delivery event. Keep the current draft and task references; do not resubmit confirmation or prepare another draft.'
     if action.get("owner") == "system":
@@ -193,6 +218,10 @@ def _production_instruction(data):
 
 
 _MATERIAL_ADMISSION_FLOW = (
+    "Before preparing any generation wave, honor generation_readiness: missing user parameter "
+    "choices require the existing clarification card, not recommended defaults or workflow approval. "
+    "Use generation_required_choices from missing_choices; do not ask for video duration, which is planned per step. "
+    "After the real card submission, resume the same work_ref with freezone_prepare_material_stage. "
     "For each ready generation wave, first read freezone_get_workflow_skill with "
     "skill_id=reference-video-remix and use the returned exact skill.version, not a "
     "remembered or placeholder version. Call freezone_begin_agent_product_generation once with "
@@ -287,7 +316,7 @@ def build_director_tools(host: dict):
             "references": {"type": "array", "items": material_reference, "maxItems": 100},
             "generation_inputs": {"type": "object",
                 "propertyNames": {"not": {"enum": ["id", "recipe_id", "prompt", "name", "reference_inputs", "node_id", "depends_on", "source", "status", "dialogue", "narration", "voiceover", "speech_text", "speechText"]}},
-                "description": "Optional real model catalog inputs, e.g. aspect_ratio when supported. Identity, prompt and references use the named step fields; never override them here."},
+                "description": "Optional real model catalog inputs. Every generate video step requires generation_inputs.durationSec: an integer 4-15 seconds, also supported by the selected live model. Never put duration_frames at step top level; plan frames describe edit intervals, not model inputs. Identity, prompt and references use the named step fields; never override them here."},
             "status": {"enum": ["planned", "awaiting_upload"]},
             "candidates": {"type": "array", "maxItems": 0},
             "accepted_resource": {"type": "null"},
@@ -319,7 +348,8 @@ def build_director_tools(host: dict):
                     "entity_id": text,
                     "field": {"type": "string", "enum": ["goal", "purpose", "text", "description", "media_path", "graphic.text"]},
                 }, "required": ["entity_kind", "entity_id", "field"], "additionalProperties": False,
-            }}, {"type": "null"}], "default": None},
+            }}, {"type": "null"}], "default": None,
+                "description": "Structured saved-field citations, not prose evidence. Required for semantic requirements and planned audio sources. A placement audio_visual_roles finding must cite field=text for every turn it owns via speech_placement_id. A sound-only source cites its description or an overlapping beat purpose."},
         },
         "required": ["category", "entity_kind", "entity_id", "verdict", "reason", "evidence"],
         "additionalProperties": False,
@@ -488,6 +518,23 @@ def build_director_tools(host: dict):
             if material and data.get('selection_status') == 'selection_required':
                 return result({"ok": True, "status": "material_work_saved", **data,
                     "agent_instruction": "工作包已保存，尚未关联当前委托。保留 work_ref，用户明确选定后调用现有 freezone_select_material_work；不要自动采用、准备新草稿或重复创建工作包。"})
+            if material:
+                readiness = data.get("generation_readiness") or {}
+                if (readiness.get("ready_for_native_generation") is False
+                        or (data.get("workflow_intent", {}).get("items")
+                            and readiness.get("ready_for_native_generation") is not True)):
+                    missing = readiness.get("missing_choices") or {}
+                    return result({**data, "ok": False, "status": "clarification_required",
+                        "code": "generation_parameters_required", "required_choices": missing,
+                        "media_types": sorted(missing), "next_action": "request_user_clarification",
+                        "agent_instruction": (
+                            "素材工作包已保存，尚未准备生成草稿或启动生成。保留当前 work_ref，"
+                            "调用 freezone_request_user_clarification，generation_required_choices 使用返回的 required_choices。"
+                            "模型、比例、分辨率等选择必须来自用户提交的现有参数卡，推荐值和画布确认不能代替。"
+                            "视频时长按已确认方案逐段规划，不要询问全局视频时长。"
+                            "收到真实参数卡回答后，使用同一 work_ref 调用 freezone_prepare_material_stage；"
+                            "不要重复创建工作包或绕到通用工作流工具。"
+                        )})
             if material and data.get("workflow_intent", {}).get("items"):
                 # The work package is persistent before a draft is prepared;
                 # existing approval/graph validation own actual node creation.
@@ -546,11 +593,31 @@ def build_director_tools(host: dict):
                                "ready_step_ids": data["ready_step_ids"],
                                "material_lifecycle": draft.get("material_lifecycle")
                                or data["material_lifecycle"]})
-            if name == 'freezone_review_production_plan' and (data.get('review') or {}).get('status') == 'passed':
-                data['agent_instruction'] = ('The saved plan passed review and its pending decision was '
-                                             'registered internally. Present the actual reviewed plan in ordinary '
-                                             'chat and ask for the user’s own reply. Do not create another plan '
-                                             'decision or start materials before authenticated confirmation.')
+            if name == 'freezone_review_production_plan':
+                if (data.get('review') or {}).get('status') == 'passed':
+                    data['agent_instruction'] = ('The saved plan passed review and its pending decision was '
+                                                 'registered internally. Present the actual reviewed plan in ordinary '
+                                                 'chat and ask for the user’s own reply. Do not create another plan '
+                                                 'decision or start materials before authenticated confirmation.')
+                else:
+                    data['agent_instruction'] = (
+                        'The saved review has not passed. Each submission is a complete independent snapshot; '
+                        'findings are never merged with earlier reviews. Inspect review.checks and the exact '
+                        'saved plan_ref and confirmed direction. Recheck and retain still-valid findings, '
+                        'correct the failed items, then resubmit all eight categories together, except dialogue '
+                        'may be omitted only for a saved plan without nonblank turns or explicit confirmed '
+                        'dialogue constraints. Submitted change/unsupported findings still block; unsupported '
+                        'does not mean not applicable. Do not submit '
+                        'only supplemental findings. For each planned_audio_source_review_missing check, '
+                        'submit an audio_visual_roles finding anchored to that placement, with evidence_refs '
+                        'containing every required_evidence_refs entry (or at least one alternative_evidence_refs '
+                        'entry for a source without dialogue). These references identify saved fields, not '
+                        'prose in evidence. Judge the content before using verdict=pass; references alone '
+                        'do not approve it. If the plan changes, reread its current exact revision and recheck '
+                        'affected findings; never reuse approval from an older revision. Do not claim review '
+                        'passed, request user confirmation, start materials, or change the audio strategy '
+                        'merely to bypass missing evidence. Actual media sound still requires material review.'
+                    )
             if name == 'freezone_confirm_reference_plan' and data.get('commission'):
                 comm = data['commission']
                 phase = comm.get('phase', '')
@@ -604,9 +671,9 @@ def build_director_tools(host: dict):
         ("freezone_get_reference_director_state", "Read saved reference direction, current plan confirmation, material work and pending decisions in this canvas. This is a pending-decision summary: its material reviews list pending review, so absence is not proof that no saved passed review exists. Read freezone_get_material_work with the exact saved work_ref for actual saved material review refs and statuses. Reuse confirmed requirements; waiting for a user is a normal stage.", "GET", "state", {}, [], False, False),
         ("freezone_confirm_reference_plan", "Confirm the exact reviewed plan currently presented in ordinary chat. Call only after the user clearly approves that exact plan; the host binds this action to the active human turn and checks the saved commission, plan, review and presentation references. Do not pass an approval flag, free-form intent, user identity or message text. A successful host receipt is the only confirmation proof. This advances only the existing plan confirmation stage and does not start media generation.", "POST", "decisions/confirm-reference-plan", {"commission_ref": ref, "plan_ref": exact_ref}, ["commission_ref", "plan_ref"], False, False),
         ("freezone_prepare_reference_decision", "Save a plan, material or editable-composition proposal. Direction stays in ordinary chat and is committed by freezone_prepare_production_nodes; never use this tool to recover a rejected direction submission. A passed freezone_review_production_plan automatically registers its exact plan confirmation target; present that plan in ordinary chat, without manually preparing another plan decision. This tool never confirms for the user. Read current commission_ref first. For editable scope, show its current manifest_ref and compose_node_id; do not require an export.", "POST", "decisions", {"commission_ref": ref, "command_id": text, "kind": {"type": "string", "enum": ["plan", "material", "composition"]}, "proposal": {**obj, "description": "General proposal content. For an explicitly preserved visual identity use preserve_replace entries with stable id, entity_kind, entity_id, action=preserve and visual_identity=true; story-structure or relationship preservation does not set visual_identity. The later material requirement must bind each such choice to a real image source. A reviewed plan decision is normally created by plan review. A direct kind=plan retry must copy the current returned commission.plan_ref exactly, including project_id."}, "summary": text}, ["commission_ref", "command_id", "kind", "proposal", "summary"], False, False),
-        ("freezone_review_production_plan", 'Review inspected real saved plan content against confirmed direction, covering all eight finding categories. Use one actual entity ID per finding; entity_kind plan uses entity_id plan. Never use pipe-joined, wildcard or imagined IDs. Supply concrete nonblank reason and evidence. Read review_context.requirements from current production state. Every semantic entry needs a finding with its exact requirement_id and evidence_refs pointing to a real saved content entity and field (purpose, text, description, media_path or graphic.text); the host resolves its value. A direction finding for an expanded plan goal also cites plan.goal and one real content entity. Explain the conclusion in reason and evidence; do not copy an entire saved field just to pass a string match. Missing or unsupported requirements block review. Use change or unsupported for content that cannot pass. This tool saves the review and advances automatically; user confirmation remains required. Do not invent an advance event. Placeholder finding example: {"category":"direction","entity_kind":"plan","entity_id":"plan","verdict":"unsupported","reason":"REPLACE with the actual review conclusion","evidence":["REPLACE with inspected saved plan content and confirmed direction"]}. Replace placeholder text with real observations. Schema-valid alone does not approve creative content.', "POST", "plan-review", {"commission_ref": ref, "plan_ref": ref, "findings": {"type": "array", "items": review_finding}}, ["commission_ref", "plan_ref", "findings"], False, False),
+        ("freezone_review_production_plan", 'Review inspected real saved plan content against confirmed direction, covering all applicable finding categories in one complete independent snapshot. The host waives only a missing dialogue finding when the saved plan has no nonblank turns and confirmed direction has no explicit dialogue constraint. Otherwise dialogue remains required. unsupported means unable to support a conclusion, never not-applicable; submitted change/unsupported findings still block. All other categories remain required. Submissions never merge with earlier reviews; after a failure recheck still-valid findings, correct failed items and resubmit the full set for the exact current plan_ref. For every planned audio source, submit an audio_visual_roles finding anchored to its placement ID with evidence_refs citing field=text for every turn whose speech_placement_id points there; sound-only sources cite their description or an overlapping beat purpose. Prose evidence does not replace these references. Use one actual entity ID per finding; entity_kind plan uses entity_id plan. Never use pipe-joined, wildcard or imagined IDs. Supply concrete nonblank reason and evidence. Read review_context.requirements from current production state. Every semantic entry needs a finding with its exact requirement_id and evidence_refs pointing to a real saved content entity and field (purpose, text, description, media_path or graphic.text); the host resolves its value. A direction finding for an expanded plan goal also cites plan.goal and one real content entity. Explain the conclusion in reason and evidence; do not copy an entire saved field just to pass a string match. Missing or unsupported requirements block review. Use change or unsupported for content that cannot pass. This tool saves the review and advances automatically; user confirmation remains required. Do not invent an advance event. Placeholder finding example: {"category":"direction","entity_kind":"plan","entity_id":"plan","verdict":"unsupported","reason":"REPLACE with the actual review conclusion","evidence":["REPLACE with inspected saved plan content and confirmed direction"]}. Replace placeholder text with real observations. Schema-valid alone does not approve creative content.', "POST", "plan-review", {"commission_ref": ref, "plan_ref": ref, "findings": {"type": "array", "items": review_finding}}, ["commission_ref", "plan_ref", "findings"], False, False),
         ("freezone_prepare_reference_branches", "Register independently reviewed production branches for multiple real saved plans descended from one reference analysis. The parent's actual confirmed direction is inherited; each plan keeps its own content approval, materials and progress. No plan is overwritten.", "POST", "branches", {"commission_ref": ref, "plan_refs": {"type": "array", "items": ref, "minItems": 1, "maxItems": 100}, "command_id": text}, ["commission_ref", "plan_refs", "command_id"], False, False),
-        ("freezone_prepare_material_work", "Plan the dependency graph that produces the confirmed plan's final media: shared identity/product/setting/voice references, intermediate images, generated video or uploaded inputs. Use exact two-key plan_ref (artifact_id, revision); project_id belongs at tool scope. Requirements require id, description, media_kind and final_step_id plus actual saved placement/take/turn IDs; steps require id, label, media_kind and source. Generated audio/video dialogue comes only from ordered dialogue_turn_ids in the saved plan; keep prompt for creative direction and leave the IDs empty for silent or reference-only steps. Shared references are separate steps linked by depends_on/references, not invented placement_id/output_kind/step_kind/uses fields. Generate uses a matching general-image/video/audio Recipe and nonblank prompt. Set select_for_commission=true when creating the actual work for this confirmed commission; default false saves a candidate only. Association does not approve content or generation. This call saves the material work package and its 4-15 second video plans; it does not create or run a native generation task. Return the saved work_ref and generation_readiness, then use the existing parameter card and canvas confirmation before native generation. Only ready generation steps become an existing workflow draft; execution and acceptance remain server owned. Read material_lifecycle to distinguish saved package, ready draft, canvas delivery and actual generation. " + _MATERIAL_ADMISSION_FLOW, "POST", "material-work", {"commission_ref": ref, "plan_ref": exact_ref, "requirements": {"type": "array", "items": material_requirement, "minItems": 1, "maxItems": 200}, "steps": {"type": "array", "items": material_step, "minItems": 1, "maxItems": 200}, "command_id": {**text, "maxLength": 128}, "select_for_commission": {"type": "boolean", "default": False}, **material_draft_options}, ["commission_ref", "plan_ref", "requirements", "steps", "command_id"], False, True),
+        ("freezone_prepare_material_work", "Plan the dependency graph that produces the confirmed plan's final media: shared identity/product/setting/voice references, intermediate images, generated video or uploaded inputs. Use exact two-key plan_ref (artifact_id, revision); project_id belongs at tool scope. Requirements require id, description, media_kind and final_step_id plus actual saved placement/take/turn IDs; steps require id, label, media_kind and source. Generated audio/video dialogue comes only from ordered dialogue_turn_ids in the saved plan; keep prompt for creative direction and leave the IDs empty for silent or reference-only steps. Shared references are separate steps linked by depends_on/references, not invented placement_id/output_kind/step_kind/uses fields. Generate uses a matching general-image/video/audio Recipe and nonblank prompt. Every generated video needs generation_inputs.durationSec as an integer 4-15 seconds within the selected live model limits; duration_frames is not a step field. Always supply a stable command_id. Prepare individual media resources bound to their actual saved targets, not a general-video step that edits the entire film. Final assembly, subtitles, graphics and mixing use the existing native composition pipeline after material acceptance. depends_on orders work but does not supply audio or perform lip sync; actual inputs use supported references. Follow the saved speech_placement_id ownership: a generated final source step must own its complete dialogue_turn_ids and its requirement.turn_ids. Do not silently replace voiced video with separate narration. Set select_for_commission=true when creating the actual work for this confirmed commission; default false saves a candidate only. Association does not approve content or generation. This call saves the material work package and its 4-15 second video plans; it does not create or run a native generation task. Return the saved work_ref and generation_readiness, then use the existing parameter card and canvas confirmation before native generation. Only ready generation steps become an existing workflow draft; execution and acceptance remain server owned. Read material_lifecycle to distinguish saved package, ready draft, canvas delivery and actual generation. " + _MATERIAL_ADMISSION_FLOW, "POST", "material-work", {"commission_ref": ref, "plan_ref": exact_ref, "requirements": {"type": "array", "items": material_requirement, "minItems": 1, "maxItems": 200}, "steps": {"type": "array", "items": material_step, "minItems": 1, "maxItems": 200}, "command_id": {**text, "maxLength": 128}, "select_for_commission": {"type": "boolean", "default": False}, **material_draft_options}, ["commission_ref", "plan_ref", "requirements", "steps", "command_id"], False, True),
         ("freezone_get_material_work", "Read the current material work head, pending uploads, accepted shared references and ready next steps. Read material_reviews before another review. matches_current_work_revision=true identifies the exact basis. Historical records retain their original work_ref; only host-certified review_compatible_with_current_work=true permits an unchanged independent existing item across genuine native acceptance bookkeeping. Accept using the returned current work_ref head plus the original eligible passed review_ref and exact resource; never rewrite its basis or infer compatibility yourself. Other historical records require native rechecking. Do not infer unobserved audio passed. If material_reviews_truncated is true, absence is not proof of no review. Completed generation remains a candidate until content review.", "POST", "material-state", {"work_ref": exact_ref}, ["work_ref"], False, False),
         ("freezone_prepare_material_stage", "Prepare the next ready generation wave from a saved material work package. Optionally provide exact saved placement_ids to include only their dependency closure; already accepted dependencies are reused and unrelated placements are excluded. Uses the existing workflow approval and associates the real draft with the material steps. Read material_lifecycle before claiming delivery or generation; a ready draft still requires the existing canvas confirmation. " + _MATERIAL_ADMISSION_FLOW, "POST", "material-stage", {"work_ref": exact_ref, "placement_ids": {"type": "array", "items": text, "maxItems": 200, "uniqueItems": True}, **material_draft_options}, ["work_ref"], False, True),
         ("freezone_review_material_candidate", "Inspect a real current-canvas candidate using native media evidence. Technical checks and content observation are separate. If content review is unavailable, ask for the specific review; never assert that unseen media passed.", "POST", "material-review", {"work_ref": exact_ref, "step_id": text, "node_id": text}, ["work_ref", "step_id", "node_id"], False, False),
@@ -622,6 +689,7 @@ def build_director_tools(host: dict):
     director_fields += ("blocker", "settlement_key", "branches", "selection_required", "scope", "generation_scope", "progress", "execution_status", "execution_problem",
                         "ready_system_actions", "projection_revision", "director_state", "material_steps",
                         "candidate_work_refs", "suggested_work_ref", "inventory_truncated", "plan_review_valid",
+                        "plan_revision_sync",
                         "speech_estimates", "plan_diagnostics", "review_context", "model_capabilities",
                         "visual_preservation_status",
                         "advancement", "advancement_blocker", "step_id", "summary", "observation_ref", "correction_ref",

@@ -7,7 +7,8 @@ from typing import Any
 
 from .plan_revision_settlement import reconcile_plan_revision
 from .production_review import ReviewFinding, evaluate_saved_production_review, review_production_plan
-from .reference_commission import advance_reference_commission, read_reference_commission
+from .reference_commission import (_PRODUCTION_PHASES, advance_reference_commission,
+                                    read_reference_commission)
 
 
 def _identity(value: Any) -> str:
@@ -117,11 +118,14 @@ def submit_plan_review(store, *, commission_ref: dict[str, Any], plan_ref: dict[
         if reviewed['payload']['findings'] != requested_findings:
             raise ValueError('review request differs from the current passed review; revise the plan before reviewing again')
         return ensure_reviewed_plan_confirmation(store, commission_ref=commission['commission_ref'])
-    if commission['phase'] not in {'drafting_plan', 'awaiting_plan_review'}:
+    if commission['phase'] not in {'drafting_plan', 'awaiting_plan_review', *_PRODUCTION_PHASES}:
         raise ValueError('current plan is not awaiting review')
-    if commission.get('plan_ref') != plan_ref or commission['phase'] != 'awaiting_plan_review':
+    if commission.get('plan_ref') != plan_ref or commission['phase'] == 'drafting_plan':
+        # Only a different saved revision needs receiving; a revoked review of
+        # the already confirmed revision keeps its phase and confirmation.
         commission = advance_reference_commission(store, commission['commission_ref'],
             {'type': 'plan_ready', 'plan_ref': plan_ref}, commission['commission_ref']['revision'])
+    production_phase = commission['phase'] in _PRODUCTION_PHASES
     review_id = _identity([store.project_id, commission['canvas_id'],
         commission['requester_user_id'], commission['commission_ref']['artifact_id'],
         commission['direction_fingerprint'], plan_ref, findings])[:32]
@@ -132,4 +136,8 @@ def submit_plan_review(store, *, commission_ref: dict[str, Any], plan_ref: dict[
         return {'review_ref': review_ref, 'review': review['payload'], 'commission': commission}
     commission = advance_reference_commission(store, commission['commission_ref'],
         {'type': 'plan_reviewed', 'review_ref': review_ref}, commission['commission_ref']['revision'])
+    if production_phase:
+        # Creative content was already confirmed; only the review identity was
+        # replaced, so the current plan confirmation stays valid.
+        return {'review_ref': review_ref, 'review': review['payload'], 'commission': commission}
     return ensure_reviewed_plan_confirmation(store, commission_ref=commission['commission_ref'])

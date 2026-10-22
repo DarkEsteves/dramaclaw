@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCanvasStore } from '@/stores/canvasStore';
 import type { ReferenceDirectorState } from '@/api/referenceDirector';
@@ -402,6 +402,91 @@ it('limits explicit batch selection to the supported twenty exact reviews', asyn
   checks.slice(0, 20).forEach((check) => fireEvent.click(check));
   expect(checks[20].hasAttribute('disabled')).toBe(true);
   expect(checks[0].hasAttribute('disabled')).toBe(false);
+});
+
+const stageMaterials = (): ReferenceDirectorState => ({ ...empty(),
+  material_stages: [{ stage_id: 'work:stage:1', stage_number: 1, step_ids: ['first', 'second'], status: 'awaiting_confirmation', total: 2, confirmed: 0, reviewed: 0 }],
+  material_reviews: ['first', 'second'].map((id) => ({ ...speechMaterial(), review_ref: { artifact_id: `review-${id}`, revision: 1 }, step_id: id,
+    resource: { media_path: `media/${id}.png`, media_kind: 'image', node_id: id } })),
+});
+
+it('shows only compact progress until the whole material stage is technically ready', async () => {
+  vi.clearAllMocks();
+  const current = stageMaterials();
+  current.material_stages![0].status = 'preparing';
+  render(<ReferenceDirectorPanel {...props} conversationMode controlledState={current} />);
+  const card = await screen.findByRole('article', { name: '第 1 阶段素材确认' });
+  expect(within(card).getByText('本阶段素材正在准备，全部通过技术检查后统一审看。')).toBeTruthy();
+  expect(within(card).queryByRole('img')).toBeNull();
+  expect(within(card).queryByRole('checkbox')).toBeNull();
+  expect(confirmReferenceMaterialReview).not.toHaveBeenCalled();
+});
+
+it('keeps one grouped card through partial approval and collapses the fully confirmed summary', async () => {
+  vi.clearAllMocks();
+  const current = stageMaterials();
+  const refresh = vi.fn(async () => {});
+  vi.mocked(confirmReferenceMaterialReview).mockResolvedValue({});
+  const view = render(<ReferenceDirectorPanel {...props} conversationMode controlledState={current} onRefresh={refresh} />);
+  let card = await screen.findByRole('article', { name: '第 1 阶段素材确认' });
+  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  fireEvent.click(within(card).getAllByRole('button', { name: '我已审看，确认素材内容' })[0]);
+  await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  // A successful mutation must not locally remove a review before the read model arrives.
+  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  const partial = stageMaterials();
+  partial.material_stages![0].confirmed = 1;
+  partial.material_stages![0].reviewed = 1;
+  partial.material_reviews![0].content.status = 'passed';
+  view.rerender(<ReferenceDirectorPanel {...props} conversationMode controlledState={partial} onRefresh={refresh} />);
+  expect(await screen.findByText('本阶段素材已就绪，请统一审看 · 已确认 1/2')).toBeTruthy();
+  card = screen.getByRole('article', { name: '第 1 阶段素材确认' });
+  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  expect(within(card).getAllByRole('button', { name: '我已审看，确认素材内容' })).toHaveLength(1);
+  const complete = stageMaterials();
+  complete.material_stages![0] = { ...complete.material_stages![0], status: 'confirmed', confirmed: 2, reviewed: 2 };
+  complete.material_reviews!.forEach((review) => { review.content.status = 'passed'; });
+  view.rerender(<ReferenceDirectorPanel {...props} conversationMode controlledState={complete} onRefresh={refresh} />);
+  expect(await screen.findByText('本阶段素材已全部确认（2/2）')).toBeTruthy();
+  card = screen.getByRole('article', { name: '第 1 阶段素材确认' });
+  expect(within(card).queryByRole('img')).toBeNull();
+  const expand = within(card).getByRole('button', { name: '展开第 1 阶段素材确认' });
+  expect(expand.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(expand);
+  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  expect(within(card).queryByRole('checkbox')).toBeNull();
+  // The summary is durable server state, not an in-memory approval receipt.
+  view.unmount();
+  render(<ReferenceDirectorPanel {...props} conversationMode controlledState={complete} />);
+  expect(await screen.findByText('本阶段素材已全部确认（2/2）')).toBeTruthy();
+  expect(screen.queryByRole('img')).toBeNull();
+});
+
+it('scopes batch confirmation to the selected exact reviews in one stage', async () => {
+  vi.clearAllMocks();
+  const current = stageMaterials();
+  current.material_stages = [
+    { ...current.material_stages![0], step_ids: ['first'], total: 1 },
+    { ...current.material_stages![0], stage_id: 'work:stage:2', stage_number: 2, step_ids: ['second'], total: 1 },
+  ];
+  vi.mocked(confirmReferenceMaterialReviewBatch).mockResolvedValue({ items: [], replayed: false });
+  render(<ReferenceDirectorPanel {...props} conversationMode controlledState={current} />);
+  const first = await screen.findByRole('article', { name: '第 1 阶段素材确认' });
+  const second = screen.getByRole('article', { name: '第 2 阶段素材确认' });
+  fireEvent.click(within(first).getByRole('checkbox', { name: '已审看此素材，加入本次确认' }));
+  fireEvent.click(within(second).getByRole('checkbox', { name: '已审看此素材，加入本次确认' }));
+  fireEvent.click(within(first).getByRole('button', { name: '确认已勾选的素材' }));
+  await waitFor(() => expect(confirmReferenceMaterialReviewBatch).toHaveBeenCalledTimes(1));
+  expect(confirmReferenceMaterialReviewBatch).toHaveBeenCalledWith('project', 'canvas', {
+    items: [{ review_ref: current.material_reviews![0].review_ref, work_ref: current.material_reviews![0].work_ref, step_id: 'first', node_id: 'first' }], command_id: expect.any(String),
+  });
+});
+
+it('retains a confirmed stage summary even when no detailed reviews are supplied', async () => {
+  render(<ReferenceDirectorPanel {...props} conversationMode controlledState={{ ...empty(), material_stages: [
+    { stage_id: 'work:stage:1', stage_number: 1, step_ids: ['first'], status: 'confirmed', total: 1, confirmed: 1, reviewed: 1 },
+  ] }} />);
+  expect(await screen.findByText('本阶段素材已全部确认（1/1）')).toBeTruthy();
 });
 
 it('clears listening and batch selection when the current work or candidate resource changes', async () => {

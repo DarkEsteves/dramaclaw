@@ -98,6 +98,10 @@ class ReferenceCommission(BaseModel):
         return self
 
 
+_PRODUCTION_PHASES = {'preparing_materials', 'aligning_speech', 'composing', 'reviewing_output', 'completed'}
+_REVIEW_RECEIVING_PHASES = {'awaiting_plan_review', *_PRODUCTION_PHASES}
+
+
 _ACTIONS = {
     'awaiting_direction': {'owner': 'agent', 'kind': 'discuss_direction', 'tool': None},
     'drafting_plan': {'owner': 'agent', 'kind': 'prepare_production_nodes', 'tool': 'freezone_prepare_production_nodes'},
@@ -332,7 +336,7 @@ def advance_reference_commission(store: RemixArtifactStore, commission_ref: dict
                            work_ref=None, manifest_ref=None, output_review_ref=None)
     elif kind == 'plan_reviewed':
         ref = event.get('review_ref')
-        if payload['phase'] != 'awaiting_plan_review' or not isinstance(ref, dict):
+        if not isinstance(ref, dict) or payload['phase'] not in _REVIEW_RECEIVING_PHASES:
             raise ValueError('saved review required')
         review = store.read(ref['artifact_id'], ref['revision'])
         review_payload = review['payload']
@@ -340,10 +344,21 @@ def advance_reference_commission(store: RemixArtifactStore, commission_ref: dict
         latest_plan = store.read_latest(payload['plan_ref']['artifact_id'])
         if (review['schema'] != 'production_review.v1' or source != payload['plan_ref']
                 or review_payload.get('status') != 'passed'
-                or latest_plan['revision'] != payload['plan_ref']['revision']
                 or review_payload.get('direction_fingerprint') != payload['direction_fingerprint']):
             raise ValueError('review must approve the exact saved plan')
-        payload.update(review_ref=ref, phase='awaiting_plan_confirmation')
+        if payload['phase'] in _PRODUCTION_PHASES:
+            # A revoked review of unchanged creative content gains its host
+            # approval back in place; the original plan confirmation still
+            # covers the same decision content, so no second user turn.
+            from .production_review import production_decision_fingerprint
+            current_plan = store.read(payload['plan_ref']['artifact_id'], payload['plan_ref']['revision'])
+            if review_payload.get('decision_fingerprint') != production_decision_fingerprint(current_plan['payload']):
+                raise ValueError('changed plan content requires a new user confirmation')
+            payload.update(review_ref=ref)
+        else:
+            if latest_plan['revision'] != payload['plan_ref']['revision']:
+                raise ValueError('review must approve the exact saved plan')
+            payload.update(review_ref=ref, phase='awaiting_plan_confirmation')
     elif kind == 'materials_invalidated':
         ref = event.get('work_ref') or {}
         work = store.read_latest(ref.get('artifact_id', ''))
@@ -431,7 +446,8 @@ def advance_reference_commission(store: RemixArtifactStore, commission_ref: dict
     refs.extend(payload[key] for key in ('work_ref', 'manifest_ref', 'output_review_ref') if payload[key])
     validated = ReferenceCommission.model_validate(payload).model_dump(mode='json')
     advanced = _result(store.revise(commission_ref['artifact_id'], expected_revision, validated, refs))
-    if kind == 'plan_reviewed':
+    if kind == 'plan_reviewed' and advanced['phase'] == 'awaiting_plan_confirmation':
+        # A production-phase re-approval keeps the existing confirmation.
         from .plan_review_settlement import ensure_reviewed_plan_confirmation
 
         ensure_reviewed_plan_confirmation(store, commission_ref=advanced['commission_ref'])

@@ -80,6 +80,28 @@ def resolve_direction_review_contract(direction: dict[str, Any]) -> dict[str, An
             raise ValueError('direction.preserve requirement identity collision')
         semantic.append({'id': identity, 'text': statement})
         by_id[identity] = statement
+    choice_ids: set[str] = set()
+    for choice in choices:
+        if not isinstance(choice, dict):
+            raise ValueError('direction.preserve_replace requires structured choices')
+        if (choice.get('action') not in {'preserve', 'replace'}
+                or not isinstance(choice.get('entity_kind'), str) or not choice['entity_kind'].strip()
+                or not isinstance(choice.get('entity_id'), str) or not choice['entity_id'].strip()):
+            raise ValueError('direction.preserve_replace requires an action and concrete entity')
+        if choice['entity_kind'] == 'turn' and 'value' in choice:
+            continue
+        identity = choice.get('id')
+        if not isinstance(identity, str) or not identity.strip():
+            raise ValueError('direction.preserve_replace requires a stable choice id')
+        if identity in choice_ids:
+            raise ValueError('direction.preserve_replace choice ids must be unique')
+        choice_ids.add(identity)
+        text = f"{choice['action']} {choice['entity_kind']}: {choice['entity_id']}"
+        if identity in by_id and by_id[identity] != text:
+            raise ValueError('direction.preserve_replace requirement identity collision')
+        if identity not in by_id:
+            semantic.append({'id': identity, 'text': text})
+            by_id[identity] = text
     if semantic:
         requirements['semantic'] = semantic
     return {

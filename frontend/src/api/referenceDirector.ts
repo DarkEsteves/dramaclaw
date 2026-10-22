@@ -60,7 +60,13 @@ export interface DirectorOutputReview {
   content: Pick<DirectorMaterialReview['content'], 'status'> & Partial<Omit<DirectorMaterialReview['content'], 'status'>>;
   findings: string[];
 }
+export interface DirectorMaterialStage {
+  stage_id: string; stage_number: number; step_ids: string[];
+  status: 'preparing' | 'awaiting_confirmation' | 'confirmed';
+  total: number; confirmed: number; reviewed: number;
+}
 export interface ReferenceDirectorState {
+  material_stages?: DirectorMaterialStage[];
   commissions: ReferenceCommission[]; decisions: ReferenceDecision[];
   output_reviews?: DirectorOutputReview[]; material_work: DirectorMaterialWork[]; material_reviews?: DirectorMaterialReview[]; speech_corrections?: DirectorSpeechCorrection[];
 }

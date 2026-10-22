@@ -263,7 +263,7 @@ def test_historical_user_confirmation_does_not_generalize_other_source_types(tmp
     reviews[1] = review
     current = accept(store, basis, reviews, 0)['work_ref']
     before = snapshot(store)
-    with pytest.raises(ValueError, match='independent existing'):
+    with pytest.raises(ValueError, match='independent existing|submitted native execution'):
         accept(store, current, reviews, 1)
     assert snapshot(store) == before
 

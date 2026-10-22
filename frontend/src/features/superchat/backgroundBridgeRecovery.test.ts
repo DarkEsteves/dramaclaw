@@ -38,6 +38,46 @@ describe('scoped durable bridge recovery', () => {
 });
 
 import { mergeBridgeRecoveryMessages } from './backgroundBridgeRecovery';
+
+it.each([false, true])('hides cards for unloaded turns even if recovery replays old messages (%s)', (withMessages) => {
+  const recent = Array.from({ length: 50 }, (_, index) => ({
+    id: `recent-${index}`, role: 'assistant' as const, turnId: `recent-${index}`,
+    text: 'recent reply', timestamp: 2000 + index,
+  }));
+  const result = mergeBridgeRecoveryMessages(recent, page({
+    messages: withMessages ? [{ id: 9, role: 'assistant', content: 'old reply', turn_id: 'old', timestamp: 1000 }] : [],
+    events: [{ id: 7, turn_id: 'old', type: 'assistant.message_parts', payload: { parts: [{ id: 'text', type: 'text', text: 'old card' }] }, created_at: '2026-10-22T09:00:00Z' }],
+    receipts: [{ request_id: 'old-command', kind: 'canvas_command', turn_id: 'old', status: 'applied', result: { applied_count: 1 } }],
+  }));
+  expect(result.map(message => message.id)).toEqual(recent.map(message => message.id));
+  expect(result.flatMap(message => message.parts ?? [])).toEqual([]);
+});
+
+it('updates loaded cards without moving them and still recovers new messages', () => {
+  const current = [
+    { id: '9', role: 'assistant' as const, turnId: 'loaded', text: '', timestamp: 1000 },
+    { id: '10', role: 'assistant' as const, turnId: 'recent', text: '', timestamp: 2000 },
+  ];
+  const result = mergeBridgeRecoveryMessages(current, page({
+    messages: [{ id: 11, role: 'assistant', content: 'new reply', turn_id: 'new', timestamp: 3000 }],
+    receipts: [{ request_id: 'command', kind: 'canvas_command', turn_id: 'loaded', status: 'applied', result: { applied_count: 1 } }],
+  }));
+  expect(result.map(message => message.id)).toEqual(['9', '10', '11']);
+  expect(result[0]).toMatchObject({ timestamp: 1000, parts: [expect.objectContaining({ type: 'canvas_feedback' })] });
+});
+
+it('anchors a loaded unfinished turn to its user message and merges its later original reply', () => {
+  const current = [{ id: '7', role: 'user' as const, turnId: 'loaded', text: 'request', timestamp: 1000 }];
+  const recovered = mergeBridgeRecoveryMessages(current, page({
+    receipts: [{ request_id: 'command', kind: 'canvas_command', turn_id: 'loaded', status: 'applied', result: { applied_count: 1, command_results: [{ commandIndex: 0, type: 'run_node_action', status: 'success' }] } }],
+  }));
+  expect(recovered.map(message => message.id)).toEqual(['7', 'assistant-loaded']);
+  expect(recovered[1].timestamp).toBe(1000);
+  const merged = mergeBridgeRecoveryMessages(recovered, page({ messages: [{ id: 9, role: 'assistant', content: 'original', turn_id: 'loaded', timestamp: 1100 }] }));
+  expect(merged.map(message => message.id)).toEqual(['7', '9']);
+  expect(merged[1].parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'canvas_feedback', event: expect.objectContaining({ applied: 1 }) })]));
+});
+
 it('keeps the terminal executor card when an older canonical pending receipt arrives', () => {
   const current = [{ id: 'assistant-1', role: 'assistant' as const, turnId: 'turn-1', text: '', timestamp: 1, parts: [{
     id: 'canvas_feedback:bridge:request-1.executor.owner-1', type: 'canvas_feedback' as const,
@@ -190,13 +230,15 @@ it('does not reconcile an optimistic message from an unowned actor or scope', ()
 });
 
 
+const loadedAssistant = (turnId = 'turn') => ({ id: `assistant-${turnId}`, role: 'assistant' as const, turnId, text: '', timestamp: 1 });
+
 it.each(['waiting', 'timed_out', 'applied'])('does not certify a pending clarification receipt (%s)', status => {
-  const result = mergeBridgeRecoveryMessages([], page({ receipts: [{ request_id: 'question', kind: 'clarification_event', turn_id: 'turn', status, result: { ok: true, clarification_status: 'pending_user_input', answers: {} } }] }));
+  const result = mergeBridgeRecoveryMessages([loadedAssistant()], page({ receipts: [{ request_id: 'question', kind: 'clarification_event', turn_id: 'turn', status, result: { ok: true, clarification_status: 'pending_user_input', answers: {} } }] }));
   expect(result[0].parts?.some(part => part.type === 'clarification' && (part.event as { submitted?: boolean }).submitted)).toBe(false);
 });
 it('recovers actual applied clarification answers and preserves them against delayed history', () => {
   const receipt = { request_id: 'question', kind: 'clarification_event', turn_id: 'turn', status: 'applied', result: { ok: true, status: 'clarification_frontend_result', clarification_status: 'answered', answers: { duration: '30 seconds' } } };
-  const current = mergeBridgeRecoveryMessages([], page({ receipts: [receipt] }));
+  const current = mergeBridgeRecoveryMessages([loadedAssistant()], page({ receipts: [receipt] }));
   const result = mergeBridgeRecoveryMessages(current, page({ events: [{ id: 1, turn_id: 'turn', type: 'assistant.clarification.request', payload: { type: 'assistant.clarification.request', bridge_key: 'question.executor.delayed', answers: {} }, created_at: '' }] }));
   expect(result[0].parts).toHaveLength(1);
   expect(result[0].parts?.[0]).toMatchObject({ event: { submitted: true, answers: { duration: '30 seconds' } } });
@@ -204,26 +246,26 @@ it('recovers actual applied clarification answers and preserves them against del
 
 it('keeps same-title clarification requests and original turns separate', () => {
   const receipt = (request_id: string, turn_id: string) => ({ request_id, turn_id, kind: 'clarification_event', status: 'applied', result: { ok: true, status: 'clarification_frontend_result', clarification_status: 'answered', title: 'Questions', answers: { duration: request_id } } });
-  const result = mergeBridgeRecoveryMessages([], page({ receipts: [receipt('first', 'one'), receipt('second', 'one'), receipt('first', 'two')] }));
+  const result = mergeBridgeRecoveryMessages([loadedAssistant('one'), loadedAssistant('two')], page({ receipts: [receipt('first', 'one'), receipt('second', 'one'), receipt('first', 'two')] }));
   expect(result).toHaveLength(2);
   expect(result.find(message => message.turnId === 'one')?.parts).toHaveLength(2);
   expect(result.find(message => message.turnId === 'two')?.parts).toHaveLength(1);
 });
 it('accepts a later actual submitted answer with its real data', () => {
   const receipt = (duration: string) => ({ request_id: 'later-answer', turn_id: 'turn', kind: 'clarification_event', status: 'applied', result: { ok: true, status: 'clarification_frontend_result', clarification_status: 'answered', answers: { duration } } });
-  const first = mergeBridgeRecoveryMessages([], page({ receipts: [receipt('30 seconds')] }));
+  const first = mergeBridgeRecoveryMessages([loadedAssistant()], page({ receipts: [receipt('30 seconds')] }));
   const result = mergeBridgeRecoveryMessages(first, page({ receipts: [receipt('60 seconds')] }));
   expect(result[0].parts?.[0]).toMatchObject({ event: { submitted: true, answers: { duration: '60 seconds' } } });
 });
 
 it('does not certify a failed clarification callback as an answer', () => {
-  const result = mergeBridgeRecoveryMessages([], page({ receipts: [{ request_id: 'failed-question', kind: 'clarification_event', turn_id: 'turn', status: 'applied', result: { ok: false, status: 'clarification_frontend_result', clarification_status: 'answered', answers: { duration: 'uncommitted' } } }] }));
+  const result = mergeBridgeRecoveryMessages([loadedAssistant()], page({ receipts: [{ request_id: 'failed-question', kind: 'clarification_event', turn_id: 'turn', status: 'applied', result: { ok: false, status: 'clarification_frontend_result', clarification_status: 'answered', answers: { duration: 'uncommitted' } } }] }));
   expect(result[0].parts?.some(part => part.type === 'clarification' && (part.event as { submitted?: boolean }).submitted)).toBe(false);
 });
 
 it.each(['waiting', 'timed_out'])('preserves actual answers against a later pending receipt (%s)', status => {
   const receipt = { request_id: 'answered-question', kind: 'clarification_event', turn_id: 'turn', status: 'applied', result: { ok: true, status: 'clarification_frontend_result', clarification_status: 'answered', answers: { duration: '30 seconds' } } };
-  const current = mergeBridgeRecoveryMessages([], page({ receipts: [receipt] }));
+  const current = mergeBridgeRecoveryMessages([loadedAssistant()], page({ receipts: [receipt] }));
   const result = mergeBridgeRecoveryMessages(current, page({ receipts: [{ ...receipt, status, result: { ok: true, status: 'clarification_frontend_result', clarification_status: 'pending_user_input', answers: {} } }] }));
   expect(result[0].parts).toHaveLength(1);
   expect(result[0].parts?.[0]).toMatchObject({ event: { submitted: true, answers: { duration: '30 seconds' } } });

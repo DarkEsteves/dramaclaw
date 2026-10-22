@@ -209,6 +209,7 @@ def test_direct_plan_and_review_then_material_work(setup_api):
     assert readiness["missing_choices"]["image"] == [
         "model", "aspect_ratio", "resolution"]
     assert generated.json()["data"]["next_action"] == "request_user_clarification"
+    assert generated.json()["data"]["workflow_intent"]["items"] == []
     assert "不要重复保存工作包或自动重试" in generated.json()["data"]["agent_instruction"]
 
     invalid_duration = client.post(BASE + "/material-work", json={

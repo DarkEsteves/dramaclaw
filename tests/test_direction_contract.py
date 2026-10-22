@@ -70,6 +70,56 @@ def test_legacy_choices_do_not_modify_a_preserve_list():
     }
 
 
+def test_structured_choices_expose_reviewable_ids_without_mutating_direction():
+    direction = {'preserve_replace': [
+        {'id': 'pr-scene', 'entity_kind': 'scene', 'entity_id': '咖啡馆双人访谈场景',
+         'action': 'preserve', 'evidence': '其他保持'},
+        {'id': 'pr-product', 'entity_kind': 'product', 'entity_id': '补剂换成黑咖啡',
+         'action': 'replace', 'evidence': '产品换成黑咖啡'},
+    ]}
+    original = deepcopy(direction)
+    result = resolve_direction_review_contract(direction)
+    assert result['requirements']['semantic'] == [
+        {'id': 'pr-scene', 'text': 'preserve scene: 咖啡馆双人访谈场景'},
+        {'id': 'pr-product', 'text': 'replace product: 补剂换成黑咖啡'},
+    ]
+    assert direction == original
+    assert result == resolve_direction_review_contract(direction)
+
+
+def test_literal_choice_stays_an_exact_dialogue_constraint():
+    choice = {'entity_kind': 'turn', 'entity_id': 'line', 'action': 'preserve', 'value': '原句'}
+    result = resolve_direction_review_contract({'preserve_replace': [choice]})
+    assert result['requirements'] == {}
+    assert result['preserve_replace'] == [choice]
+
+
+@pytest.mark.parametrize('choices', [
+    [{'entity_kind': 'scene', 'entity_id': 'Cafe', 'action': 'preserve'}],
+    [{'id': 'scene', 'entity_kind': 'scene', 'entity_id': ' ', 'action': 'preserve'}],
+    [{'id': 'scene', 'entity_kind': 'scene', 'entity_id': 'Cafe', 'action': 'ignore'}],
+    ['Keep the cafe'],
+])
+def test_invalid_structured_choice_is_rejected(choices):
+    with pytest.raises(ValueError, match='preserve_replace'):
+        resolve_direction_review_contract({'preserve_replace': choices})
+
+
+def test_duplicate_choice_ids_are_rejected():
+    choice = {'id': 'scene', 'entity_kind': 'scene', 'entity_id': 'Cafe', 'action': 'preserve'}
+    with pytest.raises(ValueError, match='unique'):
+        resolve_direction_review_contract({'preserve_replace': [choice, dict(choice)]})
+
+
+def test_choice_id_cannot_alias_another_semantic_requirement():
+    with pytest.raises(ValueError, match='identity collision'):
+        resolve_direction_review_contract({
+            'requirements': {'semantic': [{'id': 'scene', 'text': 'Different requirement'}]},
+            'preserve_replace': [{'id': 'scene', 'entity_kind': 'scene', 'entity_id': 'Cafe',
+                                  'action': 'preserve'}],
+        })
+
+
 def test_invalid_nested_output_requirements_has_a_validation_error():
     with pytest.raises(ValueError, match='output_requirements'):
         resolve_direction_review_contract({

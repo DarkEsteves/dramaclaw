@@ -138,7 +138,18 @@ def evaluate_production_review(payload: dict[str, Any], direction: dict[str, Any
 
     if not plan["beats"]:
         fail("empty_plan", "plan", "Create the narrative beats before review")
-    missing = set(REVIEW_CATEGORIES) - {row["category"] for row in rows}
+    required_categories = set(REVIEW_CATEGORIES)
+    has_dialogue = any(turn['text'].strip() for beat in plan['beats'] for turn in beat['turns'])
+    dialogue_required = (
+        requirements.get('dialogue', {}).get('mode', 'unspecified') != 'unspecified'
+        or bool(contract['exact_turns'])
+        or bool(locked_turns)
+        or any(choice.get('entity_kind') in {'turn', 'dialogue'}
+               for choice in contract['preserve_replace'])
+    )
+    if not has_dialogue and not dialogue_required:
+        required_categories.discard('dialogue')
+    missing = required_categories - {row["category"] for row in rows}
     if missing:
         fail("creative_review_incomplete", "plan", "Missing reasoned review: " + ", ".join(sorted(missing)))
     planned_sources = planned_speech_sources(plan)
@@ -187,6 +198,11 @@ def evaluate_production_review(payload: dict[str, Any], direction: dict[str, Any
                  f"Review planned audio source placement {placement_id} and turns "
                  f"{', '.join(turn_ids) if turn_ids else '(no dialogue)'} with saved content evidence; "
                  "actual media sound still needs material review")
+            refs = required_refs if turn_ids else sound_context_refs[placement_id]
+            checks[-1]["required_evidence_refs" if turn_ids else "alternative_evidence_refs"] = [
+                {"entity_kind": kind, "entity_id": entity_id, "field": field}
+                for kind, entity_id, field in sorted(refs)
+            ]
     if contract['goal'] is not None and contract['goal'] != plan['goal']:
         direction_findings = [index for index, row in enumerate(rows)
                               if row['category'] == 'direction' and row['verdict'] == 'pass']
@@ -214,8 +230,6 @@ def evaluate_production_review(payload: dict[str, Any], direction: dict[str, Any
             elif kind == "turn" and choice.get("action") == "replace" and "value" in choice:
                 if entity_id not in turns or turns[entity_id]["text"] != choice["value"]:
                     fail("replacement_dialogue_missing", entity_id or "plan", "Confirmed replacement dialogue is missing")
-            elif not choice.get("reason"):
-                fail("direction_constraint_unresolved", entity_id or "plan", "Nonliteral direction requires reasoned Agent review")
     voiced_ranges = []
     frame = 0
     for beat in plan["beats"]:

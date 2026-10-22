@@ -67,6 +67,104 @@ def test_progress_is_one_scoped_read_preserving_current_counts_and_wait(adapter)
     Draft202012Validator(plugin._output_schema('freezone_get_production_progress')).validate(result)
 
 
+@pytest.mark.parametrize('phase,expected', [
+    ('awaiting_plan_review', 'has not passed review'),
+    ('awaiting_plan_confirmation', 'freezone_confirm_reference_plan'),
+])
+def test_progress_instruction_requires_actual_review_and_confirmation_receipts(adapter, phase, expected):
+    _, _, replies, tool = adapter
+    native = {**state('waiting_agent'), 'phase': phase}
+    replies.append({'ok': True, 'data': native})
+    _, read = tool('freezone_get_production_progress')
+    result = read({'commission_id': 'commission'})
+    assert expected in result['agent_instruction']
+    assert 'recorded' in result['agent_instruction']
+    assert 'warnings' in result['agent_instruction']
+
+
+def test_revoked_review_does_not_instruct_plan_confirmation(adapter):
+    _, _, replies, tool = adapter
+    replies.append({'ok': True, 'data': {
+        **state('waiting_agent'), 'phase': 'awaiting_plan_confirmation', 'plan_review_valid': False,
+        'next_action': {'owner': 'agent', 'kind': 'review_production_plan'},
+    }})
+    _, read = tool('freezone_get_production_progress')
+    result = read({'commission_id': 'commission'})
+    assert 'has not passed review' in result['agent_instruction']
+    assert 'freezone_confirm_reference_plan' not in result['agent_instruction']
+
+
+def test_plan_review_tool_preserves_grounded_complete_snapshot_and_recovery(adapter):
+    from test_production_audio_sources import planned_video_dialogue
+    from test_production_review import passing_findings
+    from novelvideo.freezone.remix.production_review import evaluate_production_review
+
+    plugin, calls, replies, tool = adapter
+    source = planned_video_dialogue()
+    schema, review = tool('freezone_review_production_plan')
+    assert 'complete independent snapshot' in schema['description']
+    assert 'never merge' in schema['description']
+    assert 'host waives only a missing dialogue finding' in schema['description']
+    assert 'submitted change/unsupported findings still block' in schema['description'].lower()
+    finding_schema = schema['parameters']['properties']['findings']['items']
+    assert 'planned audio sources' in finding_schema['properties']['evidence_refs']['description']
+    args = {'commission_ref': state()['commission_ref'], 'plan_ref': state()['plan_ref'],
+            'findings': passing_findings()}
+    failed = evaluate_production_review(source, {}, args['findings'])
+    commission = {'phase': 'awaiting_plan_review', 'review_ref': None}
+    review_ref = {'artifact_id': 'review', 'revision': 1}
+    replies.append({'ok': True, 'data': {'review_ref': review_ref, 'review': failed, 'commission': commission}})
+    Draft202012Validator(schema['parameters']).validate(args)
+    result = review(args)
+    assert result['review'] == failed
+    assert result['commission'] == commission
+    instruction = result['agent_instruction']
+    for expected in ('complete independent snapshot', 'never merged', 'all eight categories',
+                     'required_evidence_refs', 'alternative_evidence_refs',
+                     'Do not claim review passed', 'older revision'):
+        assert expected in instruction
+    Draft202012Validator(plugin._output_schema('freezone_review_production_plan')).validate(result)
+
+    check = next(row for row in failed['checks'] if row['code'] == 'planned_audio_source_review_missing')
+    args['findings'].append({
+        'category': 'audio_visual_roles', 'entity_kind': 'placement', 'entity_id': 'demo-video',
+        'verdict': 'pass', 'reason': 'Inspected both saved turns',
+        'evidence': ['A continuous question and answer performance'],
+        'evidence_refs': check['required_evidence_refs'],
+    })
+    Draft202012Validator(schema['parameters']).validate(args)
+    passed = evaluate_production_review(source, {}, args['findings'])
+    assert passed['status'] == 'passed'
+    replies.append({'ok': True, 'data': {'review_ref': review_ref, 'review': passed,
+                                        'commission': {'phase': 'awaiting_plan_confirmation',
+                                                       'review_ref': review_ref}}})
+    result = review(args)
+    assert calls[-1][2]['body'] == args
+    assert result['review']['resolved_evidence'] == passed['resolved_evidence']
+    assert 'saved plan passed review' in result['agent_instruction']
+    assert 'before authenticated confirmation' in result['agent_instruction']
+    Draft202012Validator(plugin._output_schema('freezone_review_production_plan')).validate(result)
+
+
+def test_progress_exposes_pending_plan_sync_instead_of_a_bare_review_blocker(adapter):
+    _, _, replies, tool = adapter
+    replies.append({'ok': True, 'data': {
+        **state('waiting_agent'), 'phase': 'preparing_materials', 'plan_review_valid': False,
+        'plan_revision_sync': {
+            'status': 'pending_commission_sync',
+            'plan_ref': {'artifact_id': 'plan', 'revision': 5, 'project_id': 'project'},
+            'canvas_plan_ref': {'artifact_id': 'plan', 'revision': 5, 'project_id': 'project'},
+            'commission_plan_ref': {'artifact_id': 'plan', 'revision': 4, 'project_id': 'project'},
+        },
+        'next_action': {'owner': 'agent', 'kind': 'review_production_plan'},
+    }})
+    schema, read = tool('freezone_get_production_progress')
+    result = read({'commission_id': 'commission'})
+    Draft202012Validator(schema['output_schema']).validate(result)
+    assert result['plan_revision_sync']['plan_ref']['revision'] == 5
+    assert 'plan@5' in result['agent_instruction']
+
+
 def test_legacy_commission_event_is_not_an_agent_tool(adapter):
     plugin, _, _, _ = adapter
     assert 'freezone_advance_reference_production' not in {name for name, _, _ in plugin.TOOLS}

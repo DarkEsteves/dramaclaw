@@ -524,11 +524,39 @@ def _prepare_material_work(store, plan_ref: dict, requirements: list[dict], step
         return {"work_ref": {"artifact_id": artifact_id, "revision": 1}, "ready_step_ids": ready_material_steps(payload)}
 
 
+def material_stage_groups(work: dict) -> list[list[str]]:
+    """Group dependency depths into human-reviewed production stages."""
+    steps = {step['id']: step for step in work['steps']}
+    depths, visiting = {}, set()
+
+    def depth(step_id):
+        if step_id in depths:
+            return depths[step_id]
+        if step_id in visiting or step_id not in steps:
+            raise ValueError('material stage dependencies must be an acyclic saved graph')
+        visiting.add(step_id)
+        step = steps[step_id]
+        dependencies = set(step.get('depends_on', [])) | {
+            ref['step_id'] for ref in step.get('references', []) if ref.get('step_id')}
+        depths[step_id] = max((depth(dep) + 1 for dep in dependencies), default=0)
+        visiting.remove(step_id)
+        return depths[step_id]
+
+    for step_id in steps:
+        depth(step_id)
+    return [[step_id for step_id in steps if depths[step_id] == level]
+            for level in sorted(set(depths.values()))]
+
+
 def ready_material_steps(work: dict, reopenable_step_ids=None) -> list[str]:
     accepted = {s["id"] for s in work["steps"] if s.get("status") == "accepted"}
+    stage = next((set(group) for group in material_stage_groups(work)
+                  if not set(group) <= accepted), set())
     reopenable = set(reopenable_step_ids or ())
     ready: list[str] = []
     for step in work["steps"]:
+        if step['id'] not in stage:
+            continue
         status = step.get("status")
         if status not in {"planned", "awaiting_upload", "rejected", "stale"} and not (
                 status == "submitted" and step["id"] in reopenable):
@@ -781,7 +809,7 @@ def _material_generation_controls(step: dict) -> dict:
 def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix", *, canvas: dict | None = None,
                              store=None, selected_step_ids: list[str] | None = None,
                              reopenable_step_ids=None) -> dict:
-    """Compile every pending generation step into one graph; edges order the run."""
+    """Compile only the current stage; downstream work waits for human acceptance."""
     if any(row.get('preservation_bindings') for row in work.get('requirements', [])):
         if canvas is None or store is None:
             raise ValueError('preservation binding requires current project media verification')
@@ -812,7 +840,7 @@ def material_workflow_intent(work: dict, skill_id: str = "reference-video-remix"
                    for placement_id in targets):
                 voiced_step_ids.add(step['id'])
     steps = {s["id"]: s for s in work["steps"]}
-    compile_set = set(pending_material_steps(work, reopenable_step_ids))
+    compile_set = set(ready_material_steps(work, reopenable_step_ids))
     if selected_step_ids is not None:
         if (any(not isinstance(step_id, str) for step_id in selected_step_ids)
                 or len(selected_step_ids) != len(set(selected_step_ids))
@@ -1088,19 +1116,37 @@ class _IndependentMaterialReviewContinuity:
         self._ranges.add(key)
 
     def validate(self, review):
-        work = self._work(self.current['revision'])
-        plan_ref = work['payload']['plan_ref']
-        if self._head(plan_ref['artifact_id']) != plan_ref['revision']:
-            raise ValueError('historical material review requires its unchanged plan revision')
         payload = review['payload']
-        self._review(review, payload['step_id'], payload['resource'], self.current['revision'])
+        basis_revision = payload['work_ref']['revision']
+        if not 0 <= self.current['revision'] - basis_revision <= 200:
+            raise ValueError('material review acceptance history exceeds its bounded proof')
+        basis = self._work(basis_revision)
+        original = next(step for step in basis['payload']['steps'] if step['id'] == payload['step_id'])
+        if original['source'] != 'generate':
+            work = self._work(self.current['revision'])
+            plan_ref = work['payload']['plan_ref']
+            if self._head(plan_ref['artifact_id']) != plan_ref['revision']:
+                raise ValueError('historical material review requires its unchanged plan revision')
+            self._review(review, payload['step_id'], payload['resource'], self.current['revision'])
+            return
+        self.validate_target(review)
+        if not original.get('execution') or original.get('status') != 'submitted':
+            raise ValueError('historical generated material requires its submitted native execution')
+        decision = payload.get('user_decision') or {}
+        if (payload.get('actor_kind') != 'user' or not payload.get('decision_receipt_id')
+                or decision.get('requester_user_id') != self.store.created_by
+                or decision.get('canvas_id') != self.canvas_id
+                or decision.get('media_hash') != payload['resource']['media_hash']
+                or payload['technical']['status'] != 'passed'
+                or payload['content']['status'] != 'passed'):
+            raise ValueError('historical material review requires its original passed scoped user receipt')
 
     def validate_target(self, review):
-        """Prove unchanged display/confirmation target without granting acceptance.
+        """Keep an unchanged candidate valid across unrelated execution bookkeeping.
 
-        The candidate may remain unavailable/unconfirmed. Every intervening
-        mutation must still be a genuine independent acceptance with its own
-        original passed scoped user receipt, using the strict transition proof.
+        Every saved revision is checked, so changing and restoring a target cannot
+        revive an old approval. Current media and native execution are checked by
+        the caller before display or acceptance.
         """
         from .material_review import validate_material_review_lineage
         current = self._work(self.current['revision'])
@@ -1126,12 +1172,43 @@ class _IndependentMaterialReviewContinuity:
         if (not original or original.get('node_id') != payload['resource']['node_id']
                 or original['media_kind'] != payload['resource']['media_kind']):
             raise ValueError('material review target differs from its original resource')
+        original_work = self._work(basis['revision'])['payload']
+        if original['source'] != 'generate':
+            for revision in range(basis['revision'] + 1, current['revision'] + 1):
+                self._transition(revision)
+                target = next((step for step in self._work(revision)['payload']['steps']
+                               if step['id'] == payload['step_id']), None)
+                if not self._same(original, target):
+                    raise ValueError('material review target changed after original observation')
+            return
+        protected = {payload['step_id']}
+        frontier = list(protected)
+        originals = {step['id']: step for step in original_work['steps']}
+        while frontier:
+            step = originals[frontier.pop()]
+            for dependency in set(step.get('depends_on', [])) | {
+                    ref['step_id'] for ref in step.get('references', []) if ref.get('step_id')}:
+                if dependency not in protected:
+                    protected.add(dependency)
+                    frontier.append(dependency)
+        def identity(step):
+            return {key: value for key, value in step.items()
+                    if key not in {'status', 'candidates', 'accepted_resource', 'review_ref'}}
+        metadata = {key: value for key, value in original_work.items()
+                    if key not in {'steps', 'command_receipts'}}
         for revision in range(basis['revision'] + 1, current['revision'] + 1):
-            self._transition(revision)
-            target = next((step for step in self._work(revision)['payload']['steps']
-                           if step['id'] == payload['step_id']), None)
-            if not self._same(original, target):
-                raise ValueError('material review target changed after original observation')
+            work = self._work(revision)['payload']
+            if not self._same(metadata, {key: value for key, value in work.items()
+                                        if key not in {'steps', 'command_receipts'}}):
+                raise ValueError('material review requirements changed after original observation')
+            targets = {step['id']: step for step in work['steps']}
+            for step_id in protected:
+                target = targets.get(step_id)
+                if (not target or target.get('status') in {'stale', 'rejected'}
+                        or not self._same(identity(originals[step_id]), identity(target))
+                        or (step_id != payload['step_id'] and not self._same(
+                            originals[step_id].get('accepted_resource'), target.get('accepted_resource')))):
+                    raise ValueError('material review target changed after original observation')
 
 
 MAX_ACCEPTANCE_SNAPSHOT_BYTES = 128 * 1024 * 1024
@@ -1275,6 +1352,10 @@ def prepare_material_acceptance(store, work_ref: dict, step_id: str, resource: d
         raise ValueError("material technical/content review has not passed")
     accepted = {s["id"] for s in work["steps"] if s.get("status") == "accepted"}
     dependencies = set(step.get("depends_on", [])) | {r["step_id"] for r in step.get("references", []) if r.get("step_id")}
+    stage = next((set(group) for group in material_stage_groups(work)
+                  if not set(group) <= accepted), set())
+    if step_id not in stage:
+        raise ValueError('previous material stage requires complete acceptance')
     if not dependencies <= accepted or (step_id not in ready_material_steps(work) and step.get("status") not in {"candidate", "submitted"}):
         raise ValueError("material dependencies are not accepted")
     step.update(status="accepted", accepted_resource=resource, review_ref=review_ref, node_id=resource["node_id"])

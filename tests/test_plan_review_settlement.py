@@ -43,6 +43,66 @@ def _unreviewed_plan(setup_api):
     return store, commission, plan_ref, findings
 
 
+def test_audio_review_retries_require_complete_snapshot(setup_api):
+    from test_production_audio_sources import planned_video_dialogue
+    from novelvideo.freezone.remix.reference_commission import advance_reference_commission
+
+    store, commission, _, findings = _unreviewed_plan(setup_api)
+    source = planned_video_dialogue()
+    source['goal'] = '产品介绍'
+    saved = store.create('production_plan.v2', source, [])
+    plan_ref = {'artifact_id': saved['id'], 'revision': 1, 'project_id': 'p'}
+    commission = advance_reference_commission(store, commission['commission_ref'],
+        {'type': 'plan_ready', 'plan_ref': plan_ref}, commission['commission_ref']['revision'])
+    original_revision = commission['commission_ref']['revision']
+
+    first = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                               plan_ref=plan_ref, findings=findings)
+    failed = next(row for row in first['review']['checks']
+                  if row['code'] == 'planned_audio_source_review_missing')
+    assert failed['required_evidence_refs'] == [
+        {'entity_kind': 'turn', 'entity_id': 'answer', 'field': 'text'},
+        {'entity_kind': 'turn', 'entity_id': 'ask', 'field': 'text'},
+    ]
+    audio = {'category': 'audio_visual_roles', 'entity_kind': 'placement',
+             'entity_id': 'demo-video', 'verdict': 'pass',
+             'reason': 'Inspected both saved turns and their planned source',
+             'evidence': ['One continuous question and answer performance'],
+             'evidence_refs': failed['required_evidence_refs']}
+    supplemental = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                      plan_ref=plan_ref, findings=[audio])
+    assert supplemental['review']['status'] == 'changes_required'
+    assert supplemental['review']['findings'] == [audio]
+    assert any(row['code'] == 'creative_review_incomplete' for row in supplemental['review']['checks'])
+    for result in (first, supplemental):
+        assert result['commission']['phase'] == 'awaiting_plan_review'
+        assert result['commission']['review_ref'] is None
+        assert result['commission']['commission_ref']['revision'] == original_revision
+        assert 'decision_ref' not in result
+
+    complete = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                  plan_ref=plan_ref, findings=findings + [audio])
+    assert complete['review']['status'] == 'passed'
+    assert complete['review']['plan_ref'] == plan_ref
+    assert complete['commission']['phase'] == 'awaiting_plan_confirmation'
+    assert complete['decision']['status'] == 'pending'
+    assert complete['decision']['proposal']['plan_ref'] == plan_ref
+    assert not any(row['type'] == 'plan_confirmed' for row in complete['commission']['decisions'])
+    assert len(_reviews(store)) == 3
+
+
+def test_silent_plan_seven_categories_settle_pending_confirmation(setup_api):
+    store, commission, plan_ref, findings = _unreviewed_plan(setup_api)
+    findings = [row for row in findings if row['category'] != 'dialogue']
+    result = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                plan_ref=plan_ref, findings=findings)
+    assert result['review']['status'] == 'passed'
+    assert result['commission']['phase'] == 'awaiting_plan_confirmation'
+    assert result['decision']['status'] == 'pending'
+    assert result['decision']['proposal']['plan_ref'] == plan_ref
+    assert not any(row['type'] == 'plan_confirmed' for row in result['commission']['decisions'])
+
+
 def test_repeated_review_returns_same_saved_review_and_decision(reviewed_plan):
     _, store, commission, _ = reviewed_plan
     review = store.read(commission['review_ref']['artifact_id'], commission['review_ref']['revision'])
@@ -143,6 +203,120 @@ def test_confirmed_preservation_list_reviews_existing_saved_plan_without_regener
     assert result['commission']['phase'] == 'awaiting_plan_confirmation'
     assert result['decision']['status'] == 'pending'
     assert store.read_latest(saved['id'])['revision'] == saved['revision']
+
+
+def test_structured_direction_review_settles_exact_plan_confirmation(setup_api):
+    from novelvideo.freezone.remix.reference_commission import (
+        AuthenticatedDecisionEvidence, advance_reference_commission,
+    )
+    from novelvideo.freezone.remix.production_review import REVIEW_CATEGORIES
+
+    _, store, commission, _ = setup_api
+    direction = {'target_goal': '黑咖啡访谈', 'preserve_replace': [
+        {'id': 'pr-scene', 'entity_kind': 'scene', 'entity_id': '咖啡馆双人访谈', 'action': 'preserve'},
+        {'id': 'pr-structure', 'entity_kind': 'structure', 'entity_id': '提问后反转', 'action': 'preserve'},
+        {'id': 'pr-product', 'entity_kind': 'product', 'entity_id': '补剂换成黑咖啡', 'action': 'replace'},
+        {'id': 'pr-dialogue', 'entity_kind': 'dialogue', 'entity_id': '英文改中文', 'action': 'replace'},
+    ]}
+    commission = advance_reference_commission(
+        store, commission['commission_ref'], {'type': 'direction_confirmed', 'direction': direction},
+        commission['commission_ref']['revision'],
+        host_evidence=AuthenticatedDecisionEvidence('p', 'c', 'u', 'direction-message'),
+    )
+    saved = store.create('production_plan.v2', {
+        'schema_version': 2, 'goal': '黑咖啡访谈',
+        'output': {'width': 1080, 'height': 1920, 'fps_num': 24, 'fps_den': 1},
+        'beats': [{'id': 'opening', 'purpose': '咖啡馆双人访谈，提问后反转，补剂换成黑咖啡',
+                   'duration_frames': 240, 'turns': [{'id': 'line', 'text': '你每天最离不开什么？黑咖啡。'}]}],
+    }, [])
+    plan_ref = {'artifact_id': saved['id'], 'revision': 1, 'project_id': 'p'}
+    findings = [{'category': category, 'entity_kind': 'plan', 'entity_id': 'plan',
+                 'verdict': 'pass', 'reason': 'Inspected the saved interview',
+                 'evidence': ['The opening introduces black coffee in Chinese']}
+                for category in REVIEW_CATEGORIES]
+    for choice in direction['preserve_replace']:
+        findings.append({
+            'category': 'direction', 'entity_kind': 'beat', 'entity_id': 'opening',
+            'requirement_id': choice['id'], 'verdict': 'pass',
+            'reason': 'The saved interview implements this confirmed choice',
+            'evidence': [choice['entity_id']],
+            'evidence_refs': [{'entity_kind': 'beat', 'entity_id': 'opening', 'field': 'purpose'},
+                              {'entity_kind': 'turn', 'entity_id': 'line', 'field': 'text'}],
+        })
+    result = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                plan_ref=plan_ref, findings=findings)
+    assert result['review']['status'] == 'passed'
+    assert result['commission']['phase'] == 'awaiting_plan_confirmation'
+    assert result['decision']['status'] == 'pending'
+    assert result['decision']['proposal']['plan_ref'] == plan_ref
+    assert not any(row['type'] == 'plan_confirmed' for row in result['commission']['decisions'])
+    assert store.read_latest(saved['id'])['revision'] == 1
+    assert store.read_latest(commission['commission_ref']['artifact_id'])['payload']['direction'] == direction
+
+
+def _confirm_plan(store, commission):
+    from novelvideo.freezone.remix.reference_commission import (
+        AuthenticatedDecisionEvidence, advance_reference_commission,
+    )
+    return advance_reference_commission(
+        store, commission['commission_ref'], {'type': 'plan_confirmed', 'plan_ref': commission['plan_ref']},
+        commission['commission_ref']['revision'],
+        host_evidence=AuthenticatedDecisionEvidence('p', 'c', 'u', 'plan-message'),
+    )
+
+
+def _revoke_review(store, commission):
+    from copy import deepcopy
+    from novelvideo.freezone.remix.production_review import evaluate_production_review
+
+    review = store.read_latest(commission['review_ref']['artifact_id'])
+    plan = store.read(commission['plan_ref']['artifact_id'], commission['plan_ref']['revision'])
+    findings = deepcopy(review['payload']['findings'])
+    findings[0]['verdict'] = 'change'
+    rejected = {**review['payload'],
+                **evaluate_production_review(plan['payload'], commission['direction'], findings)}
+    store.revise(review['id'], review['revision'], rejected, review['upstream_refs'])
+
+
+def _passing_findings():
+    from novelvideo.freezone.remix.production_review import REVIEW_CATEGORIES
+    return [{'category': category, 'entity_kind': 'plan', 'entity_id': 'plan', 'verdict': 'pass',
+             'reason': 'Rechecked the saved plan', 'evidence': ['intro']}
+            for category in REVIEW_CATEGORIES]
+
+
+def test_revoked_review_in_production_phase_is_reapproved_without_second_confirmation(reviewed_plan):
+    _, store, commission, _ = reviewed_plan
+    commission = _confirm_plan(store, commission)
+    assert commission['phase'] == 'preparing_materials'
+    confirmed = [row for row in commission['decisions'] if row['type'] == 'plan_confirmed']
+    _revoke_review(store, commission)
+    result = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                plan_ref=commission['plan_ref'], findings=_passing_findings())
+    assert result['review']['status'] == 'passed'
+    assert result['commission']['phase'] == 'preparing_materials'
+    assert [row for row in result['commission']['decisions']
+            if row['type'] == 'plan_confirmed'] == confirmed
+    assert result['commission']['review_ref'] != commission['review_ref']
+
+
+def test_changed_plan_content_still_requires_user_confirmation(reviewed_plan):
+    from novelvideo.freezone.remix.reference_commission import advance_reference_commission
+
+    _, store, commission, _ = reviewed_plan
+    commission = _confirm_plan(store, commission)
+    _revoke_review(store, commission)
+    plan = store.read(commission['plan_ref']['artifact_id'], commission['plan_ref']['revision'])
+    revised = store.revise(plan['id'], plan['revision'],
+                           {**plan['payload'], 'goal': plan['payload']['goal'] + ' v2'},
+                           plan['upstream_refs'])
+    new_ref = {'artifact_id': revised['id'], 'revision': revised['revision'], 'project_id': 'p'}
+    result = submit_plan_review(store, commission_ref=commission['commission_ref'],
+                                plan_ref=new_ref, findings=_passing_findings())
+    # Changed creative content never regains approval in place: the commission
+    # leaves production and the user must confirm the new plan.
+    assert result['commission']['phase'] != 'preparing_materials'
+    assert result['commission']['phase'] in {'awaiting_plan_review', 'awaiting_plan_confirmation'}
 
 
 def test_changed_findings_cannot_reuse_prior_passed_review(reviewed_plan):
