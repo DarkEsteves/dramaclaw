@@ -16816,6 +16816,45 @@ async def complete_agent_product_operation(
     return {"ok": True, "data": operation}
 
 
+async def _sync_material_draft_before_claim(ctx, canvas_id: str, draft: dict) -> None:
+    """Parameter clarification may revise a draft after its material attachment."""
+    if (draft.get('status') != 'ready'
+            or (draft.get('intent') or {}).get('skill_id') != 'reference-video-remix'):
+        return
+    from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
+    from novelvideo.freezone.remix.reference_director import list_director_artifacts
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from .reference_material import _current_material_generation_choices
+
+    store = RemixArtifactStore(Path(ctx.output_dir), ctx.project_id,
+                               created_by=ctx.requester_user_id)
+    artifacts = await asyncio.to_thread(
+        list_director_artifacts, store, canvas_id, ctx.requester_user_id, limit=None)
+    stale = [work for work in artifacts['material_work']
+             if any(step.get('status') == 'submitted'
+                    and (step.get('execution') or {}).get('draft_id') == draft['draft_id']
+                    and (step.get('execution') or {}).get('canvas_id') == canvas_id
+                    and (step.get('execution') or {}).get('draft_revision') != draft['revision']
+                    for step in work['steps'])]
+    if not stale:
+        return
+    if len(stale) != 1:
+        raise HTTPException(409, {'code': 'material_draft_binding_ambiguous'})
+    work = stale[0]
+    choices = await _current_material_generation_choices(
+        ctx, canvas_id, store, {'work_ref': work['work_ref'], 'work': work})
+    canvas = await asyncio.to_thread(canvas_store.read_canvas, ctx.state_dir, canvas_id)
+    try:
+        await asyncio.to_thread(
+            attach_material_execution_draft, store, work['work_ref'],
+            canvas_id=canvas_id, draft_id=draft['draft_id'],
+            draft_revision=draft['revision'], workflow_state_dir=ctx.state_dir,
+            canvas=canvas, confirmed_choices=choices)
+    except ValueError as exc:
+        raise HTTPException(409, {'code': 'material_draft_binding_changed',
+                                  'message': str(exc)}) from exc
+
+
 @router.post(
     "/projects/{project}/freezone/canvases/{canvas_id}/workflow-drafts/{draft_id}/claim",
     tags=[TAG_FREEZONE_CANVAS],
@@ -16884,6 +16923,7 @@ async def claim_canvas_workflow_draft(
         require_verified=True,
     )
     await _check_workflow_runtime(validated, project=project, user=user)
+    await _sync_material_draft_before_claim(ctx, canvas_id, current_draft)
     try:
         draft, error = await asyncio.to_thread(
             claim_workflow_draft_confirmation,

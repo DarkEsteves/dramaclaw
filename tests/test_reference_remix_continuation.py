@@ -1568,6 +1568,43 @@ def test_stage_instruction_names_current_saved_result(phase, reference_field, di
         assert commission[reference_field]['artifact_id'] in instruction
 
 
+def test_material_stage_instruction_names_wake_and_accepted_steps():
+    commission = {'phase': 'preparing_materials',
+                  'work_ref': {'artifact_id': 'work', 'revision': 1}}
+    state = {'work_ref': {'artifact_id': 'work', 'revision': 6}, 'ready_step_ids': ['s2'],
+             'steps': [{'id': 's1', 'status': 'accepted'}, {'id': 's2', 'status': 'planned'}]}
+    wake = {'event_key': 'production:abc', 'event': None,
+            'notice': '上一阶段素材已全部确认，下一阶段已就绪；请按原有授权与动作确认流程继续。',
+            'evidence': {'work_id': 'work', 'ready_step_ids': ['s2']}}
+    instruction = continuation._production_stage_instruction(
+        commission, wake_event=wake, material_state=state)
+    assert '本轮唤醒原因' in instruction
+    assert '上一阶段素材已全部确认' in instruction
+    assert '"revision": 6' in instruction
+    assert '不得再次请求确认这些步骤' in instruction
+
+
+def test_wake_waiting_saves_bounded_wake_reason(service, tmp_path):
+    ctx = context(tmp_path)
+    ref = {'artifact_id': 'commission', 'revision': 2}
+    service.store.create({'run_id': 'wake-reason', 'project_id': ctx.project_id,
+        'requester_user_id': ctx.requester_user_id, 'canvas_id': 'canvas', 'agent_id': 'main',
+        'idempotency_key': 'wake-reason', 'request_fingerprint': 'fp',
+        'status': 'preparing_materials', 'commission_phase': 'preparing_materials',
+        'commission_ref': ref})
+    observed = {'event': None, 'event_key': 'production:abc',
+                'notice': '上一阶段素材已全部确认，下一阶段已就绪。',
+                'evidence': {'work_id': 'work', 'ready_step_ids': ['s2'],
+                             'candidates': [{'step_id': 's1'}]}}
+    woke = service.store.wake_waiting(ctx, 'wake-reason', ref, 'preparing_materials',
+                                      event_key='production:abc', wake_event=observed)
+    assert woke['wake_event']['event_key'] == 'production:abc'
+    assert woke['wake_event']['evidence'] == {'work_id': 'work', 'ready_step_ids': ['s2']}
+    assert continuation._current_wake_event(woke)['notice'].startswith('上一阶段素材已全部确认')
+    stale = {**woke, 'commission_event_receipts': ['production:abc', 'production:def']}
+    assert continuation._current_wake_event(stale) is None
+
+
 @pytest.mark.asyncio
 async def test_failed_plan_wake_sends_failure_directive_to_agent(service, tmp_path, monkeypatch):
     from novelvideo.api import egress_binding
@@ -3050,3 +3087,124 @@ def test_explicit_continue_retains_exact_material_checkpoint(service, tmp_path):
     retried = service.store.retry(ctx, 'continue-existing')
     assert retried['material_resume_checkpoint'] == checkpoint
     assert retried.get('manual_resume_required') is not True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', [
+    'stage_recovery', 'work_recovery', 'equal_revision', 'older_revision',
+    'other_work', 'generic_draft', 'unbound_draft', 'missing_work_ref',
+    'future_revision', 'missing_receipt_work_ref',
+    'failed_success_event', 'later_failure', 'unrelated_blocker', 'invalid_draft',
+    'stale_bound_revision',
+])
+async def test_material_failure_only_clears_after_matching_durable_recovery(service, tmp_path, monkeypatch, case):
+    from novelvideo.api import egress_binding
+    from novelvideo.freezone.remix import reference_commission
+    from novelvideo.freezone.remix.material_execution import attach_material_execution_draft
+    from novelvideo.freezone.remix.material_work import material_workflow_intent, prepare_material_work
+    from novelvideo.freezone.remix.store import RemixArtifactStore
+    from novelvideo.freezone.workflow_drafts import create_workflow_draft
+    from test_material_work import setup_work
+
+    ctx = context(tmp_path)
+    run, task = await ready_run(service, ctx, monkeypatch)
+    payload = await service._save_analysis(ctx, run, result=task.result)
+    run['result_fingerprint'] = continuation._node_fingerprint(payload['nodes'][1])
+    artifacts, plan_ref, prepared = setup_work(ctx.output_dir)
+    work = artifacts.read_latest(prepared['work_ref']['artifact_id'])['payload']
+    intent = material_workflow_intent(work)
+    draft = create_workflow_draft(project_dir=ctx.state_dir, project_id=ctx.project_id,
+        canvas_id='canvas', intent=intent,
+        compiled={'ok': True, 'skill_id': intent['skill_id'], 'plan': {
+            'nodes': [], 'external_inputs': [{'id': 'reference', 'node_id': 'analysis', 'media_kind': 'reference_analysis'}]}})
+    attached = attach_material_execution_draft(artifacts, prepared['work_ref'], canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=1, workflow_state_dir=ctx.state_dir)
+    assert attached['work_ref']['revision'] == 2
+    if case == 'stale_bound_revision':
+        from novelvideo.freezone.workflow_drafts import patch_workflow_draft
+        revised, error = patch_workflow_draft(project_dir=ctx.state_dir, canvas_id='canvas',
+            draft_id=draft['draft_id'], expected_revision=1, intent=intent, compiled=draft['compiled'])
+        assert error is None and revised['revision'] == 2
+    receipt_ref = dict(attached['work_ref'])
+    failure_ref = dict(prepared['work_ref'])
+    if case == 'equal_revision':
+        failure_ref = dict(receipt_ref)
+    elif case == 'older_revision':
+        failure_ref, receipt_ref = dict(receipt_ref), dict(failure_ref)
+    elif case == 'other_work':
+        failure_ref = prepare_material_work(artifacts, plan_ref, work['requirements'],
+            work['steps'], 'other-work')['work_ref']
+    elif case == 'unbound_draft':
+        receipt_ref = prepare_material_work(artifacts, plan_ref, work['requirements'],
+            work['steps'], 'unbound-work')['work_ref']
+        failure_ref = dict(receipt_ref)
+
+    run.update(commission_ref={'artifact_id': 'commission', 'revision': 5},
+               commission_phase='preparing_materials')
+    assert service.store.update_owned(run, service.owner_token)
+    monkeypatch.setattr(reference_commission, 'read_reference_commission', lambda *_a, **_k: {
+        'phase': 'preparing_materials', 'commission_ref': run['commission_ref']})
+    read_latest = RemixArtifactStore.read_latest
+    def read_artifact(store, artifact_id):
+        if artifact_id == 'commission':
+            return {'payload': {'plan_ref': plan_ref}}
+        return read_latest(store, artifact_id)
+    monkeypatch.setattr(RemixArtifactStore, 'read_latest', read_artifact)
+    @asynccontextmanager
+    async def egress(**_kwargs):
+        yield None
+    monkeypatch.setattr(egress_binding, 'request_egress_scope', egress)
+    checkpoint = {'code': 'material_draft_not_submitted', 'message': 'Saved draft awaits submission',
+                  'next_action': 'submit_canvas_approval'}
+    monkeypatch.setattr(service, '_material_submission_checkpoint', lambda *_a: checkpoint)
+    failure = {'type': 'tool_updated', 'name': 'freezone_prepare_material_stage',
+               'call_id': 'failed-call', 'status': 'failed', 'result_json': {
+                   'ok': False, 'status': 'failed', 'code': 'material_stage_failed',
+                   'work_ref': failure_ref, 'error': 'Original material failure'}}
+    if case == 'missing_work_ref':
+        failure['result_json'].pop('work_ref')
+    receipt = {'ok': True, 'status': 'workflow_draft_ready', 'draft_id': draft['draft_id'],
+               'revision': 1, 'work_ref': receipt_ref}
+    if case == 'invalid_draft':
+        receipt['draft_id'] = 'workflow_draft_nonexistent'
+    elif case == 'future_revision':
+        receipt['work_ref']['revision'] = 3
+    elif case == 'missing_receipt_work_ref':
+        receipt.pop('work_ref')
+    success = {'type': 'tool_completed', 'name': (
+        'freezone_prepare_workflow_draft' if case == 'generic_draft' else
+        'freezone_prepare_material_work' if case == 'work_recovery' else
+        'freezone_prepare_material_stage'), 'call_id': 'recovered-call',
+        'status': 'failed' if case == 'failed_success_event' else 'completed', 'result_json': receipt}
+    async def reply(*args, **_kwargs):
+        on_event = args[3]
+        await on_event(failure)
+        if case == 'unrelated_blocker':
+            await on_event({'type': 'turn_started', 'turn_id': 'runtime-turn'})
+            await on_event({'type': 'turn_completed', 'turn_id': 'runtime-turn',
+                            'status': 'failed', 'error': {'code': 'agent_session_invalid'}})
+        await on_event(success)
+        if case == 'later_failure':
+            await on_event(failure)
+    monkeypatch.setattr(continuation.chat_service, 'stream_assistant_reply', reply)
+    if case == 'invalid_draft':
+        with pytest.raises(ValueError, match='草稿'):
+            await service._resume_agent(run, ctx)
+        assert not run.get('workflow_draft_id')
+        return
+    await service._resume_agent(run, ctx)
+    assert run['status'] == 'resume_failed'
+    if case == 'unrelated_blocker':
+        assert run['execution_blocker']['code'] == 'agent_session_invalid'
+        assert not run.get('manual_resume_required')
+    else:
+        recovered = case in {'stage_recovery', 'work_recovery', 'equal_revision'}
+        expected = 'material_draft_not_submitted' if recovered else 'material_stage_failed'
+        assert run['manual_resume_required'] is True
+        assert run['manual_resume_reason']['code'] == expected
+        if not recovered:
+            assert run['execution_blocker']['code'] == 'material_work_failed'
+            assert run['manual_resume_reason']['call_id'] == 'failed-call'
+    saved = service.store.get(run['run_id'])
+    assert saved.get('manual_resume_reason') == run.get('manual_resume_reason')
+    assert saved['execution_blocker'] == run['execution_blocker']

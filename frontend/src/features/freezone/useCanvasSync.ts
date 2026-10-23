@@ -51,10 +51,12 @@ import {
   subscribeCanvasAutosaveRelease,
 } from "./canvasAutosaveHold";
 import {
+  applyRemoteFreezoneCanvas,
   consumeQueuedLocalFreezoneProjections,
   registerFreezoneCanvasRuntime,
   type FreezoneCanvasBaseline,
 } from "./canvasSyncRuntime";
+import { mergeConcurrentCanvas, mergeReferenceAnalysisMetadata } from "./referenceAnalysisEvents";
 import {
   mergeProjectedCanvasWithLocalCanvas,
   mergeProjectionMetadata,
@@ -1003,6 +1005,7 @@ export function useCanvasSync(
 
     return registerFreezoneCanvasRuntime(project, canvasId, (remote, merge, options) => {
       const local = useCanvasStore.getState();
+      let reconciledMetadata: Record<string, unknown> | null | undefined;
       if (options?.protectUnsavedLocalEdits) {
         const shot = useShotMetadataStore.getState().shot;
         const localSignature = canvasDraftSignature(
@@ -1022,26 +1025,32 @@ export function useCanvasSync(
             window.clearTimeout(draftTimerRef.current);
             draftTimerRef.current = null;
           }
-          // The Agent has already committed a newer remote revision. Sending
-          // this local snapshot with the old base revision can only create a
-          // synthetic 409, and adopting the remote payload would discard the
-          // user's unsaved work. Fence pending saves and surface the existing
-          // recovery flow only for this genuine overlap.
-          startSaveSession();
-          writeConflictSnapshot({
-            canvas_id: canvasId,
-            nodes: local.nodes,
-            edges: local.edges,
-            viewport: local.currentViewport,
-            metadata: buildPersistMetadata(shot),
-            timestamp: new Date().toISOString(),
-          });
-          setError(
-            options.conflictMessage ??
-              i18next.t('canvas.story.messages.refreshConflict'),
-          );
-          setSyncStatus("conflict");
-          return false;
+          try {
+            const baseline = remoteBaselineRef.current;
+            if (!baseline) throw new Error("Canvas baseline unavailable");
+            const merged = mergeConcurrentCanvas(
+              (remote.nodes ?? []) as CanvasNode[], (remote.edges ?? []) as CanvasEdge[],
+              local.nodes, local.edges, baseline,
+            );
+            reconciledMetadata = mergeReferenceAnalysisMetadata(
+              baseline.metadata ?? null, buildPersistMetadata(shot), remote.metadata ?? null,
+            );
+            merge = () => ({ ...merged, metadata: reconciledMetadata });
+          } catch {
+            // Only overlapping edits to the same content require user recovery.
+            startSaveSession();
+            writeConflictSnapshot({
+              canvas_id: canvasId,
+              nodes: local.nodes,
+              edges: local.edges,
+              viewport: local.currentViewport,
+              metadata: buildPersistMetadata(shot),
+              timestamp: new Date().toISOString(),
+            });
+            setError(options.conflictMessage ?? i18next.t('canvas.story.messages.refreshConflict'));
+            setSyncStatus("conflict");
+            return false;
+          }
         }
       }
       if (debounceTimerRef.current != null) {
@@ -2136,9 +2145,22 @@ async function handleSaveError(
 
   switch (outcome.kind) {
     case "conflict": {
-      // Optimistic-lock conflict: stash the local edits to localStorage so
-      // the user can recover them, then surface the overlay.
       dropPendingId();
+      const detail = (body as { detail?: { code?: string } } | null)?.detail;
+      if (detail?.code === "canvas_revision_conflict" && args.remoteBaselineRef?.current) {
+        try {
+          const remote = await getFreezoneCanvas(args.project, args.canvasId);
+          if (args.canvasGenerationRef.current !== dispatchGeneration) return false;
+          // The runtime merges against its current baseline and live local
+          // edits, fences this failed save, then schedules a fresh merged save.
+          if (applyRemoteFreezoneCanvas(args.project, args.canvasId, remote, undefined,
+            { protectUnsavedLocalEdits: true }) === true) return true;
+        } catch {
+          // Failed fetch or overlapping edits: retain the existing recovery UI.
+        }
+      }
+      if (args.canvasGenerationRef.current !== dispatchGeneration) return false;
+      // Genuine overlap (or non-revision 409) must never overwrite either side.
       args.snapshotConflict?.(args);
       args.setError(outcome.message);
       args.setStatus("conflict");

@@ -250,7 +250,7 @@ def observe_source_speech(store, *, scope: dict, resource: dict, language: str,
                     else:
                         conn.execute('UPDATE observations SET status=? WHERE source_key=? AND owner=?', ('unknown', key, owner))
                 if not pre_dispatch and isinstance(exc, Exception):
-                    raise SourceSpeechPending('source recognition outcome requires reconciliation') from exc
+                    raise SourceSpeechPending('source recognition outcome requires reconciliation: ' + str(exc)) from exc
                 raise
         # Serialize publication only after provider work, preserving raw result
         # for recovery if artifact publication or notification fails.

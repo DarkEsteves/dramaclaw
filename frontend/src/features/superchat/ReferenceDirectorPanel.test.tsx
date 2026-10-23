@@ -361,17 +361,19 @@ it('submits only explicitly checked exact material reviews and retains choices o
   const second = { ...first, review_ref: { artifact_id: 'review-other', revision: 4 }, step_id: 'other', resource: { ...first.resource, node_id: 'other-node' } };
   vi.mocked(confirmReferenceMaterialReviewBatch).mockRejectedValue(new Error('候选素材已变化'));
   render(<ReferenceDirectorPanel {...props} controlledState={{ ...empty(), material_reviews: [first, second] }} />);
-  const checks = await screen.findAllByRole('checkbox', { name: '已审看此素材，加入本次确认' });
-  expect((checks[0] as HTMLInputElement).checked).toBe(false);
-  const submit = screen.getByRole('button', { name: '确认已勾选的素材' });
+  const card = await screen.findByRole('article', { name: '素材确认' });
+  expect((within(card).getByRole('checkbox', { name: '已审看此素材，加入本次确认' }) as HTMLInputElement).checked).toBe(false);
+  const submit = within(card).getByRole('button', { name: '确认已勾选的素材' });
   expect(submit.hasAttribute('disabled')).toBe(true);
-  fireEvent.click(checks[1]);
+  fireEvent.click(within(card).getByRole('button', { name: '下一条' }));
+  const secondCheck = within(card).getByRole('checkbox', { name: '已审看此素材，加入本次确认' });
+  fireEvent.click(secondCheck);
   fireEvent.click(submit);
   await screen.findByText('候选素材已变化');
   expect(confirmReferenceMaterialReviewBatch).toHaveBeenCalledWith('project', 'canvas', {
     items: [{ review_ref: second.review_ref, work_ref: second.work_ref, step_id: 'other', node_id: 'other-node' }], command_id: expect.any(String),
   });
-  expect((checks[1] as HTMLInputElement).checked).toBe(true);
+  expect((within(card).getByRole('checkbox', { name: '已审看此素材，加入本次确认' }) as HTMLInputElement).checked).toBe(true);
   expect(confirmReferenceMaterialReview).not.toHaveBeenCalled();
 });
 
@@ -398,10 +400,16 @@ it('limits explicit batch selection to the supported twenty exact reviews', asyn
   vi.clearAllMocks(); scope.current = true;
   const reviews = Array.from({ length: 21 }, (_, i) => ({ ...speechMaterial(), review_ref: { artifact_id: `review-${i}`, revision: 1 }, resource: { ...speechMaterial().resource, media_kind: 'image' as const } }));
   render(<ReferenceDirectorPanel {...props} controlledState={{ ...empty(), material_reviews: reviews }} />);
-  const checks = await screen.findAllByRole('checkbox', { name: '已审看此素材，加入本次确认' });
-  checks.slice(0, 20).forEach((check) => fireEvent.click(check));
-  expect(checks[20].hasAttribute('disabled')).toBe(true);
-  expect(checks[0].hasAttribute('disabled')).toBe(false);
+  const card = await screen.findByRole('article', { name: '素材确认' });
+  for (let index = 1; index <= 20; index += 1) {
+    expect(within(card).getByText(`第 ${index} / 21 条`)).toBeTruthy();
+    const check = within(card).getByRole('checkbox', { name: '已审看此素材，加入本次确认' });
+    expect(check.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(check);
+    fireEvent.click(within(card).getByRole('button', { name: '下一条' }));
+  }
+  expect(within(card).getByText('第 21 / 21 条')).toBeTruthy();
+  expect(within(card).getByRole('checkbox', { name: '已审看此素材，加入本次确认' }).hasAttribute('disabled')).toBe(true);
 });
 
 const stageMaterials = (): ReferenceDirectorState => ({ ...empty(),
@@ -429,11 +437,13 @@ it('keeps one grouped card through partial approval and collapses the fully conf
   vi.mocked(confirmReferenceMaterialReview).mockResolvedValue({});
   const view = render(<ReferenceDirectorPanel {...props} conversationMode controlledState={current} onRefresh={refresh} />);
   let card = await screen.findByRole('article', { name: '第 1 阶段素材确认' });
-  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  // One stage shows one candidate at a time; the rest are reachable by paging.
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
+  expect(within(card).getByText('第 1 / 2 条')).toBeTruthy();
   fireEvent.click(within(card).getAllByRole('button', { name: '我已审看，确认素材内容' })[0]);
   await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
   // A successful mutation must not locally remove a review before the read model arrives.
-  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
   const partial = stageMaterials();
   partial.material_stages![0].confirmed = 1;
   partial.material_stages![0].reviewed = 1;
@@ -441,7 +451,9 @@ it('keeps one grouped card through partial approval and collapses the fully conf
   view.rerender(<ReferenceDirectorPanel {...props} conversationMode controlledState={partial} onRefresh={refresh} />);
   expect(await screen.findByText('本阶段素材已就绪，请统一审看 · 已确认 1/2')).toBeTruthy();
   card = screen.getByRole('article', { name: '第 1 阶段素材确认' });
-  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  // The confirmed candidate drops out of the pager, leaving the pending one.
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
+  expect(within(card).getByText('第 2 / 2 条')).toBeTruthy();
   expect(within(card).getAllByRole('button', { name: '我已审看，确认素材内容' })).toHaveLength(1);
   const complete = stageMaterials();
   complete.material_stages![0] = { ...complete.material_stages![0], status: 'confirmed', confirmed: 2, reviewed: 2 };
@@ -453,13 +465,29 @@ it('keeps one grouped card through partial approval and collapses the fully conf
   const expand = within(card).getByRole('button', { name: '展开第 1 阶段素材确认' });
   expect(expand.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(expand);
-  expect(within(card).getAllByRole('img')).toHaveLength(2);
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
+  expect(within(card).getByText('第 1 / 2 条')).toBeTruthy();
   expect(within(card).queryByRole('checkbox')).toBeNull();
   // The summary is durable server state, not an in-memory approval receipt.
   view.unmount();
   render(<ReferenceDirectorPanel {...props} conversationMode controlledState={complete} />);
   expect(await screen.findByText('本阶段素材已全部确认（2/2）')).toBeTruthy();
   expect(screen.queryByRole('img')).toBeNull();
+});
+
+it('pages through one stage candidate at a time instead of stacking them', async () => {
+  vi.clearAllMocks();
+  render(<ReferenceDirectorPanel {...props} conversationMode controlledState={stageMaterials()} />);
+  const card = await screen.findByRole('article', { name: '第 1 阶段素材确认' });
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
+  expect(within(card).getByText('第 1 / 2 条')).toBeTruthy();
+  expect(within(card).getByRole('button', { name: '上一条' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(within(card).getByRole('button', { name: '下一条' }));
+  expect(within(card).getByText('第 2 / 2 条')).toBeTruthy();
+  expect(within(card).getByRole('button', { name: '下一条' }).hasAttribute('disabled')).toBe(true);
+  expect(within(card).getAllByRole('img')).toHaveLength(1);
+  fireEvent.click(within(card).getByRole('button', { name: '上一条' }));
+  expect(within(card).getByText('第 1 / 2 条')).toBeTruthy();
 });
 
 it('scopes batch confirmation to the selected exact reviews in one stage', async () => {

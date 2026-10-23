@@ -152,22 +152,20 @@ def test_saved_user_model_choice_fills_missing_step_fields_without_replacing_exp
     assert requested == before
 
 
-def test_dependent_video_joins_the_same_wave_and_the_edge_orders_execution(native_catalog):
+def test_dependent_video_waits_for_image_acceptance(native_catalog):
     image = step('ref_guest', {'aspectRatio': '9:16', 'count': 1, 'model': 'image-model',
                                'size': '1K', 'quality': 'high'}, 'image')
     video = step('shot_1')
     video['depends_on'] = ['ref_guest']
     video['references'] = [{'step_id': 'ref_guest', 'role': 'identity'}]
     intent = material_workflow_intent({'steps': [image, video]})
-    assert [item['id'] for item in intent['items']] == ['ref_guest', 'shot_1']
-    assert intent['items'][1]['reference_inputs'] == ['ref_guest']
+    assert [item['id'] for item in intent['items']] == ['ref_guest']
     assert intent['external_inputs'] == []
     compiled = catalog.compile_workflow_intent(intent)
     assert compiled['ok'], compiled
-    assert {'ref_guest', 'shot_1'} <= {node['id'] for node in compiled['plan']['nodes']}
-    edges = {(edge['source'], edge['target']): edge['link_type']
-             for edge in compiled['plan']['edges']}
-    assert edges[('ref_guest', 'shot_1')] == 'media_input_for'
+    assert {node['id'] for node in compiled['plan']['nodes']
+            if node['node_type'] == 'imageGenNode'} == {'ref_guest'}
+    assert not any(node['node_type'] == 'videoNode' for node in compiled['plan']['nodes'])
 
 
 def test_dependents_wait_when_an_incoherent_prerequisite_leaves_the_wave():
@@ -192,8 +190,8 @@ def test_unconfirmed_draft_returns_to_pending_so_the_whole_wave_is_replanned(tmp
                                 workflow_state_dir=tmp_path)
     assert state['material_lifecycle']['canvas_delivery_status'] == 'ready_to_submit'
     assert state['material_lifecycle']['generation_status'] == 'not_started'
-    assert state['reopenable_step_ids'] == ['image', 'video']
-    assert [item['id'] for item in state['workflow_intent']['items']] == ['image', 'video']
+    assert state['reopenable_step_ids'] == ['image']
+    assert [item['id'] for item in state['workflow_intent']['items']] == ['image']
     replanned = material_workflow_intent(state['work'], reopenable_step_ids=state['reopenable_step_ids'])
     second = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
                                    intent=replanned, compiled={'ok': True, 'plan': {'nodes': []}})
@@ -202,7 +200,8 @@ def test_unconfirmed_draft_returns_to_pending_so_the_whole_wave_is_replanned(tmp
                 'revision': attached['work_ref']['revision']},
         canvas_id='canvas', draft_id=second['draft_id'], draft_revision=1,
         workflow_state_dir=tmp_path)
-    assert {step['status'] for step in again['work']['steps']} == {'submitted'}
+    assert {step['id']: step['status'] for step in again['work']['steps']} == {
+        'image': 'submitted', 'video': 'planned'}
     superseded, _ = read_workflow_draft(project_dir=tmp_path, canvas_id='canvas',
                                         draft_id=first['draft_id'])
     assert superseded['status'] == 'cancelled'
@@ -280,6 +279,101 @@ def saved_work(tmp_path, steps):
     requirement = store.read_latest(prepared['work_ref']['artifact_id'])['payload']['requirements']
     prepared = prepare_material_work(store, plan_ref, requirement, steps, 'controlled-wave')
     return store, prepared['work_ref']
+
+
+def saved_image_work(tmp_path, controls):
+    store, plan_ref, prepared = setup_work(tmp_path)
+    work = store.read_latest(prepared['work_ref']['artifact_id'])['payload']
+    work['steps'][0]['generation_inputs'] = deepcopy(controls)
+    prepared = prepare_material_work(store, plan_ref, work['requirements'], work['steps'], 'image-controls')
+    return store, prepared['work_ref']
+
+
+@pytest.mark.parametrize('per_item', [False, True])
+def test_attachment_accepts_saved_controls_in_shared_or_item_fields(tmp_path, per_item):
+    controls = {'image_model': 'image-model', 'image_aspect_ratio': '9:16',
+                'image_resolution': '1k', 'image_quality': 'low',
+                'image_variants_per_node': 1}
+    store, ref = saved_image_work(tmp_path, controls)
+    intent = material_workflow_intent(store.read_latest(ref['artifact_id'])['payload'])
+    if not per_item:
+        for key in controls:
+            intent['items'][0].pop(key, None)
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                  intent=intent, compiled={'ok': True, 'plan': {'nodes': []}})
+    result = attach_material_execution_draft(store, ref, canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=1)
+    assert result['work']['steps'][0]['execution']['draft_revision'] == 1
+
+
+def test_parameter_revision_rebinds_only_after_saved_user_choices_match(tmp_path):
+    from novelvideo.freezone.workflow_drafts import patch_workflow_draft
+
+    controls = {'image_model': 'image-model', 'image_aspect_ratio': '9:16', 'image_resolution': '1k'}
+    store, ref = saved_image_work(tmp_path, controls)
+    intent = material_workflow_intent(store.read_latest(ref['artifact_id'])['payload'])
+    compiled = {'ok': True, 'skill_id': intent['skill_id'], 'plan': {'nodes': []}}
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                  intent=intent, compiled=compiled)
+    attached = attach_material_execution_draft(store, ref, canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=1)
+    choices = {**controls, 'image_quality': 'low', 'image_variants_per_node': 1}
+    intent['inputs'].update(choices)
+    revised, error = patch_workflow_draft(project_dir=tmp_path, canvas_id='canvas',
+        draft_id=draft['draft_id'], expected_revision=1, intent=intent, compiled=compiled)
+    assert error is None and revised['revision'] == 2
+    result = attach_material_execution_draft(store, attached['work_ref'], canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=2, confirmed_choices=choices)
+    actual = result['work']['steps'][0]
+    assert actual['execution']['draft_revision'] == 2
+    assert actual['generation_inputs']['image_quality'] == 'low'
+    assert actual['generation_inputs']['image_variants_per_node'] == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_syncs_attached_revision_using_durable_choices(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from novelvideo.api.routes import freezone, reference_material
+    from novelvideo.freezone.remix import reference_director
+    from novelvideo.freezone.workflow_drafts import patch_workflow_draft
+
+    controls = {'image_model': 'image-model', 'image_aspect_ratio': '9:16', 'image_resolution': '1k'}
+    store, ref = saved_image_work(tmp_path, controls)
+    intent = material_workflow_intent(store.read_latest(ref['artifact_id'])['payload'])
+    compiled = {'ok': True, 'skill_id': intent['skill_id'], 'plan': {'nodes': []}}
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                  intent=intent, compiled=compiled)
+    attached = attach_material_execution_draft(store, ref, canvas_id='canvas',
+        draft_id=draft['draft_id'], draft_revision=1)
+    choices = {**controls, 'image_quality': 'low', 'image_variants_per_node': 1}
+    intent['inputs'].update(choices)
+    revised, error = patch_workflow_draft(project_dir=tmp_path, canvas_id='canvas',
+        draft_id=draft['draft_id'], expected_revision=1, intent=intent, compiled=compiled)
+    assert error is None
+    monkeypatch.setattr(reference_director, 'list_director_artifacts', lambda *_a, **_k: {
+        'material_work': [{**attached['work'], 'work_ref': attached['work_ref']}]})
+    async def saved_choices(*_a):
+        return choices
+    monkeypatch.setattr(reference_material, '_current_material_generation_choices', saved_choices)
+    monkeypatch.setattr(freezone.canvas_store, 'read_canvas', lambda *_a: {'nodes': []})
+    ctx = SimpleNamespace(output_dir=tmp_path, state_dir=tmp_path,
+                          project_id='project', requester_user_id=store.created_by)
+    await freezone._sync_material_draft_before_claim(ctx, 'canvas', revised)
+    current = store.read_latest(ref['artifact_id'])
+    assert current['payload']['steps'][0]['execution']['draft_revision'] == 2
+    assert current['payload']['steps'][0]['generation_inputs']['image_quality'] == 'low'
+
+
+def test_attachment_rejects_item_override_of_saved_shared_controls(tmp_path):
+    store, ref = saved_work(tmp_path, [step()])
+    intent = material_workflow_intent(store.read_latest(ref['artifact_id'])['payload'])
+    intent['items'][0]['quality'] = '720p'
+    draft = create_workflow_draft(project_dir=tmp_path, project_id='project', canvas_id='canvas',
+                                  intent=intent, compiled={'ok': True, 'plan': {'nodes': []}})
+    with pytest.raises(ValueError, match='differs from ready material wave'):
+        attach_material_execution_draft(store, ref, canvas_id='canvas',
+            draft_id=draft['draft_id'], draft_revision=1)
+    assert store.read_latest(ref['artifact_id'])['revision'] == ref['revision']
 
 
 @pytest.mark.parametrize('drift', ['audio-type', 'mode', 'quality', 'missing'])

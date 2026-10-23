@@ -222,7 +222,37 @@ def test_newapi_transcription_groups_zero_duration_tokens_with_adjacent_word(tmp
 
     assert result["transcript"] == "一杯咖啡"
     assert [(word["text"], word["start_us"], word["end_us"]) for word in result["words"]] == [
-        ("一杯", 0, 300_000), ("咖", 400_000, 600_000), ("啡", 600_000, 800_000),
+        ("一", 0, 300_000), ("杯咖", 400_000, 600_000), ("啡", 600_000, 800_000),
+    ]
+
+
+def test_newapi_transcription_keeps_zero_duration_token_inside_one_span(tmp_path: Path) -> None:
+    from novelvideo.freezone.remix.newapi_transcription import NewApiSpeechTranscriber
+
+    media = tmp_path / "speech.wav"
+    media.write_bytes(b"audio")
+    transcriber = NewApiSpeechTranscriber(
+        api_key="test-key", base_url="https://gateway.example/v1",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+            "language": "chinese",
+            "text": "如果只能选一样,你每天最离不开的东西是什么?",
+            "words": [
+                {"word": "如果", "start": 0.0, "end": 0.48},
+                {"word": "只能", "start": 0.48, "end": 0.8},
+                {"word": "选", "start": 0.8, "end": 0.94},
+                {"word": "一样", "start": 0.94, "end": 1.26},
+                {"word": "你", "start": 1.54, "end": 1.54},
+                {"word": "每天", "start": 1.54, "end": 1.92},
+                {"word": "最离不开的东西是什么", "start": 1.92, "end": 3.32},
+            ],
+        })),
+    )
+
+    result = transcribe_media(media, "auto", aligner=transcriber)
+
+    assert result["transcript"] == "如果只能选一样,你每天最离不开的东西是什么?"
+    assert [word["text"] for word in result["words"]] == [
+        "如果", "只能", "选", "一样", "你每天", "最离不开的东西是什么",
     ]
 
 

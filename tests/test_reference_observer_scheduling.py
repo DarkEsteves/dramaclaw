@@ -249,7 +249,7 @@ async def test_100_tenant_1000_record_observer_groups_reads_zero_idle_models_and
         def _assert_current(self, ctx, run, **kwargs):
             visited.add(run['run_id'])
             return {'nodes':[]}
-        async def continue_commission(self, *, ctx, run_id, event_key):
+        async def continue_commission(self, *, ctx, run_id, event_key, wake_event=None):
             updated = store.wake_waiting(ctx, run_id, {'artifact_id':run_id,'revision':1}, 'preparing_materials', event_key=event_key)
             if updated:
                 launches.append(run_id)
@@ -577,7 +577,7 @@ async def test_notification_failure_retries_only_notification_then_marks_settlem
             attempts.append(event_key)
             if len(attempts) == 1:
                 raise RuntimeError('notification failed')
-        async def continue_commission(self, *, ctx, run_id, event_key):
+        async def continue_commission(self, *, ctx, run_id, event_key, wake_event=None):
             return db.wake_waiting(ctx, run_id, commission['commission_ref'], 'preparing_materials', event_key=event_key)
     monkeypatch.setattr(module, 'read_reference_commission', lambda *args, **kwargs: commission)
     observer = module.ReferenceProductionObserver(Coordinator(db))

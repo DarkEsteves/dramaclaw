@@ -436,7 +436,46 @@ def confirm_material_review(store, review_ref: dict, canvas: dict, *, canvas_id:
     return {'review_ref':{'artifact_id':revised['id'],'revision':revised['revision']},'review':revised['payload']}
 
 
-def attach_material_execution_draft(store, work_ref: dict, *, canvas_id: str, draft_id: str, draft_revision: int, workflow_state_dir: Path | None = None, canvas: dict | None = None) -> dict:
+def _material_intent_items(intent: dict, work: dict, *, expected_items: list[dict] | None = None) -> list[dict]:
+    """Compare effective controls, not their shared/per-item storage location."""
+    from .material_work import _material_generation_controls
+
+    kinds = {step['id']: step['media_kind'] for step in work['steps']}
+    shared = intent.get('inputs') or {}
+    items = []
+    for item in intent.get('items', []):
+        kind = kinds.get(item.get('id'))
+        if kind not in {'image', 'video'}:
+            items.append(item)
+            continue
+        controls = {}
+        identity = {}
+        for key, value in item.items():
+            try:
+                control = _material_generation_controls({
+                    'media_kind': kind, 'generation_inputs': {key: value}})
+            except ValueError:
+                control = {}
+            if control:
+                for field, setting in control.items():
+                    if field in controls and (type(controls[field]) is not type(setting)
+                                              or controls[field] != setting):
+                        raise ValueError('material generation control aliases conflict')
+                    controls[field] = setting
+            else:
+                identity[key] = value
+        effective = {key: value for key, value in shared.items()
+                     if key.startswith(kind + '_')}
+        if expected_items is not None:
+            target = next((row for row in expected_items if row.get('id') == item.get('id')), {})
+            effective = {key: value for key, value in effective.items()
+                         if key in target.get('generation_controls', {})}
+        effective.update(controls)
+        items.append({**identity, 'generation_controls': effective})
+    return items
+
+
+def attach_material_execution_draft(store, work_ref: dict, *, canvas_id: str, draft_id: str, draft_revision: int, workflow_state_dir: Path | None = None, canvas: dict | None = None, confirmed_choices: dict | None = None) -> dict:
     from novelvideo.freezone.workflow_drafts import read_workflow_draft
     state_dir = workflow_state_dir if workflow_state_dir is not None else store.project_dir
     saved = store.read(work_ref['artifact_id'], work_ref['revision'])
@@ -447,19 +486,31 @@ def attach_material_execution_draft(store, work_ref: dict, *, canvas_id: str, dr
         raise ValueError('native workflow draft scope or revision differs')
     # A wrong draft that was never confirmed is replanned: include the steps it
     # still holds so the whole graph is recompiled in one wave.
-    reopenable_step_ids = reopenable_material_step_ids(state_dir, canvas_id, saved['payload'])
-    expected = material_workflow_intent(saved['payload'], canvas=canvas, store=store,
+    from .material_work import _apply_confirmed_material_choices, material_parameter_conflicts
+
+    work = deepcopy(saved['payload'])
+    if material_parameter_conflicts(work['steps'], confirmed_choices):
+        raise ValueError('native workflow draft generation inputs conflict with saved user choices')
+    work['steps'] = _apply_confirmed_material_choices(work['steps'], confirmed_choices)
+    if confirmed_choices:
+        work['confirmed_generation_choices'] = confirmed_choices
+    reopenable_step_ids = reopenable_material_step_ids(state_dir, canvas_id, work)
+    expected = material_workflow_intent(work, canvas=canvas, store=store,
                                         reopenable_step_ids=reopenable_step_ids)
-    # Compilers normalize optional defaults; compare executable identity and supplied parameters.
     intent = draft.get('intent', {})
-    if intent.get('skill_id') != expected['skill_id'] or intent.get('items') != expected['items'] or intent.get('external_inputs', []) != expected['external_inputs']:
+    if intent.get('skill_id') != expected['skill_id'] or intent.get('external_inputs', []) != expected['external_inputs']:
+        raise ValueError('native workflow draft differs from ready material wave')
+    expected_items = _material_intent_items(expected, work)
+    # Extra shared defaults have always been allowed; explicit item controls
+    # and every saved control must match, including their JSON value types.
+    supplied_items = _material_intent_items(intent, work, expected_items=expected_items)
+    if store._canonical(supplied_items) != store._canonical(expected_items):
         raise ValueError('native workflow draft differs from ready material wave')
     if expected['inputs']:
         supplied = intent.get('inputs')
         if (not isinstance(supplied, dict) or any(key not in supplied for key in expected['inputs'])
                 or store._canonical({key: supplied[key] for key in expected['inputs']}) != store._canonical(expected['inputs'])):
             raise ValueError('native workflow draft generation inputs differ from saved material controls')
-    work = deepcopy(saved['payload'])
     for step in work['steps']:
         if step['id'] in {item['id'] for item in expected['items']}:
             step['status'] = 'submitted'

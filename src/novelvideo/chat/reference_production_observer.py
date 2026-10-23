@@ -901,7 +901,7 @@ class ReferenceProductionObserver:
         try:
             if observed.get('notice') and callable(getattr(self.coordinator, '_notify', None)):
                 await self.coordinator._notify(run,observed['notice'],observed['event_key'])
-            await self.coordinator.continue_commission(ctx=ctx,run_id=run['run_id'],event_key=observed['event_key'])
+            await self.coordinator.continue_commission(ctx=ctx,run_id=run['run_id'],event_key=observed['event_key'],wake_event=observed)
         except Exception as exc:
             if plan_delivery:
                 log_production_plan_diagnostic('production_plan.notification_failed', stage='notifying', error=exc, **plan_diagnostic)
@@ -1161,7 +1161,7 @@ class ReferenceProductionObserver:
             return False
         if notices:
             await self.coordinator._notify(run,'\n'.join(dict.fromkeys(notices)),observed['event_key'])
-        await self.coordinator.continue_commission(ctx=ctx,run_id=run['run_id'],event_key=observed['event_key'])
+        await self.coordinator.continue_commission(ctx=ctx,run_id=run['run_id'],event_key=observed['event_key'],wake_event=observed)
         await self._acknowledge_settlements(ctx, run, store, observed)
         return True
 

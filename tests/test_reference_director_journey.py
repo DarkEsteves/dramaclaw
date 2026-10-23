@@ -113,7 +113,10 @@ async def test_observer_resolves_scope_and_wakes_from_persisted_state(tmp_path):
             continuations.append(kwargs)
     await ReferenceProductionObserver(Coordinator()).observe_run(run)
     assert len(continuations) == 1
-    assert continuations[0] == {'ctx': resolved, 'run_id': 'r', 'event_key': expected_event_key}
+    assert continuations[0]['ctx'] is resolved
+    assert continuations[0]['run_id'] == 'r'
+    assert continuations[0]['event_key'] == expected_event_key
+    assert continuations[0]['wake_event']['event_key'] == expected_event_key
     assert expected_event_key.startswith('production:')
     assert commissions.read_reference_commission(store,c['commission_ref'],latest=True)['phase'] == 'awaiting_plan_review'
 

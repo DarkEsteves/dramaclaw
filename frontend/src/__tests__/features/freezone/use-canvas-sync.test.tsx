@@ -1370,18 +1370,50 @@ describe("useCanvasSync hydrate lifecycle", () => {
       );
     });
 
-    expect(applied).toBe(false);
-    expect(hook.result.current.status).toBe("conflict");
-    expect(hook.result.current.error).toBe(
-      "Agent update overlaps unsaved local edits",
-    );
-    expect(hook.result.current.revision).toBe(7);
-    expect(useCanvasStore.getState().nodes).toHaveLength(1);
-    expect(useCanvasStore.getState().nodes[0]?.id).not.toBe("agent-story-node");
-    expect(hook.result.current.readConflictSnapshot()).toMatchObject({
-      canvas_id: canvasId,
+    expect(applied).toBe(true);
+    expect(hook.result.current.status).toBe("ready");
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.revision).toBe(8);
+    expect(useCanvasStore.getState().nodes).toHaveLength(2);
+    expect(hook.result.current.readConflictSnapshot()).toBeNull();
+    await act(async () => { await hook.result.current.flush(); });
+    expect(vi.mocked(putFreezoneCanvas).mock.calls.at(-1)?.[2]).toMatchObject({
+      base_revision: 8, nodes: expect.arrayContaining([expect.objectContaining({ id: "agent-story-node" })]),
     });
 
+    hook.unmount();
+  });
+
+  it("automatically rebases a revision 409 after Agent changes without losing local edits", async () => {
+    const node = { id: 'shared', type: CANVAS_NODE_TYPES.upload, position: { x: 0, y: 0 }, data: { prompt: 'before' } };
+    vi.mocked(getFreezoneCanvas).mockResolvedValueOnce({ nodes: [node], edges: [], revision: 1 });
+    const hook = renderHook(() => useCanvasSync('rebase-project', 'agent-rebase'));
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'));
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [{ ...node, data: { ...node.data, imageUrl: '/generated.png' } }], edges: [], revision: 2 });
+    vi.mocked(putFreezoneCanvas).mockRejectedValueOnce(new ApiError('conflict', 409, { detail: { code: 'canvas_revision_conflict' } }));
+    vi.mocked(putFreezoneCanvas).mockResolvedValue({ saved: true, revision: 3 });
+    act(() => useCanvasStore.getState().updateNodeData('shared', { prompt: 'local edit' }));
+    await act(async () => { await hook.result.current.flush(); });
+    await waitFor(() => expect(putFreezoneCanvas).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(putFreezoneCanvas).mock.calls[1][2]).toMatchObject({ base_revision: 2,
+      nodes: [expect.objectContaining({ data: expect.objectContaining({ prompt: 'local edit', imageUrl: '/generated.png' }) })] });
+    expect(hook.result.current.status).toBe('ready');
+    expect(hook.result.current.readConflictSnapshot()).toBeNull();
+    hook.unmount();
+  });
+
+  it("still protects different edits to the same field during revision recovery", async () => {
+    const node = { id: 'shared', type: CANVAS_NODE_TYPES.upload, position: { x: 0, y: 0 }, data: { prompt: 'before' } };
+    vi.mocked(getFreezoneCanvas).mockResolvedValueOnce({ nodes: [node], edges: [], revision: 1 });
+    const hook = renderHook(() => useCanvasSync('rebase-project', 'overlap-rebase'));
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'));
+    vi.mocked(getFreezoneCanvas).mockResolvedValue({ nodes: [{ ...node, data: { prompt: 'remote edit' } }], edges: [], revision: 2 });
+    vi.mocked(putFreezoneCanvas).mockRejectedValueOnce(new ApiError('conflict', 409, { detail: { code: 'canvas_revision_conflict' } }));
+    act(() => useCanvasStore.getState().updateNodeData('shared', { prompt: 'local edit' }));
+    await act(async () => { await hook.result.current.flush(); });
+    expect(hook.result.current.status).toBe('conflict');
+    expect(useCanvasStore.getState().nodes[0].data.prompt).toBe('local edit');
+    expect(putFreezoneCanvas).toHaveBeenCalledTimes(1);
     hook.unmount();
   });
 

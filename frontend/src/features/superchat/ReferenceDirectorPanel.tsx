@@ -77,6 +77,7 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
   const [viewedOutputs, setViewedOutputs] = useState<Set<string>>(new Set());
   const [uploadSelections, setUploadSelections] = useState<Record<string,string>>({});
   const [expandedStages, setExpandedStages] = useState<Set<string>>(new Set());
+  const [stageMaterialIndex, setStageMaterialIndex] = useState<Record<string, number>>({});
   const canvasNodes = useCanvasStore((store) => store.nodes);
   const [reload, setReload] = useState(0);
   const scopeRef = useRef('');
@@ -353,6 +354,9 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
       const title = group.stage_number ? `第 ${group.stage_number} 阶段素材确认` : '素材确认';
       const open = group.status === 'awaiting_confirmation' || expandedStages.has(group.stage_id);
       const stageSelection = selectedMaterials.filter((review) => group.reviews.includes(review));
+      const pendingIndex = group.reviews.findIndex((review) => review.content.status !== 'passed');
+      const requestedIndex = stageMaterialIndex[group.stage_id] ?? Math.max(pendingIndex, 0);
+      const activeIndex = Math.min(Math.max(requestedIndex, 0), Math.max(group.reviews.length - 1, 0));
       return <article aria-label={title} className={panelClass} key={group.stage_id}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="font-medium">{title}</h3>
@@ -363,13 +367,18 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
         <p role="status">{group.status === 'preparing' ? '本阶段素材正在准备，全部通过技术检查后统一审看。'
           : group.status === 'confirmed' ? `本阶段素材已全部确认（${group.confirmed}/${group.total}）`
           : `本阶段素材已就绪，请统一审看 · 已确认 ${group.confirmed}/${group.total}`}</p>
-        {group.status !== 'preparing' && open ? <div className="space-y-3">{group.reviews.map((review) => {
+        {group.status !== 'preparing' && open ? <div className="space-y-3">{group.reviews.length > 1 ? <div className="flex items-center justify-between gap-2">
+          <button type="button" className="tap-button" disabled={activeIndex <= 0} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex - 1 }))}>上一条</button>
+          <span className="text-xs" role="status" aria-live="polite">第 {activeIndex + 1} / {group.reviews.length} 条</span>
+          <button type="button" className="tap-button" disabled={activeIndex >= group.reviews.length - 1} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex + 1 }))}>下一条</button>
+        </div> : null}{group.reviews.map((review, index) => {
+      if (index !== activeIndex) return null;
       const reviewKey = materialReviewKey(review);
       const validPath = !review.resource.media_path.startsWith('/') && !review.resource.media_path.includes('\\') && review.resource.media_path.split('/').every((part) => part && part !== '.' && part !== '..');
       const url = validPath && projectId ? `/static/projects/${encodeURIComponent(projectId)}/${review.resource.media_path.split('/').map(encodeURIComponent).join('/')}` : null;
       return <div className="space-y-2 border-t border-[var(--ui-border-soft)] pt-3" key={review.review_ref.artifact_id}>
         <p className="font-medium">{state.material_work.find((work) => work.work_ref.artifact_id === (review.current_work_ref ?? review.work_ref).artifact_id)?.steps.find((step) => step.id === review.step_id)?.label ?? '素材需审看'}{review.content.status === 'passed' ? ' · 已确认' : ''}</p>
-        {url ? review.resource.media_kind === 'image' ? <img src={url} alt="待审看素材" className="max-h-48 w-full object-contain" /> : review.resource.media_kind === 'video' ? <video ref={(element) => { mediaElements.current[reviewKey] = element; }} controls preload="metadata" src={url} className="max-h-48 w-full" aria-label="待审看素材" /> : <audio ref={(element) => { mediaElements.current[reviewKey] = element; }} controls preload="metadata" src={url} className="w-full" aria-label="待审听素材" /> : null}
+        {url ? review.resource.media_kind === 'image' ? <img src={url} alt="待审看素材" className="max-h-48 w-full object-contain" /> : review.resource.media_kind === 'video' ? <video ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="max-h-48 w-full" aria-label="待审看素材" /> : <audio ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="w-full" aria-label="待审听素材" /> : null}
         {projectId && canvasId && review.content.status !== 'passed' && review.resource.media_kind !== 'image' ? <MaterialSpeechReviewCard
           key={JSON.stringify([identityScope, materialReviewKey(review)])}
           projectId={projectId} canvasId={canvasId} agentId={agentId?.trim() || 'main'} review={review}

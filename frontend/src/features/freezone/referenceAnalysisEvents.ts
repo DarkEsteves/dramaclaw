@@ -63,6 +63,10 @@ function mergeItems<T extends { id: string }>(base: T[], local: T[], remote: T[]
 /** The registered save baseline makes local edits distinguishable from server
  * results. Conflicts must be checked before canvasRuntime reanchors autosave. */
 export function mergeReferenceAnalysisCanvas(remoteNodes: CanvasNode[], remoteEdges: CanvasEdge[], localNodes: CanvasNode[], localEdges: CanvasEdge[], _run: ReferenceAnalysisRun, baseline: FreezoneCanvasBaseline) {
+  return mergeConcurrentCanvas(remoteNodes, remoteEdges, localNodes, localEdges, baseline);
+}
+
+export function mergeConcurrentCanvas(remoteNodes: CanvasNode[], remoteEdges: CanvasEdge[], localNodes: CanvasNode[], localEdges: CanvasEdge[], baseline: FreezoneCanvasBaseline) {
   const base = normalizeCanvasData(baseline.nodes, baseline.edges);
   const local = normalizeCanvasData(localNodes, localEdges);
   const remote = normalizeCanvasData(remoteNodes, remoteEdges);

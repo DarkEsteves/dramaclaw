@@ -141,8 +141,63 @@ def _persist_generation_parameter_submission(
     return True
 
 
-def _production_stage_instruction(commission: dict) -> str:
-    """Describe the saved result to inspect for this production stage."""
+_WAKE_EVIDENCE_FIELDS = ('work_id', 'stage_step_ids', 'ready_step_ids', 'failures')
+
+
+def _saved_wake_event(wake_event: dict[str, Any] | None, event_key: str | None) -> dict[str, Any] | None:
+    """Keep the bounded reason a wake fired; it is evidence, never an authorization."""
+    if not isinstance(wake_event, dict):
+        return None
+    evidence = wake_event.get('evidence')
+    saved = {
+        'event_key': event_key,
+        'event': wake_event.get('event') if isinstance(wake_event.get('event'), dict) else None,
+        'notice': str(wake_event.get('notice') or '')[:500],
+        'evidence': ({key: evidence[key] for key in _WAKE_EVIDENCE_FIELDS if key in evidence}
+                     if isinstance(evidence, dict) else None),
+    }
+    return saved if saved['event'] or saved['notice'] or saved['evidence'] else None
+
+
+def _wake_event_instruction(wake_event: dict[str, Any] | None) -> str:
+    """Name the saved event that woke this turn, so a stage entry is not repeated."""
+    if not isinstance(wake_event, dict):
+        return ''
+    parts = []
+    if wake_event.get('notice'):
+        parts.append(str(wake_event['notice']).strip().rstrip('。'))
+    if isinstance(wake_event.get('event'), dict) and wake_event['event']:
+        parts.append('保存事件：' + json.dumps(wake_event['event'], ensure_ascii=False))
+    if isinstance(wake_event.get('evidence'), dict) and wake_event['evidence']:
+        parts.append('当前证据：' + json.dumps(wake_event['evidence'], ensure_ascii=False))
+    text = '；'.join(part for part in parts if part)
+    return ('本轮唤醒原因：' + text + '。') if text else ''
+
+
+def _current_wake_event(run: dict[str, Any]) -> dict[str, Any] | None:
+    """The saved wake reason is current only while its receipt is the latest one."""
+    wake = run.get('wake_event')
+    if not isinstance(wake, dict):
+        return None
+    receipts = run.get('commission_event_receipts') or []
+    if receipts and wake.get('event_key') not in {None, receipts[-1]}:
+        return None
+    return wake
+
+
+def _compact_material_state(state: dict[str, Any]) -> dict[str, Any]:
+    work = state.get('work') if isinstance(state.get('work'), dict) else {}
+    return {
+        'work_ref': state.get('work_ref'),
+        'ready_step_ids': state.get('ready_step_ids') or [],
+        'steps': [{'id': step.get('id'), 'status': step.get('status')}
+                  for step in work.get('steps') or [] if isinstance(step, dict)],
+    }
+
+
+def _production_stage_instruction(commission: dict, *, wake_event: dict | None = None,
+                                  material_state: dict | None = None) -> str:
+    """Describe the saved result and the verified event that produced this turn."""
     if commission.get('authoring_stage') == 'outline':
         return ('结构与台词已保存。读取当前方案，核对用户目标并按需使用 production_plan_command 局部修改。'
                 '此任务已结束，画面与声音尚未安排。根据用户授权明确调用节点 generate_production_plan_arrangement，'
@@ -153,15 +208,22 @@ def _production_stage_instruction(commission: dict) -> str:
         'drafting_plan': ('方向已确认。请将概括的创作目标写入作品方案节点，调用节点的 AI 起草动作，完成后读取实际方案审核并局部修正。', None),
         'awaiting_plan_review': ('作品方案已保存。请读取方案引用，审核并修正当前方案。', 'plan_ref'),
         'awaiting_plan_confirmation': ('作品方案已审核。请展示当前方案并等待用户确认。', 'plan_ref'),
-        'preparing_materials': ('已进入素材制作阶段。请读取当前工作包和实际保存的候选、任务及验收记录；仅有规划时继续补齐输入，不得声称已有候选。', 'work_ref'),
+        'preparing_materials': ('素材制作阶段进行中。请读取当前工作包和实际保存的候选、任务及验收记录；仅有规划时继续补齐输入，不得声称已有候选。', 'work_ref'),
         'aligning_speech': ('台词与素材已进入对齐阶段。请检查当前工作包的语音证据。', 'work_ref'),
         'composing': ('合成阶段已开始。请读取当前作品方案并检查真实合成任务。', 'plan_ref'),
         'reviewing_output': ('合成已有实际输出。请读取合成清单并验收实际输出。', 'manifest_ref'),
     }
     instruction, field = instructions.get(phase, ('请读取当前制作阶段和真实凭据，按已确认方案推进。', None))
     if field and commission.get(field):
-        instruction += ' 当前' + field + '：' + json.dumps(commission[field], ensure_ascii=False)
-    return instruction
+        suffix = '（素材阶段选择回执，不是工作包最新修订）' if phase == 'preparing_materials' else ''
+        instruction += ' 当前' + field + suffix + '：' + json.dumps(commission[field], ensure_ascii=False)
+    if phase == 'preparing_materials':
+        if material_state:
+            instruction += ' 实时工作包（以它为准）：' + json.dumps(material_state, ensure_ascii=False)
+        instruction += (' 工作包中 status=accepted 的步骤表示具有浏览器身份的用户已在画布完成验收；'
+                        '不得再次请求确认这些步骤，直接按素材阶段流程推进下一步。')
+    wake = _wake_event_instruction(wake_event)
+    return (wake + ' ' + instruction) if wake else instruction
 
 
 def _active_plan_failure_instruction(
@@ -812,7 +874,7 @@ class ReferenceRemixStore:
             reason = run.get("manual_resume_reason") or {}
             if reason.get("code") == "material_draft_not_submitted":
                 run["material_resume_checkpoint"] = reason
-            for key in ("manual_resume_required", "manual_resume_reason", "manual_resume_event_key"):
+            for key in ("manual_resume_required", "manual_resume_reason", "manual_resume_event_key", "wake_event"):
                 run.pop(key, None)
             if verified_stale is not None:
                 verified_stale.canvas_fence()
@@ -821,7 +883,8 @@ class ReferenceRemixStore:
             connection.commit()
             return run
 
-    def wake_waiting(self, ctx: ProjectContext, run_id: str, commission_ref: dict[str, Any], phase: str, *, event_key: str | None = None) -> dict[str, Any] | None:
+    def wake_waiting(self, ctx: ProjectContext, run_id: str, commission_ref: dict[str, Any], phase: str, *, event_key: str | None = None,
+                     wake_event: dict[str, Any] | None = None) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM reference_remix_continuations WHERE run_id=? AND project_id=? AND requester_user_id=? AND status IN ('awaiting_direction','drafting_plan','awaiting_plan_review','awaiting_plan_confirmation','preparing_materials','aligning_speech','composing','reviewing_output','completed','resume_failed') AND (lease_owner='' OR lease_until<=?)",
@@ -872,6 +935,9 @@ class ReferenceRemixStore:
             run.update(status=phase if run.get("production_watch_only") else "analysis_ready", commission_ref=commission_ref, commission_phase=phase,
                        pending_stage_observation=False,
                        resume_attempt=int(run.get("resume_attempt", 0)) + 1, error=None, updated_at=_now())
+            wake = _saved_wake_event(wake_event, event_key)
+            if wake is not None:
+                run["wake_event"] = wake
             connection.execute("UPDATE reference_remix_continuations SET status=?,payload_json=?,lease_owner='',lease_until=0 WHERE run_id=?",
                                (run["status"], json.dumps(run, ensure_ascii=False), run_id))
             return run
@@ -2510,8 +2576,20 @@ class ReferenceRemixCoordinator:
             if any(plan['schema'] == 'production_plan.v2' and is_unarranged_outline(plan['payload'])
                    for plan in saved_plans):
                 instruction_commission = {**commission, 'authoring_stage': 'outline'}
+        wake_event = _current_wake_event(run)
+        material_state = None
+        if (commission and not plan_failure_instruction
+                and commission.get('phase') == 'preparing_materials' and commission.get('work_ref')):
+            from novelvideo.freezone.remix.material_execution import read_material_state
+            try:
+                material_state = _compact_material_state(await asyncio.to_thread(
+                    read_material_state, artifact_store, commission['work_ref'],
+                    include_workflow_intent=False))
+            except (ValueError, KeyError, FileNotFoundError):
+                material_state = None
         stage_instruction = (
-            plan_failure_instruction or _production_stage_instruction(instruction_commission)
+            plan_failure_instruction or _production_stage_instruction(
+                instruction_commission, wake_event=wake_event, material_state=material_state)
         ) if commission else None
         intent = {"schema_version": "freezone_workflow_intent.v1", "skill_id": "reference-video-remix", "user_goal": run["goal"], "inputs": run["inputs"],
                   "external_inputs": [{"id": "reference_analysis", "node_id": run["analysis_node_id"], "media_kind": "reference_analysis"}]}
@@ -2618,10 +2696,16 @@ class ReferenceRemixCoordinator:
                 + "\n[/REFERENCE_REMIX_CURRENT_CREATIVE_INPUT]"
             )
         prompt += "\n以下引用来自当前已保存画布；用原生 artifact API 读取完整结果，动态选中与参数仍需浏览器：\n" + json.dumps({"saved_artifact_refs": saved_context}, ensure_ascii=False)
+        confirmed_steps = [step['id'] for step in (material_state or {}).get('steps', [])
+                           if step.get('status') == 'accepted']
+        confirmation_rule = (
+            '画布已确认的素材步骤（' + '、'.join(confirmed_steps) + '）不得再次请求确认，请直接推进下一阶段；'
+            if confirmed_steps else '方案和素材仍走现有确认流程；'
+        )
         agent_directive = (
             (stage_instruction if commission else '原片分析结果已保存。请读取原片拆解并提出复刻方向。')
-            + '依据用户已确认的方向推进；未确认的方向请在普通对话中征询，方案和素材仍走现有确认流程。'
-            '不要重新分析原片，也不要代替用户确认。'
+            + '依据用户已确认的方向推进；未确认的方向请在普通对话中征询，' + confirmation_rule
+            + '不要重新分析原片，也不要代替用户确认。'
         )
         prompt = agent_directive + "\n\n" + prompt
         from novelvideo.chat.reference_turn_outcome import ReferenceTurnOutcome, context_failure_code, analysis_summary_reads
@@ -2696,7 +2780,21 @@ class ReferenceRemixCoordinator:
                     for receipt in self._json_objects(event.get("result_json")) + self._json_objects(event.get("output")):
                         if receipt.get("ok") is True and receipt.get("status") == "workflow_draft_ready" and receipt.get("draft_id"):
                             receipt["tool_name"] = name
-                            await self._record_draft_receipt(run, ctx, turn_id, receipt)
+                            # Recording can enrich a receipt with the latest work
+                            # revision. Keep the reported revision too: an older
+                            # successful event must not recover a newer failure.
+                            reported_work_ref = dict(receipt.get("work_ref") or {})
+                            verified_work_ref = await self._record_draft_receipt(run, ctx, turn_id, receipt)
+                            failed_work_ref = (material_failure or {}).get("work_ref") or {}
+                            if (name in {"freezone_prepare_material_work", "freezone_prepare_material_stage"}
+                                    and event.get("status") not in {"failed", "error"}
+                                    and verified_work_ref and failed_work_ref
+                                    and reported_work_ref.get("artifact_id") == failed_work_ref["artifact_id"] == verified_work_ref["artifact_id"]
+                                    and type(reported_work_ref.get("revision")) is int
+                                    and failed_work_ref["revision"] <= reported_work_ref["revision"] <= verified_work_ref["revision"]):
+                                material_failure = None
+                                if outcome.blocker and outcome.blocker.get("code") == "material_work_failed":
+                                    outcome.blocker = None
                             break
             elif event_type in {"turn_started", "turn_completed"}:
                 if (event_type == "turn_completed" and isinstance(event.get("error"), dict)
@@ -3109,7 +3207,8 @@ class ReferenceRemixCoordinator:
             return None
         return public_workflow_draft(draft)
 
-    async def _record_draft_receipt(self, run: dict[str, Any], ctx: ProjectContext, turn_id: str, receipt: dict[str, Any]) -> None:
+    async def _record_draft_receipt(self, run: dict[str, Any], ctx: ProjectContext, turn_id: str, receipt: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a scoped draft and return its durably verified material work ref."""
         from novelvideo.freezone.workflow_drafts import read_workflow_draft
         draft, error = await asyncio.to_thread(read_workflow_draft, project_dir=ctx.state_dir, canvas_id=run["canvas_id"], draft_id=str(receipt["draft_id"]))
         compiled = (draft or {}).get("compiled") or {}
@@ -3123,6 +3222,7 @@ class ReferenceRemixCoordinator:
         if not isinstance(external, list):
             external = []
         matching_source = any(item.get("node_id") == run["analysis_node_id"] and item.get("media_kind") == "reference_analysis" for item in external)
+        verified_work_ref = None
         if run.get("commission_phase") == "preparing_materials" and draft:
             # Recovery may have only the native draft receipt. Its saved work
             # package supplies the material execution mapping, never model prose.
@@ -3141,9 +3241,13 @@ class ReferenceRemixCoordinator:
                 commission = await asyncio.to_thread(artifact_store.read_latest, run["commission_ref"]["artifact_id"])
                 if work["payload"]["plan_ref"]["artifact_id"] != (commission["payload"].get("plan_ref") or {}).get("artifact_id"):
                     continue
-                if any((step.get("execution") or {}).get("draft_id") == draft["draft_id"] and (step.get("execution") or {}).get("canvas_id") == run["canvas_id"] for step in work["payload"]["steps"]):
+                if any((step.get("execution") or {}).get("draft_id") == draft["draft_id"]
+                       and (step.get("execution") or {}).get("canvas_id") == run["canvas_id"]
+                       and (step.get("execution") or {}).get("draft_revision") == draft["revision"]
+                       for step in work["payload"]["steps"]):
                     matching_source = True
-                    receipt["work_ref"] = {"artifact_id": work["id"], "revision": work["revision"]}
+                    verified_work_ref = {"artifact_id": work["id"], "revision": work["revision"]}
+                    receipt["work_ref"] = verified_work_ref
                     receipt.setdefault("tool_name", "freezone_prepare_material_work")
                     break
         if (error or not draft or draft.get("project_id") != run["project_id"] or draft.get("canvas_id") != run["canvas_id"]
@@ -3156,6 +3260,7 @@ class ReferenceRemixCoordinator:
         if not await asyncio.to_thread(self.store.update_owned, run, self.owner_token):
             raise ValueError("reference continuation lease was lost")
         await self._persist_draft_receipt(run, turn_id, receipt)
+        return verified_work_ref
 
     async def _persist_draft_receipt(self, run: dict[str, Any], turn_id: str, receipt: dict[str, Any]) -> None:
         part = {"id": f"reference-draft:{run['run_id']}:{receipt['draft_id']}", "type": "tool_status",
@@ -3251,7 +3356,8 @@ class ReferenceRemixCoordinator:
             if succeeded and not self._stopping:
                 await self._wait_for_schedule_wake(cadence.delay(changed))
 
-    async def continue_commission(self, *, ctx: ProjectContext, run_id: str, event_key: str | None = None) -> dict[str, Any]:
+    async def continue_commission(self, *, ctx: ProjectContext, run_id: str, event_key: str | None = None,
+                                  wake_event: dict[str, Any] | None = None) -> dict[str, Any]:
         """Wake a waiting continuation after the host persisted a real decision."""
         _require_automatic_reference_continuation()
         from novelvideo.freezone.remix.store import RemixArtifactStore
@@ -3271,7 +3377,7 @@ class ReferenceRemixCoordinator:
             return public_run(run)
         if commission["phase"] == run.get("commission_phase") and not event_key:
             return public_run(run)
-        updated = await asyncio.to_thread(self.store.wake_waiting, ctx, run_id, commission["commission_ref"], commission["phase"], event_key=event_key)
+        updated = await asyncio.to_thread(self.store.wake_waiting, ctx, run_id, commission["commission_ref"], commission["phase"], event_key=event_key, wake_event=wake_event)
         if updated:
             self._ensure_worker(updated)
             return public_run(updated)

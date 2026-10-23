@@ -342,7 +342,10 @@ async def test_saved_plan_recovers_premature_failure_without_another_generic_wak
     monkeypatch.setattr(module, 'production_event', lambda *_args, **_kwargs: {'event': event, 'event_key': 'saved:plan'})
     monkeypatch.setattr(observer, '_advance_observed', lambda *_args: None)
     assert await observer.observe_run(run) is True
-    assert calls == [{'ctx': ctx, 'run_id': 'continuation', 'event_key': 'saved:plan'}]
+    assert calls[0]['ctx'] is ctx
+    assert calls[0]['run_id'] == 'continuation'
+    assert calls[0]['event_key'] == 'saved:plan'
+    assert calls[0]['wake_event']['event']['type'] == 'plan_ready'
 
 
 def test_plan_settlement_conflict_is_scoped_and_stable(monkeypatch, tmp_path):

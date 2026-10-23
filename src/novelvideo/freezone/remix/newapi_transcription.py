@@ -341,15 +341,17 @@ def _timed_transcript(payload: object, language: str) -> dict[str, Any]:
         ):
             raise RuntimeError("NewAPI audio-transcribe returned invalid word timestamps")
         if round(end * 1_000_000) == round(start * 1_000_000):
-            # The model occasionally gives a spoken token zero duration. Keep
-            # its text with a timed neighbor instead of inventing a timestamp.
-            if words:
-                words[-1]["text"] += text
-            else:
-                pending_prefix += text
+            # The model occasionally gives a spoken token zero duration. Attach
+            # its text to the next timed token: a zero-duration token usually
+            # sits on a boundary where the provider transcript carries
+            # punctuation or spacing, which would break the later span match.
+            pending_prefix += text
             continue
         words.append({"text": pending_prefix + text, "start": start, "end": end})
         pending_prefix = ""
+    if pending_prefix and words:
+        # A trailing zero-duration token still belongs to the spoken text.
+        words[-1]["text"] += pending_prefix
     if not words:
         raise RuntimeError("NewAPI audio-transcribe did not return usable word timestamps")
 

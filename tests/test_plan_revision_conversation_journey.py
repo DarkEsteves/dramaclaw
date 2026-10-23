@@ -36,7 +36,7 @@ def _journey(reviewed_plan, monkeypatch, *, phase='awaiting_plan_confirmation', 
         def scope(self, run):
             return ChatScope(kind="project", id="p", surface="freezone", canvas_id="c",
                              agent_id="main", state_dir=str(ctx.state_dir))
-        async def continue_commission(self, *, ctx, run_id, event_key):
+        async def continue_commission(self, *, ctx, run_id, event_key, wake_event=None):
             current = read_reference_commission(artifacts, commission['commission_ref'], latest=True)
             updated = db.wake_waiting(ctx, run_id, current['commission_ref'], current['phase'], event_key=event_key)
             if updated:

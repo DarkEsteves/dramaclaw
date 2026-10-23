@@ -12,10 +12,9 @@ export type RemoteCanvasMerge = (
 
 export interface RemoteCanvasApplyOptions {
   /**
-   * Refuse to replace the open canvas when it contains edits that have not
-   * reached the server yet. Remote writes initiated by the current Agent use
-   * this guard: a clean canvas can adopt the Agent's new revision silently,
-   * while genuine concurrent local work still gets the recovery overlay.
+   * Merge pending local edits against the saved baseline before adopting an
+   * Agent revision. Independent changes refresh silently; only overlapping
+   * edits to the same content require the recovery overlay.
    */
   protectUnsavedLocalEdits?: boolean;
   conflictMessage?: string;
