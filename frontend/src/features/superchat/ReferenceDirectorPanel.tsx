@@ -7,6 +7,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import type { ReferenceAnalysisRun } from '@/api/referenceAnalysisRuns';
 import { useAuthStore } from '@/stores/auth-store';
 import { refreshProductionCanvas } from './productionCanvasRefresh';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { MaterialSpeechReviewCard } from './MaterialSpeechReviewCard';
 
 const DIRECTOR_STATUS_EVENT = 'reference-director-status';
@@ -35,6 +36,31 @@ const samePlan = (ref: unknown, preview: DirectorSpeechCorrection) => {
 };
 const planArtifactId = (ref: unknown) => (ref as { artifactId?: string } | null)?.artifactId;
 const materialReviewKey = (review: DirectorMaterialReview) => JSON.stringify([review.review_ref, review.work_ref, review.step_id, review.resource]);
+const TECHNICAL_CHECKS: Record<string, string> = { current_canvas_node: '画布素材与当前节点一致', project_file_hash: '文件完整未变', native_media_probe: '文件可播放并带声音轨道' };
+function humanizeFinding(value: string) {
+  // Host checks are machine codes; a user only needs the conclusion. Legacy English
+  // fallbacks say "a human must look", which the confirmation button already states.
+  if (TECHNICAL_CHECKS[value]) return TECHNICAL_CHECKS[value];
+  if (/^Actual content inspection unavailable/i.test(value)) return '系统未做自动内容判断，请以你的审看为准。';
+  if (/^Audio content inspection unavailable/i.test(value)) return '系统未做自动声音判断，请完整试听。';
+  return value;
+}
+type Tone = 'success' | 'warning' | 'danger' | 'muted';
+const statusDot = (tone: Tone) => `inline-block h-1.5 w-1.5 shrink-0 rounded-full ${tone === 'success' ? 'bg-success' : tone === 'danger' ? 'bg-destructive' : tone === 'warning' ? 'bg-warning' : 'bg-text-muted/60'}`;
+function technicalSummary(technical: DirectorMaterialReview['technical']): { label: string; tone: Tone } {
+  if (technical.status === 'rejected') return { label: '文件检查未通过', tone: 'danger' };
+  if (technical.status !== 'passed') return { label: '文件检查待完成', tone: 'muted' };
+  return { label: '文件可用', tone: 'success' };
+}
+function reviewHint(review: DirectorMaterialReview) {
+  if (review.technical.status !== 'passed') return '文件检查通过后才能确认。';
+  const kind = review.resource.media_kind;
+  if (kind === 'image') return '请确认画面主体、构图与细节符合预期。';
+  if (kind === 'audio') return '请完整试听，确认语气、音量与噪音可接受。';
+  return '请完整观看并试听，重点确认画面主体与声音是否符合预期。';
+}
+const pagerArrowClass = 'inline-flex size-6 shrink-0 items-center justify-center rounded-[var(--ui-radius-pill)] border border-[var(--ui-border-soft)] bg-[rgba(var(--bg-rgb)/0.42)] text-text-muted transition-colors duration-[var(--duration-fast)] enabled:hover:border-[var(--ui-border-strong)] enabled:hover:text-text disabled:cursor-not-allowed disabled:opacity-40';
+const pagerSegmentClass = 'h-[3px] flex-1 rounded-full bg-[var(--ui-border-soft)] transition-colors duration-[var(--duration-base)] data-[state=done]:bg-success/45 data-[state=active]:bg-[rgb(var(--accent-rgb))]';
 const panelClass = 'rounded-[var(--ui-radius-xl)] border border-[var(--ui-border-soft)] bg-[var(--ui-surface-panel)] p-3 space-y-2';
 
 export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected, controlledState, progress,
@@ -357,29 +383,49 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
       const pendingIndex = group.reviews.findIndex((review) => review.content.status !== 'passed');
       const requestedIndex = stageMaterialIndex[group.stage_id] ?? Math.max(pendingIndex, 0);
       const activeIndex = Math.min(Math.max(requestedIndex, 0), Math.max(group.reviews.length - 1, 0));
+      const statusText = group.status === 'preparing' ? '本阶段素材正在准备，全部通过技术检查后统一审看。'
+        : group.status === 'confirmed' ? `本阶段素材已全部确认（${group.confirmed}/${group.total}）`
+        : `本阶段素材已就绪，请统一审看 · 已确认 ${group.confirmed}/${group.total}`;
       return <article aria-label={title} className={panelClass} key={group.stage_id}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="font-medium">{title}</h3>
-          {group.status === 'confirmed' ? <button type="button" className="tap-button" aria-expanded={open} aria-label={`${open ? '收起' : '展开'}${title}`} onClick={() => setExpandedStages((prior) => {
-            const next = new Set(prior); if (open) next.delete(group.stage_id); else next.add(group.stage_id); return next;
-          })}>{open ? '收起素材' : '查看已确认素材'}</button> : null}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 space-y-1">
+            <h3 className="text-[13px] font-semibold tracking-[0.01em]">{title}</h3>
+            <p role="status" className="text-xs leading-relaxed text-text-muted">{statusText}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="tap-chip px-2 py-0.5 text-[11px] tabular-nums" aria-hidden="true">{group.confirmed}/{group.total}</span>
+            {group.status === 'confirmed' ? <button type="button" className="tap-button" aria-expanded={open} aria-label={`${open ? '收起' : '展开'}${title}`} onClick={() => setExpandedStages((prior) => {
+              const next = new Set(prior); if (open) next.delete(group.stage_id); else next.add(group.stage_id); return next;
+            })}>{open ? '收起素材' : '查看已确认素材'}</button> : null}
+          </div>
         </div>
-        <p role="status">{group.status === 'preparing' ? '本阶段素材正在准备，全部通过技术检查后统一审看。'
-          : group.status === 'confirmed' ? `本阶段素材已全部确认（${group.confirmed}/${group.total}）`
-          : `本阶段素材已就绪，请统一审看 · 已确认 ${group.confirmed}/${group.total}`}</p>
-        {group.status !== 'preparing' && open ? <div className="space-y-3">{group.reviews.length > 1 ? <div className="flex items-center justify-between gap-2">
-          <button type="button" className="tap-button" disabled={activeIndex <= 0} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex - 1 }))}>上一条</button>
-          <span className="text-xs" role="status" aria-live="polite">第 {activeIndex + 1} / {group.reviews.length} 条</span>
-          <button type="button" className="tap-button" disabled={activeIndex >= group.reviews.length - 1} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex + 1 }))}>下一条</button>
+        {group.status !== 'preparing' && open ? <div className="space-y-3">{group.reviews.length > 1 ? <div role="group" aria-label="素材翻页" className="flex items-center gap-2">
+          <button type="button" className={pagerArrowClass} aria-label="上一条" disabled={activeIndex <= 0} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex - 1 }))}>
+            <ChevronLeft className="size-3.5" strokeWidth={2} aria-hidden="true" />
+          </button>
+          <div className="flex flex-1 items-center gap-1" aria-hidden="true">
+            {group.reviews.map((review, index) => <span key={review.review_ref.artifact_id} data-state={index === activeIndex ? 'active' : review.content.status === 'passed' ? 'done' : 'idle'} className={pagerSegmentClass} />)}
+          </div>
+          <span className="min-w-8 text-center text-[11px] tabular-nums text-text-muted" role="status" aria-live="polite">{activeIndex + 1}/{group.reviews.length}</span>
+          <button type="button" className={pagerArrowClass} aria-label="下一条" disabled={activeIndex >= group.reviews.length - 1} onClick={() => setStageMaterialIndex((prior) => ({ ...prior, [group.stage_id]: activeIndex + 1 }))}>
+            <ChevronRight className="size-3.5" strokeWidth={2} aria-hidden="true" />
+          </button>
         </div> : null}{group.reviews.map((review, index) => {
       if (index !== activeIndex) return null;
       const reviewKey = materialReviewKey(review);
       const validPath = !review.resource.media_path.startsWith('/') && !review.resource.media_path.includes('\\') && review.resource.media_path.split('/').every((part) => part && part !== '.' && part !== '..');
       const url = validPath && projectId ? `/static/projects/${encodeURIComponent(projectId)}/${review.resource.media_path.split('/').map(encodeURIComponent).join('/')}` : null;
-      return <div className="space-y-2 border-t border-[var(--ui-border-soft)] pt-3" key={review.review_ref.artifact_id}>
-        <p className="font-medium">{state.material_work.find((work) => work.work_ref.artifact_id === (review.current_work_ref ?? review.work_ref).artifact_id)?.steps.find((step) => step.id === review.step_id)?.label ?? '素材需审看'}{review.content.status === 'passed' ? ' · 已确认' : ''}</p>
-        {url ? review.resource.media_kind === 'image' ? <img src={url} alt="待审看素材" className="max-h-48 w-full object-contain" /> : review.resource.media_kind === 'video' ? <video ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="max-h-48 w-full" aria-label="待审看素材" /> : <audio ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="w-full" aria-label="待审听素材" /> : null}
-        {projectId && canvasId && review.content.status !== 'passed' && review.resource.media_kind !== 'image' ? <MaterialSpeechReviewCard
+      const pending = review.content.status !== 'passed';
+      const technical = technicalSummary(review.technical);
+      const contentTone = review.content.status === 'passed' ? 'success' : review.content.status === 'rejected' ? 'danger' : 'warning';
+      const findings = [...(review.technical.checks ?? []), ...(review.technical.findings ?? []), ...(review.content.checks ?? []), ...(review.content.findings ?? [])];
+      return <div className="space-y-3 border-t border-[var(--ui-border-soft)] pt-3" key={review.review_ref.artifact_id}>
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="text-[13px] font-medium">{state.material_work.find((work) => work.work_ref.artifact_id === (review.current_work_ref ?? review.work_ref).artifact_id)?.steps.find((step) => step.id === review.step_id)?.label ?? '素材需审看'}{review.content.status === 'passed' ? ' · 已确认' : ''}</p>
+          <span className="tap-chip px-2 py-0.5 text-[11px] text-text-muted">{REVIEW_LABELS[review.content.status]}</span>
+        </div>
+        {url ? <div className="overflow-hidden rounded-[var(--ui-radius-lg)] border border-[var(--ui-border-soft)] bg-[var(--ui-surface-field)]">{review.resource.media_kind === 'image' ? <img src={url} alt="待审看素材" className="mx-auto max-h-56 w-full object-contain" /> : review.resource.media_kind === 'video' ? <video ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="max-h-56 w-full" aria-label="待审看素材" /> : <audio ref={(element) => { if (element) mediaElements.current[reviewKey] = element; else delete mediaElements.current[reviewKey]; }} controls preload="metadata" src={url} className="w-full" aria-label="待审听素材" />}</div> : null}
+        {projectId && canvasId && pending && review.resource.media_kind !== 'image' ? <MaterialSpeechReviewCard
           key={JSON.stringify([identityScope, materialReviewKey(review)])}
           projectId={projectId} canvasId={canvasId} agentId={agentId?.trim() || 'main'} review={review}
           active={(conversationMode || !!summaryTarget || expanded) && connected} refreshToken={progress ?? state}
@@ -387,28 +433,35 @@ export function ReferenceDirectorPanel({ projectId, canvasId, agentId, connected
             const media = mediaElements.current[reviewKey];
             if (media) { media.currentTime = seconds; void media.play()?.catch(() => {}); }
           }} /> : null}
-        <p>技术检查：{REVIEW_LABELS[review.technical.status]}</p>
-        <ul>{[...(review.technical.checks ?? []), ...(review.technical.findings ?? [])].map((finding, index) => <li key={index}>{finding}</li>)}</ul>
-        <p>内容检查：{REVIEW_LABELS[review.content.status]}</p>
-        <ul>{[...(review.content.checks ?? []), ...(review.content.findings ?? [])].map((finding, index) => <li key={index}>{finding}</li>)}</ul>
-        <button type="button" className="tap-button" onClick={() => locate(review.resource.node_id)}>查看素材节点</button>
-        {review.content.status !== 'passed' && review.resource.media_kind !== 'image' ? <label className="flex items-center gap-2 text-xs">
-          <input type="checkbox" checked={viewedMaterials.has(reviewKey)} disabled={Boolean(busy)} onChange={(event) => {
-            const checked = event.currentTarget.checked;
-            setViewedMaterials((prior) => { const next = new Set(prior); if (checked) next.add(reviewKey); else next.delete(reviewKey); return next; });
-          }} />{review.resource.media_kind === 'audio' ? '已完整试听当前素材' : '已完整观看并试听当前素材'}
-        </label> : null}
-        {review.content.status !== 'passed' ? <label className="flex items-center gap-2 text-xs">
-          <input type="checkbox" checked={batchMaterials.has(reviewKey)} disabled={!connected || Boolean(busy) || review.technical.status !== 'passed' || selectedMaterials.length >= 20 && !batchMaterials.has(reviewKey)} onChange={(event) => {
-            const checked = event.currentTarget.checked;
-            setBatchMaterials((prior) => { const next = new Set(prior); if (checked) next.add(reviewKey); else next.delete(reviewKey); return next; });
-          }} />已审看此素材，加入本次确认
-        </label> : null}
-        {review.content.status !== 'passed' ? <button type="button" className="tap-button tap-button-quiet-primary" disabled={!connected || Boolean(busy) || review.technical.status !== 'passed' || review.resource.media_kind !== 'image' && !viewedMaterials.has(reviewKey)} onClick={() => void confirmMaterial(review)}>{busy === review.review_ref.artifact_id ? '正在确认…' : '我已审看，确认素材内容'}</button> : null}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+          <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className={statusDot(technical.tone)} />{technical.label}</span>
+          <span className="inline-flex items-center gap-1.5 text-text-muted"><span aria-hidden="true" className={statusDot(contentTone)} />内容{review.content.status === 'passed' ? '已确认' : pending ? '待你确认' : '需返工'}</span>
+          <button type="button" className="tap-button ml-auto px-2 py-0.5 text-[11px]" onClick={() => locate(review.resource.node_id)}>查看素材节点</button>
+        </div>
+        {pending ? <p className="text-xs leading-relaxed text-text-muted">{reviewHint(review)}</p> : null}
+        {findings.length ? <details className="text-xs text-text-muted"><summary className="cursor-pointer">检查详情</summary><ul className="mt-1 space-y-0.5">{findings.map((finding, findingIndex) => <li key={findingIndex}>{humanizeFinding(finding)}</li>)}</ul></details> : null}
+        {pending ? <div className="space-y-2 rounded-[var(--ui-radius-lg)] bg-[var(--ui-surface-field)] p-2">
+          {review.resource.media_kind !== 'image' ? <label className="flex items-start gap-2 text-xs leading-relaxed">
+            <input type="checkbox" className="mt-0.5" checked={viewedMaterials.has(reviewKey)} disabled={Boolean(busy)} onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setViewedMaterials((prior) => { const next = new Set(prior); if (checked) next.add(reviewKey); else next.delete(reviewKey); return next; });
+            }} />{review.resource.media_kind === 'audio' ? '已完整试听当前素材' : '已完整观看并试听当前素材'}
+          </label> : null}
+          <details className="text-xs text-text-muted">
+            <summary className="cursor-pointer">一次确认本阶段的全部素材</summary>
+            <label className="mt-2 flex items-start gap-2 leading-relaxed">
+              <input type="checkbox" className="mt-0.5" checked={batchMaterials.has(reviewKey)} disabled={!connected || Boolean(busy) || review.technical.status !== 'passed' || selectedMaterials.length >= 20 && !batchMaterials.has(reviewKey)} onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                setBatchMaterials((prior) => { const next = new Set(prior); if (checked) next.add(reviewKey); else next.delete(reviewKey); return next; });
+              }} />已审看此素材，加入本次确认
+            </label>
+          </details>
+          <button type="button" className="tap-button tap-button-primary w-full" disabled={!connected || Boolean(busy) || review.technical.status !== 'passed' || review.resource.media_kind !== 'image' && !viewedMaterials.has(reviewKey)} onClick={() => void confirmMaterial(review)}>{busy === review.review_ref.artifact_id ? '正在确认…' : '我已审看，确认素材内容'}</button>
+        </div> : null}
       </div>;
     })}
     {group.status === 'awaiting_confirmation' && group.reviews.some((review) => review.content.status !== 'passed') ? <button type="button"
-      className="tap-button tap-button-quiet-primary" disabled={!connected || Boolean(busy) || !materialsReady(stageSelection)}
+      className="tap-button w-full" disabled={!connected || Boolean(busy) || !materialsReady(stageSelection)}
       onClick={() => void confirmBatch(group.reviews)}>{busy === 'material-batch' ? '正在确认已勾选素材…' : '确认已勾选的素材'}</button> : null}
         </div> : null}
       </article>;

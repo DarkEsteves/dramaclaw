@@ -337,6 +337,21 @@
   color: rgb(var(--accent-rgb));
 }
 
+.tap-button-primary {
+  border-color: transparent;
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 16px;
+}
+
+.tap-button-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--color-primary) 88%, white);
+  color: var(--color-primary-foreground);
+}
+
 .tap-button-quiet-primary:hover:not(:disabled) {
   border-color: rgb(var(--accent-rgb) / 0.5);
   background: rgb(var(--accent-rgb) / 0.16);

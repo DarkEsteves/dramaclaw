@@ -1377,7 +1377,8 @@ describe("useCanvasSync hydrate lifecycle", () => {
     expect(useCanvasStore.getState().nodes).toHaveLength(2);
     expect(hook.result.current.readConflictSnapshot()).toBeNull();
     await act(async () => { await hook.result.current.flush(); });
-    expect(vi.mocked(putFreezoneCanvas).mock.calls.at(-1)?.[2]).toMatchObject({
+    const calls = vi.mocked(putFreezoneCanvas).mock.calls;
+    expect(calls[calls.length - 1]?.[2]).toMatchObject({
       base_revision: 8, nodes: expect.arrayContaining([expect.objectContaining({ id: "agent-story-node" })]),
     });
 
