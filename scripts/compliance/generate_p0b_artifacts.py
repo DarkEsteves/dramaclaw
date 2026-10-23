@@ -28,8 +28,14 @@ THIRD_PARTY_PATH_OVERRIDES: tuple[tuple[str, str, str, str], ...] = (
     (
         "LICENSES/MIT.txt",
         "MIT",
-        "OpenFilm contributors",
-        "MIT License text",
+        "2022-2025 Kùzu Inc.; 2025-2026 Ladybug Memory Inc.",
+        "upstream MIT license text",
+    ),
+    (
+        "src/novelvideo/assets/ladybug-json/",
+        "MIT",
+        "2022-2025 Kùzu Inc.; 2025-2026 Ladybug Memory Inc.; 2020 YaoYuan",
+        "unmodified upstream Ladybug JSON extension (links yyjson); see bundled LICENSE.txt and SHA256SUMS",
     ),
     (
         "LICENSES/OFL-1.1.txt",
@@ -396,10 +402,11 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
+    "src/novelvideo/assets/ladybug-json/**",
     "LICENSES/MIT.txt",
 ]
 precedence = "override"
-SPDX-FileCopyrightText = "OpenFilm contributors"
+SPDX-FileCopyrightText = "2022-2025 Kùzu Inc.; 2025-2026 Ladybug Memory Inc.; 2020 YaoYuan"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
@@ -689,6 +696,7 @@ def write_notice(packages: list[PackageLicense]) -> None:
             "- @playcanvas/splat-transform ^2.0.3: MIT; optional world asset conversion tool",
             "- ffmpeg/ffprobe: external system executables; license depends on the user's system build",
             "- OpenFilm Studio v0.2.4 (vendor/openfilm): MIT; bundled video editor runtime",
+            "- Ladybug JSON extension 0.16.0 (links yyjson): MIT; unmodified upstream libraries, notices in src/novelvideo/assets/ladybug-json",
             "- playwright-core 1.61.1: Apache-2.0; drives the editor's headless browser",
             "- Inter, Noto CJK: SIL OFL 1.1; editor and container fonts",
             "- React, React DOM: MIT; editor bundle",
