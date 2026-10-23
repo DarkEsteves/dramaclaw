@@ -119,6 +119,18 @@ assertion or display a direction card. Never call
 `freezone_prepare_reference_decision` for direction, including after a
 deterministic submission rejection.
 
+### Target-video goal, not source-video summary
+
+`goal` describes what the NEW video should become, not what the reference video
+contains. Carry forward the latest agreed product replacement, language,
+dialogue rewrite, preserved features and constraints from the conversation.
+“Start” or “continue” approves the preceding discussed brief; it does not reset
+to the initial analysis request. Source analysis is evidence, not an instruction
+to preserve every original line, product, title card or scene. Literal recreation
+is a constraint only when the user explicitly requests it. Before submission,
+check that each agreed change is still expressed in `goal`; leave unspecified
+shots, dialogue and use cases to the plan node rather than inventing them here.
+
 On `direction_submission_invalid` or `direction_source_changed`, read the
 returned field path and current references. Fix only the malformed typed input
 or reread the current saved revision; ask the user when the creative content is

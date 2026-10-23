@@ -659,6 +659,7 @@ def _validate_step_dialogue(plan: dict, work: dict) -> None:
     steps = {step["id"]: step for step in work["steps"]}
     sources = planned_speech_sources(plan)
     source_by_turn = {turn_id: placement_id for placement_id, ids in sources.items() for turn_id in ids}
+    ordered_turns = [turn_id for ids in sources.values() for turn_id in ids]
     takes = {take["id"]: take for take in plan.get("speech_takes", [])}
     owner_by_turn: dict[str, str] = {}
     for requirement in work["requirements"]:
@@ -688,10 +689,19 @@ def _validate_step_dialogue(plan: dict, work: dict) -> None:
             if missing_requirement or missing_step:
                 coverage = ("to own and generate the complete planned dialogue"
                             if step['source'] == 'generate' else "to cover the complete planned dialogue")
+                # Name the field that is short, not just the sentence: the Agent
+                # otherwise re-sends the same steps and hits the same conflict.
+                reasons = []
+                if missing_requirement:
+                    reasons.append("requirement omits turns "
+                                   + ", ".join(sorted(missing_requirement)))
+                if missing_step:
+                    reasons.append("step dialogue_turn_ids omits turns "
+                                   + ", ".join(sorted(missing_step)))
                 raise MaterialSourceConflict(
                     f"material source conflict: placement {source_id} turns "
                     f"{', '.join(sources[source_id])} require final step {step_id} "
-                    f"{coverage}",
+                    f"{coverage} ({'; '.join(reasons)})",
                     placement_id=source_id, turn_ids=sources[source_id], step_ids=[step_id])
     for step in work["steps"]:
         ids = step.get("dialogue_turn_ids", [])
@@ -713,7 +723,24 @@ def _validate_step_dialogue(plan: dict, work: dict) -> None:
             if step["id"] in seen:
                 relevant.update(requirement.get("turn_ids", []))
         if not set(ids) <= relevant:
-            raise ValueError(f"material step {step['id']} dialogue turns differ from its requirements")
+            unexpected = [turn_id for turn_id in ids if turn_id not in relevant]
+            allowed = ", ".join(t for t in ordered_turns if t in relevant) or "none"
+            raise MaterialWorkRequestError(
+                code="material_step_dialogue_turns_mismatch",
+                message=(
+                    f"material step {step['id']} cannot generate dialogue turns "
+                    f"{', '.join(unexpected)}; no requirement finalised on this step "
+                    f"covers them (allowed here: {allowed})"
+                ),
+                errors=[{
+                    "path": f"steps[{step['id']}].dialogue_turn_ids",
+                    "message": (
+                        "keep only turns listed by this step's own requirement; "
+                        f"allowed here: {allowed}"
+                    ),
+                }],
+                next_action="correct_material_step_dialogue_turns",
+            )
         for turn_id in ids:
             source_id = source_by_turn.get(turn_id)
             if source_id is not None and owner_by_turn.get(turn_id) != step['id']:

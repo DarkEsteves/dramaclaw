@@ -116,6 +116,40 @@ def test_builtin_production_recipe_keeps_plan_draft_separate_from_evidence() -> 
     assert "60 秒" not in json.dumps(skill, ensure_ascii=False)
 
 
+def test_target_goal_guidance_preserves_changes_without_source_summary_defaults() -> None:
+    from novelvideo.chat.hermes_workspace import _render_workflow_skill
+    from novelvideo.freezone.agent_workflows.reference_production import NATIVE_PRODUCTION_CONTRACT
+
+    root = Path(__file__).parents[1]
+    copies = [root / name / "references/reference-video-remix.md" for name in (
+        "src/novelvideo/agent_skills/dramaclaw-workflows",
+        "agent-kit/skills/dramaclaw-workflows", ".hermes/skills/workflows",
+    )]
+    assert len({path.read_bytes() for path in copies}) == 1
+    guide = copies[0].read_text()
+    for marker in ("Target-video goal, not source-video summary", "latest agreed product replacement",
+                   "dialogue rewrite", "preceding discussed brief", "Literal recreation",
+                   "leave unspecified"):
+        assert marker in guide
+
+    skill = json.loads((CATALOG_ROOT / "skills/reference-video-remix.json").read_text())
+    content, _ = _render_workflow_skill(skill)
+    for marker in ("新视频的创作目标，不是原片内容摘要", "用户最新确认", "承接前文讨论的方向",
+                   "未指定的分镜和台词不要自行补入目标"):
+        assert marker in content
+    instruction = catalog.get_workflow_skill({"skill_id": "reference-video-remix", "compact": True})["agent_instruction"]
+    for text in (instruction, NATIVE_PRODUCTION_CONTRACT["direction_guidance"]):
+        assert "NEW video, not a source-video summary" in text
+        assert "latest agreed product, language, dialogue rewrite" in text
+        assert "preceding brief" in text
+    assert "call freezone_prepare_production_nodes" in instruction
+    assert "call freezone_prepare_workflow_draft with" not in instruction
+    assert "freezone_confirm_workflow_draft" not in instruction
+    assert "complete arranged plan" in instruction
+    assert "saved legacy outline" in instruction
+    assert "On outline completion" not in instruction
+
+
 def test_native_production_contract_does_not_offer_removed_direct_plan_tool() -> None:
     from novelvideo.freezone.agent_workflows.reference_production import NATIVE_PRODUCTION_CONTRACT
 

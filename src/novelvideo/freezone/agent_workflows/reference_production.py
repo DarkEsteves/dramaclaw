@@ -13,7 +13,7 @@ NATIVE_PRODUCTION_CONTRACT = {
     "external_input_kind": "reference_analysis",
     "stage": "production_plans",
     "direction_tool": None,
-    "direction_guidance": "Discuss preserve/replace choices in ordinary chat. At submission use the concise agreed goal with prepare_tool; do not create a separate direction decision or invent details left to AI drafting.",
+    "direction_guidance": "Discuss preserve/replace choices in ordinary chat. At submission use the concise agreed goal for the NEW video, not a source-video summary. Preserve the latest agreed product, language, dialogue rewrite and constraints; start/continue refers to the preceding brief, not the original analysis request. Do not copy source dialogue/titles as user constraints unless explicitly requested, create a separate direction decision, or invent details left to AI drafting.",
     "state_tool": "freezone_get_reference_director_state",
     "review_tool": "freezone_review_production_plan",
     "draft_action": {

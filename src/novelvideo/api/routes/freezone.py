@@ -15535,7 +15535,9 @@ async def get_workflow_capabilities(project: str, user: dict = Depends(get_api_u
     }
 
 
-async def _check_workflow_runtime(compiled: dict, *, project: str, user: dict) -> dict:
+async def _check_workflow_runtime(
+    compiled: dict, *, project: str, user: dict, draft_ref: dict | None = None
+) -> dict:
     """Resolve catalogs with request identity; never trust caller preflight evidence."""
     from novelvideo.freezone.workflow_preflight import evaluate_workflow_preflight
     from novelvideo.api.routes.tasks import get_project_task_limits
@@ -15591,6 +15593,19 @@ async def _check_workflow_runtime(compiled: dict, *, project: str, user: dict) -
                     "preflight": preflight,
                     "retryable": True,
                     "next_action": "request_user_clarification",
+                    # The answers belong to this exact draft revision. Naming it
+                    # lets the Agent hand the same draft to the clarification
+                    # tool, so the answers revise that draft instead of
+                    # opening another card for a later round.
+                    **(
+                        {
+                            "draft_id": str(draft_ref.get("draft_id")),
+                            "revision": int(draft_ref.get("revision")),
+                        }
+                        if draft_ref and draft_ref.get("draft_id")
+                        and isinstance(draft_ref.get("revision"), int)
+                        else {}
+                    ),
                 },
             )
         raise HTTPException(
@@ -16293,7 +16308,8 @@ async def patch_canvas_workflow_draft(
         validated, state_dir=state_dir, canvas_id=canvas_id, project_id=ctx.project_id,
     )
     validated["preflight"] = await _check_workflow_runtime(
-        validated, project=project, user=user
+        validated, project=project, user=user,
+        draft_ref={"draft_id": draft_id, "revision": expected_revision},
     )
     if isinstance(prepared["intent"].get("plan"), dict):
         prepared["intent"]["plan"] = deepcopy(validated["plan"])

@@ -388,7 +388,10 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "until the answer is returned. If the clarification tool returns "
     "clarification_frontend_timeout, tell the user the card is still waiting and will reappear "
     "on their next message; when they reply, call the tool again with the same clarification_id "
-    "to resume that card instead of building a new one. This rule applies to generation or run requests, including "
+    "to resume that card instead of building a new one. A rejected clarification call shows no "
+    "card, so correct the arguments its result names instead of resending it: a call carrying none "
+    "of questions, generation_media_types and generation_required_choices is rejected, and "
+    "repeating it unchanged can never succeed. This rule applies to generation or run requests, including "
     "run_after_create=true. It also applies when run_after_create=false if the user explicitly asks "
     "to configure image/video node parameters. It does not apply when the user only asks to create "
     "empty nodes, connect, group, lay out, or edit them without generation parameters. It is an "
@@ -732,8 +735,13 @@ Canvas write contract:
   key, then END THE TURN. A reference_analysis_reused result means continue this same turn from its
   saved commission; it is not a new submission. Discuss the direction in ordinary chat, including
   what to preserve, replace and constrain. Do not save a direction proposal during discussion.
-  When the user asks to proceed, send one complete concise goal to freezone_prepare_production_nodes;
-  the host checks the real human turn at that submission boundary. Wait for the existing canvas
+  When the user asks to proceed, send one complete concise goal to freezone_prepare_production_nodes.
+  This goal is the NEW video's intended direction, not a source-video summary. Preserve the latest
+  agreed product, language, dialogue rewrite, keep/replace choices and constraints. Interpret start
+  or continue against the preceding agreed brief; do not reset to the initial analysis request or
+  promote source dialogue/titles into user constraints. Leave unspecified script details to drafting;
+  literal recreation is a constraint only when the user requests it.
+  The host checks the real human turn at that submission boundary. Wait for the existing canvas
   approval in manual mode. Let the plan node's AI action draft the details; read the saved editable
   plan, audit it and make bounded edits through the same approval path; use the resulting real plan refs. Media,
   speech and composition stages use saved results, never invented artifact refs.

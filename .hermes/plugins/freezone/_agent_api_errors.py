@@ -120,6 +120,16 @@ def _copy_material_diagnostics(result: dict[str, Any], source: Any) -> None:
                     for item in values)
                     and len(json.dumps(value).encode("utf-8")) <= 1024):
                 result[field] = value
+    if source.get("code") == "generation_parameters_required":
+        # These answers belong to one exact draft revision. Naming it lets the
+        # Agent revise that draft instead of opening another card for the same
+        # parameters.
+        value = _safe_error_string(source.get("draft_id"), 160)
+        if value and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", value):
+            result["draft_id"] = value
+        revision = source.get("revision")
+        if type(revision) is int and 1 <= revision <= 10_000_000:
+            result["revision"] = revision
 
 
 def _http_error_result(status_code: int, text: str, reason: str) -> dict[str, Any]:

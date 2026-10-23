@@ -32,6 +32,18 @@ def _restore_tools_registry_modules():
             sys.modules[name] = value
 
 
+def test_native_production_goal_schema_distinguishes_target_from_source():
+    module = _load_plugin_module()
+    tool = next(schema for name, schema, _ in module.TOOLS if name == 'freezone_prepare_production_nodes')
+    goal = tool['parameters']['properties']['goal']['description']
+    for marker in ('Target-video creative brief, not a source-video summary',
+                   'latest user-agreed changes', 'preceding conversation',
+                   'Leave unspecified dialogue and shots to drafting', 'literal recreation'):
+        assert marker in goal
+    assert 'complete editable arranged plan' in tool['parameters']['properties']['run_after_create']['description']
+    assert 'structure/dialogue only' not in tool['description']
+
+
 _MINIMAL_ECOMMERCE_SKILL = {
     "id": "ecommerce-product",
     "name": "电商产品图",
@@ -3731,6 +3743,49 @@ def test_clarification_without_questions_and_without_card_is_still_rejected(monk
     })
     assert result["ok"] is False
     assert result["status"] == "questions_required"
+    # The rejection has to name the arguments a retry needs; a bare
+    # "questions must contain at least one question" left the Agent with
+    # nothing to correct and it re-sent the same empty call for a whole turn.
+    assert result["retryable"] is False
+    assert result["details"]["asked_nothing"] is True
+    assert result["details"]["allowed_required_choices"]["video"][:3] == [
+        "model", "aspect_ratio", "resolution",
+    ]
+    assert "generation_required_choices" in result["agent_instruction"]
+    Draft202012Validator(
+        plugin._output_schema("freezone_request_user_clarification")
+    ).validate(result)
+
+
+def test_repeated_empty_clarification_call_escalates_instead_of_looping(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "find_clarification_bridge_message", lambda **_kw: None)
+    handler = _clarification_handler(plugin)
+    args = {"project_id": "project-a", "canvas_id": "canvas-a", "allow_recommended": True}
+
+    assert handler(dict(args))["status"] == "questions_required"
+    assert "repeat_count" not in handler(dict(args))
+    escalated = handler(dict(args))
+
+    assert escalated["ok"] is False
+    assert escalated["repeat_count"] == plugin._REPEATED_FAILURE_LIMIT
+    assert escalated["retryable"] is False
+    assert "Stop retrying" in escalated["agent_instruction"]
+    Draft202012Validator(
+        plugin._output_schema("freezone_request_user_clarification")
+    ).validate(escalated)
+
+
+def test_waiting_clarification_result_never_counts_as_a_repeated_failure(monkeypatch):
+    """A card waiting for the user may be resumed with identical arguments."""
+    plugin = _load_plugin_module()
+    waiting = {
+        "ok": False,
+        "status": "clarification_frontend_timeout",
+        "clarification_status": "pending_user_input",
+    }
+    for _ in range(plugin._REPEATED_FAILURE_LIMIT + 2):
+        assert plugin._note_repeated_failure("freezone_request_user_clarification", {"a": 1}, waiting) == 0
 
 
 def test_clarification_resume_outside_bound_scope_never_touches_the_bridge(monkeypatch):
@@ -4039,6 +4094,122 @@ def test_generation_clarification_canonical_dependent_id_adds_model_question(mon
         "video_models",
         "selected_video_model_durations",
     ]
+
+
+def test_generation_clarification_reuses_stated_preferences_instead_of_reasking(monkeypatch):
+    """A value the user already chose must not be asked a second time."""
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    emitted = []
+    monkeypatch.setattr(
+        plugin,
+        "_emit_clarification_event",
+        lambda _project, _canvas, event: emitted.append(event) or "shown",
+    )
+
+    handlers["freezone_request_user_clarification"](
+        {
+            "generation_required_choices": {"image": ["quality"]},
+            "generation_preferences": {"image_model": "LingShan-G2"},
+        }
+    )
+
+    assert [question["id"] for question in emitted[0]["questions"]] == ["image_quality"]
+    # The confirmed model travels with the card: it is what gives every
+    # dependent field its live options, and it is what keeps the model
+    # question off the card.
+    assert emitted[0]["answers"]["image_model"] == {"option_ids": ["LingShan-G2"]}
+
+
+def test_generation_clarification_reads_confirmed_values_from_the_draft(monkeypatch):
+    """The draft already resolved the model; the card must not ask for it again."""
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    emitted = []
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(
+        plugin,
+        "_emit_clarification_event",
+        lambda _project, _canvas, event: emitted.append(event) or "shown",
+    )
+    monkeypatch.setattr(plugin, "_request", lambda *_a, **_k: {
+        "ok": True,
+        "data": {
+            "revision": 1,
+            "status": "ready",
+            "compiled": {"plan": {"inputs": {
+                "image_model": "LingShan-G2", "image_aspect_ratio": "9:16",
+            }}},
+        },
+    })
+
+    handlers["freezone_request_user_clarification"](
+        {
+            "generation_required_choices": {"image": ["quality", "count"]},
+            "workflow_draft_id": "workflow_draft_1",
+            "workflow_expected_revision": 1,
+        }
+    )
+
+    assert [question["id"] for question in emitted[0]["questions"]] == [
+        "image_quality", "image_variants_per_node",
+    ]
+    assert emitted[0]["answers"]["image_model"] == {"option_ids": ["LingShan-G2"]}
+    assert emitted[0]["answers"]["image_aspect_ratio"] == {"option_ids": ["9:16"]}
+
+
+def test_generation_clarification_asks_the_model_when_the_draft_has_none(monkeypatch):
+    """Without a known model the dependent field has no options, so ask for it."""
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    emitted = []
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(
+        plugin,
+        "_emit_clarification_event",
+        lambda _project, _canvas, event: emitted.append(event) or "shown",
+    )
+    monkeypatch.setattr(plugin, "_request", lambda *_a, **_k: {
+        "ok": True,
+        "data": {"revision": 1, "status": "ready", "compiled": {"plan": {"inputs": {}}}},
+    })
+
+    handlers["freezone_request_user_clarification"](
+        {
+            "generation_required_choices": {"image": ["quality"]},
+            "workflow_draft_id": "workflow_draft_1",
+            "workflow_expected_revision": 1,
+        }
+    )
+
+    assert [question["id"] for question in emitted[0]["questions"]] == [
+        "image_model", "image_quality",
+    ]
+
+
+def test_clarification_result_names_the_draft_the_answers_belong_to():
+    """A second card for the same draft must not be opened: name the draft."""
+    plugin = _load_plugin_module()
+    result = plugin._clarification_result_for_draft(
+        {
+            "ok": False,
+            "status": "clarification_required",
+            "code": "generation_parameters_required",
+            "agent_instruction": "Ask the user for the missing choices.",
+        },
+        "workflow_draft_1",
+        3,
+    )
+
+    assert result["draft_id"] == "workflow_draft_1"
+    assert result["revision"] == 3
+    instruction = result["agent_instruction"]
+    assert "workflow_draft_1" in instruction
+    assert "workflow_expected_revision" in instruction
+    assert "不要" not in instruction  # the English hint owns the wording
+    assert plugin._clarification_draft_hint({"draft_id": "d"}) == ""
 
 
 def test_generation_clarification_unsupported_required_choice_lists_allowed_fields():
@@ -11326,6 +11497,45 @@ def test_material_speech_conflict_names_the_owning_final_step(monkeypatch):
     assert "clip-b1" in instruction and "t1" in instruction
     assert "dialogue_turn_ids" in instruction
     _assert_real_mcp_output(plugin, "freezone_prepare_material_work", result)
+
+def test_material_step_dialogue_mismatch_names_the_editable_field(monkeypatch):
+    """A step that grabbed a foreign turn must be told which field to edit."""
+    plugin = _load_plugin_module()
+    monkeypatch.setenv("DRAMACLAW_PROJECT_ID", "project")
+    monkeypatch.setenv("DRAMACLAW_CANVAS_ID", "canvas")
+    monkeypatch.setattr(plugin, "_request", lambda *_a, **_k: {
+        "ok": False, "status_code": 422,
+        "error": {
+            "code": "material_step_dialogue_turns_mismatch",
+            "phase": "material_plan_drafting",
+            "message": "material step vid_v1 cannot generate dialogue turns t9; "
+                       "no requirement finalised on this step covers them (allowed here: t1)",
+            "next_action": "correct_material_step_dialogue_turns",
+            "retryable": False,
+            "errors": [{
+                "path": "steps[vid_v1].dialogue_turn_ids",
+                "message": "keep only turns listed by this step's own requirement; allowed here: t1",
+            }],
+        },
+    })
+    handler = next(h for n, _s, h in plugin.TOOLS if n == "freezone_prepare_material_work")
+    result = handler({
+        "commission_ref": {"artifact_id": "commission", "revision": 1},
+        "plan_ref": {"artifact_id": "plan", "revision": 1},
+        "requirements": [{"id": "r", "description": "d", "media_kind": "video",
+                          "final_step_id": "vid_v1"}],
+        "steps": [{"id": "vid_v1", "label": "l", "media_kind": "video",
+                   "source": "generate", "recipe_id": "general-video", "prompt": "p"}],
+        "command_id": "prepare-3",
+    })
+
+    assert result["code"] == "material_step_dialogue_turns_mismatch"
+    instruction = result["agent_instruction"]
+    assert "steps[vid_v1].dialogue_turn_ids" in instruction
+    assert "t1" in instruction
+    assert "不要原样重试" in instruction
+    _assert_real_mcp_output(plugin, "freezone_prepare_material_work", result)
+
 
 def test_material_create_forwards_explicit_selection_intent(monkeypatch, tmp_path):
     plugin, handler, arguments, _, requests, _ = _ready_material_adapter(

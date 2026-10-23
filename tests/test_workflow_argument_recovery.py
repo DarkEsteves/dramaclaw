@@ -481,6 +481,33 @@ async def test_dramaclaw_mcp_keeps_handler_recovery_details(monkeypatch):
     assert json.loads(result.content[0].text) == payload
 
 
+def test_generation_clarification_error_keeps_the_draft_its_answers_belong_to(monkeypatch):
+    import json
+    from novelvideo.chat import dramaclaw_mcp
+    from novelvideo.chat.agent_api_errors import _http_error_result as shared_error_result
+
+    monkeypatch.setenv("DRAMACLAW_TOOL_MODE", "freezone_canvas")
+    plugin = dramaclaw_mcp._load_plugin("freezone")
+    detail = {
+        "status": "clarification_required",
+        "code": "generation_parameters_required",
+        "error": "image/video generation parameters require user clarification",
+        "required_choices": {"image": ["quality"]},
+        "missing_parameters": [
+            {"node_id": "ref_identity_m", "node_type": "imageGenNode", "fields": ["quality"]},
+        ],
+        "draft_id": "workflow_draft_1",
+        "revision": 3,
+    }
+    body = json.dumps({"detail": detail})
+    for result in (
+        plugin._http_error_result(400, body, "Bad Request"),
+        shared_error_result(400, body, "Bad Request"),
+    ):
+        assert result["draft_id"] == "workflow_draft_1"
+        assert result["revision"] == 3
+
+
 @pytest.mark.parametrize("production_recovery", [False, True])
 def test_plugin_http_error_preserves_allowlisted_recovery_fields(monkeypatch, production_recovery):
     import json

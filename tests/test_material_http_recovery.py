@@ -11,6 +11,35 @@ from novelvideo.chat.agent_api_errors import _http_error_result
 from novelvideo.freezone.remix.material_work import material_duration_issues
 
 
+def test_speech_conflict_detail_keeps_the_ids_the_agent_must_fix():
+    """The transport must not drop the placement/turn/step the Agent has to edit."""
+    from novelvideo.api.routes.reference_director import _material_work_error_detail
+    from novelvideo.freezone.remix.material_work import MaterialSourceConflict
+
+    detail = _material_work_error_detail(MaterialSourceConflict(
+        "material source conflict: placement v1 turns t1 require final step vid_v1 "
+        "to own and generate the complete planned dialogue",
+        placement_id="v1", turn_ids=["t1", "t2"], step_ids=["vid_v1"]))
+
+    assert detail["code"] == "material_speech_source_conflict"
+    assert detail["placement_id"] == "v1"
+    assert detail["turn_ids"] == ["t1", "t2"]
+    assert detail["step_ids"] == ["vid_v1"]
+
+
+def test_duration_detail_does_not_gain_unrelated_speech_ids():
+    from novelvideo.api.routes.reference_director import _material_work_error_detail
+    from novelvideo.freezone.remix.material_work import MaterialWorkRequestError
+
+    detail = _material_work_error_detail(MaterialWorkRequestError(
+        code="material_duration_invalid", message="时长无效",
+        errors=[{"path": "steps[clip].generation_inputs.durationSec", "message": "4-15"}]))
+
+    assert set(detail) == {
+        "code", "phase", "message", "errors", "next_action", "retryable", "side_effects",
+    }
+
+
 @pytest.mark.parametrize('wrapped', [False, True])
 def test_duration_rejection_survives_http_transport(http_adapter, wrapped):
     plugin, calls, _, execute = http_adapter

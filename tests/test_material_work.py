@@ -347,6 +347,38 @@ def test_generated_video_cannot_omit_turns_owned_by_its_planned_source(tmp_path)
         prepare_material_work(store, ref, requirements, steps, 'missing-dialogue')
 
 
+def test_step_dialogue_mismatch_names_the_field_and_allowed_turns(tmp_path):
+    """A generate step cannot adopt a turn no requirement hands it.
+
+    The old message ("dialogue turns differ from its requirements") carried no
+    step, turn or field, so the Agent re-submitted the same steps unchanged.
+    """
+    store = RemixArtifactStore(tmp_path, project_id='project', created_by='alice')
+    plan = planned_video_dialogue()
+    plan['beats'][0]['turns'].append({
+        'id': 'aside', 'speaker': '丙', 'text': '顺便看一下包装。',
+        'speech_placement_id': 'other-video', 'timing_basis': 'estimated'})
+    plan['placements'].append({**plan['placements'][0], 'id': 'other-video'})
+    saved = store.create('production_plan.v2', plan, [])
+    ref = {'artifact_id': saved['id'], 'revision': saved['revision']}
+    requirements = [{'id': 'video', 'placement_ids': ['demo-video'],
+                     'turn_ids': ['ask', 'answer'], 'description': '两人交谈',
+                     'media_kind': 'video', 'final_step_id': 'clip'}]
+    steps = [{'id': 'clip', 'label': '交谈视频', 'media_kind': 'video', 'source': 'generate',
+              'recipe_id': 'general-video', 'prompt': '两人交谈',
+              'dialogue_turn_ids': ['ask', 'answer', 'aside']}]
+
+    with pytest.raises(MaterialWorkRequestError) as exc_info:
+        prepare_material_work(store, ref, requirements, steps, 'stolen-turn')
+
+    details = exc_info.value.details
+    assert details['code'] == 'material_step_dialogue_turns_mismatch'
+    assert details['next_action'] == 'correct_material_step_dialogue_turns'
+    assert details['errors'][0]['path'] == 'steps[clip].dialogue_turn_ids'
+    assert 'aside' in details['message']
+    assert 'allowed here: ask, answer' in details['errors'][0]['message']
+
+
 def test_reference_shot_defaults_to_a_mode_that_consumes_media(tmp_path):
     from novelvideo.freezone.remix.material_work import material_workflow_intent
     from novelvideo.freezone.agent_workflows.catalog import compile_workflow_intent

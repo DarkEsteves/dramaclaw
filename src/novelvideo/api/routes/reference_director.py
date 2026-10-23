@@ -25,6 +25,18 @@ router = APIRouter(prefix="/projects/{project}/freezone/canvases/{canvas_id}/dir
 logger = logging.getLogger(__name__)
 
 
+_MATERIAL_SPEECH_CONFLICT_CODES = frozenset({
+    "material_speech_source_conflict",
+    "material_step_dialogue_turns_mismatch",
+})
+
+
+def _bounded_material_ids(value: object) -> list[str]:
+    items = value if isinstance(value, list) else [value]
+    return [str(item)[:80] for item in items
+            if isinstance(item, str) and item.strip()][:8]
+
+
 def _material_work_error_detail(error: BaseException, *, request_id: str | None = None,
                                 code: str = "material_work_request_invalid",
                                 status: int = 422) -> dict[str, Any]:
@@ -40,8 +52,9 @@ def _material_work_error_detail(error: BaseException, *, request_id: str | None 
          "message": str(item.get("message", message))[:300]}
         for item in errors[:8] if isinstance(item, dict)
     ]
-    return {
-        "code": str(detail.get("code") or code)[:96],
+    bounded_code = str(detail.get("code") or code)[:96]
+    result = {
+        "code": bounded_code,
         "phase": str(detail.get("phase") or "material_plan_drafting")[:96],
         "message": str(message)[:300],
         "errors": bounded_errors or [{"path": "material_work", "message": str(message)[:300]}],
@@ -50,6 +63,18 @@ def _material_work_error_detail(error: BaseException, *, request_id: str | None 
         "side_effects": "none",
         **({"request_id": request_id} if request_id else {}),
     }
+    # A speech-owner conflict names the placement, turns and steps that disagree.
+    # The Agent only reads the sentence without them and re-submits the same work,
+    # so the ids have to survive the transport in a bounded form.
+    if bounded_code in _MATERIAL_SPEECH_CONFLICT_CODES:
+        placement = _bounded_material_ids(detail.get("placement_id"))
+        if placement:
+            result["placement_id"] = placement[0]
+        for key in ("turn_ids", "step_ids"):
+            ids = _bounded_material_ids(detail.get(key))
+            if ids:
+                result[key] = ids
+    return result
 
 
 def _material_work_internal_error(*, request_id: str | None) -> dict[str, Any]:

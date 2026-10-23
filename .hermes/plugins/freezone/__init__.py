@@ -814,6 +814,15 @@ def _http_error_result(
                     )
         if safe_missing:
             result["missing_parameters"] = safe_missing
+        # The clarification answers belong to one exact draft revision. Naming
+        # it lets the Agent revise that draft instead of opening another card
+        # for the same parameters.
+        error_draft_id = _safe_error_string(source.get("draft_id"), 160)
+        if error_draft_id and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", error_draft_id):
+            result["draft_id"] = error_draft_id
+        error_revision = source.get("revision")
+        if type(error_revision) is int and 1 <= error_revision <= 10_000_000:
+            result["revision"] = error_revision
     errors = source.get("errors")
     if isinstance(errors, list):
         safe_errors = []
@@ -1320,6 +1329,147 @@ def _workflow_bypass_clarification_error(
     }
 
 
+_CLARIFICATION_GENERATION_VALUE_IDS = frozenset({
+    "image_model", "image_aspect_ratio", "image_resolution", "image_quality",
+    "image_variants_per_node", "video_model", "video_aspect_ratio",
+    "video_resolution", "video_duration_seconds", "video_generate_audio",
+    "video_variants_per_node",
+})
+
+
+def _clarification_allowed_required_choices() -> dict[str, list[str]]:
+    """Portable generation fields the parameter card can ask about per media type."""
+    return {
+        media: [
+            "resolution" if media == "video" and field == "quality"
+            else _GENERATION_PORTABLE_FIELDS[field]
+            for field in _GENERATION_PARAMETER_FIELDS[node_type]
+        ]
+        for media, node_type in (("image", "imageGenNode"), ("video", "videoNode"))
+    }
+
+
+def _empty_clarification_result(clarification_id: str = "") -> dict[str, Any]:
+    """Reject a card that asks the user nothing, but say exactly what to send instead.
+
+    The bare error this used to return ("questions must contain at least one
+    question") gave the Agent nothing to correct, so a turn could burn dozens of
+    identical rejected calls. The rejection now names the three accepted
+    argument shapes and the fields each media type allows.
+    """
+    return {
+        "ok": False,
+        "type": "assistant.clarification.request",
+        "status": "questions_required",
+        "code": "clarification_arguments_required",
+        "error": "questions must contain at least one question",
+        "retryable": False,
+        "next_action": "retry_with_questions_or_generation_choices",
+        "clarification_id": clarification_id,
+        "details": {
+            "asked_nothing": True,
+            "allowed_required_choices": _clarification_allowed_required_choices(),
+        },
+        "agent_instruction": (
+            "No card was shown: this call asked the user nothing. Call "
+            "freezone_request_user_clarification once more with exactly one of: "
+            "generation_required_choices (copy required_choices from the "
+            "generation_parameters_required result, allowed fields in "
+            "details.allowed_required_choices), generation_media_types "
+            '(["image", "video"] or just one of them, for the full parameter card), '
+            "or questions (at least one entry with 2-5 options). Repeating this "
+            "argument-free call cannot succeed."
+        ),
+    }
+
+
+def _clarification_generation_values(source: Any) -> dict[str, str]:
+    """Read the generation values a caller or a draft already confirmed."""
+    if not isinstance(source, dict):
+        return {}
+    values: dict[str, str] = {}
+    for key, value in source.items():
+        if key not in _CLARIFICATION_GENERATION_VALUE_IDS:
+            continue
+        if isinstance(value, bool):
+            values[key] = "true" if value else "false"
+        elif isinstance(value, (str, int)) and str(value).strip():
+            values[key] = str(value).strip()
+    return values
+
+
+def _clarification_draft_generation_values(
+    project: str | None, canvas: str | None, draft_id: str
+) -> dict[str, str]:
+    """Read the generation values the workflow draft already applied.
+
+    Dependent fields (画质/比例/分辨率…) resolve their live options from the
+    selected model. A card that asks them without telling the frontend which
+    model applies renders with zero options and can never be submitted, so the
+    draft's own confirmed values are folded into the card's answers.
+    """
+    if not draft_id or not project or not canvas:
+        return {}
+    try:
+        response = _request("GET", _workflow_draft_api_path(project, canvas, draft_id))
+    except Exception:  # noqa: BLE001 - an unreadable draft only means asking again
+        return {}
+    payload = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(payload, dict):
+        return {}
+    compiled = payload.get("compiled")
+    plan = compiled.get("plan") if isinstance(compiled, dict) else {}
+    if not isinstance(plan, dict):
+        plan = {}
+    intent = payload.get("intent")
+    values: dict[str, str] = {}
+    for source in (
+        plan.get("inputs"),
+        intent.get("inputs") if isinstance(intent, dict) else None,
+    ):
+        for key, value in _clarification_generation_values(source).items():
+            values.setdefault(key, value)
+    node_fields = {
+        "model": "model",
+        "aspectRatio": "aspect_ratio",
+        "quality": "quality",
+        "count": "variants_per_node",
+        "durationSec": "duration_seconds",
+        "generateAudio": "generate_audio",
+    }
+    for node in plan.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        media = (
+            "image" if node.get("node_type") == "imageGenNode"
+            else "video" if node.get("node_type") == "videoNode"
+            else ""
+        )
+        if not media:
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        catalog = data.get("workflowCatalog")
+        if isinstance(catalog, dict):
+            for key, value in _clarification_generation_values(
+                catalog.get("confirmedInputs")
+            ).items():
+                values.setdefault(key, value)
+        for field, portable in node_fields.items():
+            if field == "quality" and media == "image":
+                media_portable = "quality"
+            elif field == "quality":
+                # Video nodes keep their resolution in data.quality.
+                media_portable = "resolution"
+            else:
+                media_portable = portable
+            value = data.get(field)
+            if isinstance(value, bool):
+                values.setdefault(f"{media}_{media_portable}", "true" if value else "false")
+            elif isinstance(value, (str, int)) and str(value).strip():
+                values.setdefault(f"{media}_{media_portable}", str(value).strip())
+    return values
+
+
 def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
     project = (
         str(
@@ -1454,8 +1604,21 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
         "video_variants_per_node": "视频生成数量",
     }
     answers = args.get("answers")
-    if not isinstance(answers, dict):
-        answers = {}
+    answers = dict(answers) if isinstance(answers, dict) else {}
+    # A value the caller or the draft already confirmed is an answer, not a new
+    # question: it decides which fields are still missing and it resolves the
+    # live options of every dependent field. Re-asking it re-opens a question
+    # the user already answered and leaves the card without any choice.
+    stated_values = _clarification_generation_values(args.get("generation_preferences"))
+    if isinstance(generation_required_choices, dict) or generation_media_types is not None:
+        stated_values = {
+            **_clarification_draft_generation_values(
+                project, canvas, str(args.get("workflow_draft_id") or "").strip()
+            ),
+            **stated_values,
+        }
+    for answer_id, stated_value in stated_values.items():
+        answers.setdefault(answer_id, {"option_ids": [stated_value]})
     # Model-dependent options cannot be resolved until the same card has a
     # model selection. Preflight often reports only the dependent field, so
     # add the model question unless the caller carried a confirmed answer.
@@ -1477,7 +1640,6 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
                 and any(field in dependent_fields[media] for field in fields)
                 and model_id not in question_ids
                 and model_id not in answers
-                and not str(args.get("workflow_draft_id") or "").strip()
             ):
                 insert_at = next(
                     (
@@ -1685,15 +1847,7 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
         clarification_id = f"clarify_{safe_context or 'default'}_{fingerprint}"
         resumed = _resume_clarification(project, canvas, clarification_id)
     if not questions and resumed is None:
-        return tool_result(
-            {
-                "ok": False,
-                "type": "assistant.clarification.request",
-                "status": "questions_required",
-                "error": "questions must contain at least one question",
-                "clarification_id": clarification_id,
-            }
-        )
+        return tool_result(_empty_clarification_result(clarification_id))
     if _external_mcp_agent_enabled():
         composite_generation_ids = {
             "generation_settings",
@@ -4946,6 +5100,36 @@ def _workflow_generation_mode_clarification(
     }
 
 
+def _clarification_draft_hint(error: dict[str, Any]) -> str:
+    """Name the draft the answers belong to, so the same draft gets revised."""
+    draft_id = str(error.get("draft_id") or "").strip()
+    revision = error.get("revision")
+    if not draft_id or not isinstance(revision, int) or revision < 1:
+        return ""
+    return (
+        f"These answers belong to workflow draft {draft_id} revision {revision}: pass "
+        "workflow_draft_id and workflow_expected_revision with them so the tool revises "
+        "that same draft. Do not prepare a new work package and do not ask the same "
+        "parameter again.\n"
+    )
+
+
+def _clarification_result_for_draft(
+    result: dict[str, Any], draft_id: str, revision: int
+) -> dict[str, Any]:
+    """Attach the draft the answers belong to, so the same draft gets revised."""
+    enriched = dict(result)
+    if draft_id:
+        enriched.setdefault("draft_id", draft_id)
+    if isinstance(revision, int) and revision >= 1:
+        enriched.setdefault("revision", revision)
+    enriched["agent_instruction"] = (
+        str(enriched.get("agent_instruction") or "")
+        + _clarification_draft_hint(enriched)
+    )
+    return enriched
+
+
 def _generation_parameters_required_result(
     missing: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -5006,8 +5190,13 @@ def _generation_parameters_required_result(
             + (
                 "Stop before every canvas write. Call freezone_request_user_clarification "
                 "exactly once for the required image/video choices listed in required_choices, "
-                "passing them as generation_required_choices and every already confirmed choice (at least the model) "
-                "in answers. Do not add a duration question for interactive story segments. "
+                "passing them verbatim as generation_required_choices="
+                + json.dumps(required_choices, ensure_ascii=False, separators=(",", ":"))
+                + " (required_choices may list fewer fields; copy it as returned) and every "
+                "already confirmed choice (at least the model) in answers. A call with no "
+                "generation_required_choices, no generation_media_types and no questions is "
+                "rejected and must not be repeated. "
+                "Do not add a duration question for interactive story segments. "
                 "After the user answers, copy each returned node_data.<node_type> field verbatim "
                 "into missing matching node fields without replacing explicit per-shot values, and retry with the per-segment durations. For a WorkflowPlan, "
                 "put them in each image/video node data. For a workflow draft, pass its id and "
@@ -7565,7 +7754,7 @@ def _handle_workflow_operation(args: dict[str, Any], *, action: str) -> str:
                 "media_types": standard["media_types"],
                 "required_choices": standard["required_choices"],
                 "clarification": standard["clarification"],
-                "agent_instruction": standard["agent_instruction"],
+                "agent_instruction": standard["agent_instruction"] + _clarification_draft_hint(error),
                 "retryable": True,
                 "next_action": "request_user_clarification",
             }
@@ -8603,7 +8792,12 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
             project_id, canvas_id, checked_graph.get("commands") or []
         )
         if missing_choices is not None:
-            return tool_result(missing_choices)
+            # The answers belong to this exact draft revision: naming it lets
+            # the Agent revise that draft instead of opening another card for
+            # the same parameters.
+            return tool_result(
+                _clarification_result_for_draft(missing_choices, draft_id, revision)
+            )
     payload, claim_result = _workflow_draft_response(
         _request(
             "POST",
@@ -9735,6 +9929,8 @@ _RESULT_COMMON_PROPERTIES: dict[str, Any] = {
     "phase": {"type": ["string", "null"]},
     "user_message": {"type": ["string", "null"]},
     "retryable": {"type": "boolean"},
+    # Present when the same failing call was repeated with identical arguments.
+    "repeat_count": {"type": "integer", "minimum": 1},
     "next_action": {"type": ["string", "null"]},
     "agent_instruction": {"type": ["string", "null"]},
     # The input-schema rejection already computes the exact corrections a retry
@@ -12152,7 +12348,7 @@ TOOLS = (
         "freezone_request_user_clarification",
         _schema(
             "freezone_request_user_clarification",
-            "Ask the user structured clarification questions in the Freezone frontend and wait for their submitted answers, including Skill Studio setup questions. For image/video generation pass generation_media_types to ask every field, or pass generation_required_choices returned by preflight to ask only missing fields; pass generation_preferences for specs the user already stated, keeping per-shot durations and final delivery resolution distinct from global video parameters. The server assembles canonical questions and the frontend resolves live options. Generation mode is exclusive: never include questions in the same call; if questions are accidentally supplied, the server ignores them instead of failing the parameter card. With workflow_draft_id and workflow_expected_revision, submitted answers are validated and saved to that draft before returning its new preview. For legacy canonical generation questions, title and options may be omitted. Do not hand-build generation questions. For other clarifications, decide the next step from the current context. This tool never creates or runs canvas nodes.",
+            "Ask the user structured clarification questions in the Freezone frontend and wait for their submitted answers, including Skill Studio setup questions. Every call must carry questions, generation_media_types or generation_required_choices: a call with none of them shows no card and is rejected, so never repeat it unchanged. For image/video generation pass generation_media_types to ask every field, or pass generation_required_choices returned by preflight to ask only missing fields; pass generation_preferences for specs the user already stated, keeping per-shot durations and final delivery resolution distinct from global video parameters. The server assembles canonical questions and the frontend resolves live options. Generation mode is exclusive: never include questions in the same call; if questions are accidentally supplied, the server ignores them instead of failing the parameter card. With workflow_draft_id and workflow_expected_revision, submitted answers are validated and saved to that draft before returning its new preview. For legacy canonical generation questions, title and options may be omitted. Do not hand-build generation questions. For other clarifications, decide the next step from the current context. This tool never creates or runs canvas nodes.",
             {
                 "clarification_id": {
                     "type": "string",
@@ -12938,14 +13134,14 @@ TOOLS = (
         "freezone_prepare_production_nodes",
         _schema(
             "freezone_prepare_production_nodes",
-            "Prepare native production nodes from the agreed concise creative brief, preserving all user constraints without inventing scenes, dialogue or use cases. The host verifies the bound human conversation, then uses the existing canvas approval. run_after_create=true starts only the structure/dialogue task after that approval; false creates nodes only. The saved outline is editable and ends that task. Visual/audio arrangement requires a separate explicit generate_production_plan_arrangement action on the same node with only the latest saved plan_ref, under existing authorization and action confirmation. Never auto-submit it from a completion notification. Neither action generates materials or renders. Treat replies resolving previously requested creative choices in context; respect explicit discussion-only or no-drafting restrictions. On direction_needs_discussion read the reason, correct your unsupported additions or ask about the actual ambiguity; never create a separate direction decision or repeat an unchanged rejected request. Pending approval and running tasks are reused; await completion events. If native_plan_stage.state=failed, prepare only reuses the existing draft and does not submit a new task; do not report it as running. After explicit user retry authorization, use the failed slot's exact plan_node_id with freezone_run_node_action(action=generate_production_plan_draft); the tool reuses the node's saved topic, requirements and blueprint, so do not send an empty or newly invented parameter payload. Report submission only after a fresh canvas run receipt; never call prepare again or retry automatically.",
+            "Prepare native production nodes from the agreed concise creative brief, preserving all user constraints without inventing scenes, dialogue or use cases. goal describes the NEW video's intended changes, not a source-video summary. Carry forward the latest agreed product, language, dialogue rewrite and preserve/replace choices; a reply such as start approves the preceding brief, not a replacement inferred from analysis. The host verifies the bound human conversation, then uses the existing canvas approval. run_after_create=true generates the complete editable arranged plan (structure, dialogue, resources and visual/audio arrangement) after that approval; false creates nodes only. Only a saved legacy outline needs the separately authorized generate_production_plan_arrangement action. Never auto-submit another task from a completion notification. Neither action generates materials or renders. Treat replies resolving previously requested creative choices in context; respect explicit discussion-only or no-drafting restrictions. On direction_needs_discussion read the reason, correct your unsupported additions or ask about the actual ambiguity; never create a separate direction decision or repeat an unchanged rejected request. Pending approval and running tasks are reused; await completion events. If native_plan_stage.state=failed, prepare only reuses the existing draft and does not submit a new task; do not report it as running. After explicit user retry authorization, use the failed slot's exact plan_node_id with freezone_run_node_action(action=generate_production_plan_draft); the tool reuses the node's saved topic, requirements and blueprint, so do not send an empty or newly invented parameter payload. Report submission only after a fresh canvas run receipt; never call prepare again or retry automatically.",
             {**_SCOPE_PROPS,
              "commission_ref": {"type": "object", "required": ["artifact_id", "revision"],
                                 "properties": {"artifact_id": {"type": "string", "minLength": 1},
                                                "revision": {"type": "integer", "minimum": 1},
                                                "project_id": {"type": "string"}}},
-             "goal": {"type": "string", "minLength": 1, "maxLength": 20000},
-             "run_after_create": {"type": "boolean", "description": "After existing canvas confirmation, true runs generate_production_plan_draft for structure/dialogue only; arrangement is a separate explicit action. False creates nodes without drafting. Neither generates materials or renders the video."},
+             "goal": {"type": "string", "minLength": 1, "maxLength": 20000, "description": "Target-video creative brief, not a source-video summary. State the latest user-agreed changes, preserved features and constraints. Interpret start/continue in the preceding conversation; do not revert to the original analysis goal or copy source dialogue/titles as user requirements. State product replacements, language choices, dialogue adaptation and preservation boundaries only as agreed in conversation. Leave unspecified dialogue and shots to drafting; literal recreation is a constraint only when the user requests it."},
+             "run_after_create": {"type": "boolean", "description": "After existing canvas confirmation, true runs generate_production_plan_draft for the complete editable arranged plan. False creates nodes without drafting. Neither generates materials or renders the video."},
              "plan_count": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1},
              "requirements": {"type": ["object", "null"], "additionalProperties": False,
                               "properties": {
@@ -13571,6 +13767,76 @@ _director_spec.loader.exec_module(_director_module)
 TOOLS = (*TOOLS, *_director_module.build_director_tools(globals()))
 
 
+_REPEATED_FAILURE_LIMIT = 3
+_REPEATED_FAILURE_TTL_SECONDS = 900
+_repeated_failures: dict[str, tuple[int, float]] = {}
+_WAITING_STATUS_MARKERS = ("pending_user_input", "timeout", "waiting", "in_progress")
+
+
+def _is_waiting_tool_result(payload: dict[str, Any]) -> bool:
+    text = (
+        f"{payload.get('status') or ''} {payload.get('clarification_status') or ''}"
+    ).lower()
+    return any(marker in text for marker in _WAITING_STATUS_MARKERS)
+
+
+def _note_repeated_failure(tool_name: str, args: Any, payload: dict[str, Any]) -> int:
+    """Count consecutive identical failing calls to one tool.
+
+    A deterministic failure cannot be fixed by sending the same arguments again,
+    yet the Agent had no signal telling it so: a single turn repeated one rejected
+    clarification 23 times. The count is per (tool, arguments) and resets on any
+    success or on results that merely wait for the user.
+    """
+    now = time.time()
+    for stale_key, (_, seen_at) in tuple(_repeated_failures.items()):
+        if now - seen_at > _REPEATED_FAILURE_TTL_SECONDS:
+            _repeated_failures.pop(stale_key, None)
+    key = f"{tool_name}:{_tool_input_hash(args)}"
+    if payload.get("ok") is not False or _is_waiting_tool_result(payload):
+        _repeated_failures.pop(key, None)
+        return 0
+    count = _repeated_failures.get(key, (0, now))[0] + 1
+    _repeated_failures[key] = (count, now)
+    return count
+
+
+def _escalate_repeated_failures(handler, tool_name: str):
+    """Rewrite the result of the Nth identical failure so the Agent stops looping."""
+
+    def bound(args, *handler_args, **handler_kwargs):
+        rendered = handler(args, *handler_args, **handler_kwargs)
+        serialized = isinstance(rendered, str)
+        payload = rendered
+        if serialized:
+            try:
+                payload = json.loads(rendered)
+            except (TypeError, ValueError):
+                payload = None
+        if not isinstance(payload, dict):
+            return rendered
+        count = _note_repeated_failure(tool_name, args, payload)
+        if count < _REPEATED_FAILURE_LIMIT:
+            return rendered
+        escalated = {
+            **payload,
+            "repeat_count": count,
+            "retryable": False,
+            "agent_instruction": (
+                f"This exact {tool_name} call already failed {count} times with identical "
+                "arguments, so sending it again will fail identically. Stop retrying: use "
+                "the correction this error reports, or tell the user briefly what is "
+                "blocked and which answer or fix you need from them. "
+                + str(payload.get("agent_instruction") or "")
+            ).strip(),
+        }
+        if not escalated.get("next_action"):
+            escalated["next_action"] = "report_to_user"
+        return tool_result(escalated) if serialized else escalated
+
+    return bound
+
+
 def _bind_structured_result_input(handler):
     def bound(args, *handler_args, **handler_kwargs):
         token = _STRUCTURED_RESULT_INPUT_HASH.set(args)
@@ -13583,7 +13849,11 @@ def _bind_structured_result_input(handler):
 
 
 TOOLS = tuple(
-    (name, schema, _bind_structured_result_input(handler))
+    (
+        name,
+        schema,
+        _bind_structured_result_input(_escalate_repeated_failures(handler, name)),
+    )
     for name, schema, handler in TOOLS
 )
 

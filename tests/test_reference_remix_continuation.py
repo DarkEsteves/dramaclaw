@@ -1335,6 +1335,10 @@ async def test_background_prompt_includes_current_saved_artifact_refs(service, t
     assert 'saved_artifact_refs' in observed[0]
     assert 'analysis_real' in observed[0]
     assert 'blueprint_real' in observed[0]
+    assert 'intent.user_goal 是启动分析时的历史请求' in observed[0]
+    assert '原片分析仅是参考证据' in observed[0]
+    assert '不得用原片摘要覆盖这些改动' in observed[0]
+    assert '开始/继续时承接前文已讨论方向' in observed[0]
 
 @pytest.mark.asyncio
 async def test_normal_model_finish_cannot_claim_summary_without_assistant_delivery(service, tmp_path, monkeypatch):

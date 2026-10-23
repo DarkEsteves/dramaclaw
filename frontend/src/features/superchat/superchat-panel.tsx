@@ -577,6 +577,19 @@ function toolBusinessStatus(message: ChatMessage): string {
   return String(toolBusinessResult(message)?.status ?? "").trim().toLowerCase();
 }
 
+/**
+ * Repeated failures collapse into one row ("确认生成参数失败 ×15"), so the row has to
+ * carry the reason on hover; otherwise the user can only see that something failed.
+ */
+function toolFailureDetail(message: ChatMessage): string {
+  const result = toolBusinessResult(message);
+  const raw = toolRawRecord(message);
+  const error = result?.error ?? result?.message ?? raw?.error;
+  if (typeof error === "string") return error.trim();
+  if (error) return JSON.stringify(error);
+  return "";
+}
+
 function isRecoverableWorkflowInteraction(message: ChatMessage): boolean {
   const result = toolBusinessResult(message);
   if (!result) return false;
@@ -2372,7 +2385,10 @@ function AgentRuntimeTimeline({
               ) : (
                 <CheckCircle2 className="size-3.5 shrink-0 text-muted-foreground" />
               )}
-              <span className="min-w-0 flex-1 break-words font-medium">
+              <span
+                className="min-w-0 flex-1 break-words font-medium"
+                title={status === "failed" ? toolFailureDetail(toolMessage) || undefined : undefined}
+              >
                 {statusText}{repeatText}
               </span>
             </div>
@@ -4617,13 +4633,50 @@ function clarificationCapabilityOptions(
   return values.length > 0 ? values : fallback;
 }
 
-function clarificationQuestionsWithLiveModelCatalogs(
+/**
+ * A dependent field (画质/比例/分辨率…) only has options once a model is chosen.
+ * When a card asks such a field without carrying the model and without asking
+ * for it, the field renders with zero choices and the card can never be
+ * submitted, so the model question is recovered from the live catalog instead.
+ */
+function clarificationWithRecoveredModelQuestions(
   questions: AssistantClarificationQuestion[],
+  imageModels: readonly ClarificationCatalogModel[],
+  videoModels: readonly ClarificationCatalogModel[],
+  answers: AssistantClarificationAnswers,
+): AssistantClarificationQuestion[] {
+  const hasQuestion = (id: string) => questions.some(
+    (question) => normalizedClarificationId(question.id) === id,
+  );
+  const missesModel = (media: "image" | "video") => questions.some((question) => {
+    const source = question.options_source
+      ?? CLARIFICATION_SOURCE_BY_QUESTION_ID[normalizedClarificationId(question.id)];
+    if (!source?.startsWith(`selected_${media}_model_`)) return false;
+    // Options the tool already sent are authoritative; only a field that
+    // really has no choice needs the model to be asked first.
+    if ((question.options ?? []).length > 0) return false;
+    return !clarificationSelectedValue(questions, answers, `${media}_model`);
+  });
+  const recovered: AssistantClarificationQuestion[] = [];
+  if (missesModel("image") && !hasQuestion("image_model") && imageModels.length > 0) {
+    recovered.push({ id: "image_model", title: "图片模型", mode: "single", options: [] });
+  }
+  if (missesModel("video") && !hasQuestion("video_model") && videoModels.length > 0) {
+    recovered.push({ id: "video_model", title: "视频模型", mode: "single", options: [] });
+  }
+  return recovered.length > 0 ? [...recovered, ...questions] : questions;
+}
+
+function clarificationQuestionsWithLiveModelCatalogs(
+  eventQuestions: AssistantClarificationQuestion[],
   imageModels: readonly ClarificationCatalogModel[],
   videoModels: readonly ClarificationCatalogModel[],
   answers: AssistantClarificationAnswers = {},
   t?: TFunction,
 ): AssistantClarificationQuestion[] {
+  const questions = clarificationWithRecoveredModelQuestions(
+    eventQuestions, imageModels, videoModels, answers,
+  );
   const selectedImageModel = clarificationSelectedModel(
     questions, answers, "image_model", imageModels,
   );

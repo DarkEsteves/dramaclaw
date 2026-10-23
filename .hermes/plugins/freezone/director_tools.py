@@ -80,6 +80,21 @@ def _material_failure_instruction(failure: dict, *, ref_hint: str) -> str:
             + ref_hint
             + "不要原样重试，也不要创建新的素材工作包。"
         )
+    if str(failure.get("code") or "") == "material_step_dialogue_turns_mismatch":
+        first_error = next(
+            (error for error in failure.get("errors") or [] if isinstance(error, dict)), {}
+        )
+        paths = str(first_error.get("path") or "steps[].dialogue_turn_ids")
+        allowed = str(first_error.get("message") or "")
+        return (
+            f"素材步骤带了不属于它的台词轮次（{paths}）。generate 步骤的 dialogue_turn_ids "
+            "只能包含它的 requirement.turn_ids 列出、且该 requirement 的 final_step_id 直接或经 "
+            "depends_on/references 指向这个步骤的 turn；把多余的 turn 移到真正拥有它的步骤，或为它补一个 "
+            "final_step_id 指向该步骤的 requirement；"
+            + (f"服务端提示：{allowed}。" if allowed else "")
+            + ref_hint
+            + "不要原样重试，也不要创建新的素材工作包。"
+        )
     if failure.get("errors"):
         return (
             "按 error 中的字段路径和 errors 中的约束修正当前素材请求后再提交；"

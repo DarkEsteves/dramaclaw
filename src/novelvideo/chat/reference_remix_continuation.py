@@ -2545,6 +2545,13 @@ class ReferenceRemixCoordinator:
                            "仅 ready 且尚无提交 claim 时调用既有确认工具；已提交查询已有请求，已确认读取回执。"
                            "版本冲突或工具失败就报告并停止，不重新准备替代草稿，不自动重试。\n"
                            + json.dumps(run['material_resume_checkpoint'], ensure_ascii=False))
+        prompt += (
+            "\n目标语义：intent.user_goal 是启动分析时的历史请求，原片分析仅是参考证据，"
+            "都不是用户后续确认的新片方向。goal 应概括新视频要保留和改变什么，"
+            "必须保留对话中最新约定的产品、语言、台词改编及约束；不得用原片摘要覆盖这些改动。"
+            "用户说开始/继续时承接前文已讨论方向，不重新根据原片猜一份目标。"
+            "已保存方向的变更仍走既有编辑/确认流程，不增加工具授权。\n"
+        )
         # Saved artifact references are business input from the checked current
         # canvas. The model reads their payloads through existing artifact APIs.
         from novelvideo.freezone.canvas_context_reader import read_saved_context

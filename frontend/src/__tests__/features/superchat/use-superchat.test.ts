@@ -3583,6 +3583,41 @@ describe("Canvas command approval image params", () => {
     ]);
   });
 
+  it("recovers the model question instead of showing an unanswerable quality field", () => {
+    const dependentQuestions = [
+      { id: "image_quality", title: "图片画质", options: [], options_source: "selected_image_model_qualities" as const },
+      { id: "image_variants_per_node", title: "图片生成数量", options: [], options_source: "image_variant_counts" as const },
+    ];
+    const models = [{ id: "newapi_gpt_image2", label: "LingShan G2", qualityOptions: ["low", "medium"] }];
+
+    const questions = clarificationQuestionsWithLiveModelCatalogsForTest(
+      dependentQuestions,
+      models,
+      [],
+    );
+
+    // Without the model the dependent field has no options at all, so the card
+    // would never become submittable; the model question is recovered instead.
+    expect(questions.map((question) => question.id)).toEqual([
+      "image_model", "image_quality", "image_variants_per_node",
+    ]);
+    expect(questions[0]?.options?.length).toBeGreaterThan(0);
+  });
+
+  it("resolves the dependent field options once the model answer is known", () => {
+    const questions = clarificationQuestionsWithLiveModelCatalogsForTest(
+      [
+        { id: "image_quality", title: "图片画质", options: [], options_source: "selected_image_model_qualities" as const },
+      ],
+      [{ id: "newapi_gpt_image2", label: "LingShan G2", qualityOptions: ["low", "medium"] }],
+      [],
+      { image_model: { option_ids: ["newapi_gpt_image2"] } },
+    );
+
+    expect(questions.map((question) => question.id)).toEqual(["image_quality"]);
+    expect(questions[0]?.options?.map((option) => option.id)).toEqual(["low", "medium"]);
+  });
+
   it("resolves a tool-declared video model source from the complete live catalog", () => {
     const questions = clarificationQuestionsWithLiveModelCatalogsForTest(
       [{
